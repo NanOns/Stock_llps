@@ -2221,5 +2221,191 @@
     "requirements": "../../docs/requirements/产品需求.md",
     "engineering": "../../docs/design/工程与存储规范.md",
     "reuse_boundaries": "../../docs/design/代码复用与模块边界.md"
+  },
+  "external_file_policy": {
+    "contract_version": "FILE_REFERENCE_POLICY_R1",
+    "normative_section": "../../docs/design/工程与存储规范.md#s27",
+    "implementation_binding_required": true,
+    "classes": {
+      "DECLARED_PACKAGE": {
+        "mode": "IMPORT_OR_PACKAGE_RESOURCE",
+        "requirements": [
+          "dependency_declaration",
+          "package_version",
+          "trusted_source"
+        ]
+      },
+      "CONTRACT_PARAMETER_CONFIG": {
+        "mode": "PARSE_AND_INJECT",
+        "requirements": [
+          "configuration_schema",
+          "adopted_version",
+          "parameter_digest",
+          "declared_override_precedence"
+        ]
+      },
+      "PRIVATE_CONFIGURATION": {
+        "mode": "STARTUP_LOADER_ONLY",
+        "requirements": [
+          "private_configuration_source",
+          "allowed_keys"
+        ],
+        "secrets_in_git_logs_or_business_digest": false
+      },
+      "STATIC_RESOURCE": {
+        "mode": "PACKAGE_RESOURCE_LOADER",
+        "requirements": [
+          "build_id",
+          "resource_manifest",
+          "resource_digest"
+        ]
+      },
+      "SOURCE_DATA": {
+        "mode": "SOURCE_OR_CANONICAL_READER",
+        "requirements": [
+          "dataset_contract",
+          "capture_id",
+          "source_set_binding",
+          "content_digest",
+          "data_coverage",
+          "availability_clock",
+          "parser_budget"
+        ]
+      },
+      "DAILY_BUSINESS_RESULT": {
+        "mode": "EXACT_OWNER_BOUND_READER",
+        "requirements": [
+          "producer",
+          "input_refs",
+          "dataset_or_owner_role",
+          "schema_contract",
+          "data_date_or_range",
+          "entity_coverage",
+          "content_digest",
+          "completion_or_seal",
+          "publication_context"
+        ]
+      },
+      "CACHE": {
+        "mode": "VALIDATED_SAME_IDENTITY_CACHE",
+        "requirements": [
+          "source_identity",
+          "computation_identity",
+          "size_budget",
+          "ttl",
+          "invalidation_policy"
+        ],
+        "authoritative": false
+      },
+      "ARCHIVE": {
+        "mode": "EXPLICIT_RESTORE_OR_REGISTERED_ARCHIVE_READER",
+        "requirements": [
+          "exact_business_identity",
+          "content_digest",
+          "format_version",
+          "reference_retention",
+          "validated_reconstruction"
+        ]
+      },
+      "CHECKPOINT": {
+        "mode": "SAME_JOB_RESUME_ONLY",
+        "requirements": [
+          "job_id",
+          "input_digest",
+          "schema_contract",
+          "size_budget",
+          "retention_policy"
+        ],
+        "authoritative_business_result": false
+      },
+      "MODEL_ARTIFACT": {
+        "mode": "ENABLED_CAPABILITY_MODEL_LOADER",
+        "requirements": [
+          "trusted_source",
+          "model_version",
+          "feature_version",
+          "content_digest",
+          "safe_format_contract",
+          "capability_binding"
+        ]
+      },
+      "USER_IMPORT": {
+        "mode": "REGISTERED_INGRESS_JOB",
+        "requirements": [
+          "dataset_contract",
+          "parser_budget",
+          "identity_and_date_validation",
+          "capture_provenance"
+        ]
+      },
+      "PROCESS_OR_TEST_ARTIFACT": {
+        "mode": "EXTERNAL_DEVELOPMENT_OR_TEST_ONLY",
+        "production_business_consumption": false
+      }
+    },
+    "business_file_descriptor_required": [
+      "artifact_or_content_id",
+      "kind",
+      "dataset_or_owner_role",
+      "contract_and_schema",
+      "producer",
+      "input_refs",
+      "data_date_or_range",
+      "available_and_captured_clock",
+      "byte_size",
+      "content_digest",
+      "locator",
+      "read_write_roles",
+      "parse_limits",
+      "retention_and_reconstruction"
+    ],
+    "path_is_business_primary_key": false,
+    "hardcoded_increment_output_path_allowed": false,
+    "select_latest_by_mtime_name_or_glob_allowed": false,
+    "stage_pass_report_is_business_authority": false,
+    "production_import_of_external_scripts_or_old_repository_allowed": false,
+    "algorithm_arbitrary_file_io_allowed": false,
+    "default_authoritative_storage": "TYPED_PG_WITH_OWNER_AND_ACCEPTED_PUBLICATION",
+    "file_backed_business_storage_exception": "EXPLICIT_DATASET_STORAGE_CONTRACT_BEFORE_USE_NO_PARALLEL_AUTHORITY",
+    "source_input_binding": "CAPTURE_AND_FROZEN_DAY_PLAN_SOURCE_SET",
+    "candidate_result_binding": "EXPLICIT_CANDIDATE_CONTEXT_WITH_SEALED_OWNER",
+    "ordinary_result_binding": "ACCEPTED_PUBLICATION_EXACT_OWNER",
+    "locator_resolution": "REGISTERED_IDENTITY_NOT_CONSUMER_PATH_CONCATENATION",
+    "path_checks": [
+      "allowed_resolved_root",
+      "links_and_reparse",
+      "no_traversal",
+      "no_arbitrary_http_local_path"
+    ],
+    "byte_checks": [
+      "atomic_ready_before_registration",
+      "size_and_format",
+      "parsed_bytes_match_frozen_digest",
+      "reject_midread_mutation"
+    ],
+    "missing_or_invalid_required_file": "BLOCK_DEPENDENT_SCOPE_KEEP_LAST_GOOD",
+    "missing_optional_file": "LOCAL_DECLARED_CAPABILITY_DEGRADATION",
+    "fallback_to_old_day_token_project_or_same_name_file": false,
+    "protected_live_references": [
+      "accepted_publication",
+      "t0_capture",
+      "pending_settlement",
+      "last_good"
+    ],
+    "implementation_batches": {
+      "R00": [
+        "package_resource_and_configuration_boundary",
+        "pure_algorithms_without_arbitrary_file_io",
+        "import_and_runtime_io_review"
+      ],
+      "R01": [
+        "dataset_capture_and_descriptor_resolution",
+        "atomic_files_and_source_set"
+      ],
+      "R02": [
+        "exact_owner_publication_binding",
+        "real_reader_and_fault_validation"
+      ]
+    }
   }
 }
