@@ -1,5 +1,5 @@
 {
-  "contract": "STOCK-A-RUNTIME-DEFAULTS/R2",
+  "contract": "STOCK-A-RUNTIME-DEFAULTS/R3",
   "paths": {
     "workspace_root": "G:/codex work/Stock A",
     "delivery_root": "G:/codex work/Stock A 交付",
@@ -57,13 +57,13 @@
       {
         "path": "runtime.defaults.json",
         "role": "BUSINESS_RUNTIME_CONFIGURATION",
-        "contract": "STOCK-A-RUNTIME-DEFAULTS/R2",
+        "contract": "STOCK-A-RUNTIME-DEFAULTS/R3",
         "consumer": "application startup / configuration resolver"
       },
       {
         "path": "contracts/day-chain.contract.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT",
-        "contract": "STOCK-A-DAY-CHAIN/R3",
+        "contract": "STOCK-A-DAY-CHAIN/R5",
         "consumer": "application day plan / declared producer bindings"
       }
     ],
