@@ -1,6 +1,6 @@
 {
   "contract_id": "STOCK-A-DAY-CHAIN",
-  "version": "R8",
+  "version": "R9",
   "contract_kind": "BUSINESS_PIPELINE_SPECIFICATION",
   "language": "zh-CN",
   "requires_implementation_binding": true,
@@ -576,7 +576,10 @@
         "loo_context",
         "source_seal",
         "prior_context",
-        "coordinates"
+        "coordinates",
+        "core_profiles",
+        "bar_status",
+        "adjusted_bars"
       ],
       "optional_inputs": [],
       "prior_inputs": [
@@ -608,7 +611,10 @@
         "adjusted_bars",
         "coordinates",
         "core_primitives",
-        "prior_context"
+        "prior_context",
+        "cross_section",
+        "bar_status",
+        "d0_facts"
       ],
       "optional_inputs": [],
       "prior_inputs": [
@@ -645,7 +651,13 @@
         "structure_facts",
         "anchors",
         "prior_context",
-        "coordinates"
+        "coordinates",
+        "core_primitives",
+        "cross_section",
+        "seed_evaluations",
+        "bar_status",
+        "adjusted_bars",
+        "sector_native"
       ],
       "optional_inputs": [],
       "prior_inputs": [
@@ -694,7 +706,8 @@
         "final_states",
         "episodes",
         "state_events",
-        "source_capabilities"
+        "source_capabilities",
+        "core_primitives"
       ],
       "optional_inputs": [
         "bao_supplement"
@@ -1186,7 +1199,10 @@
         "P06",
         "P07",
         "P08",
-        "P20"
+        "P20",
+        "P14",
+        "P15",
+        "P16"
       ],
       "terminal_consumers": [],
       "data_role": "VERSIONED_BUSINESS_ARTIFACT",
@@ -1212,7 +1228,9 @@
         "P09",
         "P11",
         "P15",
-        "P20"
+        "P20",
+        "P16",
+        "P14"
       ],
       "terminal_consumers": [],
       "data_role": "VERSIONED_BUSINESS_ARTIFACT",
@@ -1269,7 +1287,9 @@
         "P13",
         "P14",
         "P15",
-        "P20"
+        "P20",
+        "P16",
+        "P17"
       ],
       "terminal_consumers": [],
       "data_role": "VERSIONED_BUSINESS_ARTIFACT",
@@ -1296,7 +1316,9 @@
         "P13",
         "P14",
         "P17",
-        "P20"
+        "P20",
+        "P15",
+        "P16"
       ],
       "terminal_consumers": [],
       "data_role": "VERSIONED_BUSINESS_ARTIFACT",
@@ -1308,7 +1330,8 @@
       "consumers": [
         "P16",
         "P17",
-        "P20"
+        "P20",
+        "P14"
       ],
       "terminal_consumers": [],
       "data_role": "VERSIONED_BUSINESS_ARTIFACT",
@@ -1321,7 +1344,8 @@
         "P10",
         "P11",
         "P12",
-        "P20"
+        "P20",
+        "P16"
       ],
       "terminal_consumers": [],
       "data_role": "VERSIONED_BUSINESS_ARTIFACT",
@@ -1346,7 +1370,8 @@
         "P12",
         "P17",
         "P18",
-        "P20"
+        "P20",
+        "P16"
       ],
       "terminal_consumers": [],
       "data_role": "VERSIONED_BUSINESS_ARTIFACT",
@@ -1417,7 +1442,8 @@
       "consumers": [
         "P16",
         "P17",
-        "P20"
+        "P20",
+        "P15"
       ],
       "terminal_consumers": [],
       "data_role": "VERSIONED_BUSINESS_ARTIFACT",
@@ -2552,7 +2578,7 @@
     "context_and_window_dependencies_in_transitive_business_digest": true
   },
   "algorithm_design_gates": {
-    "stock_risk_composition": "OPEN_DESIGN_STOCK_RISK_COMPOSITION",
+    "stock_risk_composition": "ADOPTED_STOCK_A_STOCK_RISK_COMPOSITION_R1_PIPELINE_BINDING_REQUIRED",
     "dependent_capabilities": [
       "STOCK_PRIORITY",
       "FULL_RESEARCH_EOD"
@@ -2565,7 +2591,10 @@
     ],
     "rotation_clock": "EVALUABLE_SUCCESSOR_SESSIONS_UNKNOWN_PAUSES_AND_BREAKS_CONSECUTIVE",
     "pullback_contraction": "PULLBACK_MEAN_EXCLUDING_CONFIRMATION_DIV_PEAK_ENDING_PRIOR5_MEAN",
-    "sector_exhaustion": "INHERIT_SECTOR_AXES_V1_ORDERED_HIGH_MEDIUM_LOW"
+    "sector_exhaustion": "INHERIT_SECTOR_AXES_V1_ORDERED_HIGH_MEDIUM_LOW",
+    "d2_reducer": "ADOPTED_STOCK_A_D2_REDUCER_R1_PIPELINE_BINDING_REQUIRED",
+    "d0_admission": "ADOPTED_STOCK_A_D0_EVENT_ADMISSION_R1_PIPELINE_BINDING_REQUIRED",
+    "d1_types": "ADOPTED_STOCK_A_D1_STRUCTURE_TYPE_REGISTRY_R1_PIPELINE_BINDING_REQUIRED"
   },
   "deployment_identity_policy": {
     "configuration_identity_ref": "runtime.defaults.json#/application_identity",
@@ -9795,5 +9824,1119 @@
     "live_pit_policy": "REQUIRE_REAL_AVAILABILITY_CAPTURE_DURABILITY_AND_ACCEPTED_DEPENDENCIES_WITHIN_DECLARED_ASOF_NO_BACKSIGNING",
     "late_or_unproven_input": "REJECT_LIVE_PIT_CLAIM_NON_PIT_RESEARCH_ONLY_IF_PREDECLARED_SCOPE_PERMITS",
     "runtime_implementation_present": false
+  },
+  "research_execution_contracts": {
+    "stock_risk": {
+      "contract": "STOCK_A_STOCK_RISK_COMPOSITION_R1",
+      "stage": "P17",
+      "producer_symbol": "stock_a.research.risk:compose",
+      "adoption": "ADOPTED_RESEARCH_BASELINE_CHG015_NOT_MARKET_VALIDATED",
+      "pure_kernel_implemented": true,
+      "runtime_pipeline_implemented": false,
+      "input_domains": {
+        "P": [
+          false,
+          true
+        ],
+        "E": [
+          "LOW",
+          "MEDIUM",
+          "HIGH",
+          "EXTREME"
+        ],
+        "I": [
+          false,
+          true
+        ],
+        "W": [
+          false,
+          true
+        ]
+      },
+      "ordered_branches": [
+        {
+          "when": {
+            "op": "eq",
+            "args": [
+              {
+                "ref": "I"
+              },
+              true
+            ]
+          },
+          "value": "EXTREME",
+          "primary_reason": "CURRENT_EPISODE_INVALIDATED"
+        },
+        {
+          "when": {
+            "op": "eq",
+            "args": [
+              {
+                "ref": "E"
+              },
+              "EXTREME"
+            ]
+          },
+          "value": "EXTREME",
+          "primary_reason": "EXTREME_EXTENSION"
+        },
+        {
+          "when": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "args": [
+                  {
+                    "ref": "P"
+                  },
+                  true
+                ]
+              },
+              {
+                "op": "or",
+                "args": [
+                  {
+                    "op": "eq",
+                    "args": [
+                      {
+                        "ref": "E"
+                      },
+                      "HIGH"
+                    ]
+                  },
+                  {
+                    "op": "eq",
+                    "args": [
+                      {
+                        "ref": "W"
+                      },
+                      true
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "value": "EXTREME",
+          "primary_reason": "DAMAGE_WITH_SECOND_WARNING"
+        },
+        {
+          "when": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "args": [
+                  {
+                    "ref": "E"
+                  },
+                  "HIGH"
+                ]
+              },
+              {
+                "op": "eq",
+                "args": [
+                  {
+                    "ref": "W"
+                  },
+                  true
+                ]
+              }
+            ]
+          },
+          "value": "EXTREME",
+          "primary_reason": "EXTENSION_WITH_SOFT_BREACH"
+        },
+        {
+          "when": {
+            "op": "eq",
+            "args": [
+              {
+                "ref": "P"
+              },
+              true
+            ]
+          },
+          "value": "HIGH",
+          "primary_reason": "CORE_PRICE_DAMAGE"
+        },
+        {
+          "when": {
+            "op": "eq",
+            "args": [
+              {
+                "ref": "E"
+              },
+              "HIGH"
+            ]
+          },
+          "value": "HIGH",
+          "primary_reason": "HIGH_EXTENSION"
+        },
+        {
+          "when": {
+            "op": "and",
+            "args": [
+              {
+                "op": "eq",
+                "args": [
+                  {
+                    "ref": "E"
+                  },
+                  "MEDIUM"
+                ]
+              },
+              {
+                "op": "eq",
+                "args": [
+                  {
+                    "ref": "W"
+                  },
+                  true
+                ]
+              }
+            ]
+          },
+          "value": "HIGH",
+          "primary_reason": "MULTIPLE_MODERATE_WARNINGS"
+        },
+        {
+          "when": {
+            "op": "or",
+            "args": [
+              {
+                "op": "eq",
+                "args": [
+                  {
+                    "ref": "E"
+                  },
+                  "MEDIUM"
+                ]
+              },
+              {
+                "op": "eq",
+                "args": [
+                  {
+                    "ref": "W"
+                  },
+                  true
+                ]
+              }
+            ]
+          },
+          "value": "MEDIUM",
+          "primary_reason": "SINGLE_MODERATE_WARNING"
+        },
+        {
+          "when": true,
+          "value": "LOW",
+          "primary_reason": "NO_REGISTERED_WARNING"
+        }
+      ],
+      "unknown": "ENUMERATE_AT_MOST_32_LOGICAL_COMPLETIONS_AFTER_CONTEXT_AND_APPLICABILITY_VALIDATION",
+      "structure_applicability": {
+        "ABSENT": "I_AND_W_EXPLICIT_NA_WITH_NO_SELECTED_EPISODE",
+        "LINKED": "EXACT_SELECTED_EPISODE_I_MUST_BE_BOOLEAN_OR_UNKNOWN_W_HAS_INDEPENDENT_LINKED_SUPPORT_APPLICABILITY",
+        "UNKNOWN": "I_AND_W_UNKNOWN_NOT_NA"
+      },
+      "certainty": "LEVEL_PRIMARY_REASON_ALL_REASONS_AND_COVERAGE_INDEPENDENT",
+      "known_level_if": "ALL_COMPLETIONS_SAME_LEVEL",
+      "primary_reason_if": "ALL_COMPLETIONS_SAME_FIRST_REASON_ELSE_NULL_WITH_CANDIDATES",
+      "scope": "CURRENT_EPISODE_ONLY_MARKET_SECTOR_AND_EXECUTION_RISKS_SEPARATE",
+      "errors": "CONTRACT_OR_IMPLEMENTATION_NOT_READY_BLOCK_CAPABILITY_ENGINEERING_ERROR_PROPAGATES_INVALID_OBSERVED_VALUES_REJECT",
+      "output_schema": {
+        "level": "nullable enum + FieldValue quality/reason",
+        "possible_levels": "finite enum set",
+        "lower_bound": "enum",
+        "upper_bound": "enum",
+        "primary_reason": "nullable reason code",
+        "primary_reason_candidates": "finite reason set",
+        "confirmed_reasons": "reason intersection",
+        "possible_reasons": "reason union",
+        "structure_na": "bool",
+        "known_inputs": "nonnegative int",
+        "applicable_inputs": "2 or 3 or 4",
+        "support_na": "bool independent of episode absence"
+      },
+      "priority_policy": "D2_FALSE_EXCLUDED_BEFORE_RISK_D2_UNKNOWN_OR_RISK_UNKNOWN_OR_OTHER_KEY_MISSING_UNKNOWN_ELSE_RANKABLE",
+      "comparability": [
+        "same_entity",
+        "same_contract_parameters",
+        "same_scope",
+        "same_episode_or_explicit_selection_change"
+      ],
+      "change_labels": [
+        "FIRST_OBSERVED",
+        "RULE_CHANGED",
+        "SELECTION_CHANGED",
+        "BECAME_KNOWN",
+        "IMPROVED",
+        "WORSENED",
+        "UNCHANGED"
+      ],
+      "support_applicability": {
+        "ABSENT": "EXPLICIT_NA_PROVEN_NO_LINKED_SUPPORT_W_FALSE_WITH_NA_LABEL",
+        "LINKED": "EXACT_EPISODE_SUPPORT_OBSERVATION_NO_NA",
+        "UNKNOWN": "UNKNOWN_NOT_NA"
+      }
+    },
+    "d2": {
+      "contract": "STOCK_A_D2_REDUCER_R1",
+      "stage": "P16",
+      "producer_symbol": "stock_a.research.state:reduce_episode",
+      "adoption": "ADOPTED_RESEARCH_BASELINE_CHG015_NOT_MARKET_VALIDATED",
+      "pure_kernel_implemented": true,
+      "runtime_pipeline_implemented": false,
+      "entity_maturities": {
+        "STOCK": [
+          "NONE",
+          "SEED",
+          "PREWATCH",
+          "WARM",
+          "CONFIRMED"
+        ],
+        "SECTOR": [
+          "NONE",
+          "PREWATCH",
+          "WARM",
+          "CONFIRMED"
+        ]
+      },
+      "parameters": {
+        "downgrade_sessions": 2,
+        "expiry_sessions": 10,
+        "improvement_pp": 3,
+        "health_deadband_pp": 3
+      },
+      "raw_stock_warm": {
+        "op": "and",
+        "args": [
+          {
+            "ref": "stock.prewatch_raw"
+          },
+          {
+            "op": "eq",
+            "args": [
+              {
+                "ref": "profile.relative"
+              },
+              "ACTIVE_EMERGENCE"
+            ]
+          },
+          {
+            "op": "gt",
+            "args": [
+              {
+                "ref": "adjusted.close"
+              },
+              {
+                "ref": "core.ma20"
+              }
+            ]
+          },
+          {
+            "op": "gt",
+            "args": [
+              {
+                "ref": "core.ma_slope20_atr"
+              },
+              0
+            ]
+          }
+        ]
+      },
+      "ordered_steps": [
+        "VALIDATE_CONTEXT_CAPABILITIES_AND_PREVIOUS_MARKET_SESSION",
+        "EXPLICIT_MODEL_BOUNDARY_PRESERVE_OLD_LINEAGE",
+        "PRESERVE_TERMINAL_OR_APPLY_CURRENT_EPISODE_HARD_INVALIDATION",
+        "ACTUAL_REQUIRED_INPUT_AND_RAW_GRADE_BOUNDS",
+        "TODAY_CORE_SAFETY_SEPARATE_FROM_OLD_EPISODE_VALIDITY",
+        "NEW_EVENT_APPLICATION_EXIT_SESSION_GUARD",
+        "IMMEDIATE_UPGRADE_OR_ADJACENT_SAME_OR_LOWER_TARGET_DOWNGRADE",
+        "EARLY_EVALUABLE_EXPIRY_AND_IMPROVEMENT",
+        "INDEPENDENT_HEALTH_TRACKING_EVENTS_AND_PRIMARY_PROJECTION"
+      ],
+      "invalidation": "OWN_EFFECTIVE_FROZEN_LINE_C_LE_LEVEL_OR_LINKED_SUPPORT_HARD_BROKEN_NO_GLOBAL_CORE_DAMAGE_INVALIDATION",
+      "maturity": "MAX_KNOWN_TRUE_LOWER_BOUND_MAX_NOT_FALSE_UPPER_BOUND_EXACT_ONLY_IF_EQUAL",
+      "safety": "DAMAGE_OR_EXTREME_EXTENSION_DENIES_TODAY_QUALIFICATION_NOT_ALL_OLD_EPISODES",
+      "hysteresis": "DISPLAY_HOLD_ONLY_SORT_USES_TODAY_EFFECTIVE_BUCKET_SECOND_ADJACENT_TARGET_SAME_OR_LOWER_APPLIES",
+      "expiry": "BIRTH_AND_PROVEN_IMPROVEMENT_RESET_TO_0_SUBSEQUENT_UNIMPROVED_EVALUABLE_SESSIONS_PLUS1_EXIT_AT10",
+      "improvement": "GRADE_UPGRADE_OR_CURRENT_METRIC_MINUS_LAST_RESET_BASELINE_GTE3_PP_NOT_DAILY_RET3",
+      "unknown_suspension": "KEEP_LAST_KNOWN_RESET_DOWNGRADE_STREAK_PAUSE_EXPIRY_DO_NOT_EXIT_OR_CREATE_NEW_EPISODE",
+      "health": "STOCK_OWN_HARD_INVALIDATED_OR_CORE_DAMAGE_DAMAGED_ELSE_EXTENSION_EXTREME_EXHAUSTED_ELSE_METRIC_GT3_LT_MINUS3_STABLE_COMPLETION_UNKNOWN_SECTOR_ONLY_OWN_HARD_OR_DQ5_NO_STOCK_GATES",
+      "tracking": [
+        "ACTIVE",
+        "PAUSED",
+        "FOLLOWUP",
+        "CLOSED"
+      ],
+      "terminal": "NO_RESURRECTION_OLD_FORWARD_CONTINUES_FOLLOWUP_COMPLETE_TRUE_REQUIRED_TO_CLOSE",
+      "reentry": "AFTER_EXIT_SESSION_NEW_DISTINCT_FORMAL_EVENT_OR_PROVEN_CORE_FALSE_THEN_TRUE_EDGE_CHILD_PARENT_REQUIRED",
+      "exit_session_guard": "P16_TWO_PASS_OLD_PRIMARY_OR_EXPLICIT_PARENT_LINEAGE_EXIT_BLOCKS_NEW_APPLICATION_NO_P14_REWRITE_UNRELATED_OLD_ANCHOR_NOT_GLOBAL_VETO",
+      "model_boundary": "EXPLICIT_NEW_RULE_LINEAGE_RESET_COUNTERS_PRESERVE_PARENT_AND_OLD_FORWARD_NOT_NATURAL_IMPROVEMENT",
+      "primary_selector": [
+        "today_valid_formal",
+        "old_valid_eligible_formal",
+        "eligible_core_early",
+        "scenario_priority",
+        "event_ordinal_desc",
+        "event_id_asc"
+      ],
+      "primary_unknown": "UNKNOWN_HIGHER_CANDIDATE_BLOCKS_LOWER_SELECTION_UNKNOWN_WITHOUT_EPISODE_NOT_PROOF_OF_NA",
+      "same_day_revision": "ALWAYS_FROM_SAME_T_MINUS1_ACCEPTED_BASELINE_NOT_CURRENT_STATE",
+      "forbidden_inputs": [
+        "P17.risk_rows",
+        "P18.priority_rows",
+        "P19.focus",
+        "future_outcomes"
+      ],
+      "output_schema": {
+        "episode": "immutable event/parent/failure_line refs",
+        "maturity": "nullable exact + lower bound + display",
+        "effective_eligibility": "FieldValue bool",
+        "effective_bucket": "nullable bounded int",
+        "validity": "FieldValue enum VALID/INVALIDATED or NA",
+        "health": "FieldValue enum",
+        "freshness": "FRESH/STALE",
+        "tracking": "enum",
+        "downgrade_candidate": "nullable enum",
+        "downgrade_count": "int",
+        "expiry_count": "int",
+        "improvement_baseline": "nullable pp",
+        "exit_ordinal": "nullable official ordinal",
+        "exit_reason": "nullable enum",
+        "reentry_armed": "bool",
+        "preserved_episode_ids": "references only",
+        "input_ref": "exact current sources",
+        "state_id": "semantic digest"
+      },
+      "variant_input_policy": "SECTOR_DAMAGE_EXTENSION_EXPLICIT_NA_STOCK_GATES_NOT_APPLICABLE_SECTOR_HEALTH_USES_DQ5",
+      "new_formal_event": "DISTINCT_ADMITTED_EVENT_FORKS_INDEPENDENT_CHILD_CORE_OR_OLD_FORMAL_NOT_REBOUND_OLD_ADVANCED_SEPARATELY_GRADE_CONFIRMED_REQUIRES_OWN_EVENT"
+    },
+    "d0_admission": {
+      "contract": "STOCK_A_D0_EVENT_ADMISSION_R1",
+      "stage": "P14",
+      "producer_symbol": "stock_a.research.admission:admit",
+      "pure_kernel_implemented": true,
+      "runtime_pipeline_implemented": false,
+      "scenario_priority": [
+        "LAUNCH_CONFIRM",
+        "STRONG_PULLBACK",
+        "RECOVERY_TURN",
+        "TREND_CONTINUE"
+      ],
+      "raw_formal_admission": "SEPARATE_RAW_FALSE_FORMAL_FALSE_NOT_REQUIRED_RAW_UNKNOWN_FORMAL_UNKNOWN_RAW_TRUE_NOT_READY_FORMAL_UNKNOWN",
+      "contract_errors_before_truth": true,
+      "diagnostic": "RAW_RETAINED_FORMAL_NOT_ENABLED_IN_SCOPE",
+      "common_gates": [
+        "actual",
+        "identity_calendar_coordinate",
+        "required_window",
+        "source_seal_and_real_scope_clocks",
+        "input_snapshot",
+        "producer_contract"
+      ],
+      "failure_sources": {
+        "LAUNCH_CONFIRM": "T0_PHC20_NO_PRIOR_ANCHOR_REQUIRED",
+        "RECOVERY_TURN": "R20_PRIORITY_T0_MA20_ELSE_PROVEN_R5_T0_MA5",
+        "STRONG_PULLBACK": "T_MINUS1_VALID_EPISODE_AND_ITS_LEGAL_OLD_SUPPORT_LOWER",
+        "TREND_CONTINUE": "T_MINUS1_VALID_EPISODE_LEGAL_LOO_RAW_AND_OLD_SUPPORT_LOWER_OR_PROVEN_ABSENT_SUPPORT_T0_MA20"
+      },
+      "recovery_unknown": "R20_UNKNOWN_R5_TRUE_CANNOT_FREEZE_MA5",
+      "birth": "C_GT_LINE_EFFECTIVE_NEXT_OFFICIAL_SESSION",
+      "d2_exit_guard": "NOT_AN_INPUT_P16_APPLICATION_ONLY",
+      "source_policy": "LEGAL_NON_PIT_EOD_ALLOWED_ONLY_IF_PREDECLARED_NO_BACKDATED_LIVE",
+      "output_schema": {
+        "raw": "FieldValue bool",
+        "formal": "FieldValue bool or diagnostic state",
+        "admission": "READY/NOT_READY/NOT_REQUIRED/DIAGNOSTIC",
+        "event": "immutable event id/entity/ordinal/scenario/failure_line/coordinate/window/anchor/parent refs"
+      }
+    },
+    "d1_types": {
+      "contract": "STOCK_A_D1_STRUCTURE_TYPE_REGISTRY_R1",
+      "stage": "P15",
+      "producer_symbol": "stock_a.research.structure:generate",
+      "observer_symbol": "stock_a.research.structure:observe_support",
+      "pure_kernel_implemented": true,
+      "runtime_pipeline_implemented": false,
+      "types": {
+        "IMPULSE_BODY": {
+          "relation": "SUPPORT",
+          "expression": "ALG29_IMPULSE_A_PREV_BODY_O_TO_MID",
+          "input_artifacts": [
+            "adjusted_bars",
+            "core_primitives",
+            "cross_section"
+          ],
+          "actual_symbol": "stock_a.research.structure:generate",
+          "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+          "test_from": "NEXT_MARKET_SESSION",
+          "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+        },
+        "IMPULSE_LOW": {
+          "relation": "SUPPORT",
+          "expression": "ALG29_IMPULSE_A_PREV_LOW_POINT",
+          "input_artifacts": [
+            "adjusted_bars",
+            "core_primitives",
+            "cross_section"
+          ],
+          "actual_symbol": "stock_a.research.structure:generate",
+          "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+          "test_from": "NEXT_MARKET_SESSION",
+          "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+        },
+        "BREAKOUT_PLATFORM": {
+          "relation": "SUPPORT",
+          "expression": "C_GT_PRIOR_HIGH20_PLUS0.1_ATR_T_AND_CLV_GTE0.7_POINT_PRIOR_HIGH20",
+          "input_artifacts": [
+            "adjusted_bars",
+            "core_primitives"
+          ],
+          "actual_symbol": "stock_a.research.structure:generate",
+          "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+          "test_from": "NEXT_MARKET_SESSION",
+          "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+        },
+        "PIVOT_LOW": {
+          "relation": "SUPPORT",
+          "expression": "STRICT_LOW_CENTER_OF5_ACTUAL",
+          "input_artifacts": [
+            "adjusted_bars",
+            "bar_status"
+          ],
+          "actual_symbol": "stock_a.research.structure:generate",
+          "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+          "test_from": "NEXT_MARKET_SESSION",
+          "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+        },
+        "PIVOT_HIGH": {
+          "relation": "RESISTANCE",
+          "expression": "STRICT_HIGH_CENTER_OF5_ACTUAL",
+          "input_artifacts": [
+            "adjusted_bars",
+            "bar_status"
+          ],
+          "actual_symbol": "stock_a.research.structure:generate",
+          "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+          "test_from": "NEXT_MARKET_SESSION",
+          "required_consumer": "STOCK_CHART_RESISTANCE_CONTEXT_ONLY"
+        },
+        "RANGE_FLOOR": {
+          "relation": "SUPPORT",
+          "expression": "RANGE_PRIOR20_MIN_LOW",
+          "input_artifacts": [
+            "adjusted_bars",
+            "core_primitives",
+            "bar_status",
+            "prior_context"
+          ],
+          "actual_symbol": "stock_a.research.structure:generate",
+          "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+          "test_from": "NEXT_MARKET_SESSION",
+          "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+        },
+        "RANGE_CEILING": {
+          "relation": "RESISTANCE",
+          "expression": "RANGE_PRIOR20_MAX_HIGH",
+          "input_artifacts": [
+            "adjusted_bars",
+            "core_primitives",
+            "bar_status",
+            "prior_context"
+          ],
+          "actual_symbol": "stock_a.research.structure:generate",
+          "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+          "test_from": "NEXT_MARKET_SESSION",
+          "required_consumer": "STOCK_CHART_RESISTANCE_CONTEXT_ONLY"
+        },
+        "GAP_ZONE": {
+          "relation": "SUPPORT",
+          "expression": "LOW_T_GT_PRIOR_ACTUAL_HIGH_NO_UNKNOWN_GAPS",
+          "input_artifacts": [
+            "adjusted_bars",
+            "bar_status"
+          ],
+          "actual_symbol": "stock_a.research.structure:generate",
+          "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+          "test_from": "NEXT_MARKET_SESSION",
+          "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+        },
+        "DYNAMIC_MA5": {
+          "relation": "SUPPORT",
+          "expression": "ADMITTED_RECOVERY_R5_BIRTH_MA5",
+          "input_artifacts": [
+            "d0_facts",
+            "core_primitives"
+          ],
+          "actual_symbol": "stock_a.research.structure:generate",
+          "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+          "test_from": "NEXT_MARKET_SESSION",
+          "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+        },
+        "DYNAMIC_MA20": {
+          "relation": "SUPPORT",
+          "expression": "ADMITTED_RECOVERY_R20_OR_CONTINUE_FALLBACK_BIRTH_MA20",
+          "input_artifacts": [
+            "d0_facts",
+            "core_primitives"
+          ],
+          "actual_symbol": "stock_a.research.structure:generate",
+          "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+          "test_from": "NEXT_MARKET_SESSION",
+          "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+        }
+      },
+      "common": "REAL_ACTUAL_SAME_COORDINATE_BOUND_SOURCE_ALL_NEW_ANCHORS_TEST_FROM_NEXT_MARKET_SESSION",
+      "pivot": "STRICT_CENTER_EXTREME_LEFT2_RIGHT2_ACTUAL_TIES_NO_EVENT_RIGHT2_AVAILABLE_DAY_CREATION",
+      "range": "PRIOR20_ACTUAL_A_PREV_ATR20_T_MINUS1_TARGET_COORD_ABS_PRIOR_CORE_SLOPE_LE0.1_RANGE_LE4_A_PREV",
+      "range_dedup": "UNCHANGED_BOUNDS_AND_CONTINUING_TRUE_REUSE_EXISTING_ANCHOR_NOT_DAILY_NEW_ANCHOR",
+      "dynamic": "ONLY_ACTUAL_RECOVERY_TRIGGER_MA5_OR_MA20_OR_CONTINUE_MA20_FALLBACK_FROZEN_BIRTH_DAILY_VIEW_SEPARATE",
+      "resistance": "CONTEXT_ONLY_NOT_SUPPORT_OBSERVER_STOCK_RISK_OR_SUPPORT_RANK",
+      "gap_fill": "LOW_LE_LO_FILLED_LO_LT_LOW_LT_HI_PARTIAL_MONOTONE_FILLED_NOT_HARD_BREAK",
+      "support": "EXISTING_12_BRANCH_ORDER_A_PREV_BREACH2_DEEP1_SEPARATED_RETEST_ACCEPTANCE2_SEPARATE",
+      "test_count": "DISTINCT_PROVEN_TOUCH_EPISODES_FIRST_OR_AFTER_PROVEN_SEPARATION_NOT_EVERY_CONTIGUOUS_TOUCH_DAY",
+      "unknown": "STALE_RESET_BREACH_ACCEPTANCE_SEPARATION_QUALIFICATION_KEEP_CUMULATIVE_TEST_COUNT",
+      "output_schema": {
+        "anchor": "typed id/type/relation/original bounds/creation/available/coordinate/event/source refs",
+        "observation": "typed anchor/session/state/acceptance/freshness/counters/retest_qualification"
+      },
+      "availability": "CREATION_AND_AVAILABLE_ORDINAL_AT_CURRENT_VISIBLE_CONFIRMATION_TEST_FROM_NEXT_SESSION_NOT_THE_SAME_FIELD"
+    }
+  },
+  "research_field_bindings": {
+    "contract": "STOCK_A_RESEARCH_EXECUTION_BINDINGS_R1",
+    "external_fields": {
+      "core.price_damage": {
+        "producer_stage": "P07",
+        "output_artifact": "core_primitives",
+        "unit": "bool"
+      },
+      "profile.extension": {
+        "producer_stage": "P09",
+        "output_artifact": "core_profiles",
+        "unit": "enum"
+      },
+      "profile.relative": {
+        "producer_stage": "P09",
+        "output_artifact": "core_profiles",
+        "unit": "enum"
+      },
+      "cross.rps5_delta3_pp": {
+        "producer_stage": "P08",
+        "output_artifact": "cross_section",
+        "unit": "pp"
+      },
+      "raw.session_state": {
+        "producer_stage": "P05",
+        "output_artifact": "bar_status",
+        "unit": "enum"
+      },
+      "adjusted.close": {
+        "producer_stage": "P06",
+        "output_artifact": "adjusted_bars",
+        "unit": "CNY"
+      },
+      "core.ma20": {
+        "producer_stage": "P07",
+        "output_artifact": "core_primitives",
+        "unit": "CNY"
+      },
+      "core.ma_slope20_atr": {
+        "producer_stage": "P07",
+        "output_artifact": "core_primitives",
+        "unit": "ATR_scale"
+      },
+      "seed.raw": {
+        "producer_stage": "P09",
+        "output_artifact": "seed_evaluations",
+        "unit": "bool"
+      },
+      "stock.prewatch_raw": {
+        "producer_stage": "P09",
+        "output_artifact": "stock_prewatch_raw",
+        "unit": "bool"
+      },
+      "sector.qualifications": {
+        "producer_stage": "P10",
+        "output_artifact": "sector_raw",
+        "unit": "bool_vector"
+      },
+      "sector.dq5": {
+        "producer_stage": "P10",
+        "output_artifact": "sector_native",
+        "unit": "pp"
+      },
+      "source.seal": {
+        "producer_stage": "P04",
+        "output_artifact": "source_seal",
+        "unit": "reference"
+      },
+      "prior.accepted": {
+        "producer_stage": "P00",
+        "output_artifact": "prior_context",
+        "unit": "reference"
+      },
+      "coordinate.id": {
+        "producer_stage": "P06",
+        "output_artifact": "coordinates",
+        "unit": "reference"
+      },
+      "d0.raw": {
+        "producer_stage": "P14",
+        "output_artifact": "d0_facts",
+        "unit": "bool_vector"
+      },
+      "adjusted.open": {
+        "producer_stage": "P06",
+        "output_artifact": "adjusted_bars",
+        "unit": "CNY",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      },
+      "adjusted.high": {
+        "producer_stage": "P06",
+        "output_artifact": "adjusted_bars",
+        "unit": "CNY",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      },
+      "adjusted.low": {
+        "producer_stage": "P06",
+        "output_artifact": "adjusted_bars",
+        "unit": "CNY",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      },
+      "core.ma5": {
+        "producer_stage": "P07",
+        "output_artifact": "core_primitives",
+        "unit": "CNY",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      },
+      "core.atr20": {
+        "producer_stage": "P07",
+        "output_artifact": "core_primitives",
+        "unit": "CNY_difference",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      },
+      "core.prior_high20": {
+        "producer_stage": "P07",
+        "output_artifact": "core_primitives",
+        "unit": "CNY",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      },
+      "core.clv": {
+        "producer_stage": "P07",
+        "output_artifact": "core_primitives",
+        "unit": "fraction",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      },
+      "core.amount_ratio20": {
+        "producer_stage": "P07",
+        "output_artifact": "core_primitives",
+        "unit": "ratio",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      },
+      "cross.rel_market_1": {
+        "producer_stage": "P08",
+        "output_artifact": "cross_section",
+        "unit": "fraction",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      },
+      "d0.phc20": {
+        "producer_stage": "P07",
+        "output_artifact": "d0_primitives",
+        "unit": "CNY",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      },
+      "d0.recovery_r5_r20": {
+        "producer_stage": "P14",
+        "output_artifact": "d0_facts",
+        "unit": "bool_vector",
+        "implementation_state": "REQUIRED_PRODUCER_PIPELINE_NOT_BOUND"
+      }
+    },
+    "fields": [
+      {
+        "field_id": "d0.formal_events",
+        "producer_stage": "P14",
+        "output_artifact": "d0_facts",
+        "unit": "event_reference_set",
+        "input_fields": [
+          "d0.raw",
+          "source.seal",
+          "prior.accepted",
+          "coordinate.id",
+          "core.price_damage",
+          "profile.extension",
+          "raw.session_state",
+          "adjusted.close",
+          "core.ma5",
+          "core.ma20",
+          "d0.phc20",
+          "d0.recovery_r5_r20"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P14",
+          "P15",
+          "P16"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+        "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE"
+      },
+      {
+        "field_id": "d0.failure_lines",
+        "producer_stage": "P14",
+        "output_artifact": "frozen_failure_candidates",
+        "unit": "price_and_reference",
+        "input_fields": [
+          "d0.formal_events",
+          "coordinate.id"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P16"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND"
+      },
+      {
+        "field_id": "d1.anchor",
+        "producer_stage": "P15",
+        "output_artifact": "anchors",
+        "unit": "typed_anchor",
+        "input_fields": [
+          "d0.formal_events",
+          "prior.accepted",
+          "coordinate.id",
+          "adjusted.open",
+          "adjusted.high",
+          "adjusted.low",
+          "adjusted.close",
+          "core.atr20",
+          "core.prior_high20",
+          "core.clv",
+          "core.amount_ratio20",
+          "cross.rel_market_1",
+          "core.ma5",
+          "core.ma20",
+          "core.ma_slope20_atr",
+          "raw.session_state"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P15"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+        "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE",
+        "temporal_input_bindings": {
+          "core.atr20": "T_MINUS1_TO_CURRENT_COORDINATE_EXCEPT_BREAKOUT_CREATION_USES_CURRENT_ATR",
+          "core.ma_slope20_atr": "PRIOR_ACTUAL_ENDPOINT_FOR_RANGE",
+          "adjusted_bars": "TARGET_COORDINATE_ACTUAL_WINDOW_5_OR_PRIOR20_OR_PREV_ACTUAL_AS_TYPE_DEFINED",
+          "prior.accepted": "EXACT_PREVIOUS_MARKET_SESSION_OBSERVATION_AND_EVENT_REFERENCES"
+        }
+      },
+      {
+        "field_id": "d1.hard_breach",
+        "producer_stage": "P15",
+        "output_artifact": "structure_facts",
+        "unit": "bool",
+        "input_fields": [
+          "d1.anchor",
+          "prior.accepted",
+          "raw.session_state",
+          "adjusted.open",
+          "adjusted.high",
+          "adjusted.low",
+          "adjusted.close",
+          "core.atr20",
+          "core.clv"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P16"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+        "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE",
+        "temporal_input_bindings": {
+          "core.atr20": "T_MINUS1_TO_CURRENT_COORDINATE_EXCEPT_BREAKOUT_CREATION_USES_CURRENT_ATR",
+          "core.ma_slope20_atr": "PRIOR_ACTUAL_ENDPOINT_FOR_RANGE",
+          "adjusted_bars": "TARGET_COORDINATE_ACTUAL_WINDOW_5_OR_PRIOR20_OR_PREV_ACTUAL_AS_TYPE_DEFINED",
+          "prior.accepted": "EXACT_PREVIOUS_MARKET_SESSION_OBSERVATION_AND_EVENT_REFERENCES"
+        }
+      },
+      {
+        "field_id": "d1.shallow_breach",
+        "producer_stage": "P15",
+        "output_artifact": "structure_facts",
+        "unit": "bool",
+        "input_fields": [
+          "d1.anchor",
+          "prior.accepted",
+          "raw.session_state",
+          "adjusted.open",
+          "adjusted.high",
+          "adjusted.low",
+          "adjusted.close",
+          "core.atr20",
+          "core.clv"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P17"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+        "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE",
+        "temporal_input_bindings": {
+          "core.atr20": "T_MINUS1_TO_CURRENT_COORDINATE_EXCEPT_BREAKOUT_CREATION_USES_CURRENT_ATR",
+          "core.ma_slope20_atr": "PRIOR_ACTUAL_ENDPOINT_FOR_RANGE",
+          "adjusted_bars": "TARGET_COORDINATE_ACTUAL_WINDOW_5_OR_PRIOR20_OR_PREV_ACTUAL_AS_TYPE_DEFINED",
+          "prior.accepted": "EXACT_PREVIOUS_MARKET_SESSION_OBSERVATION_AND_EVENT_REFERENCES"
+        }
+      },
+      {
+        "field_id": "d2.warm_raw",
+        "producer_stage": "P16",
+        "output_artifact": "final_states",
+        "unit": "bool",
+        "input_fields": [
+          "stock.prewatch_raw",
+          "profile.relative",
+          "adjusted.close",
+          "core.ma20",
+          "core.ma_slope20_atr"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P16"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND"
+      },
+      {
+        "field_id": "d2.episode",
+        "producer_stage": "P16",
+        "output_artifact": "episodes",
+        "unit": "typed_episode",
+        "input_fields": [
+          "seed.raw",
+          "stock.prewatch_raw",
+          "sector.qualifications",
+          "d0.formal_events",
+          "d0.failure_lines",
+          "d2.warm_raw",
+          "d2.current_invalidation",
+          "prior.accepted",
+          "raw.session_state",
+          "core.price_damage",
+          "profile.extension",
+          "cross.rps5_delta3_pp",
+          "sector.dq5"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P16"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+        "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE"
+      },
+      {
+        "field_id": "d2.today_eligibility",
+        "producer_stage": "P16",
+        "output_artifact": "final_states",
+        "unit": "bool",
+        "input_fields": [
+          "d2.episode",
+          "core.price_damage",
+          "profile.extension"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P16"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND"
+      },
+      {
+        "field_id": "d2.grade",
+        "producer_stage": "P16",
+        "output_artifact": "final_states",
+        "unit": "enum_with_bounds",
+        "input_fields": [
+          "d2.episode"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P16"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND"
+      },
+      {
+        "field_id": "d2.validity",
+        "producer_stage": "P16",
+        "output_artifact": "final_states",
+        "unit": "enum",
+        "input_fields": [
+          "d2.episode"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND"
+      },
+      {
+        "field_id": "d2.primary_episode",
+        "producer_stage": "P16",
+        "output_artifact": "final_states",
+        "unit": "reference",
+        "input_fields": [
+          "d2.episode",
+          "d2.grade",
+          "d2.today_eligibility",
+          "prior.accepted"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P17"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+        "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE"
+      },
+      {
+        "field_id": "d2.health",
+        "producer_stage": "P16",
+        "output_artifact": "final_states",
+        "unit": "enum",
+        "input_fields": [
+          "core.price_damage",
+          "profile.extension",
+          "cross.rps5_delta3_pp",
+          "sector.dq5",
+          "d2.current_invalidation"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+        "variant_inputs": {
+          "STOCK": [
+            "core.price_damage",
+            "profile.extension",
+            "cross.rps5_delta3_pp",
+            "d2.current_invalidation"
+          ],
+          "SECTOR": [
+            "sector.dq5",
+            "d2.current_invalidation"
+          ]
+        }
+      },
+      {
+        "field_id": "d2.current_invalidation",
+        "producer_stage": "P16",
+        "output_artifact": "episodes",
+        "unit": "bool",
+        "input_fields": [
+          "d1.hard_breach",
+          "prior.accepted",
+          "coordinate.id",
+          "adjusted.close"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P16",
+          "P17"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND"
+      },
+      {
+        "field_id": "risk.stock",
+        "producer_stage": "P17",
+        "output_artifact": "risk_rows",
+        "unit": "enum_with_bounds",
+        "input_fields": [
+          "core.price_damage",
+          "profile.extension",
+          "d2.primary_episode",
+          "d2.current_invalidation",
+          "d1.shallow_breach"
+        ],
+        "temporal_roles": [
+          "CURRENT_EXACT_CONTEXT",
+          "PREVIOUS_ACCEPTED_IF_DECLARED"
+        ],
+        "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+        "consumers": [
+          "P18"
+        ],
+        "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+        "implementation_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+        "key_alignment": "ENTITY_SESSION_COORDINATE_EXACT_SELECTED_EPISODE_I_AND_W_NO_ANY_OLD_ANCHOR_AGGREGATE",
+        "applicability_policy": "EPISODE_ABSENCE_AND_LINKED_SUPPORT_ABSENCE_INDEPENDENT_EXPLICIT_EVIDENCE_NO_FORCED_ANCHOR"
+      }
+    ],
+    "namespace": "FULL_RESEARCH_ONLY_FOUNDATION_102_FIELDS_UNCHANGED",
+    "runtime_pipeline_implemented": false
   }
 }
