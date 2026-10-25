@@ -1,6 +1,6 @@
-# Stock A PROJECT_SPEC.md：完整产品与工程规格 R5
+# Stock A PROJECT_SPEC.md：完整产品与工程规格 R6
 
-合同：`STOCK-A-PROJECT-SPEC/R5`。日期：2026-10-25，Asia/Shanghai。状态：`DESIGN_BASELINE_READY_FOR_REVIEW`。本文件给出新项目完整目标、数据模型、主链、算法、交互、运维与验收；不是旧V4继续开发卡，也不证明新代码已实现。R5取代每日业务文件方案：日更事实/控制状态全部PG化，配置文件只允许新项目config且与测试/过程文档隔离；按责任域归档与旧代码优先复用路线保持。完整业务链、算法命名/单位/时间角色及无新闻范围保持。Stock A源码/交付根和Git业务/规范白名单保持，测试、阶段材料、回执与产物全部外置。后续PG默认路径为G盘；当前E盘旧数据仅保留参考，不迁移、不覆盖、不因本轮配置修订切换服务。
+合同：`STOCK-A-PROJECT-SPEC/R6`。日期：2026-10-25，Asia/Shanghai。状态：`DESIGN_BASELINE_WITH_EXPLICIT_OPEN_GATES`。本文件给出新项目完整目标、数据模型、主链、算法、交互、运维与验收；不是旧V4继续开发卡，也不证明新代码已实现。R6补足算法边界、并发恢复和生命周期约束；股票综合风险、具体字段/窄scope和存储参数仍须绑定，不能称设计已全部闭合。R5已取代每日业务文件方案：日更事实/控制状态全部PG化，配置文件只允许新项目config且与测试/过程文档隔离；按责任域归档与旧代码优先复用路线保持。完整业务链、算法命名/单位/时间角色及无新闻范围保持。Stock A源码/交付根和Git业务/规范白名单保持，测试、阶段材料、回执与产物全部外置。后续PG默认路径为G盘；当前E盘旧数据仅保留参考，不迁移、不覆盖、不因本轮配置修订切换服务。
 
 ## S01 项目目标、范围与完成定义
 
@@ -116,7 +116,7 @@ Seed宽度记录k/n/未知与Wilson下界启发式(z=1.96)，其值为`(p+z²/(2
 
 Rotation有NONE/PULSE/IN/ACCEPTED/EXPANDING/REACCELERATING/OUT/FAILED/UNKNOWN；pulse使用dq5≥10且breadth_delta1≥0.05，冻结pulse前基准/当时成员/Seed和上涨集合。价格retention用固定篮子，不将每日中位收益拼成指数。
 
-early与mature retention分开，前强势分母0只影响mature；单龙头高集中且无扩散不得通过接受/扩散。脉冲后至少1会话才IN、至少2才ACCEPTED，成熟留存/扩散才EXPANDING或REACCELERATING；失败/连续衰退/5会话未接受按冻结有序规则终止；未知暂停计数。新项目明确提出采用`ROTATION_RESEARCH_DEFAULTS_R1`，继承旧R5工程候选数值但重新登记采用状态：early_seed_retention≥2/3、early_breadth_retention≥0.6、breadth_delta≥0、early_top1_concentration≤1/3、mature_strong_retention≥0.75、diffusion_top1≤0.5。emergence HIGH阈值为dq5≥10、breadth_delta3≥0.05、adjusted_seed_width≥0.1。各字段分母、冻结pulse基准与未知规则按前述固定篮子/共同成员合同执行，不能仅有阈值而缺公式。旧配置formal_consumer_enabled=false，以上是新项目待采用默认，不是旧系统已获正式有效性证明。其余未定义规则须在实现前补齐同一合同，不能临场填阈值。
+early与mature retention分开，前强势分母0只影响mature；单龙头高集中且无扩散不得通过接受/扩散。脉冲后至少1个可评估会话才IN、至少2个才ACCEPTED，成熟留存/扩散才EXPANDING或REACCELERATING；失败/连续衰退/第6个可评估会话仍未接受按冻结有序规则终止；未知暂停计数。新项目明确提出采用`ROTATION_RESEARCH_DEFAULTS_R1`，继承旧R5工程候选数值但重新登记采用状态：early_seed_retention≥2/3、early_breadth_retention≥0.6、breadth_delta≥0、early_top1_concentration≤1/3、mature_strong_retention≥0.75、diffusion_top1≤0.5。emergence HIGH阈值为dq5≥10、breadth_delta3≥0.05、adjusted_seed_width≥0.1。各字段分母、冻结pulse基准与未知规则按前述固定篮子/共同成员合同执行，不能仅有阈值而缺公式。旧配置formal_consumer_enabled=false，以上是新项目待采用默认，不是旧系统已获正式有效性证明。其余未定义规则须在实现前补齐同一合同，不能临场填阈值。
 
 ## S10 市场轴、三族风险与Priority
 

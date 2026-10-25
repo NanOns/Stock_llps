@@ -1,6 +1,6 @@
 {
   "contract_id": "STOCK-A-DAY-CHAIN",
-  "version": "R3",
+  "version": "R4",
   "contract_kind": "BUSINESS_PIPELINE_SPECIFICATION",
   "language": "zh-CN",
   "requires_implementation_binding": true,
@@ -486,6 +486,12 @@
           "role": "frozen_rotation_baskets",
           "temporal_role": "PREVIOUS_ACCEPTED",
           "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+        },
+        {
+          "role": "final_states",
+          "temporal_role": "PREVIOUS_ACCEPTED",
+          "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED",
+          "component": "SECTOR_MATURITY"
         }
       ],
       "outputs": [
@@ -2172,7 +2178,8 @@
       "quality_partition",
       "consumer_binding",
       "independent_numeric_certificate"
-    ]
+    ],
+    "writer_fencing": "PG_MONOTONIC_TOKEN_CHECKED_UNDER_LEASE_ROW_LOCK_IN_EVERY_MUTATING_TRANSACTION"
   },
   "identity_policy": {
     "business_manifest": "H(scope,required_owner_vector,contract_versions)",
@@ -2180,7 +2187,9 @@
     "publication": "H(business_manifest_id,read_index_version,dispatch_plan_id)",
     "token": "SERVER_RESOLVED_PUBLICATION_AND_BOUND_SUBREVISIONS",
     "read_index_is_thin_rebuildable_projection": true,
-    "dynamic_schema_creation_forbidden": true
+    "dynamic_schema_creation_forbidden": true,
+    "owner_input_identity": "ACTUAL_CONSUMED_FIELD_AND_SOURCE_CONTENT_DEPENDENCY_SUBVECTOR_NOT_WHOLE_RUN_SOURCE_SET",
+    "capture_fact_changes_alone_invalidate_numeric_owner": false
   },
   "acceptance_policy": {
     "single_short_transaction": [
@@ -2194,7 +2203,9 @@
     "failed_cas": "KEEP_LAST_GOOD",
     "post_acceptance_failure": "POST_ACCEPTANCE_PENDING_NOT_COMPLETE",
     "observer_retry": "EXACT_PUBLICATION_PLAN_IDEMPOTENT",
-    "late_observer": "KEEP_ACTUAL_CAPTURE_TIME_AND_LATE_LANE"
+    "late_observer": "KEEP_ACTUAL_CAPTURE_TIME_AND_LATE_LANE",
+    "historical_repair_moves_current_head_backward": false,
+    "invalid_publication_outbox": "BLOCK_NEW_SIDE_EFFECTS_PRESERVE_CAPTURED_FACTS_WITH_VALIDITY_REVISION"
   },
   "completion_policy": {
     "eligible_scopes": [
@@ -2243,7 +2254,9 @@
     "request_snapshot": "READ_ONLY_REPEATABLE_READ",
     "max_sequence_or_count_is_revision": false,
     "pending_future_sessions": "NOT_DUE_NOT_A_BUSINESS_ERROR",
-    "engineering_failure_can_be_deferred_source_gap": false
+    "engineering_failure_can_be_deferred_source_gap": false,
+    "path_drawdown_metric": "MDD_CLOSE_WITH_P0_AND_SUCCESSOR_CLOSES",
+    "cross_request_stale_generation": "REJECT_CONTEXT_STALE_UNLESS_EXACT_HISTORICAL_GENERATION_IS_RECONSTRUCTABLE"
   },
   "page_consumers": [
     {
@@ -2337,7 +2350,8 @@
   "revision_policy": {
     "normal_mode": "APPEND_NEW_SESSIONS_WITH_REQUIRED_WINDOWS",
     "changed_source_actions_membership_algorithm": "BOUNDED_RANGE_REPAIR",
-    "immutable_t0_and_accepted_history": true
+    "immutable_t0_and_accepted_history": true,
+    "stateful_propagation": "DEPENDENCY_FIXED_POINT_WITH_RECORDED_STOP_REASON"
   },
   "storage_policy": {
     "business_schema": "v4",
@@ -2351,7 +2365,8 @@
     "raw_source_or_file_binary_in_pg_allowed": false,
     "full_object_or_rowset_json_in_pg_allowed": false,
     "runtime_cache_backend": "BOUNDED_MEMORY_OR_CONTROLLED_PG_TEMP",
-    "configuration_root_only": true
+    "configuration_root_only": true,
+    "lifecycle_capacity_gc_restore_binding_required_before_persistence": true
   },
   "document_registry": {
     "root_spec": "../../PROJECT_SPEC.md",
@@ -2441,5 +2456,27 @@
         "approx_500_session_capacity_model_and_measured_pg_calibration"
       ]
     }
+  },
+  "field_binding_policy": {
+    "group_graph_is_not_concrete_registry": true,
+    "requires_unique_producer_and_actual_consumer": true,
+    "required_before_each_capability_enabled": true,
+    "requires_type_unit_formula_window_time_coordinate_null_policy": true
+  },
+  "algorithm_design_gates": {
+    "stock_risk_composition": "OPEN_DESIGN_STOCK_RISK_COMPOSITION",
+    "dependent_capabilities": [
+      "STOCK_PRIORITY",
+      "FULL_RESEARCH_EOD"
+    ],
+    "independent_batches_not_blocked": [
+      "R00",
+      "R01",
+      "R02",
+      "R03"
+    ],
+    "rotation_clock": "EVALUABLE_SUCCESSOR_SESSIONS_UNKNOWN_PAUSES_AND_BREAKS_CONSECUTIVE",
+    "pullback_contraction": "PULLBACK_MEAN_EXCLUDING_CONFIRMATION_DIV_PEAK_ENDING_PRIOR5_MEAN",
+    "sector_exhaustion": "INHERIT_SECTOR_AXES_V1_ORDERED_HIGH_MEDIUM_LOW"
   }
 }
