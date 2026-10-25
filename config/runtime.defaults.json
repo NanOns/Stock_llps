@@ -1,0 +1,54 @@
+{
+  "contract": "STOCK-A-RUNTIME-DEFAULTS/R1",
+  "paths": {
+    "workspace_root": "G:/codex work/Stock A",
+    "delivery_root": "G:/codex work/Stock A 交付",
+    "release_root": "G:/codex work/Stock A 交付/发布包",
+    "process_materials_root": "G:/codex work/Stock A 交付/过程资料",
+    "reference_root": "G:/codex work/Stock A 交付/参考资料",
+    "runtime_data_root": "G:/codex work/Stock A 交付/运行数据",
+    "private_configuration_root": "G:/codex work/Stock A 交付/运行配置",
+    "temporary_root": "G:/codex_tmp",
+    "test_root": "G:/codex_tmp/test_temp"
+  },
+  "services": {
+    "production": {
+      "host": "127.0.0.1",
+      "port": 28765
+    },
+    "development": {
+      "host": "127.0.0.1",
+      "port": 28766
+    }
+  },
+  "postgresql": {
+    "host": "127.0.0.1",
+    "port": 5432,
+    "database": "market_research",
+    "business_schema": "v4",
+    "data_directory": "G:/Postgres/data",
+    "wal_directory": "G:/Postgres/data/pg_wal",
+    "log_directory": "G:/Postgres/log",
+    "manual_export_and_backup_directory": "G:/Postgres/backups",
+    "temp_tablespaces": ""
+  },
+  "source_policy": {
+    "configured_tdx_source_roots": [],
+    "all_source_roots_read_only": true,
+    "require_phase0_before_dependent_operations": true
+  },
+  "startup_policy": {
+    "require_explicit_validated_configuration": true,
+    "require_pg_data_directory_match": true,
+    "allow_legacy_postgres_writes": false,
+    "allow_automatic_pg_initialization": false,
+    "allow_automatic_old_data_migration": false,
+    "allow_port_takeover": false
+  },
+  "git_content_policy": {
+    "business_and_normative_documents_only": true,
+    "tests_allowed": false,
+    "stage_tasks_reports_receipts_evidence_artifacts_allowed": false,
+    "credentials_and_runtime_data_allowed": false
+  }
+}
