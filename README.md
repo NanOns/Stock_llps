@@ -2,7 +2,7 @@
 
 A股市场结构研究系统的新项目，唯一业务开发主线。旧V4只作为只读设计/故障参考，不迁入旧代码树、数据库或运行历史。
 
-先读[AGENTS](AGENTS.md)、[完整规格](PROJECT_SPEC.md)、[目录与Git准入](docs/design/目录与Git准入.md)，正式需求变化见[需求变更](docs/changes/需求变更.md)。唯一默认路径配置为[config/runtime.defaults.json](config/runtime.defaults.json)。
+先读[AGENTS](AGENTS.md)、[完整规格](PROJECT_SPEC.md)、[目录与Git准入](docs/design/目录与Git准入.md)，正式需求变化见[需求变更](docs/changes/需求变更.md)。完整闭环见[数据业务设计](docs/design/数据业务完整闭环.md)、[算法合同](docs/design/算法合同与升级规则.md)及[机器依赖清单](config/contracts/day-chain.contract.json)。唯一默认路径配置为[config/runtime.defaults.json](config/runtime.defaults.json)。
 
 | 用途 | 路径 |
 |---|---|
@@ -16,6 +16,8 @@ Git只接收业务运行必需内容、需求、设计、正式需求变更和�
 
 正式业务CLI属于src业务包；不建堆放阶段脚本的scripts目录。测试在外部执行并绑定源码版本，业务不能导入外部测试/过程工具。空目录不放.gitkeep，实际业务文件出现时再纳入Git。
 
-当前放置的是根规范、目录约束与默认配置，没有业务实现或可启动服务。PG默认配置尚未应用到当前Windows服务；E盘旧实例保留可读，不自动迁移、初始化覆盖或重启。新项目实际写库前必须核验服务与PG数据路径已符合G盘要求。
+产品不含新闻、资讯抓取、外部事件催化或题材映射模块；行业/概念成员和内部算法状态事件保留，第五入口为“市场研究”。
+
+当前放置的是完整设计、根规范、目录约束与默认配置，没有业务实现或可启动服务。PG默认配置尚未应用到当前Windows服务；E盘旧实例保留可读，不自动迁移、初始化覆盖或重启。新项目实际写库前必须核验服务与PG数据路径已符合G盘要求。
 
 本地Git准入钩子保存在.git/hooks，不进入Git或运行包。新环境必须恢复本地准入；提交前仍逐文件审查用途。远端仓库按用户指定配置，不沿用旧V4远端。

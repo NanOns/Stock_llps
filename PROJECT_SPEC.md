@@ -1,12 +1,12 @@
-# Stock A PROJECT_SPEC.md：完整产品与工程规格 R1.2
+# Stock A PROJECT_SPEC.md：完整产品与工程规格 R2
 
-合同：`STOCK-A-PROJECT-SPEC/R1.2`。日期：2026-10-25，Asia/Shanghai。状态：`DESIGN_BASELINE_READY_FOR_REVIEW`。本文件给出新项目完整目标、数据模型、主链、算法、交互、运维与验收；不是旧V4继续开发卡，也不证明新代码已实现。R1.2固定Stock A源码/交付根和Git业务/规范白名单；测试、阶段材料、回执与产物全部外置。后续PG默认路径为G盘；当前E盘旧数据仅保留参考，不迁移、不覆盖、不因本轮配置修订切换服务。
+合同：`STOCK-A-PROJECT-SPEC/R2`。日期：2026-10-25，Asia/Shanghai。状态：`DESIGN_BASELINE_READY_FOR_REVIEW`。本文件给出新项目完整目标、数据模型、主链、算法、交互、运维与验收；不是旧V4继续开发卡，也不证明新代码已实现。R2统一完整业务链、算法命名/单位/时间角色及无新闻产品范围；Stock A源码/交付根和Git业务/规范白名单保持，测试、阶段材料、回执与产物全部外置。后续PG默认路径为G盘；当前E盘旧数据仅保留参考，不迁移、不覆盖、不因本轮配置修订切换服务。
 
 ## S01 项目目标、范围与完成定义
 
 新项目是后续唯一主线。服务单用户盘后A股主观研究，覆盖市场→行业/概念→全市场个股→结构/状态→关注→独立Forward及可选条件统计。用户每天能够理解环境、变化、风险、候选为何入选/未入选、下一步观察及失效条件。研究辅助不连接自动交易，不承诺上涨或收益。
 
-完整产品包含六入口、全市场Daily Profile、日周月K、市场四轴/压力变化、板块生命周期/扩散/轮动/重叠、个股Seed/PREWATCH/确认/结构、可解释Priority、Focus、独立Cohort与Forward、回放/比较、真实日更/恢复、Windows安装与托盘；BaoStock补充、新闻、FEP、分钟是独立能力支线。
+完整产品包含六入口、全市场Daily Profile、日周月K、市场四轴/压力变化、板块生命周期/扩散/轮动/重叠、个股Seed/PREWATCH/确认/结构、可解释Priority、Focus、独立Cohort与Forward、回放/比较、真实日更/恢复、Windows安装与托盘；BaoStock补充、FEP、分钟是独立能力支线。新闻、资讯抓取、外部事件催化及题材映射不在本项目范围，不设置对应菜单、API、表或占位能力；TDX行业/概念分类与成员关系保留。
 
 首条交付是一个真实已收盘交易日的端到端基础研究链，随后至少两个真实不同交易日连续增量、重跑与故障恢复。首链不删除完整产品目标，基础通过不宣称全产品完成。新股不因缺两年历史而没有画像；缺字段以真实质量和原因保留。
 
@@ -36,9 +36,7 @@ TDX本地日线/合法官方包为核心，GBBQ及本地仿射引擎生成复权
 
 来源包只留必要单份字节，PG存manifest/捕获事实/解析关系。source_content_id与capture_id分开，相同内容不同捕获时钟不合并事实；从同一内容解析相同行无需再次复制。原件缺失列精确SHA/范围与不可恢复影响，不能用派生输出反证输入存在。
 
-请求ready时钟不早于完整下载、校验及必要多源最晚可用；旧缓存/包日期不能提前。基础来源缺失只阻断真实依赖，不因可选turnover/news失败停止Core。免费来源预算按实际ledger计含登录/查询/重试/退出，未验证能力不得无限探测。
-
-M14逐数据集批准/合同/门/时间/有界请求；热榜直连仅当次请求，不存原始响应/行/批次/历史快照。外部复权不替代内核，不改本地快照身份，不让外部增强阻塞主链。
+请求ready时钟不早于完整下载、校验及必要多源最晚可用；旧缓存/包日期不能提前。基础来源缺失只阻断真实依赖，不因可选turnover失败停止Core。免费来源预算按实际ledger计含登录/查询/重试/退出，未验证能力不得无限探测。
 
 ## S04 身份、日历、成员与双时间
 
@@ -69,7 +67,7 @@ Data Universe、制度可交易Universe、Research Universe分别登记日期、
 | schedules/settlements | observation/horizon/due_session；settlement_revision、evaluation/source identity；不让PENDING卡住DUE |
 | manifests/heads/jobs/outbox | 不可变版本向量、受控CAS指针、run阶段/失败/幂等及事务outbox |
 | serving indexes | 检索键、稳定排序/必要摘要、manifest引用；可再生，详情按需读取 |
-| optional model/news | 实际功能实施时按typed键新增；不先建35张空表，不通用payload承载全部业务 |
+| optional model | 实际功能实施时按typed键新增；不先建35张空表，不通用payload承载全部业务 |
 
 PK/UK/FK/CHECK覆盖业务日期、entity、版本/namespace及内容一致性，迁移合并后同kind+fact_key不得覆盖。精确manifest跨表冻结版本向量，逻辑角色唯一；不能因追求一个Head而把来源/模型/结算所有修订压进单指针。
 
@@ -135,7 +133,7 @@ HH_PROGRESS=max(H[t−4:t])>max(H[t−9:t−5])；LL_PROGRESS=min(L[t−4:t])<mi
 
 位置按bias≥3先EXTENDED，再pos60的0.8/0.6/0.4/0.2分区；drawdown≥−5%为SHALLOW、≥−15%为MODERATE，等号边界不可丢。
 
-均线BULL_ALIGNED为MA5>MA10>MA20且slope20>0，BEAR反向，TRANSITION用MA5/MA20及slope符号，其余MIXED。相对状态按first-true：ACTIVE_EMERGENCE为Δ3≥10且(正在压缩或均线BULL_TRANSITION/BULL_ALIGNED)；PASSIVE_RESILIENCE为rel_market_1>0且非ACTIVE且Δ3≤0；LEADING_ACCELERATING为RPS20≥80且Δ3>0；LEADING_STABLE为RPS20≥80且Δ3≥−3；IMPROVING为Δ3>3；WEAKENING为Δ3<−3；LAGGING为RPS20<20；其余NEUTRAL。所需compression/MA状态未知不得落默认中性。
+均线BULL_ALIGNED为MA5>MA10>MA20且slope20>0，BEAR反向，TRANSITION用MA5/MA20及slope符号，其余MIXED。相对状态的Δ3统一指rps5_delta3_pp，按first-true：ACTIVE_EMERGENCE为Δ3≥10且(正在压缩或均线BULL_TRANSITION/BULL_ALIGNED)；PASSIVE_RESILIENCE为rel_market_1>0且非ACTIVE且Δ3≤0；LEADING_ACCELERATING为RPS20≥80且Δ3>0；LEADING_STABLE为RPS20≥80且Δ3≥−3；IMPROVING为Δ3>3；WEAKENING为Δ3<−3；LAGGING为RPS20<20；其余NEUTRAL。所需compression/MA状态未知不得落默认中性。
 
 压缩先判断atr或vol ratio≥1.5为极端扩张、≥1.1为扩张，再按range≤0.35/atr≤0.7/vol≤0.7/amount≤0.8/流动性构成强压缩，较宽阈值0.6/0.9/0.9构成压缩；minimum_liquidity仅依赖前20金额均值≥20,000,000CNY，不能隐藏依赖当前amount_ratio20。
 
@@ -145,13 +143,13 @@ HH_PROGRESS=max(H[t−4:t])>max(H[t−9:t−5])；LL_PROGRESS=min(L[t−4:t])<mi
 
 ## S09 Seed、板块、LOO与轮动
 
-Seed安全：Research Universe、actual bar、合法价格、前20流动性、无price damage/严重extension，按专属三态归约。路径S1为bias<3且压缩且Δ3≥3；S2为bias<3且Δ3≥10且早期均线转强。只读Core，不读板块最终状态、Focus或高级Anchor。
+本节Seed的Δ3统一指rps5_delta3_pp。Seed安全：Research Universe、actual bar、合法价格、前20流动性、无price damage/严重extension，按专属三态归约。路径S1为bias<3且压缩且Δ3≥3；S2为bias<3且Δ3≥10且早期均线转强。只读Core，不读板块最终状态、Focus或高级Anchor。
 
 板块按日期真实成员M与可评估E计算覆盖，最低成员5、quote coverage≥0.8；RS_N为retN中位数，板块百分位在同日同类型/源/成员质量合格全集排名。dq5为RS5百分位跨3会话差；跨日宽度/MA变化在两端共同成员可评估集合分别重算，成员加入/退出单列。
 
 Seed宽度记录k/n/未知与Wilson下界启发式(z=1.96)，其值为`(p+z²/(2n)−z*sqrt(p*(1−p)/n+z²/(4n²)))/(1+z²/n)`，p=k/n，n=0为UNKNOWN；仅作小样本惩罚，不称统计置信/上涨概率。强势成员RPS20≥80；留存分母冻结，未知成员不当退出，不删缺值后改分母。无适用前强势集合的成熟留存为NA，不应阻止有独立证据的早期Rotation。
 
-板块PREWATCH：安全 AND dq5≥3 AND(breadth_delta3>0 OR ma20_delta3>0) AND adjusted_seed_width≥0.05。WARM/CONFIRMED不能只借旧标签/Amount A路径，必须具备独立纯Core规则与完整向量；未采用路径保留明确未实现/候选，不假造。
+板块PREWATCH：安全 AND dq5≥3 AND(breadth_delta3>0 OR ma20_delta3>0) AND adjusted_seed_width≥0.05。WARM/CONFIRMED按算法合同ALG-23的PURE_CORE_SECTOR_QUALIFICATION_R2明确设计，不继承Amount A硬依赖；这是新规则选择，实施前完成采用与独立验证，未采用/未实现不得报完整板块能力。
 
 行业/概念底层独立，Overlap提供Jaccard/簇/unique share/集中度；不做1/N成员稀释。LOO排除目标后重算中位数、rank、Seed/板块原始资格及必要历史，不能只减计数。算法支持板块选择按LOO确认/成熟、emergence、Seed宽度、stable_id，不能提升个股硬资格。
 
@@ -171,21 +169,19 @@ Participation为合法amount_ratio20中位数；压力等级为同日合法限�
 
 股票/板块/市场三族风险分别物化总体/known/unknown/coverage/变化，first-observed与前态变化分开，不用Focus行数替代全市场分母。
 
-Priority保留研究序，不合神秘单总分；资格、完整性、桶、emergence、structure、risk、staleness与stable tie-break明确。股票按bucket→emergence→structure→Δ3降序→risk→改善年龄→prior20金额→stable_id；板块按emergence→rank_velocity→breadth/MA变化→调整Seed宽度→exhaustion→stable_id。风险枚举不按字符串排序，缺键归该层末但不改变已成立资格。
+Priority的枚举rank、方向和缺键处理见算法合同ALG-32，Δ3明确为rps5_delta3_pp。Priority保留研究序，不合神秘单总分；资格、完整性、桶、emergence、structure、risk、staleness与stable tie-break明确。股票按bucket→emergence→structure→Δ3降序→risk→改善年龄→prior20金额→stable_id；板块按emergence→rank_velocity→breadth/MA变化→调整Seed宽度→exhaustion→stable_id。风险枚举不按字符串排序，必需排序键未知归UNKNOWN且不进入RANKABLE；已知资格仍独立保存。可选展示键缺失可置其明确末位，不制造默认中性。
 
 新项目若采用操作型分值变体，必须独立contract/version/全量Oracle，不与上述Priority V1同名混用。rps20可为完整性前提但不直接加分；合法TARGET_COORDINATE不得被展示丢弃。已知FALSE/必需UNKNOWN的支配按本规则表，全部原因与互斥主因分开。事件变化序、研究排序、显示cap及手动关注分开；NEW不自动第一名。
 
 ## S11 D0、D1、D2与状态：补齐设计而不补造旧事实
 
-D0正式/诊断分场景：LAUNCH_CONFIRM、RECOVERY_TURN可在来源封口后验；STRONG_PULLBACK、TREND_CONTINUE需独立prior episode/LOO/time role，不能从同日reducer/Focus反推。原始谓词、场景治理、正式聚合分别有真值表。双场景正式聚合不含两诊断场景UNKNOWN；四场景仍为完整产品目标。
+D0四场景的原语、全部谓词、冻结输入和主次顺序按算法合同ALG-27/28的D0_SCENARIO_FACTS_R2设计，替代旧未闭合legacy标志。STRONG_PULLBACK、TREND_CONTINUE依赖合法t−1 episode/LOO raw，不能从同日reducer/Focus反推。原始谓词、场景治理、正式聚合分列；每次运行预先固定FORMAL/DIAGNOSTIC角色，诊断UNKNOWN不污染正式集合。完整目标包括四场景，部分实施只能报具名范围。
 
 新项目封口方案`SOURCE_SEAL_R1`：manifest列全部必需数据集、time_role、原内容/日期身份、实际available/captured时钟、规则/参数与来源验证。对真实盘后首捕，时间边界取官方日历下一常规交易会话open，严格在此前实际就绪/冻结才可申请LIVE/PIT分能力资格；迟到保留LATE/NON_PIT。开发封口只声明真实验证事实，不伪装第三方签发；布尔sealed不能代替证据。历史缺真实捕获不能补首冻。
 
 D1覆盖突破、回踩、恢复、impulse、支撑/接受/失效、多Anchor与活跃选择器。锚在创建时冻结类型/价格区间/坐标/来源/窗口/算法；新锚不在同日自证支撑，使用t−1事件。突破示例继承C>prior_high20+0.1ATR20且CLV≥0.7，创建日tentative，至少两连续可评估守住才accepted。没有前置有效上涨/突破不能叫pullback，收复事件与真正守住分开。
 
-**D2新项目设计提案`FROZEN_STRUCTURE_INVALIDATION_R1`**：不再只交比较器。事件生产者必须在T0输出`failure_anchor_id/level/basis/source/window`；启动确认的失败锚来自创建该突破的冻结PRIOR_HIGH下边界，回踩来自t−1有效支持锚下边界，恢复来自创建恢复事件时的冻结recovery line。没有合法对应锚不得生成可用episode，不改用随后的20日低点凑价。
-
-该提案默认不额外发明ATR/百分比缓冲；收盘`C <= frozen_level`触发该episode失效，等号及坐标转换必须明示。若业务选择“跌破而非触及”或需缓冲，必须在实施前评审并生成新版本；本提案是明确待评审设计选择，不冒充旧V4已批准规则/有效性证据。不得回填旧875个缺证episode。原始资格与最终失效分别展示。
+**D2新项目设计`FROZEN_SCENARIO_INVALIDATION_R2`**按算法合同ALG-30执行，替代R1泛指PRIOR_HIGH的方案：LAUNCH冻结PHC20，RECOVERY冻结实际触发的MA20或MA5，PULLBACK冻结关联旧support lower，CONTINUE冻结关联旧support lower或明确T0 MA20事件线。输出failure_level/coordinate/source_window/source_event/effective_from，出生要求C>failure_level，最早下一市场会话生效；后继同坐标C<=冻结线只失效关联episode。不得用PHH20替代只突破收盘平台的事件，不读未来低点，不回填旧缺T0证据的episode。D1缓冲破坏与D2无缓冲事件失效分开，新设计不冒充旧批准合同或效果证明。
 
 状态分maturity(NONE/SEED/PREWATCH/WARM/CONFIRMED)、health、validity、tracking、scenario。硬失效优先，必需未知保留last_known+STALE但不作今日资格；上升当日生效、下降按连续可评估会话及hysteresis；未知/停牌断连续，不增长expiry。旧某锚坏只影响关联episode，重入新episode含parent，旧到期工作继续。
 
@@ -217,21 +213,17 @@ ENTRY与DAILY_LANDMARK分开；所有候选今日排序使用当天feature/预�
 
 模型、校准、OOD/coherence和missingness分别输出；参数和实验预算在看外测前冻结。收益/风险同屏，MFE/MAE符号及跨horizon可比性先验明确；不静默裁剪改善分数。scope/target/horizon/feature/model/capability精确准入，描述、模型显示、Shadow、Priority分别验。FEP失败恢复Priority V1，不影响Core；不接自动交易。
 
-## S14 新闻、题材与社会事件
+## S14 产品范围排除与内部业务事件
 
-独立执行DA-EVENT-RESEARCH-SOP：八域为政策监管/企业产业/地方文旅/社交消费/海外前沿/大宗供需/海外风险/A股盘面公司；逐域PASS/NOT_AVAILABLE/NONE_FOUND和实际检索日志，不可访问不写没热点。
+新闻、资讯采集、外部事件催化、社会事件研究及其公司/题材映射全部排除，不建采集任务、数据库表、API、菜单或可开启占位模块。DA-EVENT研究规范及旧EVT-01至EVT-06不作为Stock A需求或依赖；历史参考原件保留只读，不重新执行。
 
-S1原始权威、S2报道、S3平台、S4未核实；来源URL/标题/发布者/published_at/observed_at/访问与转载关系完整。公司关系为A_VERIFIED_DIRECT(官方直接业务证据)、B_PLAUSIBLE_CHAIN(合理产业链但未证项目)、C_REGION_CONCEPT(地域/概念)、D_RUMOR_ONLY(传闻/联想)；证据等级不是涨幅/概率排序。真实业务链与叙事链、受益/受损方向、发生/首次公开/首次可交易/行情截止时点分开；同一转载不当独立来源。
-
-F为可核验事实，R为价格/扩散等可复核结果，H为竞争研究假设，A为观察/等待/失效后的研究动作；普通规则解释另外标rule_explanation，不能与新闻R混淆。F/R/H/A分层，H由证据模板支持，不对每股机械凑两个故事；高优先新闻事件按规范竞争解释硬门，缺则PARTIAL。ResearchScore/SourceConfidence/TradeReadiness分列，不转买入排名；无行情不填涨幅/金额/涨停数。T0冻结、T+N追加、澄清/失败/漏报保留，不事后改成提前发现。
-
-Q01窗口、Q02八域、Q03来源、Q04时序、Q05映射、Q06行情、Q07竞争假设、Q08风险、Q09偏差、Q10交付；Q01/03/04/06失败不得宣称整轮事实行情已验收。人类报告、事件卡、机器结构均可交付，工程接入不阻塞主链，遵守热榜特定禁存。
+保留行情研究中的行业/概念目录、成员关系与Overlap；保留算法内部突破、回踩、失效、状态变化、Focus跟踪事件及事务outbox。这些内部事件必须追到确定输入/规则，不生成新闻叙事或催化评分。第五入口固定为“市场研究”。FEP和分钟的独立可选边界按S13及来源合同执行。
 
 ## S15 日更、原子发布与恢复
 
 候选PG封存后，开发验证通过显式候选token读取同一manifest，只有验证路径可访问；普通用户默认context只解析已接受Head。候选读回不使其成为正式版本。所有必要验证完成后受控CAS接受，再读回普通context与last_good，避免“先发布才能测试、未测试先全局可见”的循环。
 
-真实运行状态：DISCOVERED→SOURCE_CAPTURED→SOURCE_VALIDATED→CORE_COMPUTED→REQUIRED_DOMAINS_COMPUTED→NUMERIC_VERIFIED→CANDIDATE_PG_SEALED→SAME_CONTEXT_API_UI_VERIFIED→DAY_CHAIN_PASS(scope)。首个失败、各域未跑/等待、真实T0/source/parameter/producer及last_good持久化；SourceIngress回执永远不代替聚合完成。
+运行按完整闭环合同P00–P25及机器依赖清单执行，覆盖来源、基础事实、全部研究域、Owner/Manifest、ReadIndex、候选API、CAS/outbox、接受后观察/到期任务/读回及前端确认。SOURCE_INGRESS、FOUNDATION_EOD、FULL_RESEARCH_EOD、FULL_CHAIN_DISPLAYED分别报告，基础范围不得代完整产品。后台全部就绪但实际前端未确认时明确“后台业务链已就绪，前端显示待确认”；只有全部必需域与后继任务具名完成、同context读回及当前前端显示ACK成立，通用day_chain_complete才为true。单次PG提交、某Owner或某ReadIndex成功永远不能代替。工程错误/未实现不能伪装真实缺源UNKNOWN或未来未到期。真实首错、未跑域、T0/source/parameter/producer及last_good持久化。
 
 无修订只算新增日及必要历史读取，source/adjustment/algorithm/member变化先识别影响范围，普通APPEND拒绝RANGE_REPAIR_REQUIRED。没有自动修订引擎不无条件阻止经验证无修订日；有修订则不能吞掉异常发布。
 
@@ -259,9 +251,9 @@ value/quality、时间证据、使用权限、工程错误及结算状态正交�
 |---|---|
 | 今日总览 | 环境各轴/允许复合、今日轮动、板块与独立个股新变化、三族风险；先回答发生什么/为什么/待验证，不堆digest |
 | 板块研究 | 全行业/概念目录、筛选分页、生命周期/健康/轮动时间线、扩散/留存/Overlap、全部成员/风险、来源覆盖 |
-| 个股研究 | 任意有效代码/名称搜索、全市场Profile、入选/未入选/Near-Miss谓词、日周月K、MA/锚点、F/R/H/A、板块/Focus |
+| 个股研究 | 任意有效代码/名称搜索、全市场Profile、入选/未入选/Near-Miss谓词、日周月K、MA/锚点、事实/规则解释/研究假设、板块/Focus |
 | 关注跟踪 | episode、事件、Anchor/observation、退出/失效/重入、等待与失效条件，独立显示跟踪与研究排序 |
-| 市场与事件 | 类型化指数、宽度/参与/压力、涨跌停/梯队/连板可判定性、新闻事件与反证；不造日线无法知道的分钟信息 |
+| 市场研究 | 类型化指数、宽度/参与/压力、涨跌停/梯队/连板可判定性、各轴风险；不造日线无法知道的分钟信息 |
 | 数据与诊断 | 源/时钟/覆盖、合同/参数、任务阶段/首错、版本与PG/服务身份、恢复和积压；诊断折叠可查 |
 
 公共：完整分页、服务端过滤排序、历史回放、跨日/跨对象比较、全站zh-CN、同context来源追踪。首页显示cap只控负荷，不控底层样本；独立股票去重并保留also-in-sectors，主题簇不改原板块事实。
@@ -302,7 +294,7 @@ M2持续闭环：第二真实日正常APPEND、同输入幂等、修订拒绝或
 
 M3完整研究：按依赖完成Seed/板块/市场/Priority/D0/D1/D2/Focus/独立Forward与六入口；封口/D2/Focus排序提案在对应实施前完成明确采用裁定，新实现不带旧未定义坑。完整产品所有声明能力真实验，缺源/未来成熟仍精确披露。
 
-M4交付与持续实证：实际安装包、运行身份、生产授权/切换、连续真实日稳定与Forward自然成熟；FEP/新闻按独立能力阶段接入。首捕在其源/规则就绪时先行，不等M4才开始积累。
+M4交付与持续实证：实际安装包、运行身份、生产授权/切换、连续真实日稳定与Forward自然成熟；FEP按独立能力阶段接入。首捕在其源/规则就绪时先行，不等M4才开始积累。
 
 外部过程资料中的ISSUES从V4全部问题台账导入可适用问题的ID/防线/回归/验收责任，执行台账和测试证据不提交Git；禁止只复制叙述不落实机器检查。结构问题必须在M0/M1关闭，算法/结算问题在对应模块准入前关闭；历史不可补证不能靠代码填造。文档完整不等于未来不再发现未知问题，任何新增问题按同一台账与影响域处理，不能再靠新建平行系统逃避。
 
@@ -312,7 +304,7 @@ M4交付与持续实证：实际安装包、运行身份、生产授权/切换�
 
 PG默认G盘为用户确定约束，不属于候选资源预算；新写入/发布前连接验证`SHOW data_directory`、日志/WAL/表空间和服务参数。当前E盘实例可读只证明旧数据仍可访问，不计作新项目G盘存储通过；本轮没有声称已改变运行服务。
 
-确定继承：三窗口、RPS中秩、amr分母排除当前、breadth主式、Core/Supplemental隔离、单PG/schema、完整安装路线、新闻SOT与FEP方法。新项目提案：SOURCE_SEAL_R1、FROZEN_STRUCTURE_INVALIDATION_R1、FOCUS_RECENCY_ORDER_R1、ROTATION_RESEARCH_DEFAULTS_R1及候选资源预算，须明确采用后实施，不伪装为旧合同已批准。
+确定继承：三窗口、RPS中秩、amr分母排除当前、breadth主式、Core/Supplemental隔离、单PG/schema、完整安装路线与FEP方法。新项目提案：SOURCE_SEAL_R1、PURE_CORE_SECTOR_QUALIFICATION_R2、D0_SCENARIO_FACTS_R2、FROZEN_SCENARIO_INVALIDATION_R2、FOCUS_RECENCY_ORDER_R1、ROTATION_RESEARCH_DEFAULTS_R1及候选资源预算，须明确采用后实施，不伪装为旧合同已批准。
 
 真实来源缺口、缺历史首冻、未来到期、外部访问能力无法由本规格制造；应在运行范围与完成谓词中如实反映。用户已授权在Stock A目录放置根规范和Git准入；业务编码、旧代码清理、旧库迁移/复用、服务停止/切换仍按实际后续任务，不能从文档放置推定已完成实施。
 
@@ -331,15 +323,15 @@ PG默认G盘为用户确定约束，不属于候选资源预算；新写入/发�
 
 继承参考中的阈值/候选不能仅凭旧文件标FROZEN_CANDIDATE就自动变正式。本轮补齐了方向、关键公式和防复发条件；仍需领域采用决策的参数、封口/D2/Focus新提案与真实来源证据均明确保留，不宣称已经完成实施或外部验收。完整规格应让未闭合项可识别和可执行关闭，而不是隐去它们。
 
-## S23 全部142项产品需求的现行承接条款
+## S23 全部136项现行产品需求的现行承接条款
 
-本节将既有142项产品需求完整列入新规格，避免只记住近期问题而丢掉原产品目标。按S01–S22落实；新项目明确方案替代旧项目路径/未决措辞，不承接旧运行状态或授权。旧范式中的Owner/ReadIndex是逻辑职责，不要求重建同名巨型容器。领域详细表达按唯一现行合同注册表执行，不直接执行旧任务卡。
+本节保留136项现行产品需求；按用户明确指令撤销六项EVT新闻需求，不重编号其余稳定ID。历史142项仅是旧版参考，不是当前范围。按S01–S22落实；新项目明确方案替代旧项目路径/未决措辞，不承接旧运行状态或授权。旧范式中的Owner/ReadIndex是逻辑职责，不要求重建同名巨型容器。领域详细表达按唯一现行合同注册表执行，不直接执行旧任务卡。
 
 | ID | 新项目要求 | 主要规格位置 |
 |---|---|---|
 | OBJ-01 | 支持全市场每日状态理解、变化发现、可解释研究、持续关注、历史回放和前瞻验证，形成“市场 → 板块 → 个股 → 结构/状态 → Focus → Forward”的完整流程。 | S01/S17/S20 |
 | OBJ-02 | 任意当日有效证券均有 Daily Profile 和未入选解释；画像范围不由筛选结果、榜单、Focus 或少量样例决定。 | S01/S17/S20 |
-| OBJ-03 | 事实、规则解释(rule_explanation)与研究假设分层；新闻F/R/H/A分别是事实/可复核结果/竞争假设/研究动作。全部来源、数值计算与研究者判断可分别追溯，不混用两个领域的R。 | S01/S17/S20 |
+| OBJ-03 | 事实、规则解释(rule_explanation)与研究假设分层；全部来源、数值计算与研究者判断可分别追溯，假设不得冒充已证事实。 | S01/S17/S20 |
 | OBJ-04 | 已具备真实输入、工程准入与有效研究发布政策的能力可正式研究使用；长期样本尚未成熟只限制对应效果论证或模型能力。 | S01/S17/S20 |
 | OBJ-05 | 研究优先级不等于买入优先级；不输出自动交易，不以历史重建、观察频率、研究评分或工程测试宣称个股上涨概率或收益保证。 | S01/S17/S20 |
 | OBJ-06 | 所有能力按域、对象、时间、规则版本、证据来源及消费者管理；一个域缺源时，保留独立且可验证的其他域。 | S01/S17/S20 |
@@ -353,7 +345,7 @@ PG默认G盘为用户确定约束，不属于候选资源预算；新写入/发�
 | SRC-07 | SourceIngress 只表示原始来源已写入并读回；回执必须单列 `completion_scope`、业务链各阶段和失败原因，不能报告为整日计算/发布完成。 | S03/S04/S07 |
 | SRC-08 | BaoStock 只承担经合同核实的字段与身份/状态补充；`BOUND_STRICT / BOUND_SOFT / UNAVAILABLE` 分明，只有准入质量进入对应因子。失败不无条件阻塞独立 Pure Core。 | S03/S04/S07 |
 | SRC-09 | 跨源 OHLCV、amount、单位及身份逐字段核对。金额差异独立立项，保留 TDX 原值与冲突证据，不平均、不静默替换、不以其它字段相等推定金额正确。 | S03/S04/S07 |
-| SRC-10 | M14 公开增强须逐数据集具备合同、来源版本、能力门、可审计时间与有界请求。热榜直连仅请求时使用，不持久化热榜原始响应、数据行、批次或历史快照。 | S03/S04/S07 |
+| SRC-10 | 行情、日历、身份、制度和成员等获准数据集须逐项具备来源合同、版本、能力门、可审计时钟及有界请求；可选补充失败只影响其真实消费者，不能堵独立Core。 | S03/S04/S07 |
 | SRC-11 | 精确原始来源、冻结引用、历史身份和不可再生证据可恢复；来源缺失不能用其派生结果反向证明。所有产物在源根之外同卷原子落盘。 | S03/S04/S07 |
 | ID-01 | 稳定证券身份与交易代码分离，支持沪深北、各有效板块、新股、代码变更、更名、退市及生命周期；交易代码首次出现不能直接解释为 IPO 日。 | S04/S16 |
 | ID-02 | 每个交易日绑定有效 Data Universe、Research Universe、交易状态及排除理由；日期身份优先于宽泛供应方名录，不能被当前名单覆盖。 | S04/S16 |
@@ -425,17 +417,11 @@ PG默认G盘为用户确定约束，不属于候选资源预算；新写入/发�
 | FEP-06 | support、calibration、OOD、coherence、missingness 分列，分位数与置信区间不混淆。未获相应合同和证据时不输出概率性宣称。 | S13 |
 | FEP-07 | 权限精确到 scope/target/horizon/feature/model/capability；描述、模型展示、Shadow、Priority 各自准入。FEP 失效恢复 Priority V1，不影响 Core。 | S13 |
 | FEP-08 | 模型 artifact 本地可信、校验摘要与依赖；部署 head 受控 CAS、幂等及撤销保留历史。API 只读，不在 GET 内训练、下载或重算。 | S13 |
-| EVT-01 | 执行 `DA-EVENT-RESEARCH-SOP / SOT R1.0` 及适用后继版本，保留完整原文；研究规范采纳不自动授权旧系统工程集成。 | S14 |
-| EVT-02 | 覆盖政策监管、企业产业、地方文旅、社交消费、海外前沿、大宗供需、海外风险、A股盘面公司八域，逐域 PASS/NOT_AVAILABLE/NONE_FOUND；不可访问不写“无热点”。 | S14 |
-| EVT-03 | 来源 S1–S4、公司关系 A–D、F/R/H/A 统一；原始发布、事件发生、观察、首次可交易及行情截止时点分开；转载回溯原源，去重后保留 milestone。 | S14 |
-| EVT-04 | 真实业务链与叙事链分开，利益传导方向、直接/上下游/地域/情绪关系、反证、竞争假设和取消条件可见；不因同题材上涨倒推供应合同或因果。 | S14 |
-| EVT-05 | ResearchScore、SourceConfidence、TradeReadiness 分列，研究分数不映射买入次序；缺行情不填涨幅、成交额或涨停数。 | S14 |
-| EVT-06 | T0 冻结，T+N 追加，保留失败样本、先涨后消息和漏报；Q01–Q10 硬门及规范回归完整执行，事实/时序/行情失败时只能声明有限 PARTIAL。 | S14 |
 | UI-01 | 今日总览 ／ 市场各轴与环境、轮动、板块/独立个股变化、三族风险、研究入口；优先回答当日变化、原因和待验证条件，不能用成员数/收盘价代替算法结果。 | S16/S17 |
 | UI-02 | 板块研究 ／ 全行业/概念目录、筛选分页、生命周期、轮动与因子时间线、成员扩散/留存、Overlap、完整成员及风险；披露关系快照覆盖。 | S16/S17 |
-| UI-03 | 个股研究 ／ 任意代码/名称搜索、全市场画像、入选/未入选/近失原因、日周月K线、结构锚点、F/R/H、板块上下文、Focus 与历史来源。 | S16/S17 |
+| UI-03 | 个股研究 ／ 任意代码/名称搜索、全市场画像、入选/未入选/近失原因、日周月K线、结构锚点、事实/规则解释/研究假设、板块上下文、Focus 与历史来源。 | S16/S17 |
 | UI-04 | 关注跟踪 ／ 列表、episode 生命周期、Anchor/Observation、事件、退出重入、待验证与失效；采用S12明确Focus默认排序方案并独立验证，不再留下无规则排序。 | S16/S17 |
-| UI-05 | 市场与事件 ／ 指数、宽度、涨跌停/梯队/连板可判定性、题材事件和反证；标记实际数据能力，日线不造分钟信息。 | S16/S17 |
+| UI-05 | 市场研究 ／ 指数、宽度、参与、压力、涨跌停/梯队/连板可判定性与风险；标记实际数据能力，日线不造分钟信息。 | S16/S17 |
 | UI-06 | 数据与诊断 ／ 来源/时钟/覆盖、字段合同、参数/版本、错误、任务阶段、旧模块归位、队列与消费者依赖追踪；诊断信息不挤占首页主要阅读。 | S16/S17 |
 | UI-07 | 公共能力 ／ 服务端筛选、稳定排序、全量分页、详情、历史 PIT/非PIT回放、跨日/跨对象比较；页间无重复、遗漏，比较对象时间和坐标一致。 | S16/S17 |
 | UI-08 | 状态解释 ／ 简体中文 zh-CN 默认；技术枚举配中文，空数据、未匹配、输入缺失、未实现、合同未定、未授权、未来待到期分别解释。 | S16/S17 |
@@ -452,7 +438,7 @@ PG默认G盘为用户确定约束，不属于候选资源预算；新写入/发�
 | DB-08 | LF/CRLF 语义身份和原始字节身份分别保存；只按明确合同进行换行规范化，不能用规范化掩盖实际内容变化或取消原件摘要。 | S05/S06/S16 |
 | DB-09 | 成功重试必须验证原不可变快照与全部入参内容相同才复用；坏行、重复、缺行、未来行、异内容同 revision 均拒绝。 | S05/S06/S16 |
 | DB-10 | 使用现有安全连接配置，不入文档/日志凭据；读事务 READ ONLY，需一致快照时 REPEATABLE READ；开发写事务列明对象与范围，不绕过真实访问控制。 | S05/S06/S16 |
-| RUN-01 | 日更目标从接受上下文、日历及来源事实解析；无修订 APPEND 只算新增会话及必要窗口，不每日重建全历史。按 Source→Core/Profile→Sector/Market/D0/D1/D2→Focus/Forward/周期→PG→ReadIndex→发布→API/UI 分阶段回执。 | S15/S18 |
+| RUN-01 | 日更目标从接受上下文、日历及来源事实解析；无修订 APPEND 只算新增会话及必要窗口，不每日重建全历史。按S25的P00–P25依赖图分阶段执行并派生聚合完成，包含真正接受后的观察/到期任务和显示确认，不能只串模块名。 | S15/S18 |
 | RUN-02 | 明确 source-ready、derived、PG-staged、candidate-validated、published、consumer-verified；保存 accepted_before/after、真实来源上限、缺失域及 last_good，任一步失败不写“今日更新完成”。 | S15/S18 |
 | RUN-03 | 四门独立：G1 业务值/状态等价；G2 旧 Owner/Anchor/Episode 身份守恒；G3 新身份/摘要/引用正确可重算；G4 PG/发布/CAS/失败恢复。重建新 ID 不强求等于旧正式 ID。 | S15/S18 |
 | RUN-04 | 修订检测区分来源、复权、算法、成员/身份和参数变化；异常拒绝普通 APPEND，进入版本化有界 RANGE_REPAIR；未完成自动修订引擎不无条件阻塞经证实无修订的正常新增日。 | S15/S18 |
@@ -506,3 +492,11 @@ PG默认G盘为用户确定约束，不属于候选资源预算；新写入/发�
 Git以默认拒绝的.gitignore和本地提交/推送准入共同保护；目录、扩展名只是初筛，人工仍须确认用途。禁止force-add、关闭钩子、no-verify、重命名或改后缀绕过。克隆/换机不会自动获得本地钩子，首次提交前必须按本项目规则恢复准入；不因缺少远端而擅自使用旧仓远端或另建外部仓库。
 
 新项目保留全部业务验收义务，测试仍在外部可重复执行，版本/命令/独立预期和结果摘要在外部留存并绑定源码。阶段记录不入Git不改变其真实验收要求。开发不允许依赖外部测试或过程工具生成正常业务结果。
+
+## S25 唯一完整业务链与算法设计入口
+
+详细算法口径及升级选择以[算法合同与升级规则](docs/design/算法合同与升级规则.md)为唯一现行设计；字段单位/窗口、39类算法、四场景D0、Pure Core板块资格、D2失效及Priority不得继续从不同代旧代码拼接。
+
+端到端输入/产物/消费者、26阶段DAG、来源落点、Owner封存、无循环Manifest/ReadIndex/Publication身份、Head CAS、接受后observer/Forward、六入口与前端ACK、首日/增量/修订/恢复按[数据业务完整闭环](docs/design/数据业务完整闭环.md)及[业务依赖合同](config/contracts/day-chain.contract.json)执行。机器清单是待绑定实现的正式业务合同，不是现成调度程序或执行回执；缺实际生产者不得凭设计节点存在判通过。
+
+前端日常显示ACK由产品自身提交，外部浏览器测试仅用于发布验收，不能成为生产运行导入依赖。API GET保持只读。Forward读取generation在追加事实的同一事务内按分区行锁递增，不以max sequence或行数替代。FEP尚未实施不阻断主研究scope，也不能被报成已实现；新闻功能在所有scope中排除。
