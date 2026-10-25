@@ -176,3 +176,7 @@
 **/*.pyc
 **/*.tmp
 **/.gitkeep
+
+# 私密配置仅允许在唯一config根内，永不进入Git。
+/config/private/
+/config/private/**

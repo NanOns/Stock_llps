@@ -1,15 +1,13 @@
 {
-  "contract": "STOCK-A-RUNTIME-DEFAULTS/R1",
+  "contract": "STOCK-A-RUNTIME-DEFAULTS/R2",
   "paths": {
     "workspace_root": "G:/codex work/Stock A",
     "delivery_root": "G:/codex work/Stock A 交付",
     "release_root": "G:/codex work/Stock A 交付/发布包",
-    "process_materials_root": "G:/codex work/Stock A 交付/过程资料",
-    "reference_root": "G:/codex work/Stock A 交付/参考资料",
     "runtime_data_root": "G:/codex work/Stock A 交付/运行数据",
-    "private_configuration_root": "G:/codex work/Stock A 交付/运行配置",
+    "private_configuration_root": "G:/codex work/Stock A/config/private",
     "temporary_root": "G:/codex_tmp",
-    "test_root": "G:/codex_tmp/test_temp"
+    "configuration_root": "G:/codex work/Stock A/config"
   },
   "services": {
     "production": {
@@ -50,5 +48,46 @@
     "tests_allowed": false,
     "stage_tasks_reports_receipts_evidence_artifacts_allowed": false,
     "credentials_and_runtime_data_allowed": false
+  },
+  "configuration_policy": {
+    "contract": "STOCK-A-CONFIGURATION-POLICY/R1",
+    "root": "G:/codex work/Stock A/config",
+    "root_only": true,
+    "public_files": [
+      {
+        "path": "runtime.defaults.json",
+        "role": "BUSINESS_RUNTIME_CONFIGURATION",
+        "contract": "STOCK-A-RUNTIME-DEFAULTS/R2",
+        "consumer": "application startup / configuration resolver"
+      },
+      {
+        "path": "contracts/day-chain.contract.json",
+        "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT",
+        "contract": "STOCK-A-DAY-CHAIN/R3",
+        "consumer": "application day plan / declared producer bindings"
+      }
+    ],
+    "private_files": {
+      "root": "private",
+      "git_allowed": false,
+      "allowed_role": "SECRET_CONNECTION_KEYS_ONLY_NOT_BUSINESS_TEST_OR_RESULT_DATA"
+    },
+    "unknown_files": "REJECT",
+    "outside_root_or_link_escape": "REJECT",
+    "recursive_autoload": false,
+    "test_configuration_or_fixture_allowed": false,
+    "daily_job_configuration_writes_allowed": false,
+    "secrets_via_secure_store_or_secret_environment_allowed": true,
+    "environment_or_cli_config_path_outside_root_allowed": false,
+    "runtime_enforcement_implementation_required": true
+  },
+  "business_storage_policy": {
+    "daily_persistent_business_files_allowed": false,
+    "business_state_backend": "POSTGRESQL_TYPED_TABLES",
+    "checkpoint_backend": "POSTGRESQL_BOUNDED_JOB_CURSORS",
+    "runtime_cache_backend": "BOUNDED_MEMORY_OR_CONTROLLED_PG_TEMP",
+    "raw_file_binary_or_full_payload_in_pg_allowed": false,
+    "original_source_locator_is_runtime_dependency": false,
+    "default_daily_source_archive_enabled": false
   }
 }

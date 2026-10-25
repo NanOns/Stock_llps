@@ -15,7 +15,7 @@ A股市场结构研究系统的新项目，唯一业务开发主线。采用旧�
 | 7 | [代码复用与模块边界](docs/design/代码复用与模块边界.md) | 具体旧代码候选、目标职责、改造要求及禁用边界 |
 | 8 | [目录与Git准入](docs/design/目录与Git准入.md)／[需求变更](docs/changes/需求变更.md) | 文件归属与正式规则变化 |
 
-机器依赖以[day-chain.contract.json](config/contracts/day-chain.contract.json)声明；唯一默认路径配置为[runtime.defaults.json](config/runtime.defaults.json)。阶段实施方案和交接文档在外部交付根的过程资料中，不提交Git。
+机器依赖以[day-chain.contract.json](config/contracts/day-chain.contract.json)声明；唯一默认路径配置为[runtime.defaults.json](config/runtime.defaults.json)。业务文件配置只从本项目config登记目录加载，私密文件如需只在config/private并忽略Git；测试配置与测试文档不得混入正式目录。阶段实施方案和交接文档在外部交付根过程资料中，不提交Git。
 
 | 用途 | 路径 |
 |---|---|
@@ -34,3 +34,5 @@ Git只接收业务运行必需内容、需求、设计、正式需求变更和�
 PG默认G盘配置尚不代表Windows服务已经应用。旧E盘数据不自动迁移、复制、覆盖或切换；新项目写库前必须实际核验G盘路径。当前保留设计与配置，不提供尚不存在的CLI或服务启动命令。
 
 本地Git准入钩子保存在.git/hooks，不进入Git或运行包；换机须恢复准入。远端按用户指定配置，不沿用旧仓远端。
+
+正常日更业务结果、计划、恢复游标、Owner/索引/回执全部存PG必要类型字段和引用；不生成逐日业务文件，不把源包/二进制/整对象JSON塞进PG。清空隔离测试临时目录不能破坏已入库历史查询和恢复；用户原始TDX来源仍保持只读。

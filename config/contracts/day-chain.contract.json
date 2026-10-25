@@ -1,6 +1,6 @@
 {
   "contract_id": "STOCK-A-DAY-CHAIN",
-  "version": "R2",
+  "version": "R3",
   "contract_kind": "BUSINESS_PIPELINE_SPECIFICATION",
   "language": "zh-CN",
   "requires_implementation_binding": true,
@@ -1001,7 +1001,9 @@
         "P25"
       ],
       "terminal_consumers": [],
-      "data_role": "CONTROL"
+      "data_role": "CONTROL",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "environment_gate": {
       "producer": "P00",
@@ -1010,7 +1012,9 @@
         "P02"
       ],
       "terminal_consumers": [],
-      "data_role": "CONTROL"
+      "data_role": "CONTROL",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "prior_context": {
       "producer": "P00",
@@ -1026,7 +1030,9 @@
         "P24"
       ],
       "terminal_consumers": [],
-      "data_role": "CONTROL"
+      "data_role": "CONTROL",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "tdx_capture": {
       "producer": "P01",
@@ -1034,7 +1040,9 @@
         "P03"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "bao_capability_status": {
       "producer": "P02",
@@ -1042,7 +1050,9 @@
         "P03"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "bao_supplement": {
       "producer": "P02",
@@ -1051,7 +1061,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "source_set": {
       "producer": "P03",
@@ -1061,7 +1073,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "source_capabilities": {
       "producer": "P03",
@@ -1071,7 +1085,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "identity_calendar_universe": {
       "producer": "P04",
@@ -1088,7 +1104,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "membership": {
       "producer": "P04",
@@ -1099,7 +1117,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "actions": {
       "producer": "P04",
@@ -1108,7 +1128,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "reference_catalog": {
       "producer": "P04",
@@ -1118,7 +1140,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "source_seal": {
       "producer": "P04",
@@ -1126,7 +1150,9 @@
         "P14"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "raw_bars": {
       "producer": "P05",
@@ -1136,7 +1162,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "bar_status": {
       "producer": "P05",
@@ -1146,7 +1174,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "price_limits": {
       "producer": "P05",
@@ -1155,7 +1185,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "adjusted_bars": {
       "producer": "P06",
@@ -1167,7 +1199,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "coordinates": {
       "producer": "P06",
@@ -1183,7 +1217,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "period_bars": {
       "producer": "P06",
@@ -1191,7 +1227,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "reference_series": {
       "producer": "P06",
@@ -1200,7 +1238,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "core_primitives": {
       "producer": "P07",
@@ -1215,7 +1255,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "d0_primitives": {
       "producer": "P07",
@@ -1224,7 +1266,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "cross_section": {
       "producer": "P08",
@@ -1238,7 +1282,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "core_profiles": {
       "producer": "P09",
@@ -1248,7 +1294,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "seed_evaluations": {
       "producer": "P09",
@@ -1259,7 +1307,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "stock_prewatch_raw": {
       "producer": "P09",
@@ -1268,7 +1318,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "sector_native": {
       "producer": "P10",
@@ -1280,7 +1332,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "sector_raw": {
       "producer": "P10",
@@ -1292,7 +1346,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "overlap": {
       "producer": "P10",
@@ -1301,7 +1357,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "rotation": {
       "producer": "P11",
@@ -1310,7 +1368,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "loo_context": {
       "producer": "P12",
@@ -1320,7 +1380,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "market_axes": {
       "producer": "P13",
@@ -1329,7 +1391,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "d0_facts": {
       "producer": "P14",
@@ -1339,7 +1403,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "frozen_failure_candidates": {
       "producer": "P14",
@@ -1348,7 +1414,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "structure_facts": {
       "producer": "P15",
@@ -1358,7 +1426,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "anchors": {
       "producer": "P15",
@@ -1369,7 +1439,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "final_states": {
       "producer": "P16",
@@ -1380,7 +1452,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "episodes": {
       "producer": "P16",
@@ -1390,7 +1464,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "state_events": {
       "producer": "P16",
@@ -1401,7 +1477,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "risk_rows": {
       "producer": "P17",
@@ -1410,7 +1488,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "complete_profiles": {
       "producer": "P17",
@@ -1420,7 +1500,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "priority_rows": {
       "producer": "P18",
@@ -1429,7 +1511,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "radar_rows": {
       "producer": "P18",
@@ -1437,7 +1521,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "near_miss_rows": {
       "producer": "P18",
@@ -1445,7 +1531,9 @@
         "P20"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "focus_plan": {
       "producer": "P19",
@@ -1454,7 +1542,9 @@
         "P24"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "cohort_evaluations": {
       "producer": "P19",
@@ -1463,7 +1553,9 @@
         "P24"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "observation_intents": {
       "producer": "P19",
@@ -1472,7 +1564,9 @@
         "P24"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "schedule_plan": {
       "producer": "P19",
@@ -1481,7 +1575,9 @@
         "P24"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "dispatch_plan": {
       "producer": "P19",
@@ -1492,7 +1588,9 @@
         "P24"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "owner_seals": {
       "producer": "P20",
@@ -1501,7 +1599,9 @@
         "P22"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "business_manifest": {
       "producer": "P20",
@@ -1510,7 +1610,9 @@
         "P23"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "read_index": {
       "producer": "P21",
@@ -1519,7 +1621,9 @@
         "P23"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "candidate_publication": {
       "producer": "P21",
@@ -1528,7 +1632,9 @@
         "P23"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "candidate_api_validation": {
       "producer": "P22",
@@ -1536,7 +1642,9 @@
         "P23"
       ],
       "terminal_consumers": [],
-      "data_role": "CONTROL"
+      "data_role": "CONTROL",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "client_contract_validation": {
       "producer": "P22",
@@ -1545,7 +1653,9 @@
         "P25"
       ],
       "terminal_consumers": [],
-      "data_role": "CONTROL"
+      "data_role": "CONTROL",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "accepted_publication": {
       "producer": "P23",
@@ -1554,7 +1664,9 @@
         "P25"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "research_head": {
       "producer": "P23",
@@ -1563,7 +1675,9 @@
         "P25"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "accepted_receipt": {
       "producer": "P23",
@@ -1571,7 +1685,9 @@
         "P24"
       ],
       "terminal_consumers": [],
-      "data_role": "CONTROL"
+      "data_role": "CONTROL",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "transaction_outbox": {
       "producer": "P23",
@@ -1579,7 +1695,9 @@
         "P24"
       ],
       "terminal_consumers": [],
-      "data_role": "CONTROL"
+      "data_role": "CONTROL",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "dispatch_accounting": {
       "producer": "P24",
@@ -1587,7 +1705,9 @@
         "P25"
       ],
       "terminal_consumers": [],
-      "data_role": "CONTROL"
+      "data_role": "CONTROL",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "observations": {
       "producer": "P24",
@@ -1596,7 +1716,9 @@
         "status_api",
         "data_diagnostics"
       ],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "forward_outcomes": {
       "producer": "P24",
@@ -1605,7 +1727,9 @@
         "status_api",
         "data_diagnostics"
       ],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "forward_read_revision": {
       "producer": "P24",
@@ -1613,7 +1737,9 @@
         "P25"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "accepted_api_readback": {
       "producer": "P24",
@@ -1621,7 +1747,9 @@
         "P25"
       ],
       "terminal_consumers": [],
-      "data_role": "VERSIONED_BUSINESS_ARTIFACT"
+      "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "backend_chain_status": {
       "producer": "P25",
@@ -1630,7 +1758,9 @@
         "status_api",
         "data_diagnostics"
       ],
-      "data_role": "CONTROL"
+      "data_role": "CONTROL",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     },
     "display_chain_status": {
       "producer": "P25",
@@ -1639,7 +1769,9 @@
         "status_api",
         "data_diagnostics"
       ],
-      "data_role": "CONTROL"
+      "data_role": "CONTROL",
+      "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+      "filesystem_business_sidecar_allowed": false
     }
   },
   "algorithms": [
@@ -2210,11 +2342,16 @@
   "storage_policy": {
     "business_schema": "v4",
     "typed_families_required": true,
-    "raw_source_single_copy_outside_pg": true,
     "generic_payload_for_all_business_forbidden": true,
     "duplicate_full_detail_projection_forbidden": true,
     "new_release_new_schema_forbidden": true,
-    "tests_and_receipts_outside_git": true
+    "tests_and_receipts_outside_git": true,
+    "daily_persistent_business_files_allowed": false,
+    "business_checkpoint_backend": "POSTGRESQL_BOUNDED_JOB_CURSORS",
+    "raw_source_or_file_binary_in_pg_allowed": false,
+    "full_object_or_rowset_json_in_pg_allowed": false,
+    "runtime_cache_backend": "BOUNDED_MEMORY_OR_CONTROLLED_PG_TEMP",
+    "configuration_root_only": true
   },
   "document_registry": {
     "root_spec": "../../PROJECT_SPEC.md",
@@ -2223,188 +2360,85 @@
     "reuse_boundaries": "../../docs/design/代码复用与模块边界.md"
   },
   "external_file_policy": {
-    "contract_version": "FILE_REFERENCE_POLICY_R1",
+    "contract_version": "PG_ONLY_DAILY_STATE_AND_CONFIG_ROOT_R2",
     "normative_section": "../../docs/design/工程与存储规范.md#s27",
     "implementation_binding_required": true,
-    "classes": {
-      "DECLARED_PACKAGE": {
-        "mode": "IMPORT_OR_PACKAGE_RESOURCE",
-        "requirements": [
-          "dependency_declaration",
-          "package_version",
-          "trusted_source"
-        ]
-      },
-      "CONTRACT_PARAMETER_CONFIG": {
-        "mode": "PARSE_AND_INJECT",
-        "requirements": [
-          "configuration_schema",
-          "adopted_version",
-          "parameter_digest",
-          "declared_override_precedence"
-        ]
-      },
-      "PRIVATE_CONFIGURATION": {
-        "mode": "STARTUP_LOADER_ONLY",
-        "requirements": [
-          "private_configuration_source",
-          "allowed_keys"
-        ],
-        "secrets_in_git_logs_or_business_digest": false
-      },
-      "STATIC_RESOURCE": {
-        "mode": "PACKAGE_RESOURCE_LOADER",
-        "requirements": [
-          "build_id",
-          "resource_manifest",
-          "resource_digest"
-        ]
-      },
-      "SOURCE_DATA": {
-        "mode": "SOURCE_OR_CANONICAL_READER",
-        "requirements": [
-          "dataset_contract",
-          "capture_id",
-          "source_set_binding",
-          "content_digest",
-          "data_coverage",
-          "availability_clock",
-          "parser_budget"
-        ]
-      },
-      "DAILY_BUSINESS_RESULT": {
-        "mode": "EXACT_OWNER_BOUND_READER",
-        "requirements": [
-          "producer",
-          "input_refs",
-          "dataset_or_owner_role",
-          "schema_contract",
-          "data_date_or_range",
-          "entity_coverage",
-          "content_digest",
-          "completion_or_seal",
-          "publication_context"
-        ]
-      },
-      "CACHE": {
-        "mode": "VALIDATED_SAME_IDENTITY_CACHE",
-        "requirements": [
-          "source_identity",
-          "computation_identity",
-          "size_budget",
-          "ttl",
-          "invalidation_policy"
-        ],
-        "authoritative": false
-      },
-      "ARCHIVE": {
-        "mode": "EXPLICIT_RESTORE_OR_REGISTERED_ARCHIVE_READER",
-        "requirements": [
-          "exact_business_identity",
-          "content_digest",
-          "format_version",
-          "reference_retention",
-          "validated_reconstruction"
-        ]
-      },
-      "CHECKPOINT": {
-        "mode": "SAME_JOB_RESUME_ONLY",
-        "requirements": [
-          "job_id",
-          "input_digest",
-          "schema_contract",
-          "size_budget",
-          "retention_policy"
-        ],
-        "authoritative_business_result": false
-      },
-      "MODEL_ARTIFACT": {
-        "mode": "ENABLED_CAPABILITY_MODEL_LOADER",
-        "requirements": [
-          "trusted_source",
-          "model_version",
-          "feature_version",
-          "content_digest",
-          "safe_format_contract",
-          "capability_binding"
-        ]
-      },
-      "USER_IMPORT": {
-        "mode": "REGISTERED_INGRESS_JOB",
-        "requirements": [
-          "dataset_contract",
-          "parser_budget",
-          "identity_and_date_validation",
-          "capture_provenance"
-        ]
-      },
-      "PROCESS_OR_TEST_ARTIFACT": {
-        "mode": "EXTERNAL_DEVELOPMENT_OR_TEST_ONLY",
-        "production_business_consumption": false
-      }
-    },
-    "business_file_descriptor_required": [
-      "artifact_or_content_id",
-      "kind",
-      "dataset_or_owner_role",
-      "contract_and_schema",
-      "producer",
-      "input_refs",
-      "data_date_or_range",
-      "available_and_captured_clock",
-      "byte_size",
-      "content_digest",
-      "locator",
-      "read_write_roles",
-      "parse_limits",
-      "retention_and_reconstruction"
+    "configuration_root": "G:/codex work/Stock A/config",
+    "configuration_catalog": "../runtime.defaults.json#configuration_policy",
+    "public_configuration_files": [
+      "runtime.defaults.json",
+      "contracts/day-chain.contract.json"
     ],
-    "path_is_business_primary_key": false,
+    "outside_configuration_root_allowed": false,
+    "test_configuration_in_production_config_allowed": false,
+    "test_documents_in_normative_docs_allowed": false,
+    "daily_business_storage": "POSTGRESQL_NECESSARY_TYPED_FACTS_AND_REFERENCES",
+    "daily_persistent_business_files_allowed": false,
+    "file_backed_business_storage_exception_allowed": false,
+    "day_plan_checkpoint_receipt_backend": "POSTGRESQL_BOUNDED_TYPED_CONTROL_ROWS",
+    "disk_business_cache_allowed": false,
+    "pg_forbidden_payloads": [
+      "SOURCE_ARCHIVE_BINARY",
+      "RAW_RESPONSE_BODY",
+      "BYTEA_OR_LARGE_OBJECT_FILE_MIRROR",
+      "BASE64_OR_COMPRESSED_FILE",
+      "COMPLETE_BUSINESS_OBJECT_OR_RESPONSE_JSON",
+      "LONG_PRICE_SERIES_OR_ROWSET_JSON"
+    ],
+    "pg_required_facts": [
+      "necessary_canonical_ohlcv_and_amount",
+      "dated_identity_calendar_status_membership_actions",
+      "consumed_factors_and_domain_states",
+      "minimal_frozen_t0_features_and_baskets",
+      "observations_and_settlements",
+      "exact_owner_publication_and_index_references",
+      "bounded_jobs_batch_cursors_receipt_and_outbox"
+    ],
+    "source_ingress": "READONLY_OR_BOUNDED_TRANSIENT_DOWNLOAD_STREAM_PARSE_TO_NECESSARY_PG_FACTS",
+    "default_daily_source_archive_enabled": false,
+    "accepted_pg_reads_resume_and_settlements_require_original_files": false,
+    "new_day_ingress_still_requires_actual_source": true,
+    "allowed_nonbusiness_files": [
+      "declared_current_program_and_static_resources",
+      "registered_configuration_under_project_config",
+      "readonly_original_source_inputs",
+      "bounded_transient_source_downloads",
+      "explicit_user_export_or_backup",
+      "bounded_nonbusiness_logs",
+      "external_development_or_test_evidence_not_runtime_dependencies"
+    ],
+    "source_capture_digest_and_clock_in_pg": true,
+    "business_locator_backend": "PG_PRIMARY_KEYS_AND_VERSIONS_NOT_FILESYSTEM_LOCATORS",
+    "source_input_binding": "FROZEN_SOURCE_SET_OF_NORMALIZED_PG_FACTS",
+    "candidate_result_binding": "SEALED_PG_OWNER_EXPLICIT_CANDIDATE_CONTEXT",
+    "ordinary_result_binding": "ACCEPTED_PUBLICATION_EXACT_PG_OWNER",
     "hardcoded_increment_output_path_allowed": false,
     "select_latest_by_mtime_name_or_glob_allowed": false,
     "stage_pass_report_is_business_authority": false,
     "production_import_of_external_scripts_or_old_repository_allowed": false,
     "algorithm_arbitrary_file_io_allowed": false,
-    "default_authoritative_storage": "TYPED_PG_WITH_OWNER_AND_ACCEPTED_PUBLICATION",
-    "file_backed_business_storage_exception": "EXPLICIT_DATASET_STORAGE_CONTRACT_BEFORE_USE_NO_PARALLEL_AUTHORITY",
-    "source_input_binding": "CAPTURE_AND_FROZEN_DAY_PLAN_SOURCE_SET",
-    "candidate_result_binding": "EXPLICIT_CANDIDATE_CONTEXT_WITH_SEALED_OWNER",
-    "ordinary_result_binding": "ACCEPTED_PUBLICATION_EXACT_OWNER",
-    "locator_resolution": "REGISTERED_IDENTITY_NOT_CONSUMER_PATH_CONCATENATION",
-    "path_checks": [
-      "allowed_resolved_root",
-      "links_and_reparse",
-      "no_traversal",
-      "no_arbitrary_http_local_path"
-    ],
-    "byte_checks": [
-      "atomic_ready_before_registration",
-      "size_and_format",
-      "parsed_bytes_match_frozen_digest",
-      "reject_midread_mutation"
-    ],
-    "missing_or_invalid_required_file": "BLOCK_DEPENDENT_SCOPE_KEEP_LAST_GOOD",
-    "missing_optional_file": "LOCAL_DECLARED_CAPABILITY_DEGRADATION",
+    "path_is_business_primary_key": false,
     "fallback_to_old_day_token_project_or_same_name_file": false,
-    "protected_live_references": [
-      "accepted_publication",
-      "t0_capture",
-      "pending_settlement",
-      "last_good"
+    "configuration_path_checks": [
+      "registered_relative_path",
+      "real_root_within_project_config",
+      "no_links_or_reparse_escape",
+      "no_test_or_process_configuration",
+      "schema_and_allowed_keys"
     ],
     "implementation_batches": {
       "R00": [
-        "package_resource_and_configuration_boundary",
-        "pure_algorithms_without_arbitrary_file_io",
-        "import_and_runtime_io_review"
+        "configuration_catalog_root_and_semantic_isolation",
+        "pure_algorithms_no_config_or_file_io"
       ],
       "R01": [
-        "dataset_capture_and_descriptor_resolution",
-        "atomic_files_and_source_set"
+        "streaming_source_normalization",
+        "no_daily_business_files"
       ],
       "R02": [
-        "exact_owner_publication_binding",
-        "real_reader_and_fault_validation"
+        "all_necessary_pg_facts_and_control_cursors",
+        "temporary_directory_independent_reads_resume_and_settlement",
+        "approx_500_session_capacity_model_and_measured_pg_calibration"
       ]
     }
   }
