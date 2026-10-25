@@ -1,6 +1,6 @@
 {
   "contract_id": "STOCK-A-DAY-CHAIN",
-  "version": "R7",
+  "version": "R8",
   "contract_kind": "BUSINESS_PIPELINE_SPECIFICATION",
   "language": "zh-CN",
   "requires_implementation_binding": true,
@@ -2211,7 +2211,49 @@
     "read_index_is_thin_rebuildable_projection": true,
     "dynamic_schema_creation_forbidden": true,
     "owner_input_identity": "ACTUAL_CONSUMED_FIELD_AND_SOURCE_CONTENT_DEPENDENCY_SUBVECTOR_NOT_WHOLE_RUN_SOURCE_SET",
-    "capture_fact_changes_alone_invalidate_numeric_owner": false
+    "capture_fact_changes_alone_invalidate_numeric_owner": false,
+    "canonical_semantic_identity": {
+      "contract": "CANONICAL_FIELD_AND_WINDOW_IDENTITY_R1",
+      "field_components": [
+        "entity_id",
+        "session",
+        "field_id",
+        "value",
+        "quality",
+        "reason",
+        "source_authority",
+        "parser_version",
+        "unit_version",
+        "normalization_version"
+      ],
+      "field_excludes": [
+        "source_file_sha",
+        "capture_id",
+        "capture_time",
+        "run_id",
+        "whole_source_set_id",
+        "unrelated_bao",
+        "current_wall_clock_cutoff"
+      ],
+      "separate_required_provenance": [
+        "selected_capture_id",
+        "selected_available_at",
+        "selected_durable_at",
+        "selected_binding_cutoff_eligibility"
+      ],
+      "append": "REUSE_UNCHANGED_FIELD_DIGESTS_AND_ORIGINAL_SELECTED_BINDINGS",
+      "correction": "RECOMPUTE_CHANGED_FIELDS_ACTUAL_WINDOWS_RANK_POPULATIONS_AND_STATE_CLOSURE",
+      "parser_or_unit_change": "INVALIDATE_ONLY_ACTUAL_CONSUMERS_OF_CHANGED_PARSER_OR_UNIT_VERSION",
+      "same_values_different_capture": "NUMERIC_RESULT_MAY_REUSE_BUT_PIT_PROVENANCE_MUST_NOT_BE_SUBSTITUTED",
+      "cutoff": "SELECT_FACTS_AND_VALIDATE_ELIGIBILITY_THEN_HASH_SELECTED_BINDING_NOT_EVERY_RUN_CUTOFF",
+      "pure_symbols": [
+        "stock_a.canonical.identity:field_digest",
+        "stock_a.canonical.identity:window_digest",
+        "stock_a.canonical.identity:availability_digest"
+      ],
+      "runtime_pipeline_implemented": false,
+      "version_projection": "PARSER_UNIT_NORMALIZATION_CALENDAR_STATUS_ACTION_REVISIONS_ARE_ACTUAL_CONSUMED_FIELD_WINDOW_PROJECTIONS_NOT_WHOLE_DATASET_LATEST"
+    }
   },
   "acceptance_policy": {
     "single_short_transaction": [
@@ -2389,7 +2431,23 @@
     "runtime_cache_backend": "BOUNDED_MEMORY_OR_CONTROLLED_PG_TEMP",
     "configuration_root_only": true,
     "lifecycle_capacity_gc_restore_binding_required_before_persistence": true,
-    "logical_database": "stock_a"
+    "logical_database": "stock_a",
+    "canonical_partial_quality": {
+      "contract": "CANONICAL_PARTIAL_QUALITY_R1",
+      "physical_relation": "stock_a.canonical_daily",
+      "independent_groups": [
+        "price",
+        "amount",
+        "volume"
+      ],
+      "price_group": "ALL_FOUR_KNOWN_VALID_OR_ALL_NULL_WITH_REASON",
+      "observed": "VALUE_NOT_NULL_REASON_NULL",
+      "unknown_or_na": "VALUE_NULL_NONEMPTY_REASON",
+      "zero": "VALID_NONNEGATIVE_AMOUNT_OR_VOLUME_NOT_UNKNOWN",
+      "provenance": "SOURCE_CAPTURE_FK_PLUS_PER_GROUP_SEMANTIC_REVISION",
+      "price_invalid": "KEEP_INDEPENDENT_VALID_AMOUNT_AND_VOLUME_NO_ACTUAL_PRICE_BAR",
+      "migration_applied": false
+    }
   },
   "document_registry": {
     "root_spec": "../../PROJECT_SPEC.md",
@@ -2538,7 +2596,7 @@
   },
   "scope_bindings": {
     "FOUNDATION_EOD": {
-      "contract": "STOCK_A_FOUNDATION_BINDING_R2",
+      "contract": "STOCK_A_FOUNDATION_BINDING_R3",
       "execution_mode": "SINGLE_EXECUTOR_SCOPE_PROJECTED_KERNELS",
       "stage_bindings": [
         {
@@ -3009,10 +3067,11 @@
           "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
           "context_dependencies": [
             "context.target_session",
-            "context.source_cutoff"
+            "context.source_cutoff",
+            "context.selected_raw_open"
           ],
           "output_artifact": "raw_bars",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
         },
         {
           "field_id": "raw.high",
@@ -3053,10 +3112,11 @@
           "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
           "context_dependencies": [
             "context.target_session",
-            "context.source_cutoff"
+            "context.source_cutoff",
+            "context.selected_raw_high"
           ],
           "output_artifact": "raw_bars",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
         },
         {
           "field_id": "raw.low",
@@ -3097,10 +3157,11 @@
           "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
           "context_dependencies": [
             "context.target_session",
-            "context.source_cutoff"
+            "context.source_cutoff",
+            "context.selected_raw_low"
           ],
           "output_artifact": "raw_bars",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
         },
         {
           "field_id": "raw.close",
@@ -3141,10 +3202,11 @@
           "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
           "context_dependencies": [
             "context.target_session",
-            "context.source_cutoff"
+            "context.source_cutoff",
+            "context.selected_raw_close"
           ],
           "output_artifact": "raw_bars",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
         },
         {
           "field_id": "raw.amount",
@@ -3186,10 +3248,11 @@
           "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
           "context_dependencies": [
             "context.target_session",
-            "context.source_cutoff"
+            "context.source_cutoff",
+            "context.selected_raw_amount"
           ],
           "output_artifact": "raw_bars",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
         },
         {
           "field_id": "raw.volume",
@@ -3231,10 +3294,11 @@
           "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
           "context_dependencies": [
             "context.target_session",
-            "context.source_cutoff"
+            "context.source_cutoff",
+            "context.selected_raw_volume"
           ],
           "output_artifact": "raw_bars",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
         },
         {
           "field_id": "raw.session_state",
@@ -6001,7 +6065,7 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_TREND_R1",
           "input_fields": [
             "adjusted.close",
             "core.ma20",
@@ -6021,13 +6085,22 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "DOWNTREND_STRONG",
+              "UPTREND_STRONG",
+              "DOWNTREND",
+              "UPTREND",
+              "SIDEWAYS_WEAK",
+              "SIDEWAYS_STRONG",
+              "SIDEWAYS"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6041,7 +6114,10 @@
             "context.source_cutoff"
           ],
           "output_artifact": "core_profiles",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "profile.position",
@@ -6049,7 +6125,7 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_POSITION_R1",
           "input_fields": [
             "core.bias20_atr",
             "core.pos60"
@@ -6063,13 +6139,21 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "EXTENDED",
+              "HIGH_ZONE",
+              "MID_HIGH",
+              "MID_ZONE",
+              "MID_LOW",
+              "LOW_ZONE"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6083,7 +6167,10 @@
             "context.source_cutoff"
           ],
           "output_artifact": "core_profiles",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "profile.ma_structure",
@@ -6091,7 +6178,7 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_MA_STRUCTURE_R1",
           "input_fields": [
             "core.ma5",
             "core.ma10",
@@ -6108,13 +6195,20 @@
             "P09"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "BULL_ALIGNED",
+              "BEAR_ALIGNED",
+              "BULL_TRANSITION",
+              "BEAR_TRANSITION",
+              "MIXED"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6128,7 +6222,10 @@
             "context.source_cutoff"
           ],
           "output_artifact": "core_profiles",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "profile.relative",
@@ -6136,7 +6233,7 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_RELATIVE_R1",
           "input_fields": [
             "cross.rps5_delta3_pp",
             "cross.rps20",
@@ -6153,13 +6250,23 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "ACTIVE_EMERGENCE",
+              "PASSIVE_RESILIENCE",
+              "LEADING_ACCELERATING",
+              "LEADING_STABLE",
+              "IMPROVING",
+              "WEAKENING",
+              "LAGGING",
+              "NEUTRAL"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6173,7 +6280,10 @@
             "context.source_cutoff"
           ],
           "output_artifact": "core_profiles",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "profile.compression",
@@ -6181,7 +6291,7 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_COMPRESSION_R1",
           "input_fields": [
             "core.range_ratio",
             "core.atr_ratio",
@@ -6199,13 +6309,20 @@
             "P09"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "EXPANDING_EXTREME",
+              "EXPANDING",
+              "COMPRESSING_STRONG",
+              "COMPRESSING",
+              "NORMAL"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6219,7 +6336,10 @@
             "context.source_cutoff"
           ],
           "output_artifact": "core_profiles",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "profile.participation",
@@ -6227,7 +6347,7 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_PARTICIPATION_R1",
           "input_fields": [
             "core.ret1",
             "core.clv",
@@ -6242,13 +6362,21 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "HIGH_PARTICIPATION_REVERSAL",
+              "HIGH_PARTICIPATION_EFFECTIVE_ADVANCE",
+              "HIGH_PARTICIPATION_LOW_EFFICIENCY",
+              "LOW_PARTICIPATION_ADVANCE",
+              "LOW_PARTICIPATION_DECLINE",
+              "NORMAL_PARTICIPATION"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6262,7 +6390,10 @@
             "context.source_cutoff"
           ],
           "output_artifact": "core_profiles",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "profile.extension",
@@ -6270,7 +6401,7 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_EXTENSION_R1",
           "input_fields": [
             "core.bias20_atr",
             "core.ret5",
@@ -6288,13 +6419,19 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "EXTREME",
+              "HIGH",
+              "MEDIUM",
+              "LOW"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6308,7 +6445,10 @@
             "context.source_cutoff"
           ],
           "output_artifact": "core_profiles",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "profile.near_high20",
@@ -6331,7 +6471,7 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R2",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
@@ -6357,7 +6497,9 @@
           ],
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-          "parameter_binding_state": "BINDING_REQUIRED"
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "profile.drawdown60",
@@ -6379,7 +6521,7 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R2",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
@@ -6405,7 +6547,9 @@
           ],
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-          "parameter_binding_state": "DESIGN_RULE_DEFINED_IMPLEMENTATION_BINDING_REQUIRED"
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "period.closed_week",
@@ -6491,7 +6635,7 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R2",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
@@ -6518,8 +6662,10 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-          "parameter_binding_state": "DESIGN_RULE_DEFINED_IMPLEMENTATION_BINDING_REQUIRED",
-          "minimum_closed_period_count": 6
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "minimum_closed_period_count": 6,
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "period.closed_month",
@@ -6605,7 +6751,7 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R2",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
@@ -6632,8 +6778,10 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-          "parameter_binding_state": "DESIGN_RULE_DEFINED_IMPLEMENTATION_BINDING_REQUIRED",
-          "minimum_closed_period_count": 4
+          "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
+          "minimum_closed_period_count": 4,
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         {
           "field_id": "plan.scope",
@@ -6837,7 +6985,8 @@
           "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
           "consumers": [
             "BASE_STOCK_DETAIL",
-            "DATA_STATUS"
+            "DATA_STATUS",
+            "P03"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
           "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
@@ -6909,7 +7058,8 @@
           "input_fields": [
             "capture.content_sha",
             "capture.durable_at",
-            "bao.capability_state"
+            "bao.capability_state",
+            "capture.canonical_digest"
           ],
           "window_contract": "NONE",
           "coordinate_role": "NONE",
@@ -6935,10 +7085,24 @@
           "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
           "context_dependencies": [
             "context.target_session",
-            "context.source_cutoff"
+            "context.source_cutoff",
+            "context.capture_dataset_id",
+            "context.capture_parser_version",
+            "context.capture_unit_version",
+            "context.capture_binding_id"
           ],
           "output_artifact": "source_set",
-          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "expression_components": [
+            "capture.content_sha",
+            "capture.canonical_digest",
+            "capture.durable_at",
+            "bao.capability_state",
+            "context.capture_dataset_id",
+            "context.capture_parser_version",
+            "context.capture_unit_version",
+            "context.capture_binding_id"
+          ]
         },
         {
           "field_id": "owner.id",
@@ -7552,7 +7716,7 @@
       "implementation_binding_required": true,
       "runtime_implementation_present": false,
       "within_stage_field_toposort_required": true,
-      "parameter_binding_state": "DESIGN_REFERENCES_EXPLICIT_RUNTIME_BINDING_REQUIRED",
+      "parameter_binding_state": "ADOPTED_PROFILE_BASELINE_OTHER_DOMAINS_REQUIRE_BINDING",
       "allowed_environments": [
         "DEV",
         "TEST"
@@ -7562,7 +7726,7 @@
         "selection": "EXACT_DECLARED_FIELD_WINDOWS_AND_ENDPOINT_UNIVERSES",
         "first_day": "NEW_VERIFIED_SOURCE_HISTORY_OR_LEGITIMATE_SHORT_HISTORY_NO_OLD_V4_DB",
         "stateful_advanced_prior_required": false,
-        "context_dependencies": "TRANSITIVE_UNION_OF_INPUT_FIELD_CONTEXT_AND_LOCAL_CONTEXT_NO_LATEST",
+        "context_dependencies": "TRANSITIVE_UNION_OF_SELECTED_INPUT_AND_WINDOW_CONTEXT_PROJECTIONS_NO_LATEST",
         "window_identity_required": [
           "endpoint_roles",
           "selected_session_or_actual_ids",
@@ -7579,7 +7743,13 @@
         "identity_storage": "NECESSARY_TYPED_KEYS_AND_DIGESTS_NO_PER_FIELD_HISTORY_COPY",
         "business_digest": "VALUES_QUALITY_REAL_PROVENANCE_TRANSITIVE_CONTEXT_WINDOW_IDENTITY",
         "repair": "RECOMPUTE_ACTUAL_AFFECTED_DEPENDENCY_CLOSURE_PRESERVE_UNAFFECTED_RESULTS",
-        "runtime_enforcement_implemented": false
+        "runtime_enforcement_implemented": false,
+        "identity_projection": {
+          "canonical_row_set_digest": "ONLY_CONSUMED_FIELD_VALUE_QUALITY_REASON_AND_FIELD_SPECIFIC_LINEAGE",
+          "status_revision": "ACTUAL_WINDOW_STATUS_PROJECTION",
+          "calendar_revision": "ACTUAL_WINDOW_SESSIONS_AND_STATUS_BOUNDARIES",
+          "source_cutoff": "SELECTED_FACTS_ACTIONS_MEMBERSHIP_AND_REAL_ELIGIBILITY_BINDINGS_NOT_NEW_RUN_CLOCK"
+        }
       },
       "source_seal_validation_ref": "source_seal_validation",
       "profile_expression_registry": {
@@ -7651,7 +7821,25 @@
           "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
           "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
           "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
-          "runtime_implementation_present": false
+          "runtime_implementation_present": false,
+          "data_gate": "ALL_INPUTS_KNOWN",
+          "input_domains": {
+            "adjusted.close": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "core.hhv60": {
+              "type": "number",
+              "exclusive_min": 0
+            }
+          },
+          "output_values": [
+            "SHALLOW",
+            "MODERATE",
+            "DEEP"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         "PROFILE_NEAR_HIGH20_R1": {
           "algorithm_family": "ALG-17",
@@ -7689,9 +7877,12 @@
             "near_high20_max_atr": {
               "unit": "ATR_scale",
               "domain": "FINITE_POSITIVE_NUMBER_REJECT_BOOL",
-              "value": null,
+              "value": 0.5,
               "default_allowed": false,
-              "adoption_state": "BINDING_REQUIRED"
+              "adoption_state": "ADOPTED_RESEARCH_BASELINE",
+              "adoption_ref": "CHG-014",
+              "basis": "EXISTING_NEAR_HIGH_ATR_ENGINEERING_CANDIDATE",
+              "effect_claim": "NONE_NOT_OPTIMIZED_OR_MARKET_VALIDATED"
             }
           },
           "ordered_branches": [
@@ -7729,7 +7920,29 @@
           "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
           "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
           "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
-          "runtime_implementation_present": false
+          "runtime_implementation_present": false,
+          "data_gate": "ALL_INPUTS_KNOWN",
+          "input_domains": {
+            "adjusted.close": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "core.prior_high20": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "core.atr20": {
+              "type": "number",
+              "exclusive_min": 0
+            }
+          },
+          "output_values": [
+            "ABOVE_HIGH",
+            "NEAR_HIGH",
+            "BELOW_HIGH"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         "PROFILE_CLOSED_WEEK_TREND_R1": {
           "algorithm_family": "ALG-17",
@@ -7831,7 +8044,21 @@
           "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
           "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
           "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
-          "runtime_implementation_present": false
+          "runtime_implementation_present": false,
+          "data_gate": "ALL_INPUTS_KNOWN",
+          "input_domains": {
+            "period.closed_week": {
+              "type": "closed_prices",
+              "minimum_count": 6
+            }
+          },
+          "output_values": [
+            "UPTREND",
+            "DOWNTREND",
+            "SIDEWAYS"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         },
         "PROFILE_CLOSED_MONTH_TREND_R1": {
           "algorithm_family": "ALG-17",
@@ -7933,28 +8160,1568 @@
           "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
           "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
           "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
-          "runtime_implementation_present": false
+          "runtime_implementation_present": false,
+          "data_gate": "ALL_INPUTS_KNOWN",
+          "input_domains": {
+            "period.closed_month": {
+              "type": "closed_prices",
+              "minimum_count": 4
+            }
+          },
+          "output_values": [
+            "UPTREND",
+            "DOWNTREND",
+            "SIDEWAYS"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
+        },
+        "PROFILE_TREND_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.trend",
+          "input_fields": [
+            "adjusted.close",
+            "core.ma20",
+            "core.ma60",
+            "core.ma_slope20_atr",
+            "core.ma_slope60_atr",
+            "core.hh_progress",
+            "core.ll_progress",
+            "core.price_damage"
+          ],
+          "operands": {},
+          "parameters": {},
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "adjusted.close"
+                      },
+                      {
+                        "ref": "core.ma20"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.ma_slope20_atr"
+                      },
+                      -0.1
+                    ]
+                  },
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.ma_slope60_atr"
+                      },
+                      -0.1
+                    ]
+                  },
+                  {
+                    "ref": "core.ll_progress"
+                  }
+                ]
+              },
+              "value": "DOWNTREND_STRONG"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "adjusted.close"
+                      },
+                      {
+                        "ref": "core.ma20"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "core.ma_slope20_atr"
+                      },
+                      0.1
+                    ]
+                  },
+                  {
+                    "op": "or",
+                    "args": [
+                      {
+                        "op": "gt",
+                        "args": [
+                          {
+                            "ref": "adjusted.close"
+                          },
+                          {
+                            "ref": "core.ma60"
+                          }
+                        ]
+                      },
+                      {
+                        "op": "gt",
+                        "args": [
+                          {
+                            "ref": "core.ma_slope60_atr"
+                          },
+                          0.1
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "ref": "core.hh_progress"
+                  },
+                  {
+                    "op": "not",
+                    "args": [
+                      {
+                        "ref": "core.price_damage"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "value": "UPTREND_STRONG"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "adjusted.close"
+                      },
+                      {
+                        "ref": "core.ma20"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.ma_slope20_atr"
+                      },
+                      -0.1
+                    ]
+                  }
+                ]
+              },
+              "value": "DOWNTREND"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "adjusted.close"
+                      },
+                      {
+                        "ref": "core.ma20"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "core.ma_slope20_atr"
+                      },
+                      0.1
+                    ]
+                  },
+                  {
+                    "op": "not",
+                    "args": [
+                      {
+                        "ref": "core.price_damage"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "value": "UPTREND"
+            },
+            {
+              "when": {
+                "op": "lt",
+                "args": [
+                  {
+                    "ref": "adjusted.close"
+                  },
+                  {
+                    "ref": "core.ma20"
+                  }
+                ]
+              },
+              "value": "SIDEWAYS_WEAK"
+            },
+            {
+              "when": {
+                "op": "gt",
+                "args": [
+                  {
+                    "ref": "adjusted.close"
+                  },
+                  {
+                    "ref": "core.ma20"
+                  }
+                ]
+              },
+              "value": "SIDEWAYS_STRONG"
+            },
+            {
+              "when": true,
+              "value": "SIDEWAYS"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false,
+          "data_gate": "ALL_INPUTS_KNOWN",
+          "input_domains": {
+            "adjusted.close": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "core.ma20": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "core.ma60": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "core.ma_slope20_atr": {
+              "type": "number"
+            },
+            "core.ma_slope60_atr": {
+              "type": "number"
+            },
+            "core.hh_progress": {
+              "type": "boolean"
+            },
+            "core.ll_progress": {
+              "type": "boolean"
+            },
+            "core.price_damage": {
+              "type": "boolean"
+            }
+          },
+          "output_values": [
+            "DOWNTREND_STRONG",
+            "UPTREND_STRONG",
+            "DOWNTREND",
+            "UPTREND",
+            "SIDEWAYS_WEAK",
+            "SIDEWAYS_STRONG",
+            "SIDEWAYS"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
+        },
+        "PROFILE_POSITION_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.position",
+          "input_fields": [
+            "core.bias20_atr",
+            "core.pos60"
+          ],
+          "operands": {},
+          "parameters": {},
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "gte",
+                "args": [
+                  {
+                    "ref": "core.bias20_atr"
+                  },
+                  3
+                ]
+              },
+              "value": "EXTENDED"
+            },
+            {
+              "when": {
+                "op": "gte",
+                "args": [
+                  {
+                    "ref": "core.pos60"
+                  },
+                  0.8
+                ]
+              },
+              "value": "HIGH_ZONE"
+            },
+            {
+              "when": {
+                "op": "gte",
+                "args": [
+                  {
+                    "ref": "core.pos60"
+                  },
+                  0.6
+                ]
+              },
+              "value": "MID_HIGH"
+            },
+            {
+              "when": {
+                "op": "gte",
+                "args": [
+                  {
+                    "ref": "core.pos60"
+                  },
+                  0.4
+                ]
+              },
+              "value": "MID_ZONE"
+            },
+            {
+              "when": {
+                "op": "gte",
+                "args": [
+                  {
+                    "ref": "core.pos60"
+                  },
+                  0.2
+                ]
+              },
+              "value": "MID_LOW"
+            },
+            {
+              "when": true,
+              "value": "LOW_ZONE"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false,
+          "data_gate": "ALL_INPUTS_KNOWN",
+          "input_domains": {
+            "core.bias20_atr": {
+              "type": "number"
+            },
+            "core.pos60": {
+              "type": "number",
+              "min": 0,
+              "max": 1
+            }
+          },
+          "output_values": [
+            "EXTENDED",
+            "HIGH_ZONE",
+            "MID_HIGH",
+            "MID_ZONE",
+            "MID_LOW",
+            "LOW_ZONE"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
+        },
+        "PROFILE_MA_STRUCTURE_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.ma_structure",
+          "input_fields": [
+            "core.ma5",
+            "core.ma10",
+            "core.ma20",
+            "core.ma_slope20_atr"
+          ],
+          "operands": {},
+          "parameters": {},
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "core.ma5"
+                      },
+                      {
+                        "ref": "core.ma10"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "core.ma10"
+                      },
+                      {
+                        "ref": "core.ma20"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "core.ma_slope20_atr"
+                      },
+                      0
+                    ]
+                  }
+                ]
+              },
+              "value": "BULL_ALIGNED"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.ma5"
+                      },
+                      {
+                        "ref": "core.ma10"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.ma10"
+                      },
+                      {
+                        "ref": "core.ma20"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.ma_slope20_atr"
+                      },
+                      0
+                    ]
+                  }
+                ]
+              },
+              "value": "BEAR_ALIGNED"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "core.ma5"
+                      },
+                      {
+                        "ref": "core.ma20"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.ma_slope20_atr"
+                      },
+                      0
+                    ]
+                  }
+                ]
+              },
+              "value": "BULL_TRANSITION"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.ma5"
+                      },
+                      {
+                        "ref": "core.ma20"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "core.ma_slope20_atr"
+                      },
+                      0
+                    ]
+                  }
+                ]
+              },
+              "value": "BEAR_TRANSITION"
+            },
+            {
+              "when": true,
+              "value": "MIXED"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false,
+          "data_gate": "ALL_INPUTS_KNOWN",
+          "input_domains": {
+            "core.ma5": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "core.ma10": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "core.ma20": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "core.ma_slope20_atr": {
+              "type": "number"
+            }
+          },
+          "output_values": [
+            "BULL_ALIGNED",
+            "BEAR_ALIGNED",
+            "BULL_TRANSITION",
+            "BEAR_TRANSITION",
+            "MIXED"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
+        },
+        "PROFILE_COMPRESSION_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.compression",
+          "input_fields": [
+            "core.range_ratio",
+            "core.atr_ratio",
+            "core.vol_ratio",
+            "core.amount_ratio20",
+            "core.liquidity_mean20"
+          ],
+          "operands": {},
+          "parameters": {},
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "or",
+                "args": [
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.atr_ratio"
+                      },
+                      1.5
+                    ]
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.vol_ratio"
+                      },
+                      1.5
+                    ]
+                  }
+                ]
+              },
+              "value": "EXPANDING_EXTREME"
+            },
+            {
+              "when": {
+                "op": "or",
+                "args": [
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.atr_ratio"
+                      },
+                      1.1
+                    ]
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.vol_ratio"
+                      },
+                      1.1
+                    ]
+                  }
+                ]
+              },
+              "value": "EXPANDING"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "core.range_ratio"
+                      },
+                      0.35
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "core.atr_ratio"
+                      },
+                      0.7
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "core.vol_ratio"
+                      },
+                      0.7
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "core.amount_ratio20"
+                      },
+                      0.8
+                    ]
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.liquidity_mean20"
+                      },
+                      20000000
+                    ]
+                  }
+                ]
+              },
+              "value": "COMPRESSING_STRONG"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "core.range_ratio"
+                      },
+                      0.6
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "core.atr_ratio"
+                      },
+                      0.9
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "core.vol_ratio"
+                      },
+                      0.9
+                    ]
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.liquidity_mean20"
+                      },
+                      20000000
+                    ]
+                  }
+                ]
+              },
+              "value": "COMPRESSING"
+            },
+            {
+              "when": true,
+              "value": "NORMAL"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false,
+          "data_gate": "BRANCH_LOCAL_KLEENE",
+          "input_domains": {
+            "core.range_ratio": {
+              "type": "number",
+              "min": 0
+            },
+            "core.atr_ratio": {
+              "type": "number",
+              "min": 0
+            },
+            "core.vol_ratio": {
+              "type": "number",
+              "min": 0
+            },
+            "core.amount_ratio20": {
+              "type": "number",
+              "min": 0
+            },
+            "core.liquidity_mean20": {
+              "type": "number",
+              "min": 0
+            }
+          },
+          "output_values": [
+            "EXPANDING_EXTREME",
+            "EXPANDING",
+            "COMPRESSING_STRONG",
+            "COMPRESSING",
+            "NORMAL"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
+        },
+        "PROFILE_RELATIVE_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.relative",
+          "input_fields": [
+            "cross.rps5_delta3_pp",
+            "cross.rps20",
+            "cross.rel_market_1",
+            "profile.compression",
+            "profile.ma_structure"
+          ],
+          "operands": {},
+          "parameters": {},
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "cross.rps5_delta3_pp"
+                      },
+                      10
+                    ]
+                  },
+                  {
+                    "op": "or",
+                    "args": [
+                      {
+                        "op": "in",
+                        "args": [
+                          {
+                            "ref": "profile.compression"
+                          },
+                          "COMPRESSING",
+                          "COMPRESSING_STRONG"
+                        ]
+                      },
+                      {
+                        "op": "in",
+                        "args": [
+                          {
+                            "ref": "profile.ma_structure"
+                          },
+                          "BULL_TRANSITION",
+                          "BULL_ALIGNED"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              "value": "ACTIVE_EMERGENCE"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "cross.rel_market_1"
+                      },
+                      0
+                    ]
+                  },
+                  {
+                    "op": "not",
+                    "args": [
+                      {
+                        "op": "and",
+                        "args": [
+                          {
+                            "op": "gte",
+                            "args": [
+                              {
+                                "ref": "cross.rps5_delta3_pp"
+                              },
+                              10
+                            ]
+                          },
+                          {
+                            "op": "or",
+                            "args": [
+                              {
+                                "op": "in",
+                                "args": [
+                                  {
+                                    "ref": "profile.compression"
+                                  },
+                                  "COMPRESSING",
+                                  "COMPRESSING_STRONG"
+                                ]
+                              },
+                              {
+                                "op": "in",
+                                "args": [
+                                  {
+                                    "ref": "profile.ma_structure"
+                                  },
+                                  "BULL_TRANSITION",
+                                  "BULL_ALIGNED"
+                                ]
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "cross.rps5_delta3_pp"
+                      },
+                      0
+                    ]
+                  }
+                ]
+              },
+              "value": "PASSIVE_RESILIENCE"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "cross.rps20"
+                      },
+                      80
+                    ]
+                  },
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "cross.rps5_delta3_pp"
+                      },
+                      0
+                    ]
+                  }
+                ]
+              },
+              "value": "LEADING_ACCELERATING"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "cross.rps20"
+                      },
+                      80
+                    ]
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "cross.rps5_delta3_pp"
+                      },
+                      -3
+                    ]
+                  }
+                ]
+              },
+              "value": "LEADING_STABLE"
+            },
+            {
+              "when": {
+                "op": "gt",
+                "args": [
+                  {
+                    "ref": "cross.rps5_delta3_pp"
+                  },
+                  3
+                ]
+              },
+              "value": "IMPROVING"
+            },
+            {
+              "when": {
+                "op": "lt",
+                "args": [
+                  {
+                    "ref": "cross.rps5_delta3_pp"
+                  },
+                  -3
+                ]
+              },
+              "value": "WEAKENING"
+            },
+            {
+              "when": {
+                "op": "lt",
+                "args": [
+                  {
+                    "ref": "cross.rps20"
+                  },
+                  20
+                ]
+              },
+              "value": "LAGGING"
+            },
+            {
+              "when": true,
+              "value": "NEUTRAL"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false,
+          "data_gate": "ALL_INPUTS_KNOWN",
+          "input_domains": {
+            "cross.rps5_delta3_pp": {
+              "type": "number",
+              "min": -100,
+              "max": 100
+            },
+            "cross.rps20": {
+              "type": "number",
+              "min": 0,
+              "max": 100
+            },
+            "cross.rel_market_1": {
+              "type": "number"
+            },
+            "profile.compression": {
+              "type": "enum",
+              "values": [
+                "EXPANDING_EXTREME",
+                "EXPANDING",
+                "COMPRESSING_STRONG",
+                "COMPRESSING",
+                "NORMAL"
+              ]
+            },
+            "profile.ma_structure": {
+              "type": "enum",
+              "values": [
+                "BULL_ALIGNED",
+                "BEAR_ALIGNED",
+                "BULL_TRANSITION",
+                "BEAR_TRANSITION",
+                "MIXED"
+              ]
+            }
+          },
+          "output_values": [
+            "ACTIVE_EMERGENCE",
+            "PASSIVE_RESILIENCE",
+            "LEADING_ACCELERATING",
+            "LEADING_STABLE",
+            "IMPROVING",
+            "WEAKENING",
+            "LAGGING",
+            "NEUTRAL"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
+        },
+        "PROFILE_PARTICIPATION_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.participation",
+          "input_fields": [
+            "core.ret1",
+            "core.clv",
+            "core.amount_ratio20"
+          ],
+          "operands": {},
+          "parameters": {},
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.amount_ratio20"
+                      },
+                      1.2
+                    ]
+                  },
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.ret1"
+                      },
+                      0
+                    ]
+                  }
+                ]
+              },
+              "value": "HIGH_PARTICIPATION_REVERSAL"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.amount_ratio20"
+                      },
+                      1.2
+                    ]
+                  },
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "core.ret1"
+                      },
+                      0
+                    ]
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.clv"
+                      },
+                      0.7
+                    ]
+                  }
+                ]
+              },
+              "value": "HIGH_PARTICIPATION_EFFECTIVE_ADVANCE"
+            },
+            {
+              "when": {
+                "op": "gte",
+                "args": [
+                  {
+                    "ref": "core.amount_ratio20"
+                  },
+                  1.2
+                ]
+              },
+              "value": "HIGH_PARTICIPATION_LOW_EFFICIENCY"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.amount_ratio20"
+                      },
+                      0.8
+                    ]
+                  },
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "core.ret1"
+                      },
+                      0
+                    ]
+                  }
+                ]
+              },
+              "value": "LOW_PARTICIPATION_ADVANCE"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.amount_ratio20"
+                      },
+                      0.8
+                    ]
+                  },
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "core.ret1"
+                      },
+                      0
+                    ]
+                  }
+                ]
+              },
+              "value": "LOW_PARTICIPATION_DECLINE"
+            },
+            {
+              "when": true,
+              "value": "NORMAL_PARTICIPATION"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false,
+          "data_gate": "BRANCH_LOCAL_KLEENE",
+          "input_domains": {
+            "core.ret1": {
+              "type": "number",
+              "exclusive_min": -1
+            },
+            "core.clv": {
+              "type": "number",
+              "min": 0,
+              "max": 1
+            },
+            "core.amount_ratio20": {
+              "type": "number",
+              "min": 0
+            }
+          },
+          "output_values": [
+            "HIGH_PARTICIPATION_REVERSAL",
+            "HIGH_PARTICIPATION_EFFECTIVE_ADVANCE",
+            "HIGH_PARTICIPATION_LOW_EFFICIENCY",
+            "LOW_PARTICIPATION_ADVANCE",
+            "LOW_PARTICIPATION_DECLINE",
+            "NORMAL_PARTICIPATION"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
+        },
+        "PROFILE_EXTENSION_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.extension",
+          "input_fields": [
+            "core.bias20_atr",
+            "core.ret5",
+            "core.atr20",
+            "adjusted.close",
+            "core.amount_ratio20",
+            "core.ret1"
+          ],
+          "operands": {},
+          "parameters": {},
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "gte",
+                "args": [
+                  {
+                    "ref": "core.bias20_atr"
+                  },
+                  4
+                ]
+              },
+              "value": "EXTREME"
+            },
+            {
+              "when": {
+                "op": "or",
+                "args": [
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "core.bias20_atr"
+                      },
+                      3
+                    ]
+                  },
+                  {
+                    "op": "and",
+                    "args": [
+                      {
+                        "op": "gte",
+                        "args": [
+                          {
+                            "ref": "core.ret5"
+                          },
+                          {
+                            "op": "divide",
+                            "args": [
+                              {
+                                "op": "multiply",
+                                "args": [
+                                  3,
+                                  {
+                                    "ref": "core.atr20"
+                                  }
+                                ]
+                              },
+                              {
+                                "ref": "adjusted.close"
+                              }
+                            ]
+                          }
+                        ]
+                      },
+                      {
+                        "op": "gte",
+                        "args": [
+                          {
+                            "ref": "core.amount_ratio20"
+                          },
+                          2
+                        ]
+                      },
+                      {
+                        "op": "lte",
+                        "args": [
+                          {
+                            "ref": "core.ret1"
+                          },
+                          0
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              "value": "HIGH"
+            },
+            {
+              "when": {
+                "op": "gte",
+                "args": [
+                  {
+                    "ref": "core.bias20_atr"
+                  },
+                  2
+                ]
+              },
+              "value": "MEDIUM"
+            },
+            {
+              "when": true,
+              "value": "LOW"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false,
+          "data_gate": "BRANCH_LOCAL_KLEENE",
+          "input_domains": {
+            "core.bias20_atr": {
+              "type": "number"
+            },
+            "core.ret5": {
+              "type": "number",
+              "exclusive_min": -1
+            },
+            "core.atr20": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "adjusted.close": {
+              "type": "number",
+              "exclusive_min": 0
+            },
+            "core.amount_ratio20": {
+              "type": "number",
+              "min": 0
+            },
+            "core.ret1": {
+              "type": "number",
+              "exclusive_min": -1
+            }
+          },
+          "output_values": [
+            "EXTREME",
+            "HIGH",
+            "MEDIUM",
+            "LOW"
+          ],
+          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_implemented": true
         }
       },
       "profile_expression_policy": {
         "operators": [
           "subtract",
           "divide",
+          "multiply",
           "lt",
           "lte",
           "gt",
           "gte",
-          "and"
+          "eq",
+          "and",
+          "or",
+          "not",
+          "in"
         ],
         "rule_ids_resolve_exactly": true,
         "field_inputs_must_cover_operand_references": true,
         "all_required_rule_parameters_must_bind_before_capability_enablement": true,
         "guard_order": "CONTRACT_AND_PARAMETERS_THEN_FIELD_LOCAL_DATA_VALIDATION_THEN_ORDERED_BRANCHES",
         "quality_not_business_enum": true,
-        "other_profile_fields": "ALG17_FAMILY_REFERENCE_REQUIRES_FURTHER_EXACT_RULE_BINDING_NOT_AUTO_CLOSED",
-        "numeric_evaluation": "EXACT_DECIMAL_OR_RATIONAL_NO_BINARY_FLOAT_BOUNDARY_ROUNDING"
+        "other_profile_fields": "ALL_11_FOUNDATION_PROFILE_FIELDS_HAVE_EXACT_RULES_PIPELINE_STILL_UNIMPLEMENTED",
+        "numeric_evaluation": "EXACT_DECIMAL_OR_RATIONAL_NO_BINARY_FLOAT_BOUNDARY_ROUNDING",
+        "input_decoding": "JSON_NUMERIC_CONSTANTS_DECODE_AS_DECIMAL_REJECT_BINARY_FLOAT",
+        "per_rule_data_gate": true
       },
-      "accepted_readback_identity_assertion": "P24_REQUIRES_ACCEPTED_AND_ORIGINAL_CANDIDATE_PUBLICATION_EXACT_ID_MANIFEST_INDEX_EQUALITY_NO_UNACCEPTED_READBACK"
+      "accepted_readback_identity_assertion": "P24_REQUIRES_ACCEPTED_AND_ORIGINAL_CANDIDATE_PUBLICATION_EXACT_ID_MANIFEST_INDEX_EQUALITY_NO_UNACCEPTED_READBACK",
+      "context_input_registry": {
+        "context.capture_dataset_id": {
+          "value_type": "string",
+          "producer_stage": "P01",
+          "output_artifact": "tdx_capture",
+          "identity_role": "SOURCE_AUDIT_OR_SELECTED_PROVENANCE_NOT_GLOBAL_NUMERIC_DEPENDENCY"
+        },
+        "context.capture_parser_version": {
+          "value_type": "string",
+          "producer_stage": "P01",
+          "output_artifact": "tdx_capture",
+          "identity_role": "SOURCE_AUDIT_OR_SELECTED_PROVENANCE_NOT_GLOBAL_NUMERIC_DEPENDENCY"
+        },
+        "context.capture_unit_version": {
+          "value_type": "string",
+          "producer_stage": "P01",
+          "output_artifact": "tdx_capture",
+          "identity_role": "SOURCE_AUDIT_OR_SELECTED_PROVENANCE_NOT_GLOBAL_NUMERIC_DEPENDENCY"
+        },
+        "context.capture_binding_id": {
+          "value_type": "uuid",
+          "producer_stage": "P01",
+          "output_artifact": "tdx_capture",
+          "identity_role": "SOURCE_AUDIT_OR_SELECTED_PROVENANCE_NOT_GLOBAL_NUMERIC_DEPENDENCY"
+        },
+        "context.selected_raw_open": {
+          "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+          "producer_stage": "P03",
+          "output_artifact": "source_set",
+          "schema": {
+            "source_key": "string",
+            "session": "date",
+            "field_id": "string",
+            "semantic_digest": "sha256",
+            "source_authority": "string",
+            "parser_version": "string",
+            "unit_version": "string",
+            "normalization_version": "string",
+            "selected_capture_id": "uuid",
+            "selected_available_at": "timestamptz",
+            "selected_durable_at": "timestamptz"
+          },
+          "consumer": "raw.open",
+          "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+          "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+          "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+          "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+          "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+        },
+        "context.selected_raw_high": {
+          "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+          "producer_stage": "P03",
+          "output_artifact": "source_set",
+          "schema": {
+            "source_key": "string",
+            "session": "date",
+            "field_id": "string",
+            "semantic_digest": "sha256",
+            "source_authority": "string",
+            "parser_version": "string",
+            "unit_version": "string",
+            "normalization_version": "string",
+            "selected_capture_id": "uuid",
+            "selected_available_at": "timestamptz",
+            "selected_durable_at": "timestamptz"
+          },
+          "consumer": "raw.high",
+          "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+          "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+          "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+          "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+          "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+        },
+        "context.selected_raw_low": {
+          "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+          "producer_stage": "P03",
+          "output_artifact": "source_set",
+          "schema": {
+            "source_key": "string",
+            "session": "date",
+            "field_id": "string",
+            "semantic_digest": "sha256",
+            "source_authority": "string",
+            "parser_version": "string",
+            "unit_version": "string",
+            "normalization_version": "string",
+            "selected_capture_id": "uuid",
+            "selected_available_at": "timestamptz",
+            "selected_durable_at": "timestamptz"
+          },
+          "consumer": "raw.low",
+          "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+          "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+          "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+          "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+          "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+        },
+        "context.selected_raw_close": {
+          "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+          "producer_stage": "P03",
+          "output_artifact": "source_set",
+          "schema": {
+            "source_key": "string",
+            "session": "date",
+            "field_id": "string",
+            "semantic_digest": "sha256",
+            "source_authority": "string",
+            "parser_version": "string",
+            "unit_version": "string",
+            "normalization_version": "string",
+            "selected_capture_id": "uuid",
+            "selected_available_at": "timestamptz",
+            "selected_durable_at": "timestamptz"
+          },
+          "consumer": "raw.close",
+          "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+          "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+          "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+          "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+          "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+        },
+        "context.selected_raw_amount": {
+          "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+          "producer_stage": "P03",
+          "output_artifact": "source_set",
+          "schema": {
+            "source_key": "string",
+            "session": "date",
+            "field_id": "string",
+            "semantic_digest": "sha256",
+            "source_authority": "string",
+            "parser_version": "string",
+            "unit_version": "string",
+            "normalization_version": "string",
+            "selected_capture_id": "uuid",
+            "selected_available_at": "timestamptz",
+            "selected_durable_at": "timestamptz"
+          },
+          "consumer": "raw.amount",
+          "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+          "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+          "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+          "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+          "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+        },
+        "context.selected_raw_volume": {
+          "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+          "producer_stage": "P03",
+          "output_artifact": "source_set",
+          "schema": {
+            "source_key": "string",
+            "session": "date",
+            "field_id": "string",
+            "semantic_digest": "sha256",
+            "source_authority": "string",
+            "parser_version": "string",
+            "unit_version": "string",
+            "normalization_version": "string",
+            "selected_capture_id": "uuid",
+            "selected_available_at": "timestamptz",
+            "selected_durable_at": "timestamptz"
+          },
+          "consumer": "raw.volume",
+          "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+          "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+          "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+          "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+          "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+        }
+      },
+      "context_identity_policy": {
+        "applies_to": "NUMERIC_FIELD_AND_WINDOW_IDENTITIES",
+        "context.source_cutoff": "SELECTED_FACT_AND_COORDINATE_ELIGIBILITY_PROJECTION_NOT_GLOBAL_RUN_WALLCLOCK",
+        "context.calendar_ref": "ACTUAL_CONSUMED_SESSION_PROJECTION_NOT_WHOLE_NEW_CALENDAR_VERSION",
+        "selected_provenance": "KEEP_ORIGINAL_SELECTED_BINDING_AND_ITS_REAL_ASOF_CLOCKS_UNLESS_FACT_SELECTION_CHANGES",
+        "audit_and_eligibility_records": "KEEP_ACTUAL_CLOCK_VALUES_AND_EXACT_SOURCE_SET_REFERENCES",
+        "transitive_rule": "PROJECT_EACH_DECLARED_CONTEXT_THEN_UNION_ACTUAL_INPUT_AND_WINDOW_DEPENDENCIES"
+      }
     }
   },
   "source_evidence_policy": {

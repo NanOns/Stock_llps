@@ -1,0 +1,85 @@
+"""复用TDX 32字节布局及价格缩放，按价格/金额/数量独立校验。"""
+from dataclasses import dataclass
+from datetime import date
+from decimal import Decimal
+from fractions import Fraction
+import math
+import struct
+
+from stock_a.domain import ContractError, FieldValue, exact_number, unknown
+
+DAY_STRUCT = struct.Struct("<IIIIIfII")
+
+
+@dataclass(frozen=True)
+class UnitContract:
+    version: str
+    amount_to_cny: Decimal
+    volume_to_shares: int
+
+    def __post_init__(self):
+        try:
+            amount_scale = exact_number(self.amount_to_cny)
+        except ValueError as error:
+            raise ContractError("金额单位倍率必须为正有限精确数") from error
+        if not isinstance(self.version, str) or not self.version or amount_scale <= 0:
+            raise ContractError("金额单位合同必须有版本和正倍率")
+        if type(self.volume_to_shares) is not int or self.volume_to_shares <= 0:
+            raise ContractError("数量单位倍率必须为正整数")
+
+
+@dataclass(frozen=True)
+class DecodedDay:
+    session_date: date
+    prices: FieldValue  # 合法OHLC四元组，或整组隔离；不推断交易状态
+    amount: FieldValue
+    volume: FieldValue
+    reserved: int
+    unit_version: str
+
+
+def normalize_components(prices, amount, volume, units: UnitContract):
+    """某个字段不合法只隔离该组；没有用零填未知的路径。"""
+    if not isinstance(units, UnitContract):
+        raise ContractError("缺少来源单位合同")
+    try:
+        o, h, l, c = tuple(exact_number(x) for x in prices)
+        if o == h == l == c == 0:
+            price_value = unknown("ZERO_PRICE_PLACEHOLDER")
+        elif min(o, h, l, c) <= 0 or not l <= min(o, c) <= max(o, c) <= h:
+            raise ValueError("OHLC非法")
+        else:
+            price_value = FieldValue((o, h, l, c))
+    except (ValueError, TypeError):
+        price_value = unknown("DATA_INVALID_OHLC")
+    try:
+        normalized_amount = exact_number(amount) * exact_number(units.amount_to_cny)
+        if normalized_amount < 0:
+            raise ValueError("金额为负")
+        amount_value = FieldValue(normalized_amount)
+    except ValueError:
+        amount_value = unknown("DATA_INVALID_AMOUNT")
+    try:
+        if type(volume) is not int or volume < 0:
+            raise ValueError("数量必须为非负整数")
+        shares = volume * units.volume_to_shares
+        if shares > 2**63 - 1:
+            raise ValueError("数量超出bigint")
+        volume_value = FieldValue(shares)
+    except ValueError:
+        volume_value = unknown("DATA_INVALID_VOLUME")
+    return price_value, amount_value, volume_value
+
+
+def decode_day_record(raw32: bytes, units: UnitContract) -> DecodedDay:
+    if not isinstance(units, UnitContract):
+        raise ContractError("缺少来源单位合同")
+    if not isinstance(raw32, bytes) or len(raw32) != DAY_STRUCT.size:
+        raise ValueError("日线记录必须为32字节")
+    day, o, h, l, c, amount, volume, reserved = DAY_STRUCT.unpack(raw32)
+    session = date(day // 10000, day // 100 % 100, day % 100)
+    prices = tuple(Fraction(x, 100) for x in (o, h, l, c))
+    # float32解包后按实际二进制值精确转换；不把NaN/Infinity写成合法金额。
+    amount_decimal = Decimal.from_float(amount) if math.isfinite(amount) else Decimal("NaN")
+    fields = normalize_components(prices, amount_decimal, volume, units)
+    return DecodedDay(session, *fields, reserved, units.version)

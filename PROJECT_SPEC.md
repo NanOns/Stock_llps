@@ -1,6 +1,6 @@
-# Stock A PROJECT_SPEC.md：完整产品与工程规格 R8
+# Stock A PROJECT_SPEC.md：完整产品与工程规格 R9
 
-合同：`STOCK-A-PROJECT-SPEC/R8`。日期：2026-10-25，Asia/Shanghai。状态：`DESIGN_BASELINE_WITH_EXPLICIT_OPEN_GATES`。本文件给出新项目完整目标、数据模型、主链、算法、交互、运维与验收；不是旧V4继续开发卡，也不证明新代码已实现。R8补足阶段/字段断边、来源封口准入、局部Profile规则与历史依赖；near_high20参数仍BINDING_REQUIRED，未证明实现。R7补足新项目逻辑身份、测试资产恢复、安装配置边界和FOUNDATION机器范围；R6补足算法边界、并发恢复和生命周期约束；股票综合风险、具体字段/窄scope和存储参数仍须绑定，不能称设计已全部闭合。R5已取代每日业务文件方案：日更事实/控制状态全部PG化，配置文件只允许新项目config且与测试/过程文档隔离；按责任域归档与旧代码优先复用路线保持。完整业务链、算法命名/单位/时间角色及无新闻范围保持。Stock A源码/交付根和Git业务/规范白名单保持，测试、阶段材料、回执与产物全部外置。后续PG默认路径为G盘；当前E盘旧数据仅保留参考，不迁移、不覆盖、不因本轮配置修订切换服务。
+合同：`STOCK-A-PROJECT-SPEC/R9`。日期：2026-10-25，Asia/Shanghai。状态：`DESIGN_BASELINE_WITH_EXPLICIT_OPEN_GATES`。本文件给出新项目完整目标、数据模型、主链、算法、交互、运维与验收；不是旧V4继续开发卡，也不证明新代码已实现。R8补足阶段/字段断边、来源封口准入、局部Profile规则与历史依赖；R9将near_high20采用为0.5 ATR研究基线并补齐11项基础画像表达，修复Canonical分质量/细粒度身份；纯内核不证明完整流水线实现。R7补足新项目逻辑身份、测试资产恢复、安装配置边界和FOUNDATION机器范围；R6补足算法边界、并发恢复和生命周期约束；股票综合风险、具体字段/窄scope和存储参数仍须绑定，不能称设计已全部闭合。R5已取代每日业务文件方案：日更事实/控制状态全部PG化，配置文件只允许新项目config且与测试/过程文档隔离；按责任域归档与旧代码优先复用路线保持。完整业务链、算法命名/单位/时间角色及无新闻范围保持。Stock A源码/交付根和Git业务/规范白名单保持，测试、阶段材料、回执与产物全部外置。后续PG默认路径为G盘；当前E盘旧数据仅保留参考，不迁移、不覆盖、不因本轮配置修订切换服务。
 
 ## S01 项目目标、范围与完成定义
 
@@ -94,7 +94,7 @@ RAW OHLCV/amount按供应方原单位验证并规范，金额CNY、量的股/手
 
 HH_PROGRESS=max(H[t−4:t])>max(H[t−9:t−5])；LL_PROGRESS=min(L[t−4:t])<min(L[t−9:t−5])。区间两端包含，使用同坐标actual bars，不读未来高低。
 
-位置按bias≥3先EXTENDED，再pos60的0.8/0.6/0.4/0.2分区。drawdown60、near_high20及closed周/月趋势的唯一精确规则正文见[算法合同§9.7](docs/design/算法合同与升级规则.md#97-foundation四项画像的确定表达)，机器expression_ref绑定具体rule_id；near_high20阈值仍BINDING_REQUIRED，无默认值，不能按已采用/已实现报通过。历史窗口与context传递见该合同§9.8。
+位置按bias≥3先EXTENDED，再pos60的0.8/0.6/0.4/0.2分区。drawdown60、near_high20及closed周/月趋势的唯一精确规则正文见[算法合同§9.7](docs/design/算法合同与升级规则.md#97-foundation基础画像的确定表达)，机器expression_ref绑定具体rule_id；near_high20明确采用0.5 ATR研究基线，见CHG-014；11项机器规则与纯求值入口不等于实际行情、PG/API/UI已通过。历史窗口与context传递见该合同§9.8。
 
 均线BULL_ALIGNED为MA5>MA10>MA20且slope20>0，BEAR反向，TRANSITION用MA5/MA20及slope符号，其余MIXED。相对状态的Δ3统一指rps5_delta3_pp，按first-true：ACTIVE_EMERGENCE为Δ3≥10且(正在压缩或均线BULL_TRANSITION/BULL_ALIGNED)；PASSIVE_RESILIENCE为rel_market_1>0且非ACTIVE且Δ3≤0；LEADING_ACCELERATING为RPS20≥80且Δ3>0；LEADING_STABLE为RPS20≥80且Δ3≥−3；IMPROVING为Δ3>3；WEAKENING为Δ3<−3；LAGGING为RPS20<20；其余NEUTRAL。所需compression/MA状态未知不得落默认中性。
 
