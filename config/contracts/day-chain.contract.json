@@ -1,6 +1,6 @@
 {
   "contract_id": "STOCK-A-DAY-CHAIN",
-  "version": "R6",
+  "version": "R7",
   "contract_kind": "BUSINESS_PIPELINE_SPECIFICATION",
   "language": "zh-CN",
   "requires_implementation_binding": true,
@@ -395,7 +395,8 @@
         "core_primitives",
         "adjusted_bars",
         "coordinates",
-        "identity_calendar_universe"
+        "identity_calendar_universe",
+        "bar_status"
       ],
       "optional_inputs": [],
       "prior_inputs": [],
@@ -416,7 +417,9 @@
         "day_plan",
         "core_primitives",
         "cross_section",
-        "identity_calendar_universe"
+        "identity_calendar_universe",
+        "adjusted_bars",
+        "period_bars"
       ],
       "optional_inputs": [],
       "prior_inputs": [],
@@ -829,7 +832,8 @@
         "observation_intents",
         "schedule_plan",
         "dispatch_plan",
-        "source_capabilities"
+        "source_capabilities",
+        "source_seal"
       ],
       "optional_inputs": [
         "bao_supplement"
@@ -919,7 +923,8 @@
         "cohort_evaluations",
         "observation_intents",
         "schedule_plan",
-        "prior_context"
+        "prior_context",
+        "candidate_publication"
       ],
       "optional_inputs": [],
       "prior_inputs": [
@@ -1155,7 +1160,8 @@
     "source_seal": {
       "producer": "P04",
       "consumers": [
-        "P14"
+        "P14",
+        "P20"
       ],
       "terminal_consumers": [],
       "data_role": "VERSIONED_BUSINESS_ARTIFACT",
@@ -1179,6 +1185,7 @@
       "consumers": [
         "P06",
         "P07",
+        "P08",
         "P20"
       ],
       "terminal_consumers": [],
@@ -1202,6 +1209,7 @@
       "consumers": [
         "P07",
         "P08",
+        "P09",
         "P11",
         "P15",
         "P20"
@@ -1232,6 +1240,7 @@
     "period_bars": {
       "producer": "P06",
       "consumers": [
+        "P09",
         "P20"
       ],
       "terminal_consumers": [],
@@ -1637,7 +1646,8 @@
       "producer": "P21",
       "consumers": [
         "P22",
-        "P23"
+        "P23",
+        "P24"
       ],
       "terminal_consumers": [],
       "data_role": "VERSIONED_BUSINESS_ARTIFACT",
@@ -2187,7 +2197,9 @@
       "content_digest",
       "quality_partition",
       "consumer_binding",
-      "independent_numeric_certificate"
+      "independent_numeric_certificate",
+      "source_seal_exact_binding_and_real_clock_policy",
+      "all_scope_owner_artifacts_directly_required_at_P20"
     ],
     "writer_fencing": "PG_MONOTONIC_TOKEN_CHECKED_UNDER_LEASE_ROW_LOCK_IN_EVERY_MUTATING_TRANSACTION"
   },
@@ -2473,7 +2485,13 @@
     "group_graph_is_not_concrete_registry": true,
     "requires_unique_producer_and_actual_consumer": true,
     "required_before_each_capability_enabled": true,
-    "requires_type_unit_formula_window_time_coordinate_null_policy": true
+    "requires_type_unit_formula_window_time_coordinate_null_policy": true,
+    "field_output_artifact_required": true,
+    "cross_stage_input_must_be_required_artifact": true,
+    "producer_consumer_reverse_check_required": true,
+    "scope_owner_artifacts_must_be_direct_required_seal_inputs": true,
+    "dependency_deletion_or_required_downgrade_to_pass_forbidden": true,
+    "context_and_window_dependencies_in_transitive_business_digest": true
   },
   "algorithm_design_gates": {
     "stock_risk_composition": "OPEN_DESIGN_STOCK_RISK_COMPOSITION",
@@ -2520,7 +2538,7 @@
   },
   "scope_bindings": {
     "FOUNDATION_EOD": {
-      "contract": "STOCK_A_FOUNDATION_BINDING_R1",
+      "contract": "STOCK_A_FOUNDATION_BINDING_R2",
       "execution_mode": "SINGLE_EXECUTOR_SCOPE_PROJECTED_KERNELS",
       "stage_bindings": [
         {
@@ -2683,7 +2701,8 @@
             "core_primitives",
             "adjusted_bars",
             "coordinates",
-            "identity_calendar_universe"
+            "identity_calendar_universe",
+            "bar_status"
           ],
           "optional_inputs": [],
           "outputs": [
@@ -2700,7 +2719,9 @@
             "day_plan",
             "core_primitives",
             "cross_section",
-            "identity_calendar_universe"
+            "identity_calendar_universe",
+            "adjusted_bars",
+            "period_bars"
           ],
           "optional_inputs": [],
           "outputs": [
@@ -2727,7 +2748,8 @@
             "core_primitives",
             "cross_section",
             "core_profiles",
-            "source_capabilities"
+            "source_capabilities",
+            "source_seal"
           ],
           "optional_inputs": [
             "bao_supplement"
@@ -2806,7 +2828,8 @@
             "research_head",
             "accepted_receipt",
             "transaction_outbox",
-            "prior_context"
+            "prior_context",
+            "candidate_publication"
           ],
           "optional_inputs": [],
           "outputs": [
@@ -2902,7 +2925,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "identity_calendar_universe",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "identity.session",
@@ -2941,7 +2966,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "identity_calendar_universe",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "raw.open",
@@ -2983,7 +3010,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "raw_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "raw.high",
@@ -3025,7 +3054,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "raw_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "raw.low",
@@ -3067,7 +3098,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "raw_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "raw.close",
@@ -3109,7 +3142,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "raw_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "raw.amount",
@@ -3152,7 +3187,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "raw_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "raw.volume",
@@ -3195,7 +3232,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "raw_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "raw.session_state",
@@ -3216,7 +3255,9 @@
             "BASE_STOCK_DETAIL",
             "CHART",
             "DATA_STATUS",
-            "P07"
+            "P07",
+            "P08",
+            "P06"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
           "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
@@ -3237,7 +3278,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "bar_status",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "coordinate.id",
@@ -3280,8 +3323,18 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff",
-            "context.sealed_actions_revision"
-          ]
+            "context.sealed_actions_revision",
+            "context.coordinate_contract_version",
+            "context.calendar_ref"
+          ],
+          "output_artifact": "coordinates",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "context_input_bindings": {
+            "context.sealed_actions_revision": "actions",
+            "context.calendar_ref": "identity_calendar_universe",
+            "context.coordinate_contract_version": "day_plan",
+            "context.source_cutoff": "day_plan"
+          }
         },
         {
           "field_id": "adjusted.open",
@@ -3322,7 +3375,9 @@
             "context.target_session",
             "context.source_cutoff",
             "context.sealed_actions_revision"
-          ]
+          ],
+          "output_artifact": "adjusted_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "adjusted.high",
@@ -3364,7 +3419,9 @@
             "context.target_session",
             "context.source_cutoff",
             "context.sealed_actions_revision"
-          ]
+          ],
+          "output_artifact": "adjusted_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "adjusted.low",
@@ -3406,7 +3463,9 @@
             "context.target_session",
             "context.source_cutoff",
             "context.sealed_actions_revision"
-          ]
+          ],
+          "output_artifact": "adjusted_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "adjusted.close",
@@ -3428,7 +3487,8 @@
             "CHART",
             "DATA_STATUS",
             "P07",
-            "P09"
+            "P09",
+            "P08"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
           "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
@@ -3449,7 +3509,9 @@
             "context.target_session",
             "context.source_cutoff",
             "context.sealed_actions_revision"
-          ]
+          ],
+          "output_artifact": "adjusted_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "core.ma5",
@@ -3491,7 +3553,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.ma10",
@@ -3533,7 +3598,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.ma20",
@@ -3576,7 +3644,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.ma60",
@@ -3619,7 +3690,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.hhv5",
@@ -3661,7 +3735,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.llv5",
@@ -3703,7 +3780,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.prior_high5",
@@ -3744,7 +3824,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.prior_low5",
@@ -3785,7 +3868,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.hhv20",
@@ -3827,7 +3913,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.llv20",
@@ -3869,7 +3958,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.prior_high20",
@@ -3912,7 +4004,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.prior_low20",
@@ -3954,7 +4049,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.hhv60",
@@ -3997,7 +4095,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.llv60",
@@ -4039,7 +4140,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.prior_high60",
@@ -4080,7 +4184,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.prior_low60",
@@ -4121,7 +4228,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.tr",
@@ -4165,6 +4275,31 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+          "temporal_input_bindings": [
+            {
+              "field_id": "adjusted.high",
+              "index": "TECH_ACTUAL",
+              "endpoint_offset": 0
+            },
+            {
+              "field_id": "adjusted.low",
+              "index": "TECH_ACTUAL",
+              "endpoint_offset": 0
+            },
+            {
+              "field_id": "adjusted.close",
+              "index": "TECH_ACTUAL",
+              "endpoint_offset": -1
+            },
+            {
+              "field_id": "raw.session_state",
+              "index": "MARKET_SESSION",
+              "selection": "ALL_SPANNED_SESSIONS"
+            }
           ]
         },
         {
@@ -4206,7 +4341,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.atr20",
@@ -4248,7 +4386,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.ma_slope20_atr",
@@ -4290,7 +4431,31 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+          "temporal_input_bindings": [
+            {
+              "field_id": "core.ma20",
+              "index": "TECH_ACTUAL",
+              "endpoint_offset": 0,
+              "window_actual_count": 20
+            },
+            {
+              "field_id": "core.ma20",
+              "index": "TECH_ACTUAL",
+              "endpoint_offset": -5,
+              "window_actual_count": 20
+            },
+            {
+              "field_id": "core.atr20",
+              "index": "TECH_ACTUAL",
+              "endpoint_offset": 0,
+              "window_price_actual_count": 21
+            }
+          ],
+          "minimum_price_actual_count": 25
         },
         {
           "field_id": "core.ma_slope60_atr",
@@ -4332,7 +4497,31 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+          "temporal_input_bindings": [
+            {
+              "field_id": "core.ma60",
+              "index": "TECH_ACTUAL",
+              "endpoint_offset": 0,
+              "window_actual_count": 60
+            },
+            {
+              "field_id": "core.ma60",
+              "index": "TECH_ACTUAL",
+              "endpoint_offset": -10,
+              "window_actual_count": 60
+            },
+            {
+              "field_id": "core.atr20",
+              "index": "TECH_ACTUAL",
+              "endpoint_offset": 0,
+              "window_price_actual_count": 21
+            }
+          ],
+          "minimum_price_actual_count": 70
         },
         {
           "field_id": "core.ret1",
@@ -4376,7 +4565,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.ret3",
@@ -4418,7 +4610,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.ret5",
@@ -4461,7 +4656,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.ret20",
@@ -4503,7 +4701,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.vol5",
@@ -4545,7 +4746,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.amount_ratio5",
@@ -4586,7 +4790,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.volume_ratio5",
@@ -4627,7 +4834,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.vol20",
@@ -4669,7 +4879,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.amount_ratio20",
@@ -4711,7 +4924,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.volume_ratio20",
@@ -4753,7 +4969,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.liquidity_mean20",
@@ -4795,7 +5014,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.clv",
@@ -4838,7 +5060,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.pos60",
@@ -4881,7 +5106,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.bias20_atr",
@@ -4924,7 +5152,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.dist_high20_atr",
@@ -4966,7 +5197,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.range_ratio",
@@ -5010,7 +5244,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.atr_ratio",
@@ -5052,7 +5289,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.vol_ratio",
@@ -5094,7 +5334,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.hh_progress",
@@ -5136,7 +5379,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.ll_progress",
@@ -5178,7 +5424,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.price_damage",
@@ -5222,7 +5471,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "core.prior60_percentile",
@@ -5263,7 +5515,10 @@
             "context.target_session",
             "context.source_cutoff",
             "context.calendar_ref"
-          ]
+          ],
+          "output_artifact": "core_primitives",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "cross.rps5",
@@ -5306,7 +5561,10 @@
             "context.source_cutoff",
             "context.calendar_ref",
             "context.universe_ref_with_each_exact_endpoint"
-          ]
+          ],
+          "output_artifact": "cross_section",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "cross.rps5_delta1_pp",
@@ -5352,7 +5610,10 @@
             "context.source_cutoff",
             "context.calendar_ref",
             "context.universe_ref_with_each_exact_endpoint"
-          ]
+          ],
+          "output_artifact": "cross_section",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "cross.rps5_delta3_pp",
@@ -5399,7 +5660,10 @@
             "context.source_cutoff",
             "context.calendar_ref",
             "context.universe_ref_with_each_exact_endpoint"
-          ]
+          ],
+          "output_artifact": "cross_section",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "cross.rps20",
@@ -5443,7 +5707,10 @@
             "context.source_cutoff",
             "context.calendar_ref",
             "context.universe_ref_with_each_exact_endpoint"
-          ]
+          ],
+          "output_artifact": "cross_section",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "cross.rps20_delta1_pp",
@@ -5489,7 +5756,10 @@
             "context.source_cutoff",
             "context.calendar_ref",
             "context.universe_ref_with_each_exact_endpoint"
-          ]
+          ],
+          "output_artifact": "cross_section",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "cross.rps20_delta3_pp",
@@ -5535,7 +5805,10 @@
             "context.source_cutoff",
             "context.calendar_ref",
             "context.universe_ref_with_each_exact_endpoint"
-          ]
+          ],
+          "output_artifact": "cross_section",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "cross.rel_market_1",
@@ -5579,7 +5852,10 @@
             "context.source_cutoff",
             "context.calendar_ref",
             "context.universe_ref_with_each_exact_endpoint"
-          ]
+          ],
+          "output_artifact": "cross_section",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "cross.rel_market_3",
@@ -5622,7 +5898,10 @@
             "context.source_cutoff",
             "context.calendar_ref",
             "context.universe_ref_with_each_exact_endpoint"
-          ]
+          ],
+          "output_artifact": "cross_section",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "cross.rel_market_5",
@@ -5665,7 +5944,10 @@
             "context.source_cutoff",
             "context.calendar_ref",
             "context.universe_ref_with_each_exact_endpoint"
-          ]
+          ],
+          "output_artifact": "cross_section",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "cross.rel_market_20",
@@ -5708,7 +5990,10 @@
             "context.source_cutoff",
             "context.calendar_ref",
             "context.universe_ref_with_each_exact_endpoint"
-          ]
+          ],
+          "output_artifact": "cross_section",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
         },
         {
           "field_id": "profile.trend",
@@ -5754,7 +6039,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "profile.position",
@@ -5794,7 +6081,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "profile.ma_structure",
@@ -5837,7 +6126,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "profile.relative",
@@ -5880,7 +6171,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "profile.compression",
@@ -5924,7 +6217,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "profile.participation",
@@ -5965,7 +6260,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "profile.extension",
@@ -6009,7 +6306,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "profile.near_high20",
@@ -6017,14 +6316,14 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_NEAR_HIGH20_R1",
           "input_fields": [
             "adjusted.close",
             "core.prior_high20",
             "core.atr20"
           ],
           "window_contract": "NONE",
-          "coordinate_role": "NONE",
+          "coordinate_role": "TARGET_SESSION",
           "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
           "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
           "consumers": [
@@ -6032,13 +6331,18 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R2",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "ABOVE_HIGH",
+              "NEAR_HIGH",
+              "BELOW_HIGH"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6050,7 +6354,10 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "parameter_binding_state": "BINDING_REQUIRED"
         },
         {
           "field_id": "profile.drawdown60",
@@ -6058,13 +6365,13 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_DRAWDOWN60_R1",
           "input_fields": [
             "adjusted.close",
             "core.hhv60"
           ],
           "window_contract": "NONE",
-          "coordinate_role": "NONE",
+          "coordinate_role": "TARGET_SESSION",
           "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
           "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
           "consumers": [
@@ -6072,13 +6379,18 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R2",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "SHALLOW",
+              "MODERATE",
+              "DEEP"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6090,7 +6402,10 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "parameter_binding_state": "DESIGN_RULE_DEFINED_IMPLEMENTATION_BINDING_REQUIRED"
         },
         {
           "field_id": "period.closed_week",
@@ -6106,7 +6421,8 @@
             "raw.close",
             "raw.amount",
             "raw.volume",
-            "coordinate.id"
+            "coordinate.id",
+            "raw.session_state"
           ],
           "window_contract": "CLOSED_PERIOD_R1",
           "coordinate_role": "TARGET_SESSION",
@@ -6139,8 +6455,22 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff",
-            "context.calendar_ref"
-          ]
+            "context.calendar_ref",
+            "context.sealed_actions_revision",
+            "context.coordinate_contract_version"
+          ],
+          "output_artifact": "period_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+          "period_selection": {
+            "calendar": "EXACT_VERSIONED_OFFICIAL_CALENDAR",
+            "closed_at_or_before": "context.target_session_and_source_cutoff",
+            "prices": "DAILY_RAW_TO_COMMON_TARGET_COORDINATE_BEFORE_AGGREGATION",
+            "missing_session": "UNKNOWN_GAP_BLOCKS_PRICE_TREND_CONFIRMED_SUSPENSION_NO_SYNTHETIC_CLOSE",
+            "fully_suspended_period": "KEEP_CALENDAR_SLOT_NO_CARRY_FORWARD_NO_PERIOD_SKIP",
+            "partial_ipo_period": "NOT_COMPLETE_PERIOD_FOR_TREND",
+            "component_quality": "PRICE_TREND_DOES_NOT_REQUIRE_KNOWN_AMOUNT_OR_VOLUME"
+          }
         },
         {
           "field_id": "profile.closed_week_trend",
@@ -6148,12 +6478,12 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_CLOSED_WEEK_TREND_R1",
           "input_fields": [
             "period.closed_week"
           ],
           "window_contract": "CLOSED_WEEK_MA5_AND_PREVIOUS_MA5_REQUIRES_6_CLOSED_WEEKS",
-          "coordinate_role": "NONE",
+          "coordinate_role": "TARGET_SESSION",
           "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
           "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
           "consumers": [
@@ -6161,13 +6491,18 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R2",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "UPTREND",
+              "DOWNTREND",
+              "SIDEWAYS"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6179,7 +6514,12 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+          "parameter_binding_state": "DESIGN_RULE_DEFINED_IMPLEMENTATION_BINDING_REQUIRED",
+          "minimum_closed_period_count": 6
         },
         {
           "field_id": "period.closed_month",
@@ -6195,7 +6535,8 @@
             "raw.close",
             "raw.amount",
             "raw.volume",
-            "coordinate.id"
+            "coordinate.id",
+            "raw.session_state"
           ],
           "window_contract": "CLOSED_PERIOD_R1",
           "coordinate_role": "TARGET_SESSION",
@@ -6228,8 +6569,22 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff",
-            "context.calendar_ref"
-          ]
+            "context.calendar_ref",
+            "context.sealed_actions_revision",
+            "context.coordinate_contract_version"
+          ],
+          "output_artifact": "period_bars",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+          "period_selection": {
+            "calendar": "EXACT_VERSIONED_OFFICIAL_CALENDAR",
+            "closed_at_or_before": "context.target_session_and_source_cutoff",
+            "prices": "DAILY_RAW_TO_COMMON_TARGET_COORDINATE_BEFORE_AGGREGATION",
+            "missing_session": "UNKNOWN_GAP_BLOCKS_PRICE_TREND_CONFIRMED_SUSPENSION_NO_SYNTHETIC_CLOSE",
+            "fully_suspended_period": "KEEP_CALENDAR_SLOT_NO_CARRY_FORWARD_NO_PERIOD_SKIP",
+            "partial_ipo_period": "NOT_COMPLETE_PERIOD_FOR_TREND",
+            "component_quality": "PRICE_TREND_DOES_NOT_REQUIRE_KNOWN_AMOUNT_OR_VOLUME"
+          }
         },
         {
           "field_id": "profile.closed_month_trend",
@@ -6237,12 +6592,12 @@
           "producer_symbol": "stock_a.research.profile:profile",
           "value_type": "enum",
           "unit": "state",
-          "expression_ref": "ALG-17",
+          "expression_ref": "PROFILE_CLOSED_MONTH_TREND_R1",
           "input_fields": [
             "period.closed_month"
           ],
           "window_contract": "CLOSED_MONTH_MA3_AND_PREVIOUS_MA3_REQUIRES_4_CLOSED_MONTHS",
-          "coordinate_role": "NONE",
+          "coordinate_role": "TARGET_SESSION",
           "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
           "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
           "consumers": [
@@ -6250,13 +6605,18 @@
             "DATA_STATUS"
           ],
           "implementation_state": "NOT_IMPLEMENTED",
-          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R2",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
             "type": "enum",
             "nullable_only_with_quality": true,
             "reject_bool_for_number": true,
-            "finite_numeric_only": true
+            "finite_numeric_only": true,
+            "allowed_values": [
+              "UPTREND",
+              "DOWNTREND",
+              "SIDEWAYS"
+            ]
           },
           "business_key": [
             "namespace_id",
@@ -6268,7 +6628,12 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "core_profiles",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+          "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+          "parameter_binding_state": "DESIGN_RULE_DEFINED_IMPLEMENTATION_BINDING_REQUIRED",
+          "minimum_closed_period_count": 4
         },
         {
           "field_id": "plan.scope",
@@ -6303,7 +6668,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "day_plan",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "plan.target_session",
@@ -6338,7 +6705,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "day_plan",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "plan.expected_head_generation",
@@ -6374,7 +6743,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "day_plan",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "capture.content_sha",
@@ -6410,7 +6781,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "tdx_capture",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "capture.durable_at",
@@ -6446,7 +6819,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "tdx_capture",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "capture.canonical_digest",
@@ -6481,7 +6856,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "tdx_capture",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "bao.capability_state",
@@ -6518,7 +6895,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "bao_capability_status",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "source_set.id",
@@ -6557,7 +6936,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "source_set",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "owner.id",
@@ -6593,7 +6974,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "owner_seals",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "owner.content_digest",
@@ -6629,7 +7012,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "owner_seals",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "owner.sealed_at",
@@ -6664,7 +7049,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "owner_seals",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "manifest.id",
@@ -6703,7 +7090,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "business_manifest",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "read_index.version",
@@ -6741,7 +7130,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "read_index",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "publication.id",
@@ -6782,7 +7173,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "candidate_publication",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "candidate.api_verified",
@@ -6821,7 +7214,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "candidate_api_validation",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "candidate.ui_compatible",
@@ -6860,7 +7255,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "client_contract_validation",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "head.generation",
@@ -6902,7 +7299,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "research_head",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "receipt.request_key",
@@ -6940,7 +7339,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "accepted_receipt",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "dispatch.accounted",
@@ -6978,7 +7379,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "dispatch_accounting",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "readback.accepted",
@@ -7018,7 +7421,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "accepted_api_readback",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "completion.backend",
@@ -7058,7 +7463,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "backend_chain_status",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         },
         {
           "field_id": "completion.display",
@@ -7096,7 +7503,9 @@
           "context_dependencies": [
             "context.target_session",
             "context.source_cutoff"
-          ]
+          ],
+          "output_artifact": "display_chain_status",
+          "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
         }
       ],
       "required_consumers": [
@@ -7152,8 +7561,400 @@
         "source": "CURRENT_RUN_SEALED_CANONICAL_PLUS_PREVIOUS_ACCEPTED_CANONICAL",
         "selection": "EXACT_DECLARED_FIELD_WINDOWS_AND_ENDPOINT_UNIVERSES",
         "first_day": "NEW_VERIFIED_SOURCE_HISTORY_OR_LEGITIMATE_SHORT_HISTORY_NO_OLD_V4_DB",
-        "stateful_advanced_prior_required": false
-      }
+        "stateful_advanced_prior_required": false,
+        "context_dependencies": "TRANSITIVE_UNION_OF_INPUT_FIELD_CONTEXT_AND_LOCAL_CONTEXT_NO_LATEST",
+        "window_identity_required": [
+          "endpoint_roles",
+          "selected_session_or_actual_ids",
+          "confirmed_suspension_gaps",
+          "unknown_gap_quality",
+          "canonical_row_set_digest",
+          "status_revision",
+          "calendar_revision",
+          "coordinate_id",
+          "action_revision",
+          "rule_and_parameter_digest",
+          "endpoint_universe_and_evaluable_set_digest_if_cross_section"
+        ],
+        "identity_storage": "NECESSARY_TYPED_KEYS_AND_DIGESTS_NO_PER_FIELD_HISTORY_COPY",
+        "business_digest": "VALUES_QUALITY_REAL_PROVENANCE_TRANSITIVE_CONTEXT_WINDOW_IDENTITY",
+        "repair": "RECOMPUTE_ACTUAL_AFFECTED_DEPENDENCY_CLOSURE_PRESERVE_UNAFFECTED_RESULTS",
+        "runtime_enforcement_implemented": false
+      },
+      "source_seal_validation_ref": "source_seal_validation",
+      "profile_expression_registry": {
+        "PROFILE_DRAWDOWN60_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.drawdown60",
+          "input_fields": [
+            "adjusted.close",
+            "core.hhv60"
+          ],
+          "operands": {
+            "drawdown_fraction": {
+              "expression": {
+                "op": "subtract",
+                "args": [
+                  {
+                    "op": "divide",
+                    "args": [
+                      {
+                        "ref": "adjusted.close"
+                      },
+                      {
+                        "ref": "core.hhv60"
+                      }
+                    ]
+                  },
+                  1
+                ]
+              },
+              "valid_range": [
+                -1,
+                0
+              ],
+              "lower_exclusive": true,
+              "denominator_must_be_positive": true
+            }
+          },
+          "parameters": {},
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "gte",
+                "args": [
+                  {
+                    "ref": "drawdown_fraction"
+                  },
+                  -0.05
+                ]
+              },
+              "value": "SHALLOW"
+            },
+            {
+              "when": {
+                "op": "gte",
+                "args": [
+                  {
+                    "ref": "drawdown_fraction"
+                  },
+                  -0.15
+                ]
+              },
+              "value": "MODERATE"
+            },
+            {
+              "when": true,
+              "value": "DEEP"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false
+        },
+        "PROFILE_NEAR_HIGH20_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.near_high20",
+          "input_fields": [
+            "adjusted.close",
+            "core.prior_high20",
+            "core.atr20"
+          ],
+          "operands": {
+            "distance_atr": {
+              "expression": {
+                "op": "divide",
+                "args": [
+                  {
+                    "op": "subtract",
+                    "args": [
+                      {
+                        "ref": "core.prior_high20"
+                      },
+                      {
+                        "ref": "adjusted.close"
+                      }
+                    ]
+                  },
+                  {
+                    "ref": "core.atr20"
+                  }
+                ]
+              },
+              "denominator_must_be_positive": true
+            }
+          },
+          "parameters": {
+            "near_high20_max_atr": {
+              "unit": "ATR_scale",
+              "domain": "FINITE_POSITIVE_NUMBER_REJECT_BOOL",
+              "value": null,
+              "default_allowed": false,
+              "adoption_state": "BINDING_REQUIRED"
+            }
+          },
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "lt",
+                "args": [
+                  {
+                    "ref": "distance_atr"
+                  },
+                  0
+                ]
+              },
+              "value": "ABOVE_HIGH"
+            },
+            {
+              "when": {
+                "op": "lte",
+                "args": [
+                  {
+                    "ref": "distance_atr"
+                  },
+                  {
+                    "ref": "parameter.near_high20_max_atr"
+                  }
+                ]
+              },
+              "value": "NEAR_HIGH"
+            },
+            {
+              "when": true,
+              "value": "BELOW_HIGH"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false
+        },
+        "PROFILE_CLOSED_WEEK_TREND_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.closed_week_trend",
+          "input_fields": [
+            "period.closed_week"
+          ],
+          "operands": {
+            "closed_close": {
+              "field_id": "period.closed_week",
+              "component": "close",
+              "endpoint_offset": 0,
+              "index": "CONSECUTIVE_CLOSED_CALENDAR_PERIOD"
+            },
+            "ma_current": {
+              "field_id": "period.closed_week",
+              "component": "close",
+              "aggregation": "SMA",
+              "count": 5,
+              "endpoint_offset": 0,
+              "index": "CONSECUTIVE_CLOSED_CALENDAR_PERIOD"
+            },
+            "ma_previous": {
+              "field_id": "period.closed_week",
+              "component": "close",
+              "aggregation": "SMA",
+              "count": 5,
+              "endpoint_offset": -1,
+              "index": "CONSECUTIVE_CLOSED_CALENDAR_PERIOD"
+            }
+          },
+          "parameters": {},
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "closed_close"
+                      },
+                      {
+                        "ref": "ma_current"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "ma_current"
+                      },
+                      {
+                        "ref": "ma_previous"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "value": "UPTREND"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "closed_close"
+                      },
+                      {
+                        "ref": "ma_current"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "ma_current"
+                      },
+                      {
+                        "ref": "ma_previous"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "value": "DOWNTREND"
+            },
+            {
+              "when": true,
+              "value": "SIDEWAYS"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false
+        },
+        "PROFILE_CLOSED_MONTH_TREND_R1": {
+          "algorithm_family": "ALG-17",
+          "field_id": "profile.closed_month_trend",
+          "input_fields": [
+            "period.closed_month"
+          ],
+          "operands": {
+            "closed_close": {
+              "field_id": "period.closed_month",
+              "component": "close",
+              "endpoint_offset": 0,
+              "index": "CONSECUTIVE_CLOSED_CALENDAR_PERIOD"
+            },
+            "ma_current": {
+              "field_id": "period.closed_month",
+              "component": "close",
+              "aggregation": "SMA",
+              "count": 3,
+              "endpoint_offset": 0,
+              "index": "CONSECUTIVE_CLOSED_CALENDAR_PERIOD"
+            },
+            "ma_previous": {
+              "field_id": "period.closed_month",
+              "component": "close",
+              "aggregation": "SMA",
+              "count": 3,
+              "endpoint_offset": -1,
+              "index": "CONSECUTIVE_CLOSED_CALENDAR_PERIOD"
+            }
+          },
+          "parameters": {},
+          "ordered_branches": [
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "closed_close"
+                      },
+                      {
+                        "ref": "ma_current"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "gt",
+                    "args": [
+                      {
+                        "ref": "ma_current"
+                      },
+                      {
+                        "ref": "ma_previous"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "value": "UPTREND"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "closed_close"
+                      },
+                      {
+                        "ref": "ma_current"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "lt",
+                    "args": [
+                      {
+                        "ref": "ma_current"
+                      },
+                      {
+                        "ref": "ma_previous"
+                      }
+                    ]
+                  }
+                ]
+              },
+              "value": "DOWNTREND"
+            },
+            {
+              "when": true,
+              "value": "SIDEWAYS"
+            }
+          ],
+          "unknown_policy": "KLEENE_PREDICATES_FIRST_POSSIBLE_TRUE_UNKNOWN_BLOCKS_LOWER_CLASS",
+          "invalid_or_short_history": "NULL_WITH_FIELD_LOCAL_QUALITY_REASON",
+          "unbound_contract_or_parameter": "BLOCK_CONTRACT_NOT_UNKNOWN_DATA",
+          "runtime_implementation_present": false
+        }
+      },
+      "profile_expression_policy": {
+        "operators": [
+          "subtract",
+          "divide",
+          "lt",
+          "lte",
+          "gt",
+          "gte",
+          "and"
+        ],
+        "rule_ids_resolve_exactly": true,
+        "field_inputs_must_cover_operand_references": true,
+        "all_required_rule_parameters_must_bind_before_capability_enablement": true,
+        "guard_order": "CONTRACT_AND_PARAMETERS_THEN_FIELD_LOCAL_DATA_VALIDATION_THEN_ORDERED_BRANCHES",
+        "quality_not_business_enum": true,
+        "other_profile_fields": "ALG17_FAMILY_REFERENCE_REQUIRES_FURTHER_EXACT_RULE_BINDING_NOT_AUTO_CLOSED",
+        "numeric_evaluation": "EXACT_DECIMAL_OR_RATIONAL_NO_BINARY_FLOAT_BOUNDARY_ROUNDING"
+      },
+      "accepted_readback_identity_assertion": "P24_REQUIRES_ACCEPTED_AND_ORIGINAL_CANDIDATE_PUBLICATION_EXACT_ID_MANIFEST_INDEX_EQUALITY_NO_UNACCEPTED_READBACK"
     }
   },
   "source_evidence_policy": {
@@ -7193,5 +7994,39 @@
     "single_G_volume_failure_covered": false,
     "engineering_budget_not_measured": true,
     "gc_must_preserve_reference_closure": true
+  },
+  "source_seal_validation": {
+    "consumer_stage": "P20",
+    "applies_to": [
+      "FOUNDATION_EOD",
+      "FULL_RESEARCH_EOD"
+    ],
+    "required_identity": [
+      "namespace_id",
+      "source_set_id",
+      "dataset_revision",
+      "source_content_digest",
+      "canonical_input_digest",
+      "parser_contract_version",
+      "identity_calendar_revision",
+      "coverage_entity_set_digest",
+      "data_date",
+      "source_cutoff",
+      "clock_quality"
+    ],
+    "required_checks": [
+      "EXACT_REQUIRED_DATASETS_AND_ENTITY_COVERAGE",
+      "SOURCE_BYTES_TO_CANONICAL_ROWS_VERIFIED_TRANSFORMATION",
+      "P05_CANONICAL_ROWS_MATCH_SEALED_INPUT_AND_TRANSFORMATION",
+      "REAL_VALIDATION_AND_DURABILITY_CLOCKS_ORDERED",
+      "NO_MUTATION_AFTER_SOURCE_SEAL",
+      "OWNER_INPUT_DIGEST_INCLUDES_SEAL_ID_CONTENT_AND_CLOCK_QUALITY"
+    ],
+    "missing_or_mismatched_seal": "REJECT_BEFORE_OWNER_SEAL_OR_PUBLICATION",
+    "post_capture_transformation": "P04_SEALS_VALIDATED_SOURCE_INPUT_P05_DERIVATION_VERIFIED_AT_P20_NO_P04_DEPENDS_ON_P05_BACK_EDGE",
+    "processing_sealed_at_after_source_cutoff_alone_is_invalid": false,
+    "live_pit_policy": "REQUIRE_REAL_AVAILABILITY_CAPTURE_DURABILITY_AND_ACCEPTED_DEPENDENCIES_WITHIN_DECLARED_ASOF_NO_BACKSIGNING",
+    "late_or_unproven_input": "REJECT_LIVE_PIT_CLAIM_NON_PIT_RESEARCH_ONLY_IF_PREDECLARED_SCOPE_PERMITS",
+    "runtime_implementation_present": false
   }
 }
