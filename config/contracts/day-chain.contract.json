@@ -2215,5 +2215,11 @@
     "duplicate_full_detail_projection_forbidden": true,
     "new_release_new_schema_forbidden": true,
     "tests_and_receipts_outside_git": true
+  },
+  "document_registry": {
+    "root_spec": "../../PROJECT_SPEC.md",
+    "requirements": "../../docs/requirements/产品需求.md",
+    "engineering": "../../docs/design/工程与存储规范.md",
+    "reuse_boundaries": "../../docs/design/代码复用与模块边界.md"
   }
 }
