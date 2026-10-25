@@ -1,13 +1,14 @@
 {
   "contract_id": "STOCK-A-DAY-CHAIN",
-  "version": "R4",
+  "version": "R5",
   "contract_kind": "BUSINESS_PIPELINE_SPECIFICATION",
   "language": "zh-CN",
   "requires_implementation_binding": true,
   "normative_documents": [
     "../../docs/design/数据业务完整闭环.md",
     "../../docs/design/算法合同与升级规则.md",
-    "../../PROJECT_SPEC.md"
+    "../../PROJECT_SPEC.md",
+    "../../docs/design/实现详细设计.md"
   ],
   "scope_policy": {
     "excluded_capabilities": [
@@ -2013,7 +2014,8 @@
         "P15"
       ],
       "requirement": "FULL_RESEARCH_EOD",
-      "binding_required_before_capability_enabled": true
+      "binding_required_before_capability_enabled": true,
+      "detailed_semantics": "STRUCTURE_EVENT_V1_SUPPORT_STATE_V1_R2_1_COUNTERS_IMPULSE_PRIOR_ATR_RELATIVE_MARKET_SEPARATED_RETEST"
     },
     {
       "id": "ALG-30",
@@ -2372,7 +2374,8 @@
     "root_spec": "../../PROJECT_SPEC.md",
     "requirements": "../../docs/requirements/产品需求.md",
     "engineering": "../../docs/design/工程与存储规范.md",
-    "reuse_boundaries": "../../docs/design/代码复用与模块边界.md"
+    "reuse_boundaries": "../../docs/design/代码复用与模块边界.md",
+    "implementation_design": "../../docs/design/实现详细设计.md"
   },
   "external_file_policy": {
     "contract_version": "PG_ONLY_DAILY_STATE_AND_CONFIG_ROOT_R2",
