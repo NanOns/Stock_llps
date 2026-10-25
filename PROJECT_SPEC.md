@@ -1,10 +1,10 @@
-# Stock A PROJECT_SPEC.md：完整产品与工程规格 R10
+# Stock A PROJECT_SPEC.md：完整产品与工程规格 R11
 
-合同：`STOCK-A-PROJECT-SPEC/R10`。日期：2026-10-25，Asia/Shanghai。状态：`DESIGN_BASELINE_WITH_EXPLICIT_OPEN_GATES`。本文件给出新项目完整目标、数据模型、主链、算法、交互、运维与验收；不是旧V4继续开发卡，也不证明新代码已实现。R8补足阶段/字段断边、来源封口准入、局部Profile规则与历史依赖；R9将near_high20采用为0.5 ATR研究基线并补齐11项基础画像表达，修复Canonical分质量/细粒度身份；纯内核不证明完整流水线实现。R7补足新项目逻辑身份、测试资产恢复、安装配置边界和FOUNDATION机器范围；R6补足算法边界、并发恢复和生命周期约束；R10采用股票综合风险/D2及D0准入/结构类型R1执行合同，见算法§10；具体执行器/typed迁移/消费者及其它领域缺口仍须分别落实，不能称全产品已实现。R5已取代每日业务文件方案：日更事实/控制状态全部PG化，配置文件只允许新项目config且与测试/过程文档隔离；按责任域归档与旧代码优先复用路线保持。完整业务链、算法命名/单位/时间角色及无新闻范围保持。Stock A源码/交付根和Git业务/规范白名单保持，测试、阶段材料、回执与产物全部外置。后续PG默认路径为G盘；当前E盘旧数据仅保留参考，不迁移、不覆盖、不因本轮配置修订切换服务。
+合同：`STOCK-A-PROJECT-SPEC/R11`。日期：2026-10-25，Asia/Shanghai。状态：`MAINLINE_BUSINESS_DESIGN_FROZEN_IMPLEMENTATION_AND_EFFECT_SEPARATE`。本文件给出新项目完整目标、数据模型、主链、算法、交互、运维与验收；不是旧V4继续开发卡，也不证明新代码已实现。R8补足阶段/字段断边、来源封口准入、局部Profile规则与历史依赖；R9将near_high20采用为0.5 ATR研究基线并补齐11项基础画像表达，修复Canonical分质量/细粒度身份；纯内核不证明完整流水线实现。R7补足新项目逻辑身份、测试资产恢复、安装配置边界和FOUNDATION机器范围；R6补足算法边界、并发恢复和生命周期约束；R10采用股票综合风险/D2及D0准入/结构类型R1执行合同，见算法§10；R11进一步按CHG-016收尾主线领域业务设计及页面/API契约；实际执行器/typed迁移/消费者仍须分别落实，不能称全产品已实现。R5已取代每日业务文件方案：日更事实/控制状态全部PG化，配置文件只允许新项目config且与测试/过程文档隔离；按责任域归档与旧代码优先复用路线保持。完整业务链、算法命名/单位/时间角色及无新闻范围保持。Stock A源码/交付根和Git业务/规范白名单保持，测试、阶段材料、回执与产物全部外置。后续PG默认路径为G盘；当前E盘旧数据仅保留参考，不迁移、不覆盖、不因本轮配置修订切换服务。
 
 ## S01 项目目标、范围与完成定义
 
-实现接口、逻辑类型、关键伪代码、基础范围窄图及详细状态转换见[实现详细设计](docs/design/实现详细设计.md)。该设计保留逐域未就绪清单；本主规格与需求覆盖不能代替实现详细设计冻结或真实运行验收。
+实现接口、逻辑类型、关键伪代码、基础范围窄图及详细状态转换见[实现详细设计](docs/design/实现详细设计.md)。该设计保留逐域未就绪清单；主线DES-01–08/10现按CHG-016、算法§11和详细设计§17完成设计决策；功能和研究有效性独立报告，不能以未接线重开已冻规则。
 
 新项目是后续唯一主线。服务单用户盘后A股主观研究，覆盖市场→行业/概念→全市场个股→结构/状态→关注→独立Forward及可选条件统计。用户每天能够理解环境、变化、风险、候选为何入选/未入选、下一步观察及失效条件。研究辅助不连接自动交易，不承诺上涨或收益。
 
@@ -22,7 +22,7 @@
 
 每数据集注册dataset_id/version、供应方/URL或配置根、字段/单位、时钟语义、适用市场/范围、包与解析版本、重复/冲突政策、请求预算/timeout/size/retry/circuit-breaker、保留与降级。登录成功、ZIP存在、HTTP200不等数据可用。
 
-所有TDX配置源根只读，写入前解析绝对路径及链接/别名，覆盖子进程/GBBQ/解压/日志/缓存。缺根配置时拒绝写，输出源外同卷原子写。新项目阶段0核对输入能力/来源身份/坐标及保护边界，输出FULL_PASS/DEGRADED_PASS/BLOCKED和影响scope；不借用旧项目的FULL_PASS。
+所有TDX配置源根只读，写入前解析绝对路径及链接/别名，覆盖子进程/GBBQ/解压/日志/缓存。缺根配置时拒绝写，临时输出仅在G:/codex_tmp，源根永不写；规范业务事实落PG，不要求在来源盘落文件。新项目阶段0核对输入能力/来源身份/坐标及保护边界，输出FULL_PASS/DEGRADED_PASS/BLOCKED和影响scope；不借用旧项目的FULL_PASS。
 
 TDX本地日线/合法官方包为核心，GBBQ及本地仿射引擎生成复权；BaoStock承担有合同的换手/状态交叉核验等补充。包重复大小写成员、路径穿越、symlink/reparse、坏CRC/SHA、解压漂移、重复证券日期记录必须拒绝或精确隔离，不能字典后写覆盖。
 
@@ -112,13 +112,13 @@ HH_PROGRESS=max(H[t−4:t])>max(H[t−9:t−5])；LL_PROGRESS=min(L[t−4:t])<mi
 
 Seed宽度记录k/n/未知与Wilson下界启发式(z=1.96)，其值为`(p+z²/(2n)−z*sqrt(p*(1−p)/n+z²/(4n²)))/(1+z²/n)`，p=k/n，n=0为UNKNOWN；仅作小样本惩罚，不称统计置信/上涨概率。强势成员RPS20≥80；留存分母冻结，未知成员不当退出，不删缺值后改分母。无适用前强势集合的成熟留存为NA，不应阻止有独立证据的早期Rotation。
 
-板块PREWATCH：安全 AND dq5≥3 AND(breadth_delta3>0 OR ma20_delta3>0) AND adjusted_seed_width≥0.05。WARM/CONFIRMED按算法合同ALG-23的PURE_CORE_SECTOR_QUALIFICATION_R2明确设计，不继承Amount A硬依赖；这是新规则选择，实施前完成采用与独立验证，未采用/未实现不得报完整板块能力。
+板块PREWATCH：安全 AND dq5≥3 AND(breadth_delta3>0 OR ma20_delta3>0) AND adjusted_seed_width≥0.05。WARM/CONFIRMED按算法合同ALG-23的PURE_CORE_SECTOR_QUALIFICATION_R2明确设计，不继承Amount A硬依赖；这是新规则选择，CHG-016已明确采用，分母/safety/未知按算法§11.2；实际功能和独立验证仍须完成。
 
 行业/概念底层独立，Overlap提供Jaccard/簇/unique share/集中度；不做1/N成员稀释。LOO排除目标后重算中位数、rank、Seed/板块原始资格及必要历史，不能只减计数。算法支持板块选择按LOO确认/成熟、emergence、Seed宽度、stable_id，不能提升个股硬资格。
 
 Rotation有NONE/PULSE/IN/ACCEPTED/EXPANDING/REACCELERATING/OUT/FAILED/UNKNOWN；pulse使用dq5≥10且breadth_delta1≥0.05，冻结pulse前基准/当时成员/Seed和上涨集合。价格retention用固定篮子，不将每日中位收益拼成指数。
 
-early与mature retention分开，前强势分母0只影响mature；单龙头高集中且无扩散不得通过接受/扩散。脉冲后至少1个可评估会话才IN、至少2个才ACCEPTED，成熟留存/扩散才EXPANDING或REACCELERATING；失败/连续衰退/第6个可评估会话仍未接受按冻结有序规则终止；未知暂停计数。新项目明确提出采用`ROTATION_RESEARCH_DEFAULTS_R1`，继承旧R5工程候选数值但重新登记采用状态：early_seed_retention≥2/3、early_breadth_retention≥0.6、breadth_delta≥0、early_top1_concentration≤1/3、mature_strong_retention≥0.75、diffusion_top1≤0.5。emergence HIGH阈值为dq5≥10、breadth_delta3≥0.05、adjusted_seed_width≥0.1。各字段分母、冻结pulse基准与未知规则按前述固定篮子/共同成员合同执行，不能仅有阈值而缺公式。旧配置formal_consumer_enabled=false，以上是新项目待采用默认，不是旧系统已获正式有效性证明。其余未定义规则须在实现前补齐同一合同，不能临场填阈值。
+early与mature retention分开，前强势分母0只影响mature；单龙头高集中且无扩散不得通过接受/扩散。脉冲后至少1个可评估会话才IN、至少2个才ACCEPTED，成熟留存/扩散才EXPANDING或REACCELERATING；失败/连续衰退/第6个可评估会话仍未接受按冻结有序规则终止；未知暂停计数。新项目已采用`ROTATION_RESEARCH_DEFAULTS_R1`阈值并由ROTATION_EXECUTION_R2限定执行，继承旧R5工程候选数值但重新登记采用状态：early_seed_retention≥2/3、early_breadth_retention≥0.6、breadth_delta≥0、early_top1_concentration≤1/3、mature_strong_retention≥0.75、diffusion_top1≤0.5。emergence HIGH阈值为dq5≥10、breadth_delta3≥0.05、adjusted_seed_width≥0.1。各字段分母、冻结pulse基准与未知规则按前述固定篮子/共同成员合同执行，不能仅有阈值而缺公式。旧配置formal_consumer_enabled=false不继承；以上阈值在本项目已采用，精确篮子/计时/转换见算法§11.3，不是旧系统权限继承或市场效果证明。
 
 ## S10 市场轴、三族风险与Priority
 
@@ -128,7 +128,7 @@ Breadth主式`mean(I(ret1_t>0)−I(ret1_t−3>0))`，零收益为0，精确比�
 
 Participation为合法amount_ratio20中位数；压力等级为同日合法限价覆盖下跌停数/可评估数，压力变化用前后同口径可比集合。缺当日限价只关压力，缺前日只关变化；共享身份/摘要损坏关其全部依赖，不能全局抹掉独立可算轴。
 
-继承研究阈值：宽度±0.05，参与扩张≥1.2/稀薄<0.8，限价最低覆盖0.8，压力elevated≥0.01/high≥0.05。复合环境按版本化规则和hysteresis，不用投票补缺轴；真实可计算和获准用于Priority是不同状态。指数参考、横截面均值、Forward固定篮子不得互换。
+继承研究阈值：宽度±0.05，参与扩张≥1.2/稀薄<0.8，限价最低覆盖0.8，压力elevated≥0.01/high≥0.05。复合环境按算法§11.4已采用有序规则和hysteresis，不用投票补缺轴；真实可计算和获准用于Priority是不同状态。指数参考、横截面均值、Forward固定篮子不得互换。
 
 股票/板块/市场三族风险分别物化总体/known/unknown/coverage/变化，first-observed与前态变化分开，不用Focus行数替代全市场分母。
 
@@ -138,7 +138,7 @@ Priority的枚举rank、方向和缺键处理见算法合同ALG-32，Δ3明确�
 
 ## S11 D0、D1、D2与状态：补齐设计而不补造旧事实
 
-D0四场景的原语、全部谓词、冻结输入和主次顺序按算法合同ALG-27/28的D0_SCENARIO_FACTS_R2设计，替代旧未闭合legacy标志。STRONG_PULLBACK、TREND_CONTINUE依赖合法t−1 episode/LOO raw，不能从同日reducer/Focus反推。原始谓词、场景治理、正式聚合分列；每次运行预先固定FORMAL/DIAGNOSTIC角色，诊断UNKNOWN不污染正式集合。完整目标包括四场景，部分实施只能报具名范围。
+D0四场景的原语、全部谓词、冻结输入和主次顺序按算法合同ALG-27/28及§11.6的D0_SCENARIO_FACTS_R3设计，替代旧未闭合legacy标志。STRONG_PULLBACK、TREND_CONTINUE依赖合法t−1 episode/LOO raw，不能从同日reducer/Focus反推。原始谓词、场景治理、正式聚合分列；每次运行预先固定FORMAL/DIAGNOSTIC角色，诊断UNKNOWN不污染正式集合。完整目标包括四场景，部分实施只能报具名范围。
 
 新项目封口方案`SOURCE_SEAL_R1`：manifest列全部必需数据集、time_role、原内容/日期身份、实际available/captured时钟、规则/参数与来源验证。对真实盘后首捕，时间边界取官方日历下一常规交易会话open，严格在此前实际就绪/冻结才可申请LIVE/PIT分能力资格；迟到保留LATE/NON_PIT。开发封口只声明真实验证事实，不伪装第三方签发；布尔sealed不能代替证据。历史缺真实捕获不能补首冻。
 
@@ -154,7 +154,7 @@ Expiry继承10个可评估会话无升级/改善门槛才退出对应Seed/PREWAT
 
 Focus是研究跟踪，不是持仓，也不是验证样本全集。独立Cohort按冻结规则留全体MATCH/NO_MATCH/UNKNOWN及未入组分母，不能只留Top N/手工关注/后来赢家。
 
-为消除排序空白，提出新项目`FOCUS_RECENCY_ORDER_R1`：默认按最后已验证跟踪事件交易日降序，再entity_id/episode_id稳定排序；风险/有效性为显式过滤/分组，手动置顶作为独立用户视图，不改研究Priority/Cohort。这个中性可解释方案是本次新设计提案，非旧合同追认；如用户目标需要确认强度排序，实施前另定版本，不临场改权重。
+为消除排序空白，提出新项目`FOCUS_RECENCY_ORDER_R1`：默认按最后已验证跟踪事件交易日降序，再entity_id/episode_id稳定排序；风险/有效性为显式过滤/分组，手动置顶作为独立用户视图，不改研究Priority/Cohort。本项目通过CHG-016正式采用，事件白名单和手动操作语义见算法§11.8，非旧合同追认；后续变更另升版本，不临场改权重。
 
 观察身份含T0、Lane H/L/late、rule/version、entity、capture revision、source digest；同revision异内容拒绝，合法变化追加，高revision查询不改first。hook走真实分Lane分组/发布路径，覆盖缺import、重复lane字段、混合实体与部分成功重试。
 
@@ -231,7 +231,7 @@ M1真实0→1：一个真实完整交易日的声明基础字段、全市场身�
 
 M2持续闭环：第二真实日正常APPEND、同输入幂等、修订拒绝或有界修复、G1–G4、恢复、真实worker读性能与空间不异常增长；旧身份/当前版本正确。
 
-M3完整研究：按依赖完成Seed/板块/市场/Priority/D0/D1/D2/Focus/独立Forward与六入口；封口/D2/Focus排序提案在对应实施前完成明确采用裁定，新实现不带旧未定义坑。完整产品所有声明能力真实验，缺源/未来成熟仍精确披露。
+M3完整研究：按依赖完成Seed/板块/市场/Priority/D0/D1/D2/Focus/独立Forward与六入口；封口/D2/Focus及算法§11主线领域设计已明确采用，新实现按同一合同执行，不重新设置全项目审批门。完整产品所有声明能力真实验，缺源/未来成熟仍精确披露。
 
 M4交付与持续实证：实际安装包、运行身份、生产授权/切换、连续真实日稳定与Forward自然成熟；FEP按独立能力阶段接入。首捕在其源/规则就绪时先行，不等M4才开始积累。
 
@@ -243,7 +243,7 @@ M4交付与持续实证：实际安装包、运行身份、生产授权/切换�
 
 PG默认G盘为用户确定约束，不属于候选资源预算；新写入/发布前连接验证`SHOW data_directory`、日志/WAL/表空间和服务参数。当前E盘实例可读只证明旧数据仍可访问，不计作新项目G盘存储通过；本轮没有声称已改变运行服务。
 
-确定继承：三窗口、RPS中秩、amr分母排除当前、breadth主式、Core/Supplemental隔离、单PG/schema、完整安装路线与FEP方法。新项目提案：SOURCE_SEAL_R1、PURE_CORE_SECTOR_QUALIFICATION_R2、D0_SCENARIO_FACTS_R2、FROZEN_SCENARIO_INVALIDATION_R2、FOCUS_RECENCY_ORDER_R1、ROTATION_RESEARCH_DEFAULTS_R1及候选资源预算，须明确采用后实施，不伪装为旧合同已批准。
+确定继承：三窗口、RPS中秩、amr分母排除当前、breadth主式、Core/Supplemental隔离、单PG/schema、完整安装路线与FEP方法。当前采用：SOURCE_SEAL_R1、§10四R1、算法§11全部主线领域合同和FOCUS_RECENCY_ORDER_R1；原板块资格R2/Rotation候选阈值由新确定执行合同显式采用，原D0 raw R2由R3限定替代。资源预算是工程限额，不是市场规律；实际实现/来源/运行准入独立，不伪装旧批准。
 
 真实来源缺口、缺历史首冻、未来到期、外部访问能力无法由本规格制造；应在运行范围与完成谓词中如实反映。用户已授权在Stock A目录放置根规范和Git准入；业务编码、旧代码清理、旧库迁移/复用、服务停止/切换仍按实际后续任务，不能从文档放置推定已完成实施。
 
@@ -256,11 +256,11 @@ PG默认G盘为用户确定约束，不属于候选资源预算；新写入/发�
 | 字段与Profile | 字段DAG、公式/AST、窗口/坐标/时钟、全部枚举分支、等号、质量、单位与数值向量 | 不允许“已有规则”等未解析引用进入可执行注册表；独立解释器一致 |
 | Seed/板块/Rotation | 资格真值表、WARM/CONFIRMED路径、membership版本、LOO、固定篮子、retention/hysteresis全部参数 | 每参数采用状态/默认/来源明确，空参数禁用其能力而非填猜测 |
 | Priority/风险 | 各桶边界、有序键、字段必需性、FALSE/UNKNOWN支配、风险主因及全量原因 | 全集独立排序与未知向量；显示截断不改变结果 |
-| D0/Anchor/状态 | 每场景原始谓词、来源封口、前态/锚选择、四场景适用性、失效与连续计数 | 采用封口与D2明确提案，缺冻结价不得生成可评估episode |
+| D0/Anchor/状态 | 每场景原始谓词、来源封口、前态/锚选择、四场景适用性、失效与连续计数 | 按已采用封口、D2四R1和D0 raw R3执行，缺冻结价不得生成可评估episode |
 | Cohort/Forward/FEP | 采样总体、Lane/时钟、horizon、due/terminal/path、固定篮子/对照、标签修订与fold | 首捕/迟采/历史分离；PENDING→DUE及各horizon单独证据 |
 | 服务/交付 | API字段/分页/错误、manifest token、缓存来源闭包、包资源与启动恢复 | 真PG→实际worker API→真实浏览器→实际包读回，禁止源码结果代验 |
 
-继承参考中的阈值/候选不能仅凭旧文件标FROZEN_CANDIDATE就自动变正式。本轮补齐了方向、关键公式和防复发条件；仍需领域采用决策的参数、封口/D2/Focus新提案与真实来源证据均明确保留，不宣称已经完成实施或外部验收。完整规格应让未闭合项可识别和可执行关闭，而不是隐去它们。
+继承参考中的阈值/候选不能仅凭旧文件标FROZEN_CANDIDATE就自动变正式。本轮补齐了方向、关键公式和防复发条件；主线参数/领域规则现按CHG-016明确采用，可选FEP/分钟继续独立延后；真实来源证据、实际功能与效果仍分别报告，不宣称已经完成实施或外部验收。完整规格应让未闭合项可识别和可执行关闭，而不是隐去它们。
 
 ## S23 全部136项现行产品需求的现行承接条款
 
@@ -287,3 +287,7 @@ PG默认G盘为用户确定约束，不属于候选资源预算；新写入/发�
 ## S27 外部文件引用与每日产物消费
 
 完整规范见[工程与存储规范](docs/design/工程与存储规范.md#s27)。本节仅作稳定定位入口：日更业务结果、任务/恢复状态全部存PG必要类型化字段，禁止生成每日业务文件或将其二进制/整对象搬入PG；配置仅限新项目config，测试配置/文档/报告与正式业务隔离。
+
+## S28 主线设计关闭与版本治理
+
+设计/功能/研究有效性为三个独立轴。主线领域采用算法§11及详细设计§17，机器domain_decision_contracts/service_product_contract为配置合同；六项设计条件满足后进入分域实现，不等待其它领域或真实效果最优证明。既有四R1和Foundation保持；可选FEP/分钟DEFERRED不冒充主线完成项，也不移除已批准需求。新问题须有具体反例/需求或来源变化及影响版本，不以相邻模块未实现重开全部设计。
