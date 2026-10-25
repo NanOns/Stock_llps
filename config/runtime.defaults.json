@@ -1,5 +1,5 @@
 {
-  "contract": "STOCK-A-RUNTIME-DEFAULTS/R3",
+  "contract": "STOCK-A-RUNTIME-DEFAULTS/R4",
   "paths": {
     "workspace_root": "G:/codex work/Stock A",
     "delivery_root": "G:/codex work/Stock A 交付",
@@ -22,8 +22,8 @@
   "postgresql": {
     "host": "127.0.0.1",
     "port": 5432,
-    "database": "market_research",
-    "business_schema": "v4",
+    "database": "stock_a",
+    "business_schema": "stock_a",
     "data_directory": "G:/Postgres/data",
     "wal_directory": "G:/Postgres/data/pg_wal",
     "log_directory": "G:/Postgres/log",
@@ -41,7 +41,10 @@
     "allow_legacy_postgres_writes": false,
     "allow_automatic_pg_initialization": false,
     "allow_automatic_old_data_migration": false,
-    "allow_port_takeover": false
+    "allow_port_takeover": false,
+    "require_database_schema_application_instance_and_migration_match": true,
+    "require_role_namespace_match": true,
+    "allow_automatic_identity_bootstrap": false
   },
   "git_content_policy": {
     "business_and_normative_documents_only": true,
@@ -57,13 +60,13 @@
       {
         "path": "runtime.defaults.json",
         "role": "BUSINESS_RUNTIME_CONFIGURATION",
-        "contract": "STOCK-A-RUNTIME-DEFAULTS/R3",
+        "contract": "STOCK-A-RUNTIME-DEFAULTS/R4",
         "consumer": "application startup / configuration resolver"
       },
       {
         "path": "contracts/day-chain.contract.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT",
-        "contract": "STOCK-A-DAY-CHAIN/R5",
+        "contract": "STOCK-A-DAY-CHAIN/R6",
         "consumer": "application day plan / declared producer bindings"
       }
     ],
@@ -79,7 +82,14 @@
     "daily_job_configuration_writes_allowed": false,
     "secrets_via_secure_store_or_secret_environment_allowed": true,
     "environment_or_cli_config_path_outside_root_allowed": false,
-    "runtime_enforcement_implementation_required": true
+    "runtime_enforcement_implementation_required": true,
+    "program_modes": {
+      "DEV": "CURRENT_SOURCE_PACKAGE",
+      "INSTALLED": "VERIFIED_INSTALLED_BINARY_AND_COMPILED_RESOURCES",
+      "same_approved_configuration_root": true,
+      "source_import_from_installed_forbidden": true,
+      "whole_configuration_root_unavailable": "REJECT_NO_FALLBACK"
+    }
   },
   "business_storage_policy": {
     "daily_persistent_business_files_allowed": false,
@@ -89,5 +99,21 @@
     "raw_file_binary_or_full_payload_in_pg_allowed": false,
     "original_source_locator_is_runtime_dependency": false,
     "default_daily_source_archive_enabled": false
+  },
+  "application_identity": {
+    "application_id": "STOCK_A",
+    "project_uuid": "bb03f819-ad77-4912-a4c1-d8fb015c03c0",
+    "migration_lineage": "STOCK_A_INITIAL_R1",
+    "deployment_instance_uuid": "BIND_DURING_EXPLICIT_ENABLEMENT",
+    "cluster_system_identifier": "BIND_DURING_EXPLICIT_ENABLEMENT",
+    "deployment_applied": false,
+    "roles": [
+      "stock_a_reader",
+      "stock_a_dev_writer",
+      "stock_a_prod_writer",
+      "stock_a_test_writer",
+      "stock_a_migrator"
+    ],
+    "runtime_role_must_match_namespace": true
   }
 }

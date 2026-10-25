@@ -1,6 +1,6 @@
 {
   "contract_id": "STOCK-A-DAY-CHAIN",
-  "version": "R5",
+  "version": "R6",
   "contract_kind": "BUSINESS_PIPELINE_SPECIFICATION",
   "language": "zh-CN",
   "requires_implementation_binding": true,
@@ -37,10 +37,11 @@
         "generic_complete_eligible": false
       },
       "FOUNDATION_EOD": {
-        "contract_role": "DEVELOPMENT_SCOPE_TEMPLATE_NOT_EXECUTABLE_AS_FULL_GRAPH",
-        "requires_separate_validated_narrow_dag_binding": true,
+        "contract_role": "NAMED_SCOPE_BINDING_OF_SINGLE_PRODUCTION_EXECUTOR",
+        "requires_separate_validated_narrow_dag_binding": false,
         "requires_explicit_narrow_owner_and_consumer_roles": true,
-        "generic_complete_eligible": false
+        "generic_complete_eligible": false,
+        "binding_ref": "scope_bindings.FOUNDATION_EOD"
       },
       "FULL_RESEARCH_EOD": {
         "required_stages": [
@@ -1821,7 +1822,14 @@
         "P07"
       ],
       "requirement": "FULL_RESEARCH_EOD",
-      "binding_required_before_capability_enabled": true
+      "binding_required_before_capability_enabled": true,
+      "fieldset_change": {
+        "addition": "core.ma10",
+        "version": "CORE_PRIMITIVES_FIELDSET_R2",
+        "old_ma5_20_60_semantics_preserved": true,
+        "dependent_ma_structure_requires_new_fieldset": true,
+        "runtime_verified": false
+      }
     },
     {
       "id": "ALG-06",
@@ -2356,7 +2364,7 @@
     "stateful_propagation": "DEPENDENCY_FIXED_POINT_WITH_RECORDED_STOP_REASON"
   },
   "storage_policy": {
-    "business_schema": "v4",
+    "business_schema": "stock_a",
     "typed_families_required": true,
     "generic_payload_for_all_business_forbidden": true,
     "duplicate_full_detail_projection_forbidden": true,
@@ -2368,7 +2376,8 @@
     "full_object_or_rowset_json_in_pg_allowed": false,
     "runtime_cache_backend": "BOUNDED_MEMORY_OR_CONTROLLED_PG_TEMP",
     "configuration_root_only": true,
-    "lifecycle_capacity_gc_restore_binding_required_before_persistence": true
+    "lifecycle_capacity_gc_restore_binding_required_before_persistence": true,
+    "logical_database": "stock_a"
   },
   "document_registry": {
     "root_spec": "../../PROJECT_SPEC.md",
@@ -2481,5 +2490,4708 @@
     "rotation_clock": "EVALUABLE_SUCCESSOR_SESSIONS_UNKNOWN_PAUSES_AND_BREAKS_CONSECUTIVE",
     "pullback_contraction": "PULLBACK_MEAN_EXCLUDING_CONFIRMATION_DIV_PEAK_ENDING_PRIOR5_MEAN",
     "sector_exhaustion": "INHERIT_SECTOR_AXES_V1_ORDERED_HIGH_MEDIUM_LOW"
+  },
+  "deployment_identity_policy": {
+    "configuration_identity_ref": "runtime.defaults.json#/application_identity",
+    "database": "stock_a",
+    "schema": "stock_a",
+    "must_verify": [
+      "PHYSICAL_G_ROOTS",
+      "CLUSTER_SYSTEM_IDENTIFIER",
+      "DATABASE_SCHEMA",
+      "APPLICATION_PROJECT_UUID",
+      "INSTANCE_UUID",
+      "MIGRATION_LINEAGE_AND_DIGEST",
+      "SESSION_USER_ROLE_NAMESPACE"
+    ],
+    "legacy_market_research_v4_binding": "REJECT",
+    "automatic_bootstrap": false
+  },
+  "scheduling_policy": {
+    "executor_count": 1,
+    "scope_binds_existing_stage_kernels": true,
+    "logical_stage_is_process_or_table": false,
+    "normal_append": "NEW_SESSION_AND_EXPLICIT_HISTORY_ENDPOINTS_ONLY",
+    "same_input_retry": "REUSE_IMMUTABLE_SEALED_RESULTS",
+    "range_repair": "ACTUAL_CHANGED_FIELD_DEPENDENCY_CLOSURE_TO_STATE_FIXED_POINT",
+    "independent_kernels": "BOUNDED_IN_PROCESS_CONCURRENCY_WITH_FENCED_WRITES",
+    "performance_start": "SECOND_REAL_SESSION_FULL_MARKET_INCLUDING_ERRORS_AND_READBACK",
+    "max_parallel_kernels": 2
+  },
+  "scope_bindings": {
+    "FOUNDATION_EOD": {
+      "contract": "STOCK_A_FOUNDATION_BINDING_R1",
+      "execution_mode": "SINGLE_EXECUTOR_SCOPE_PROJECTED_KERNELS",
+      "stage_bindings": [
+        {
+          "stage_id": "P00",
+          "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+          "required_inputs": [
+            "ext.validated_configuration",
+            "ext.calendar_authority",
+            "ext.accepted_state_catalog",
+            "ext.contract_registry",
+            "ext.build_identity"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "day_plan",
+            "environment_gate",
+            "prior_context"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": [
+            {
+              "role": "accepted_research",
+              "temporal_role": "PREVIOUS_ACCEPTED",
+              "first_day": "EXPLICIT_FIRST_RUN_NO_PRIOR"
+            }
+          ]
+        },
+        {
+          "stage_id": "P01",
+          "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+          "required_inputs": [
+            "day_plan",
+            "environment_gate",
+            "ext.readonly_tdx_roots"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "tdx_capture"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        },
+        {
+          "stage_id": "P02",
+          "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+          "required_inputs": [
+            "day_plan",
+            "environment_gate",
+            "ext.baostock_policy"
+          ],
+          "optional_inputs": [
+            "ext.baostock_responses"
+          ],
+          "outputs": [
+            "bao_capability_status",
+            "bao_supplement"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        },
+        {
+          "stage_id": "P03",
+          "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+          "required_inputs": [
+            "day_plan",
+            "tdx_capture",
+            "bao_capability_status"
+          ],
+          "optional_inputs": [
+            "ext.approved_reference_captures"
+          ],
+          "outputs": [
+            "source_set",
+            "source_capabilities"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        },
+        {
+          "stage_id": "P04",
+          "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+          "required_inputs": [
+            "day_plan",
+            "prior_context",
+            "source_set",
+            "source_capabilities"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "identity_calendar_universe",
+            "actions",
+            "reference_catalog",
+            "source_seal"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        },
+        {
+          "stage_id": "P05",
+          "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+          "required_inputs": [
+            "day_plan",
+            "source_set",
+            "identity_calendar_universe",
+            "reference_catalog"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "raw_bars",
+            "bar_status"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        },
+        {
+          "stage_id": "P06",
+          "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+          "required_inputs": [
+            "day_plan",
+            "raw_bars",
+            "bar_status",
+            "actions",
+            "identity_calendar_universe",
+            "reference_catalog"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "adjusted_bars",
+            "coordinates",
+            "period_bars"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": [],
+          "history_binding_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        },
+        {
+          "stage_id": "P07",
+          "kernel_role": "CORE_ONLY",
+          "required_inputs": [
+            "day_plan",
+            "adjusted_bars",
+            "coordinates",
+            "raw_bars",
+            "bar_status",
+            "identity_calendar_universe"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "core_primitives"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": [],
+          "history_binding_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        },
+        {
+          "stage_id": "P08",
+          "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+          "required_inputs": [
+            "day_plan",
+            "core_primitives",
+            "adjusted_bars",
+            "coordinates",
+            "identity_calendar_universe"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "cross_section"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": [],
+          "history_binding_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        },
+        {
+          "stage_id": "P09",
+          "kernel_role": "CORE_PROFILE_ONLY",
+          "required_inputs": [
+            "day_plan",
+            "core_primitives",
+            "cross_section",
+            "identity_calendar_universe"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "core_profiles"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": [],
+          "history_binding_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        },
+        {
+          "stage_id": "P20",
+          "kernel_role": "FOUNDATION_OWNER_SEAL",
+          "required_inputs": [
+            "day_plan",
+            "source_set",
+            "identity_calendar_universe",
+            "actions",
+            "reference_catalog",
+            "raw_bars",
+            "bar_status",
+            "adjusted_bars",
+            "coordinates",
+            "period_bars",
+            "core_primitives",
+            "cross_section",
+            "core_profiles",
+            "source_capabilities"
+          ],
+          "optional_inputs": [
+            "bao_supplement"
+          ],
+          "outputs": [
+            "owner_seals",
+            "business_manifest"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        },
+        {
+          "stage_id": "P21",
+          "kernel_role": "FOUNDATION_SERVING",
+          "required_inputs": [
+            "day_plan",
+            "owner_seals",
+            "business_manifest",
+            "ext.serving_contract"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "read_index",
+            "candidate_publication"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        },
+        {
+          "stage_id": "P22",
+          "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+          "required_inputs": [
+            "day_plan",
+            "candidate_publication",
+            "read_index",
+            "owner_seals",
+            "ext.build_identity",
+            "ext.validated_ui_contract"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "candidate_api_validation",
+            "client_contract_validation"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        },
+        {
+          "stage_id": "P23",
+          "kernel_role": "SCOPE_COMPATIBLE_DEVELOPMENT_ACCEPT",
+          "required_inputs": [
+            "day_plan",
+            "candidate_publication",
+            "business_manifest",
+            "read_index",
+            "candidate_api_validation",
+            "client_contract_validation",
+            "prior_context"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "accepted_publication",
+            "research_head",
+            "accepted_receipt",
+            "transaction_outbox"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        },
+        {
+          "stage_id": "P24",
+          "kernel_role": "ACCEPTED_READBACK_ONLY",
+          "required_inputs": [
+            "day_plan",
+            "accepted_publication",
+            "research_head",
+            "accepted_receipt",
+            "transaction_outbox",
+            "prior_context"
+          ],
+          "optional_inputs": [],
+          "outputs": [
+            "dispatch_accounting",
+            "accepted_api_readback"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        },
+        {
+          "stage_id": "P25",
+          "kernel_role": "FOUNDATION_COMPLETION",
+          "required_inputs": [
+            "day_plan",
+            "accepted_publication",
+            "research_head",
+            "accepted_api_readback",
+            "dispatch_accounting",
+            "client_contract_validation"
+          ],
+          "optional_inputs": [
+            "ext.frontend_view_ack"
+          ],
+          "outputs": [
+            "backend_chain_status",
+            "display_chain_status"
+          ],
+          "implementation_binding_required": true,
+          "prior_inputs": []
+        }
+      ],
+      "owner_roles": {
+        "SOURCE_CANONICAL": [
+          "source_set",
+          "source_capabilities",
+          "identity_calendar_universe",
+          "actions",
+          "reference_catalog",
+          "source_seal",
+          "raw_bars",
+          "bar_status"
+        ],
+        "PRICE_COORDINATE_PERIOD": [
+          "adjusted_bars",
+          "coordinates",
+          "period_bars"
+        ],
+        "CORE_PRIMITIVES": [
+          "core_primitives"
+        ],
+        "CROSS_SECTION": [
+          "cross_section"
+        ],
+        "CORE_PROFILE": [
+          "core_profiles"
+        ]
+      },
+      "field_registry": [
+        {
+          "field_id": "identity.entity_id",
+          "producer_stage": "P04",
+          "producer_symbol": "stock_a.canonical.identity:identity",
+          "value_type": "string",
+          "unit": "identity",
+          "expression_ref": "ALG-01",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P05",
+            "P06",
+            "P08"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "identity_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "identity.session",
+          "producer_stage": "P04",
+          "producer_symbol": "stock_a.canonical.identity:identity",
+          "value_type": "date",
+          "unit": "market_session",
+          "expression_ref": "ALG-01",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P05",
+            "P06",
+            "P08"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "date",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "calendar_version",
+            "session_date"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "raw.open",
+          "producer_stage": "P05",
+          "producer_symbol": "stock_a.canonical.daily:raw",
+          "value_type": "decimal",
+          "unit": "CNY",
+          "expression_ref": "CANONICAL_VALIDATED_TDX_RAW",
+          "input_fields": [
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P06"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "decimal",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "canonical_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "raw.high",
+          "producer_stage": "P05",
+          "producer_symbol": "stock_a.canonical.daily:raw",
+          "value_type": "decimal",
+          "unit": "CNY",
+          "expression_ref": "CANONICAL_VALIDATED_TDX_RAW",
+          "input_fields": [
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P06"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "decimal",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "canonical_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "raw.low",
+          "producer_stage": "P05",
+          "producer_symbol": "stock_a.canonical.daily:raw",
+          "value_type": "decimal",
+          "unit": "CNY",
+          "expression_ref": "CANONICAL_VALIDATED_TDX_RAW",
+          "input_fields": [
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P06"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "decimal",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "canonical_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "raw.close",
+          "producer_stage": "P05",
+          "producer_symbol": "stock_a.canonical.daily:raw",
+          "value_type": "decimal",
+          "unit": "CNY",
+          "expression_ref": "CANONICAL_VALIDATED_TDX_RAW",
+          "input_fields": [
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P06"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "decimal",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "canonical_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "raw.amount",
+          "producer_stage": "P05",
+          "producer_symbol": "stock_a.canonical.daily:raw",
+          "value_type": "decimal",
+          "unit": "CNY",
+          "expression_ref": "CANONICAL_VALIDATED_TDX_RAW",
+          "input_fields": [
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P06",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "decimal",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "canonical_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "raw.volume",
+          "producer_stage": "P05",
+          "producer_symbol": "stock_a.canonical.daily:raw",
+          "value_type": "decimal",
+          "unit": "shares",
+          "expression_ref": "CANONICAL_VALIDATED_TDX_RAW",
+          "input_fields": [
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P06",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "decimal",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "canonical_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "raw.session_state",
+          "producer_stage": "P05",
+          "producer_symbol": "stock_a.canonical.daily:raw",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ACTUAL_OR_CONFIRMED_STATUS_OR_UNKNOWN",
+          "input_fields": [
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "status_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "coordinate.id",
+          "producer_stage": "P06",
+          "producer_symbol": "stock_a.canonical.adjustment_periods:coordinate",
+          "value_type": "string",
+          "unit": "identity",
+          "expression_ref": "ALG-02",
+          "input_fields": [
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P06",
+            "P08"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "target_session",
+            "action_revision",
+            "coordinate_contract_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.sealed_actions_revision"
+          ]
+        },
+        {
+          "field_id": "adjusted.open",
+          "producer_stage": "P06",
+          "producer_symbol": "stock_a.canonical.adjustment_periods:adjusted",
+          "value_type": "decimal",
+          "unit": "CNY",
+          "expression_ref": "ALG-02",
+          "input_fields": [
+            "raw.open",
+            "coordinate.id"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "decimal",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "coordinate_id",
+            "bar_session",
+            "field_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.sealed_actions_revision"
+          ]
+        },
+        {
+          "field_id": "adjusted.high",
+          "producer_stage": "P06",
+          "producer_symbol": "stock_a.canonical.adjustment_periods:adjusted",
+          "value_type": "decimal",
+          "unit": "CNY",
+          "expression_ref": "ALG-02",
+          "input_fields": [
+            "raw.high",
+            "coordinate.id"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "decimal",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "coordinate_id",
+            "bar_session",
+            "field_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.sealed_actions_revision"
+          ]
+        },
+        {
+          "field_id": "adjusted.low",
+          "producer_stage": "P06",
+          "producer_symbol": "stock_a.canonical.adjustment_periods:adjusted",
+          "value_type": "decimal",
+          "unit": "CNY",
+          "expression_ref": "ALG-02",
+          "input_fields": [
+            "raw.low",
+            "coordinate.id"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "decimal",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "coordinate_id",
+            "bar_session",
+            "field_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.sealed_actions_revision"
+          ]
+        },
+        {
+          "field_id": "adjusted.close",
+          "producer_stage": "P06",
+          "producer_symbol": "stock_a.canonical.adjustment_periods:adjusted",
+          "value_type": "decimal",
+          "unit": "CNY",
+          "expression_ref": "ALG-02",
+          "input_fields": [
+            "raw.close",
+            "coordinate.id"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P07",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "decimal",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "coordinate_id",
+            "bar_session",
+            "field_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.sealed_actions_revision"
+          ]
+        },
+        {
+          "field_id": "core.ma5",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.ma10",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.ma20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.ma60",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.hhv5",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.high",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.llv5",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.low",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.prior_high5",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.high",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "STRICT_PRIOR_WINDOW_EXCLUDES_CURRENT",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.prior_low5",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.low",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "STRICT_PRIOR_WINDOW_EXCLUDES_CURRENT",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.hhv20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.high",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.llv20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.low",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.prior_high20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.high",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "STRICT_PRIOR_WINDOW_EXCLUDES_CURRENT",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.prior_low20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.low",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "STRICT_PRIOR_WINDOW_EXCLUDES_CURRENT",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.hhv60",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.high",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.llv60",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.low",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.prior_high60",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.high",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "STRICT_PRIOR_WINDOW_EXCLUDES_CURRENT",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.prior_low60",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-05",
+          "input_fields": [
+            "adjusted.low",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "STRICT_PRIOR_WINDOW_EXCLUDES_CURRENT",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.tr",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "price_difference",
+          "expression_ref": "ALG-06",
+          "input_fields": [
+            "adjusted.high",
+            "adjusted.low",
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.atr5",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "price_difference",
+          "expression_ref": "ALG-06",
+          "input_fields": [
+            "core.tr"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.atr20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "price_difference",
+          "expression_ref": "ALG-06",
+          "input_fields": [
+            "core.tr"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.ma_slope20_atr",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ATR_scale",
+          "expression_ref": "ALG-07",
+          "input_fields": [
+            "core.ma20",
+            "core.atr20"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.ma_slope60_atr",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ATR_scale",
+          "expression_ref": "ALG-07",
+          "input_fields": [
+            "core.ma60",
+            "core.atr20"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.ret1",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "fraction",
+          "expression_ref": "ALG-08",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07",
+            "P08",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.ret3",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "fraction",
+          "expression_ref": "ALG-08",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P08"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.ret5",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "fraction",
+          "expression_ref": "ALG-08",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P08",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.ret20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "fraction",
+          "expression_ref": "ALG-08",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P08"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.vol5",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "log_return_std",
+          "expression_ref": "ALG-08",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.amount_ratio5",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ratio",
+          "expression_ref": "ALG-12",
+          "input_fields": [
+            "raw.amount",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.volume_ratio5",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ratio",
+          "expression_ref": "ALG-12",
+          "input_fields": [
+            "raw.volume",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.vol20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "log_return_std",
+          "expression_ref": "ALG-08",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P07"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.amount_ratio20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ratio",
+          "expression_ref": "ALG-12",
+          "input_fields": [
+            "raw.amount",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.volume_ratio20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ratio",
+          "expression_ref": "ALG-12",
+          "input_fields": [
+            "raw.volume",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.liquidity_mean20",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "CNY",
+          "expression_ref": "ALG-12",
+          "input_fields": [
+            "raw.amount",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "STRICT_PRIOR_WINDOW_EXCLUDES_CURRENT",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.clv",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "fraction",
+          "expression_ref": "ALG-13",
+          "input_fields": [
+            "adjusted.close",
+            "adjusted.high",
+            "adjusted.low"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.pos60",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "fraction",
+          "expression_ref": "ALG-13",
+          "input_fields": [
+            "adjusted.close",
+            "core.hhv60",
+            "core.llv60"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.bias20_atr",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ATR_scale",
+          "expression_ref": "ALG-13",
+          "input_fields": [
+            "adjusted.close",
+            "core.ma20",
+            "core.atr20"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.dist_high20_atr",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ATR_scale",
+          "expression_ref": "ALG-13",
+          "input_fields": [
+            "core.prior_high20",
+            "adjusted.close",
+            "core.atr20"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.range_ratio",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ratio",
+          "expression_ref": "ALG-14",
+          "input_fields": [
+            "core.hhv5",
+            "core.llv5",
+            "core.hhv20",
+            "core.llv20"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.atr_ratio",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ratio",
+          "expression_ref": "ALG-14",
+          "input_fields": [
+            "core.atr5",
+            "core.atr20"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.vol_ratio",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "ratio",
+          "expression_ref": "ALG-14",
+          "input_fields": [
+            "core.vol5",
+            "core.vol20"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.hh_progress",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "bool",
+          "unit": "truth",
+          "expression_ref": "ALG-14",
+          "input_fields": [
+            "adjusted.high",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "bool",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.ll_progress",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "bool",
+          "unit": "truth",
+          "expression_ref": "ALG-14",
+          "input_fields": [
+            "adjusted.low",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "bool",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.price_damage",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "bool",
+          "unit": "truth",
+          "expression_ref": "ALG-15",
+          "input_fields": [
+            "adjusted.close",
+            "core.prior_low20",
+            "core.atr20",
+            "core.ret1"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "bool",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "core.prior60_percentile",
+          "producer_stage": "P07",
+          "producer_symbol": "stock_a.factors.core:core",
+          "value_type": "number",
+          "unit": "percentile_0_100",
+          "expression_ref": "ALG-16",
+          "input_fields": [
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "TECH_ACTUAL_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "core_input_version"
+          ],
+          "temporal_binding": "STRICT_PRIOR_WINDOW_EXCLUDES_CURRENT",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "cross.rps5",
+          "producer_stage": "P08",
+          "producer_symbol": "stock_a.factors.cross_section:cross",
+          "value_type": "number",
+          "unit": "percentile_0_100",
+          "expression_ref": "ALG-09",
+          "input_fields": [
+            "core.ret5",
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "cross_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref",
+            "context.universe_ref_with_each_exact_endpoint"
+          ]
+        },
+        {
+          "field_id": "cross.rps5_delta1_pp",
+          "producer_stage": "P08",
+          "producer_symbol": "stock_a.factors.cross_section:cross",
+          "value_type": "number",
+          "unit": "pp",
+          "expression_ref": "ALG-10",
+          "input_fields": [
+            "core.ret5",
+            "identity.entity_id",
+            "identity.session",
+            "coordinate.id",
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "cross_input_version"
+          ],
+          "temporal_binding": "BOTH_ENDPOINT_RETURNS_REEXPRESSED_TO_TARGET_AND_RANKED_ON_EACH_ENDPOINT_UNIVERSE",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref",
+            "context.universe_ref_with_each_exact_endpoint"
+          ]
+        },
+        {
+          "field_id": "cross.rps5_delta3_pp",
+          "producer_stage": "P08",
+          "producer_symbol": "stock_a.factors.cross_section:cross",
+          "value_type": "number",
+          "unit": "pp",
+          "expression_ref": "ALG-10",
+          "input_fields": [
+            "core.ret5",
+            "identity.entity_id",
+            "identity.session",
+            "coordinate.id",
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "cross_input_version"
+          ],
+          "temporal_binding": "BOTH_ENDPOINT_RETURNS_REEXPRESSED_TO_TARGET_AND_RANKED_ON_EACH_ENDPOINT_UNIVERSE",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref",
+            "context.universe_ref_with_each_exact_endpoint"
+          ]
+        },
+        {
+          "field_id": "cross.rps20",
+          "producer_stage": "P08",
+          "producer_symbol": "stock_a.factors.cross_section:cross",
+          "value_type": "number",
+          "unit": "percentile_0_100",
+          "expression_ref": "ALG-09",
+          "input_fields": [
+            "core.ret20",
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "cross_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref",
+            "context.universe_ref_with_each_exact_endpoint"
+          ]
+        },
+        {
+          "field_id": "cross.rps20_delta1_pp",
+          "producer_stage": "P08",
+          "producer_symbol": "stock_a.factors.cross_section:cross",
+          "value_type": "number",
+          "unit": "pp",
+          "expression_ref": "ALG-10",
+          "input_fields": [
+            "core.ret20",
+            "identity.entity_id",
+            "identity.session",
+            "coordinate.id",
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "cross_input_version"
+          ],
+          "temporal_binding": "BOTH_ENDPOINT_RETURNS_REEXPRESSED_TO_TARGET_AND_RANKED_ON_EACH_ENDPOINT_UNIVERSE",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref",
+            "context.universe_ref_with_each_exact_endpoint"
+          ]
+        },
+        {
+          "field_id": "cross.rps20_delta3_pp",
+          "producer_stage": "P08",
+          "producer_symbol": "stock_a.factors.cross_section:cross",
+          "value_type": "number",
+          "unit": "pp",
+          "expression_ref": "ALG-10",
+          "input_fields": [
+            "core.ret20",
+            "identity.entity_id",
+            "identity.session",
+            "coordinate.id",
+            "adjusted.close",
+            "raw.session_state"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "cross_input_version"
+          ],
+          "temporal_binding": "BOTH_ENDPOINT_RETURNS_REEXPRESSED_TO_TARGET_AND_RANKED_ON_EACH_ENDPOINT_UNIVERSE",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref",
+            "context.universe_ref_with_each_exact_endpoint"
+          ]
+        },
+        {
+          "field_id": "cross.rel_market_1",
+          "producer_stage": "P08",
+          "producer_symbol": "stock_a.factors.cross_section:cross",
+          "value_type": "number",
+          "unit": "fraction",
+          "expression_ref": "ALG-11",
+          "input_fields": [
+            "core.ret1",
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "cross_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref",
+            "context.universe_ref_with_each_exact_endpoint"
+          ]
+        },
+        {
+          "field_id": "cross.rel_market_3",
+          "producer_stage": "P08",
+          "producer_symbol": "stock_a.factors.cross_section:cross",
+          "value_type": "number",
+          "unit": "fraction",
+          "expression_ref": "ALG-11",
+          "input_fields": [
+            "core.ret3",
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "cross_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref",
+            "context.universe_ref_with_each_exact_endpoint"
+          ]
+        },
+        {
+          "field_id": "cross.rel_market_5",
+          "producer_stage": "P08",
+          "producer_symbol": "stock_a.factors.cross_section:cross",
+          "value_type": "number",
+          "unit": "fraction",
+          "expression_ref": "ALG-11",
+          "input_fields": [
+            "core.ret5",
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "cross_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref",
+            "context.universe_ref_with_each_exact_endpoint"
+          ]
+        },
+        {
+          "field_id": "cross.rel_market_20",
+          "producer_stage": "P08",
+          "producer_symbol": "stock_a.factors.cross_section:cross",
+          "value_type": "number",
+          "unit": "fraction",
+          "expression_ref": "ALG-11",
+          "input_fields": [
+            "core.ret20",
+            "identity.entity_id",
+            "identity.session"
+          ],
+          "window_contract": "CROSS_SESSION_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "number",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "cross_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref",
+            "context.universe_ref_with_each_exact_endpoint"
+          ]
+        },
+        {
+          "field_id": "profile.trend",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "adjusted.close",
+            "core.ma20",
+            "core.ma60",
+            "core.ma_slope20_atr",
+            "core.ma_slope60_atr",
+            "core.hh_progress",
+            "core.ll_progress",
+            "core.price_damage"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "profile.position",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "core.bias20_atr",
+            "core.pos60"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "profile.ma_structure",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "core.ma5",
+            "core.ma10",
+            "core.ma20",
+            "core.ma_slope20_atr"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "profile.relative",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "cross.rps5_delta3_pp",
+            "cross.rps20",
+            "cross.rel_market_1",
+            "profile.compression",
+            "profile.ma_structure"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "profile.compression",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "core.range_ratio",
+            "core.atr_ratio",
+            "core.vol_ratio",
+            "core.amount_ratio20",
+            "core.liquidity_mean20"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "profile.participation",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "core.ret1",
+            "core.clv",
+            "core.amount_ratio20"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "profile.extension",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "core.bias20_atr",
+            "core.ret5",
+            "core.atr20",
+            "adjusted.close",
+            "core.amount_ratio20",
+            "core.ret1"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "profile.near_high20",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "adjusted.close",
+            "core.prior_high20",
+            "core.atr20"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "profile.drawdown60",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "adjusted.close",
+            "core.hhv60"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "period.closed_week",
+          "producer_stage": "P06",
+          "producer_symbol": "stock_a.canonical.adjustment_periods:period",
+          "value_type": "typed_bar_set_reference",
+          "unit": "OHLCV",
+          "expression_ref": "ALG-03",
+          "input_fields": [
+            "raw.open",
+            "raw.high",
+            "raw.low",
+            "raw.close",
+            "raw.amount",
+            "raw.volume",
+            "coordinate.id"
+          ],
+          "window_contract": "CLOSED_PERIOD_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "typed_bar_set_reference",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "period_kind",
+            "period_end",
+            "source_coordinate_version",
+            "closed_asof_variant"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "profile.closed_week_trend",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "period.closed_week"
+          ],
+          "window_contract": "CLOSED_WEEK_MA5_AND_PREVIOUS_MA5_REQUIRES_6_CLOSED_WEEKS",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "period.closed_month",
+          "producer_stage": "P06",
+          "producer_symbol": "stock_a.canonical.adjustment_periods:period",
+          "value_type": "typed_bar_set_reference",
+          "unit": "OHLCV",
+          "expression_ref": "ALG-03",
+          "input_fields": [
+            "raw.open",
+            "raw.high",
+            "raw.low",
+            "raw.close",
+            "raw.amount",
+            "raw.volume",
+            "coordinate.id"
+          ],
+          "window_contract": "CLOSED_PERIOD_R1",
+          "coordinate_role": "TARGET_SESSION",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "CHART",
+            "DATA_STATUS",
+            "P09"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "typed_bar_set_reference",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "period_kind",
+            "period_end",
+            "source_coordinate_version",
+            "closed_asof_variant"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff",
+            "context.calendar_ref"
+          ]
+        },
+        {
+          "field_id": "profile.closed_month_trend",
+          "producer_stage": "P09",
+          "producer_symbol": "stock_a.research.profile:profile",
+          "value_type": "enum",
+          "unit": "state",
+          "expression_ref": "ALG-17",
+          "input_fields": [
+            "period.closed_month"
+          ],
+          "window_contract": "CLOSED_MONTH_MA3_AND_PREVIOUS_MA3_REQUIRES_4_CLOSED_MONTHS",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "entity_id",
+            "session_date",
+            "profile_input_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "plan.scope",
+          "producer_stage": "P00",
+          "producer_symbol": "stock_a.application.plan:plan",
+          "value_type": "enum",
+          "unit": "scope",
+          "expression_ref": "FROZEN_DECLARED_SCOPE",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "job_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "plan.target_session",
+          "producer_stage": "P00",
+          "producer_symbol": "stock_a.application.plan:plan",
+          "value_type": "date",
+          "unit": "session",
+          "expression_ref": "VALIDATED_CALENDAR_TARGET",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "date",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "job_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "plan.expected_head_generation",
+          "producer_stage": "P00",
+          "producer_symbol": "stock_a.application.plan:plan",
+          "value_type": "integer",
+          "unit": "generation",
+          "expression_ref": "EXACT_ACCEPTED_HEAD_OR_FIRST_RUN",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P23"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "integer",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "job_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "capture.content_sha",
+          "producer_stage": "P01",
+          "producer_symbol": "stock_a.sources.tdx.capture:capture",
+          "value_type": "string",
+          "unit": "sha256",
+          "expression_ref": "ACTUAL_BYTE_DIGEST",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P03"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "capture_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "capture.durable_at",
+          "producer_stage": "P01",
+          "producer_symbol": "stock_a.sources.tdx.capture:capture",
+          "value_type": "timestamp",
+          "unit": "UTC",
+          "expression_ref": "ACTUAL_DURABLE_CAPTURE_TIME",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P03"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "timestamp",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "capture_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "capture.canonical_digest",
+          "producer_stage": "P01",
+          "producer_symbol": "stock_a.sources.tdx.capture:capture",
+          "value_type": "string",
+          "unit": "sha256",
+          "expression_ref": "NORMALIZED_TYPED_ROWS_DIGEST",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "capture_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "bao.capability_state",
+          "producer_stage": "P02",
+          "producer_symbol": "stock_a.sources.baostock.capability:bao",
+          "value_type": "enum",
+          "unit": "capability",
+          "expression_ref": "ACCOUNT_OPTIONAL_SOURCE_FAILURE_NOT_CORE_BLOCK",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P03"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "job_id",
+            "dataset_role"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "source_set.id",
+          "producer_stage": "P03",
+          "producer_symbol": "stock_a.sources.seal:source_set",
+          "value_type": "string",
+          "unit": "identity",
+          "expression_ref": "EXACT_DATASET_CONTENT_AND_CAPTURE_BINDINGS",
+          "input_fields": [
+            "capture.content_sha",
+            "capture.durable_at",
+            "bao.capability_state"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "source_set_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "owner.id",
+          "producer_stage": "P20",
+          "producer_symbol": "stock_a.publication.owner:owner",
+          "value_type": "string",
+          "unit": "identity",
+          "expression_ref": "ACTUAL_CONSUMED_DEPENDENCY_SUBVECTOR",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P20"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "owner_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "owner.content_digest",
+          "producer_stage": "P20",
+          "producer_symbol": "stock_a.publication.owner:owner",
+          "value_type": "string",
+          "unit": "sha256",
+          "expression_ref": "CANONICAL_ORDERED_TYPED_ROWS_DIGEST",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P20"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "owner_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "owner.sealed_at",
+          "producer_stage": "P20",
+          "producer_symbol": "stock_a.publication.owner:owner",
+          "value_type": "timestamp",
+          "unit": "UTC",
+          "expression_ref": "POST_VALIDATION_ATOMIC_SEAL",
+          "input_fields": [],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "timestamp",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "owner_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "manifest.id",
+          "producer_stage": "P20",
+          "producer_symbol": "stock_a.publication.owner:manifest",
+          "value_type": "string",
+          "unit": "identity",
+          "expression_ref": "H_SCOPE_OWNER_VECTOR_CONTRACTS",
+          "input_fields": [
+            "owner.id",
+            "owner.content_digest"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P21"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "manifest_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "read_index.version",
+          "producer_stage": "P21",
+          "producer_symbol": "stock_a.publication.index:read_index",
+          "value_type": "string",
+          "unit": "identity",
+          "expression_ref": "H_MANIFEST_SERVING_THIN_PROJECTION",
+          "input_fields": [
+            "manifest.id"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P21"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "index_version"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "publication.id",
+          "producer_stage": "P21",
+          "producer_symbol": "stock_a.publication.index:publication",
+          "value_type": "string",
+          "unit": "identity",
+          "expression_ref": "H_MANIFEST_INDEX_FROZEN_READBACK_PLAN",
+          "input_fields": [
+            "manifest.id",
+            "read_index.version"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P22",
+            "P23",
+            "P24"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "publication_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "candidate.api_verified",
+          "producer_stage": "P22",
+          "producer_symbol": "stock_a.service.validation:candidate",
+          "value_type": "bool",
+          "unit": "evidence",
+          "expression_ref": "ACTUAL_API_FULL_SET_AND_DETAIL_CONTEXT_READBACK",
+          "input_fields": [
+            "publication.id"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P23"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "bool",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "publication_id",
+            "validation_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "candidate.ui_compatible",
+          "producer_stage": "P22",
+          "producer_symbol": "stock_a.service.validation:candidate",
+          "value_type": "bool",
+          "unit": "evidence",
+          "expression_ref": "ACTUAL_CLIENT_BUILD_SCHEMA_MATCH",
+          "input_fields": [
+            "publication.id"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P23"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "bool",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "publication_id",
+            "validation_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "head.generation",
+          "producer_stage": "P23",
+          "producer_symbol": "stock_a.publication.accept:head",
+          "value_type": "integer",
+          "unit": "generation",
+          "expression_ref": "FENCED_EXPECTED_GENERATION_CAS",
+          "input_fields": [
+            "plan.expected_head_generation",
+            "publication.id",
+            "candidate.api_verified",
+            "candidate.ui_compatible"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P23",
+            "P24"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "integer",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "head_role"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "receipt.request_key",
+          "producer_stage": "P23",
+          "producer_symbol": "stock_a.publication.accept:receipt",
+          "value_type": "string",
+          "unit": "identity",
+          "expression_ref": "ATOMIC_IDEMPOTENCY_CONTENT_BOUND_RECEIPT",
+          "input_fields": [
+            "head.generation"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P24"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "string",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "request_key"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "dispatch.accounted",
+          "producer_stage": "P24",
+          "producer_symbol": "stock_a.application.readback:dispatch",
+          "value_type": "bool",
+          "unit": "evidence",
+          "expression_ref": "EXACT_SCOPE_READBACK_OUTBOX_ACCOUNTING",
+          "input_fields": [
+            "receipt.request_key"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P25"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "bool",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "outbox_id"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "readback.accepted",
+          "producer_stage": "P24",
+          "producer_symbol": "stock_a.application.readback:readback",
+          "value_type": "bool",
+          "unit": "evidence",
+          "expression_ref": "ACTUAL_ACCEPTED_API_CONTEXT",
+          "input_fields": [
+            "publication.id",
+            "head.generation"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P25"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "bool",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "publication_id",
+            "readback_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "completion.backend",
+          "producer_stage": "P25",
+          "producer_symbol": "stock_a.service.completion:completion",
+          "value_type": "enum",
+          "unit": "scope_state",
+          "expression_ref": "FOUNDATION_BACKEND_PREDICATE",
+          "input_fields": [
+            "dispatch.accounted",
+            "readback.accepted"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS",
+            "P25"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "job_id",
+            "status_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        },
+        {
+          "field_id": "completion.display",
+          "producer_stage": "P25",
+          "producer_symbol": "stock_a.service.completion:completion",
+          "value_type": "enum",
+          "unit": "scope_state",
+          "expression_ref": "ACTUAL_OPERATION_AND_CONTEXT_BUILD_ACK",
+          "input_fields": [
+            "completion.backend"
+          ],
+          "window_contract": "NONE",
+          "coordinate_role": "NONE",
+          "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+          "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+          "consumers": [
+            "BASE_STOCK_DETAIL",
+            "DATA_STATUS"
+          ],
+          "implementation_state": "NOT_IMPLEMENTED",
+          "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+          "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+          "value_schema": {
+            "type": "enum",
+            "nullable_only_with_quality": true,
+            "reject_bool_for_number": true,
+            "finite_numeric_only": true
+          },
+          "business_key": [
+            "namespace_id",
+            "job_id",
+            "status_revision"
+          ],
+          "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+          "context_dependencies": [
+            "context.target_session",
+            "context.source_cutoff"
+          ]
+        }
+      ],
+      "required_consumers": [
+        "BASE_STOCK_LIST",
+        "BASE_STOCK_DETAIL",
+        "DATE_SELECTION",
+        "CHART",
+        "DATA_STATUS",
+        "ACCEPTED_API_READBACK",
+        "ACTUAL_BROWSER_OPERATION_ACK"
+      ],
+      "disabled_capabilities": [
+        "SEED",
+        "SECTOR",
+        "ROTATION",
+        "MARKET_AXES",
+        "D0",
+        "D1",
+        "D2",
+        "RISK_PRIORITY",
+        "FOCUS",
+        "FORWARD",
+        "FEP",
+        "INTRADAY"
+      ],
+      "disabled_result_state": "NOT_ENABLED_IN_SCOPE",
+      "control_dispatch_plan_source": "P00.day_plan_only_ACCEPTED_READBACK_no_P19_domain_observers",
+      "completion": {
+        "backend_all_of": [
+          "scope_required_kernels_implemented",
+          "all_registered_fields_accounted_with_real_quality",
+          "all_required_owners_sealed",
+          "thin_index_candidate_verified",
+          "development_acceptance_committed",
+          "accepted_readback_verified"
+        ],
+        "display_additional": [
+          "actual_required_browser_operations_and_matching_build_ack"
+        ],
+        "backend_status": "SCOPED_BACKEND_READY",
+        "display_status": "SCOPED_DISPLAYED",
+        "generic_day_chain_complete": false
+      },
+      "implementation_binding_required": true,
+      "runtime_implementation_present": false,
+      "within_stage_field_toposort_required": true,
+      "parameter_binding_state": "DESIGN_REFERENCES_EXPLICIT_RUNTIME_BINDING_REQUIRED",
+      "allowed_environments": [
+        "DEV",
+        "TEST"
+      ],
+      "history_policy": {
+        "source": "CURRENT_RUN_SEALED_CANONICAL_PLUS_PREVIOUS_ACCEPTED_CANONICAL",
+        "selection": "EXACT_DECLARED_FIELD_WINDOWS_AND_ENDPOINT_UNIVERSES",
+        "first_day": "NEW_VERIFIED_SOURCE_HISTORY_OR_LEGITIMATE_SHORT_HISTORY_NO_OLD_V4_DB",
+        "stateful_advanced_prior_required": false
+      }
+    }
+  },
+  "source_evidence_policy": {
+    "empty_roots_allowed_in_design": true,
+    "actual_ingress_requires_verified_nonempty_roots": true,
+    "roots_or_clocks_may_be_fabricated": false,
+    "content_digest_alone_proves_prior_observation": false,
+    "pg_capture_audit_fields": [
+      "actual_read_started_at",
+      "validated_complete_at",
+      "durable_capture_at",
+      "source_available_at_or_UNKNOWN",
+      "source_stat_before_after",
+      "byte_count",
+      "content_sha",
+      "canonical_row_digest"
+    ],
+    "live_pit_requires_actual_capture_chain": true,
+    "unprovable_historical_time": "NON_PIT_OR_LATE_NO_BACKSIGNING",
+    "raw_business_binary_archive_required": false
+  },
+  "capacity_policy": {
+    "planning_entities": 10000,
+    "planning_sessions": 500,
+    "data_and_indexes_gib": 48,
+    "candidate_peak_gib": 16,
+    "wal_warn_gib": 16,
+    "wal_emergency_gib": 32,
+    "candidate_unsealed_ttl_hours": 48,
+    "candidate_sealed_unreferenced_ttl_days": 7,
+    "max_unreferenced_sealed_versions": 3,
+    "max_active_runs": 2,
+    "gc_batch_rows": 10000,
+    "gc_round_seconds": 60,
+    "local_logical_failure_backup_rpo_hours": 24,
+    "local_restore_rto_hours": 4,
+    "single_G_volume_failure_covered": false,
+    "engineering_budget_not_measured": true,
+    "gc_must_preserve_reference_closure": true
   }
 }
