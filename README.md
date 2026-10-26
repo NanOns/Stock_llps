@@ -79,3 +79,26 @@ def evaluate(raw32: bytes, units: UnitContract, field_id: str,
 ```
 
 调用方为 `evaluate` 提供原始32字节记录、单位合同、字段ID、带质量的输入和已登记规则；画像规则需符合字段合同。接口展示纯内核调用，不代表已完成真实来源采集、全域数值验收、数据库写入、服务或页面运行。
+
+## TDX日线有界读取
+
+TDX日线文件入口需要调用方显式提供绝对文件路径、非空保护根、单位合同和读取预算；不会从当前目录、旧项目或默认盘符寻找来源。生产根只应由本项目唯一`config`中的已绑定配置解析后传入。下面示例中的变量由调用方提供，不能用测试/交付目录代替生产配置：
+
+```python
+from stock_a.sources.tdx.day_source import open_day_file
+from stock_a.sources.tdx.day_stream import ReadLimits
+
+limits = ReadLimits(
+    max_bytes=declared_source_byte_budget,
+    max_records=declared_source_record_budget,
+    chunk_records=256,
+    max_seconds=declared_read_seconds,
+)
+
+with open_day_file(source_path, (bound_source_root,), units, limits) as scan:
+    for located in scan:
+        consume_in_memory(located.record_index, located.byte_offset, located.decoded)
+    summary = scan.summary  # 仅在EOF、顺序/预算和最终句柄检查全部通过后可读
+```
+
+`iter_day_records(readonly_stream, units, limits)`复用同一扫描内核，适用于调用方管理的非seekable二进制流，不关闭调用方流。文件入口使用只读Windows句柄，并核验句柄最终路径、身份及扫描前后大小/修改时点。超限、坏日期、重复/冲突、路径越界、扫描中变化及提前退出都不能获得完整摘要；已yield前缀不能视为完整输入。摘要中的原始字节SHA仅描述本次读取字节，不代表来源捕获、PIT时钟、来源封口或业务接受版本。
