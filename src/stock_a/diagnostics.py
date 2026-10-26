@@ -5,18 +5,27 @@ import argparse
 from dataclasses import asdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
+import hashlib
 import importlib.metadata
 import json
 import os
 from pathlib import Path
+import stat
 import sys
+import time
 from typing import Any
 import uuid
 
 from stock_a import __version__
 from stock_a.domain import ContractError
 from stock_a.sources.tdx.day import UnitContract
-from stock_a.sources.tdx.day_source import open_day_file
+from stock_a.sources.tdx.actions import (
+    GBBQ_PROTOCOL_VERSION,
+    GBBQ_UNIT_VERSION,
+    GbbqDecodeError,
+    decode_gbbq_bytes,
+)
+from stock_a.sources.tdx.day_source import open_day_file, read_protected_bytes
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
 
 
@@ -309,6 +318,16 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", parser_class=ChineseParser)
     doctor = commands.add_parser("doctor", help="诊断本地配置、包身份和声明能力")
     doctor.add_argument("--config", help="仅接受唯一登记配置runtime.defaults.json的绝对路径")
+    phase0 = commands.add_parser(
+        "source-phase0",
+        help="有界核验已绑定的本地TDX来源能力",
+        description="按明示预算有界核验已绑定的本地TDX来源能力，只读不写",
+    )
+    phase0.add_argument("--max-entries", type=int, default=50000, help="每个行情目录最多枚举的目录项数，默认50000")
+    phase0.add_argument("--max-file-bytes", type=int, default=16777216, help="单个来源文件最大读取字节数，默认16777216")
+    phase0.add_argument("--max-total-bytes", type=int, default=33554432, help="本次来源文件总读取字节数上限，默认33554432")
+    phase0.add_argument("--max-records", type=int, default=200000, help="每个日线文件及GBBQ最多解析记录数，默认200000")
+    phase0.add_argument("--max-seconds", default="30", help="本次总核验耗时上限，默认30秒")
     inspect = commands.add_parser("source-inspect", help="只读检查单个TDX日线文件")
     inspect.add_argument("path", help="待检查日线文件的绝对路径")
     inspect.add_argument("--unit-version", required=True, help="显式日线单位合同版本")
@@ -319,6 +338,259 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--chunk-records", default=256, type=int, help="单次读取块记录数，默认256")
     inspect.add_argument("--max-seconds", default="30", help="本次最大读取秒数，默认30")
     return parser
+
+
+def _safe_child(path: Path, root: Path) -> Path:
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root)
+        mode = resolved.stat().st_mode
+    except FileNotFoundError as error:
+        raise DiagnosticError("SOURCE_PATH_INVALID", "来源目录不存在") from error
+    except PermissionError as error:
+        raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验来源目录", _EXIT_PERMISSION) from error
+    except OSError as error:
+        raise DiagnosticError("SOURCE_IO_ERROR", "核验来源目录时发生工程I/O错误", _EXIT_ENGINEERING) from error
+    except ValueError as error:
+        raise DiagnosticError("SOURCE_PATH_INVALID", "来源目录不存在或最终路径离开保护根") from error
+    if not stat.S_ISDIR(mode):
+        raise DiagnosticError("SOURCE_PATH_INVALID", "来源目录结构不符合TDX目录合同")
+    return resolved
+
+
+def _run_source_phase0(args: argparse.Namespace) -> int:
+    package = _module_mode()
+    config, config_path = _load_runtime_config()
+    roots = config["source_policy"]["configured_tdx_source_roots"]
+    if not roots:
+        raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX来源保护根，阶段0在目录枚举前拒绝")
+    if len(roots) != 1:
+        raise DiagnosticError("SOURCE_ROOT_AMBIGUOUS", "阶段0要求一个明确绑定的本地TDX来源根")
+    if type(args.max_entries) is not int or args.max_entries <= 0 or type(args.max_file_bytes) is not int or args.max_file_bytes <= 0 or type(args.max_total_bytes) is not int or args.max_total_bytes <= 0 or type(args.max_records) is not int or args.max_records <= 0:
+        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", "阶段0目录、字节与记录预算必须是拒绝布尔值的正整数", _EXIT_ARGUMENT)
+    try:
+        seconds = Decimal(args.max_seconds)
+        if not seconds.is_finite() or seconds <= 0:
+            raise ValueError
+    except (InvalidOperation, ValueError) as error:
+        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", "阶段0耗时预算必须是有限正数", _EXIT_ARGUMENT) from error
+    started = time.monotonic()
+    try:
+        root = Path(roots[0]).resolve(strict=True)
+        root_mode = root.stat().st_mode
+    except FileNotFoundError as error:
+        raise DiagnosticError("SOURCE_PATH_INVALID", "已绑定TDX来源根不存在") from error
+    except PermissionError as error:
+        raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验已绑定来源根", _EXIT_PERMISSION) from error
+    except OSError as error:
+        raise DiagnosticError("SOURCE_IO_ERROR", "核验已绑定来源根时发生工程I/O错误", _EXIT_ENGINEERING) from error
+    if not stat.S_ISDIR(root_mode):
+        raise DiagnosticError("SOURCE_PATH_INVALID", "已绑定TDX来源根不是目录")
+    sample_rule = "对sh/sz/bj协议目录分别按文件名排序，完整只读扫描首个.day文件；每个目录最多枚举max_entries项"
+    markets: dict[str, dict[str, Any]] = {}
+    total_bytes = 0
+    total_records = 0
+    for market in ("sh", "sz", "bj"):
+        directory = _safe_child(root / "vipdoc" / market / "lday", root)
+        names: list[str] = []
+        entry_count = 0
+        excluded_links = 0
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    if time.monotonic() - started > float(seconds):
+                        raise DiagnosticError("READ_TIMEOUT", "来源目录枚举超过耗时预算", _EXIT_UNAVAILABLE)
+                    entry_count += 1
+                    if entry_count > args.max_entries:
+                        raise DiagnosticError("READ_LIMIT_EXCEEDED", "行情目录项数超过预算，不能将截断枚举报告为完整", _EXIT_UNAVAILABLE)
+                    if entry.is_symlink():
+                        excluded_links += 1
+                        continue
+                    if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".day"):
+                        names.append(entry.name)
+        except PermissionError as error:
+            raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝枚举行情目录", _EXIT_PERMISSION) from error
+        except OSError as error:
+            raise DiagnosticError("SOURCE_IO_ERROR", "枚举行情目录时发生工程I/O错误", _EXIT_ENGINEERING) from error
+        names.sort(key=str.casefold)
+        market_result: dict[str, Any] = {
+            "directory": str(directory),
+            "day_file_count": len(names),
+            "enumerated_entry_count": entry_count,
+            "excluded_link_count": excluded_links,
+            "scope_complete": True,
+            "sample_rule": "字典序首个.day文件，读取整个文件",
+            "sample": None,
+        }
+        if names:
+            sample_path = _safe_file(root / "vipdoc" / market / "lday" / names[0], root)
+            size = sample_path.stat().st_size
+            if size > args.max_file_bytes or total_bytes + size > args.max_total_bytes:
+                raise DiagnosticError("READ_LIMIT_EXCEEDED", "日线样本超过本次文件或总字节预算", _EXIT_UNAVAILABLE)
+            units = UnitContract("TDX_RAW_DIAGNOSTIC_ONLY", Decimal(1), 1)
+            limits = ReadLimits(args.max_file_bytes, args.max_records, 1024, seconds)
+            try:
+                with open_day_file(sample_path, roots, units, limits) as scan:
+                    for _record in scan:
+                        if time.monotonic() - started > float(seconds):
+                            raise DayReadError("READ_TIMEOUT", "BUDGET")
+                    summary = scan.summary
+            except DayReadError as error:
+                code = error.code
+                exit_code = _READ_ERROR_EXIT_CODES.get(code, _EXIT_ENGINEERING)
+                raise DiagnosticError(code, f"日线真实样本未能完整核验：{error}", exit_code) from error
+            total_bytes += summary.scan.byte_count
+            total_records += summary.scan.record_count
+            market_result["sample"] = {
+                "path": str(sample_path),
+                "raw_byte_sha256": summary.scan.raw_byte_sha256,
+                "byte_count": summary.scan.byte_count,
+                "record_count": summary.scan.record_count,
+                "first_date": summary.scan.first_date.isoformat(),
+                "last_date": summary.scan.last_date.isoformat(),
+                "source_identity": asdict(summary.source),
+                "read_started_at": summary.scan.read_started_at.isoformat(),
+                "read_completed_at": summary.scan.read_completed_at.isoformat(),
+                "price_diagnostic_scale": "raw_price_integer/100 per existing decoder; candidate protocol observation only",
+                "amount_unit": "UNVERIFIED_RAW_FLOAT32",
+                "volume_unit": "UNVERIFIED_RAW_UINT32",
+                "field_quality": {name: asdict(getattr(summary.scan, name)) for name in ("prices", "amount", "volume")},
+            }
+        markets[market] = market_result
+
+    capabilities: list[dict[str, Any]] = [{
+        "capability": "TDX_DAILY_RAW",
+        "dataset_id": "TDX_DAILY_BARS",
+        "version": "TDX_DAY_RECORD_32B_CANDIDATE",
+        "source_authority": "UNVERIFIED_LOCAL_TDX_INSTALLATION",
+        "producer": "stock_a.sources.tdx.day.decode_day_record + day_stream.DayRecordScan",
+        "field_contract": [
+            {"field": "trade_date", "unit": "YYYYMMDD calendar date", "time_role": "trade_date only; not publication or availability", "quality": "date validation in existing parser", "consumer_admission": "DENY_UNTIL_OFFICIAL_CALENDAR"},
+            {"field": "open/high/low/close", "unit": "candidate raw price integer / 100", "time_role": "bar trade_date", "quality": "group validation counts included per sample", "consumer_admission": "DENY_NORMALIZED_CORE_PENDING_SOURCE_AND_UNIT_AUTHORITY"},
+            {"field": "amount", "unit": "UNVERIFIED_RAW_FLOAT32", "time_role": "bar trade_date", "quality": "finite/nonnegative group validation counts included per sample", "consumer_admission": "DENY_NORMALIZED_CORE"},
+            {"field": "volume", "unit": "UNVERIFIED_RAW_UINT32", "time_role": "bar trade_date", "quality": "nonnegative integer group validation counts included per sample", "consumer_admission": "DENY_NORMALIZED_CORE"},
+        ],
+        "clock_contract": {"observed_at": "read_started_at/read_completed_at with local timezone per sample", "available_at": "UNKNOWN", "published_at": "UNKNOWN", "captured_at": "this local CLI read observation only; not historical first capture", "sealed_at": "UNKNOWN"},
+        "required": True,
+        "status": "BLOCKED",
+        "reason": "真实文件可读，但仅每市场一个样本；成交额/成交量单位及其来源权威未独立成立，未注册规范化消费者",
+        "sample_scope": sample_rule,
+        "consumer_admission": "DENY_NORMALIZED_CORE",
+    }]
+
+    action_path = _safe_file(root / "T0002" / "hq_cache" / "gbbq", root, optional=True)
+    action_result: dict[str, Any] = {"status": "UNAVAILABLE", "reason": "来源文件不存在"}
+    if action_path is not None:
+        action_size = action_path.stat().st_size
+        if action_size > args.max_file_bytes or total_bytes + action_size > args.max_total_bytes:
+            action_result = {"status": "BLOCKED", "reason": "GBBQ超过本次字节预算", "byte_count": action_size}
+        else:
+            try:
+                raw, identity = read_protected_bytes(action_path, roots, max_bytes=args.max_file_bytes, max_seconds=float(seconds))
+            except DayReadError as error:
+                exit_code = _READ_ERROR_EXIT_CODES.get(error.code, _EXIT_ENGINEERING)
+                raise DiagnosticError(error.code, f"GBBQ真实文件未能完整核验：{error}", exit_code) from error
+            total_bytes += len(raw)
+            try:
+                parsed = decode_gbbq_bytes(
+                    raw,
+                    source_ref="TDX_LOCAL_GBBQ_CANDIDATE",
+                    protocol_version=GBBQ_PROTOCOL_VERSION,
+                    unit_version=GBBQ_UNIT_VERSION,
+                    max_bytes=args.max_file_bytes,
+                    max_records=args.max_records,
+                )
+            except GbbqDecodeError as error:
+                action_result = {"status": "BLOCKED", "reason": "GBBQ内容合同未闭合", "error_code": error.code, "raw_byte_sha256": hashlib.sha256(raw).hexdigest(), "byte_count": len(raw), "handle_path": identity.handle_path}
+            else:
+                categories: dict[str, int] = {}
+                for record in parsed.records:
+                    categories[record.category_name] = categories.get(record.category_name, 0) + 1
+                action_result = {
+                    "status": "DEGRADED_PASS",
+                    "path": str(action_path),
+                    "handle_path": identity.handle_path,
+                    "raw_byte_sha256": hashlib.sha256(raw).hexdigest(),
+                    "byte_count": len(raw),
+                    "record_count": parsed.parsed_count,
+                    "category_counts": categories,
+                    "protocol_version": parsed.protocol_version,
+                    "unit_version": parsed.unit_version,
+                    "producer": "stock_a.sources.tdx.actions.decode_gbbq_bytes",
+                    "source_authority": "UNVERIFIED_LOCAL_TDX_INSTALLATION",
+                    "identity_status": "SOURCE_SYMBOL_ONLY_NOT_STABLE_ENTITY",
+                    "pit_status": "NOT_ASSERTED_LOCAL_READ_CLOCK_ONLY",
+                    "consumer_admission": "CATEGORY_1_CANDIDATE_ONLY_NO_PIT_OR_OFFICIAL_IDENTITY",
+                }
+    capabilities.append({
+        "capability": "TDX_GBBQ_CORPORATE_ACTIONS",
+        "required": False,
+        "status": action_result["status"],
+        "reason": "本地字节可解析但不构成身份或PIT证明" if action_result["status"] == "DEGRADED_PASS" else action_result.get("reason"),
+        "evidence": action_result,
+    })
+
+    classification_candidates = []
+    for relative in ("T0002/hq_cache/tdxhy.cfg", "T0002/hq_cache/infoharbor_block.dat"):
+        candidate = _safe_file(root.joinpath(*relative.split("/")), root, optional=True)
+        if candidate is not None:
+            classification_candidates.append({"path": str(candidate), "byte_count": candidate.stat().st_size})
+    identity_candidates = []
+    for relative in ("T0002/hq_cache/ds_stk.dat", "T0002/hq_cache/base.dbf", "T0002/hq_cache/code2name.ini"):
+        candidate = _safe_file(root.joinpath(*relative.split("/")), root, optional=True)
+        if candidate is not None:
+            identity_candidates.append({"path": str(candidate), "byte_count": candidate.stat().st_size})
+    capabilities.extend([
+        {"capability": "TDX_INDUSTRY_CONCEPT_MEMBERSHIP", "required": False, "status": "BLOCKED", "reason": "分类候选文件存在但未有新项目解析/有效时钟合同；U03解析内核待后续身份与成员任务接入", "candidates": classification_candidates, "consumer_admission": "DENY"},
+        {"capability": "SECURITY_ENTITY_AND_LIFECYCLE", "required": True, "status": "BLOCKED", "reason": "本地目录/代码/首条日线不是官方稳定实体、上市/退市或换码证明；U06候选未在本目标引入", "candidates": identity_candidates, "consumer_admission": "DENY_UNMAPPED"},
+        {"capability": "OFFICIAL_TRADING_CALENDAR_AND_STATUS", "required": True, "status": "BLOCKED", "reason": "未识别并验证版本化交易所日历或日期有效状态来源；禁止由连续价格或缺bar推断", "consumer_admission": "DENY_UNKNOWN_GAPS"},
+        {"capability": "BAOSTOCK_SUPPLEMENTAL", "required": False, "status": "UNAVAILABLE", "reason": "本任务禁止联网或调用第三方接口，未验证逐字段覆盖与单位", "consumer_admission": "DENY_SUPPLEMENTAL_ONLY"},
+    ])
+    required_blocked = any(item["required"] and item["status"] not in ("FULL_PASS", "DEGRADED_PASS") for item in capabilities)
+    overall = "BLOCKED" if required_blocked else ("DEGRADED_PASS" if any(item["status"] != "FULL_PASS" for item in capabilities) else "FULL_PASS")
+    elapsed = time.monotonic() - started
+    if elapsed > float(seconds):
+        raise DiagnosticError("READ_TIMEOUT", "本次阶段0核验整体超过耗时预算，不生成完成摘要", _EXIT_UNAVAILABLE)
+    _emit({
+        "ok": overall != "BLOCKED",
+        "status": overall,
+        "message": "已按声明预算完成本地只读阶段0核验；BLOCKED能力不进入scanner/消费者，观测时钟不代表available_at、published_at、封口或PIT",
+        "package": package,
+        "configuration_path": str(config_path),
+        "source_root": str(root),
+        "source_root_final_path": str(root),
+        "observed_at": datetime.now().astimezone().isoformat(),
+        "clock_role": "LOCAL_OBSERVED_AT_ONLY",
+        "sample_rule": sample_rule,
+        "market_directories": markets,
+        "capabilities": capabilities,
+        "coverage": {"day_file_count": sum(item["day_file_count"] for item in markets.values()), "sampled_day_files": sum(item["sample"] is not None for item in markets.values()), "unsampled_day_files": sum(item["day_file_count"] for item in markets.values()) - sum(item["sample"] is not None for item in markets.values()), "sampled_records": total_records, "sampled_source_bytes": total_bytes},
+        "budgets": {"max_entries_per_market_directory": args.max_entries, "max_file_bytes": args.max_file_bytes, "max_total_bytes": args.max_total_bytes, "max_records_per_file": args.max_records, "max_seconds": str(seconds), "elapsed_seconds": round(elapsed, 6)},
+        "business_admission": "DENY" if overall == "BLOCKED" else "SCOPED_ONLY",
+        "database_connected": False,
+        "production_switched": False,
+    })
+    return _EXIT_UNAVAILABLE if overall == "BLOCKED" else _EXIT_OK
+
+
+def _safe_file(path: Path, root: Path, *, optional: bool = False) -> Path | None:
+    try:
+        resolved = path.resolve(strict=True)
+        resolved.relative_to(root)
+        mode = resolved.stat().st_mode
+    except FileNotFoundError:
+        if optional:
+            return None
+        raise DiagnosticError("SOURCE_PATH_INVALID", "所需TDX目录不存在")
+    except PermissionError as error:
+        raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验来源文件", _EXIT_PERMISSION) from error
+    except OSError as error:
+        raise DiagnosticError("SOURCE_IO_ERROR", "核验来源文件时发生工程I/O错误", _EXIT_ENGINEERING) from error
+    except ValueError as error:
+        raise DiagnosticError("SOURCE_PATH_INVALID", "来源文件最终路径离开保护根") from error
+    if not stat.S_ISREG(mode):
+        raise DiagnosticError("SOURCE_PATH_INVALID", "来源目标不是普通文件")
+    return resolved
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
@@ -401,6 +673,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "doctor":
             return _run_doctor(args)
+        if args.command == "source-phase0":
+            return _run_source_phase0(args)
         if args.command == "source-inspect":
             return _run_source_inspect(args)
     except DiagnosticError as error:

@@ -5,6 +5,7 @@ import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime
+import math
 import os
 from pathlib import Path
 import stat
@@ -522,3 +523,106 @@ def open_day_file(
 ) -> _DayFileContext:
     """返回文件扫描上下文；只在验证实际只读句柄后开始读取。"""
     return _DayFileContext(source_path, source_roots, units, limits, monotonic)
+
+
+def read_protected_bytes(
+    source_path: str | os.PathLike[str],
+    source_roots: Iterable[str | os.PathLike[str]] | None,
+    *,
+    max_bytes: int,
+    max_seconds: int | float,
+) -> tuple[bytes, FileSourceIdentity]:
+    """在最终句柄、路径别名和字节/时间预算均验证后只读取得一个完整文件。"""
+    if type(max_bytes) is not int or max_bytes <= 0:
+        raise ContractError("max_bytes必须是拒绝bool的正整数")
+    if isinstance(max_seconds, bool) or not isinstance(max_seconds, (int, float)):
+        raise ContractError("max_seconds必须是有限正数")
+    if not math.isfinite(float(max_seconds)) or max_seconds <= 0:
+        raise ContractError("max_seconds必须是有限正数")
+    started = time.monotonic()
+    if source_roots is None or isinstance(source_roots, (str, bytes, os.PathLike)):
+        root_values = source_roots
+    else:
+        try:
+            root_values = tuple(source_roots)
+        except TypeError as error:
+            raise _failure("SOURCE_PATH_INVALID", "PATH", detail="source_roots必须是可读序列", cause=error)
+    roots = _resolved_roots(root_values)
+    requested = _path_value(source_path, "来源文件")
+    initial_path = _resolved(requested, missing_code="SOURCE_NOT_FOUND", label="来源文件")
+    if not _inside_roots(initial_path, roots):
+        raise _failure("SOURCE_PATH_OUTSIDE_ROOT", "PATH")
+    if any(":" in part for part in initial_path.parts[1:]):
+        raise _failure("SOURCE_PATH_INVALID", "PATH", detail="不接受NTFS备用数据流路径")
+    initial_stat = _stat_version(initial_path)
+    if initial_stat.st_size > max_bytes:
+        raise DayReadError("READ_LIMIT_EXCEEDED", "BUDGET")
+    stream = None
+    try:
+        stream, kernel32 = _open_readonly(requested)
+        before = _handle_version(stream, kernel32)
+        if not _inside_roots(before.final_path, roots):
+            raise _failure("SOURCE_PATH_OUTSIDE_ROOT", "PATH", detail="实际句柄最终目标在保护根外")
+        if before.final_path != initial_path or not _path_identity_matches(initial_stat, before):
+            raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="打开时来源路径与只读句柄身份不一致")
+        data = bytearray()
+        while True:
+            if time.monotonic() - started > float(max_seconds):
+                raise DayReadError("READ_TIMEOUT", "BUDGET")
+            remaining = max_bytes + 1 - len(data)
+            block = stream.read(min(64 * 1024, remaining))
+            if not block:
+                break
+            data.extend(block)
+            if len(data) > max_bytes:
+                raise DayReadError("READ_LIMIT_EXCEEDED", "BUDGET")
+        after = _handle_version(stream, kernel32)
+        current_roots = _resolved_roots(root_values)
+        current_path = _resolved(requested, missing_code="SOURCE_CHANGED", label="来源文件")
+        current_stat = _stat_version(current_path)
+        if (
+            current_roots != roots
+            or current_path != initial_path
+            or after.final_path != initial_path
+            or not _path_identity_matches(current_stat, after)
+            or before.volume_serial_number != after.volume_serial_number
+            or before.file_id != after.file_id
+            or before.size != after.size
+            or before.mtime_ns != after.mtime_ns
+            or len(data) != before.size
+        ):
+            raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="来源在完整读取期间发生变化")
+        if time.monotonic() - started > float(max_seconds):
+            raise DayReadError("READ_TIMEOUT", "BUDGET")
+        identity = FileSourceIdentity(
+            requested_path=str(requested),
+            handle_path=str(after.final_path),
+            volume_serial_number=after.volume_serial_number,
+            file_id=after.file_id,
+            size_before=before.size,
+            size_after=after.size,
+            mtime_ns_before=before.mtime_ns,
+            mtime_ns_after=after.mtime_ns,
+            requested_access="GENERIC_READ",
+            path_binding_verified=True,
+            handle_path_verified=True,
+        )
+    except BaseException as original:
+        if stream is not None and not stream.closed:
+            try:
+                stream.close()
+            except OSError as close_error:
+                add_note = getattr(original, "add_note", None)
+                if callable(add_note):
+                    add_note(f"关闭来源句柄时另有错误：{close_error}")
+        if isinstance(original, PermissionError):
+            raise _failure("SOURCE_ACCESS_DENIED", "PERMISSION", cause=original)
+        if isinstance(original, OSError) and not isinstance(original, DayReadError):
+            raise _failure("SOURCE_IO_ERROR", "IO", cause=original)
+        raise
+    if stream is not None and not stream.closed:
+        try:
+            stream.close()
+        except OSError as error:
+            raise _failure("SOURCE_IO_ERROR", "IO", detail="关闭来源句柄失败", cause=error)
+    return bytes(data), identity

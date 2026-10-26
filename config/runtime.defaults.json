@@ -31,7 +31,9 @@
     "temp_tablespaces": ""
   },
   "source_policy": {
-    "configured_tdx_source_roots": [],
+    "configured_tdx_source_roots": [
+      "D:/new_tdx"
+    ],
     "all_source_roots_read_only": true,
     "require_phase0_before_dependent_operations": true
   },
