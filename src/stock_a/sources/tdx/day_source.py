@@ -156,8 +156,10 @@ def _resolved_roots(source_roots: Iterable[str | os.PathLike[str]] | None) -> tu
         resolved = _resolved(root, missing_code="SOURCE_PATH_INVALID", label="来源保护根")
         try:
             mode = resolved.stat().st_mode
+        except PermissionError as error:
+            raise _failure("SOURCE_ACCESS_DENIED", "PERMISSION", cause=error)
         except OSError as error:
-            raise _failure("SOURCE_PATH_INVALID", "PATH", detail="来源保护根无法检查", cause=error)
+            raise _failure("SOURCE_IO_ERROR", "IO", cause=error)
         if not stat.S_ISDIR(mode):
             raise _failure("SOURCE_PATH_INVALID", "PATH", detail="来源保护根必须是目录")
         roots.append(resolved)

@@ -101,7 +101,7 @@ def _load_runtime_config(explicit_path: str | None = None) -> tuple[dict[str, An
         except PermissionError as error:
             raise DiagnosticError("CONFIG_PERMISSION_DENIED", "操作系统拒绝核验正式配置路径", _EXIT_PERMISSION) from error
         except OSError as error:
-            raise DiagnosticError("CONFIG_PATH_REJECTED", "无法核验显式配置路径") from error
+            raise DiagnosticError("CONFIG_IO_ERROR", "核验显式配置路径时发生工程I/O错误", _EXIT_ENGINEERING) from error
     try:
         config_root = _CONFIG_ROOT.resolve(strict=True)
         config_path = _CONFIG_FILE.resolve(strict=True)
@@ -114,13 +114,15 @@ def _load_runtime_config(explicit_path: str | None = None) -> tuple[dict[str, An
     except PermissionError as error:
         raise DiagnosticError("CONFIG_PERMISSION_DENIED", "操作系统拒绝核验正式配置根及最终路径", _EXIT_PERMISSION) from error
     except OSError as error:
-        raise DiagnosticError("CONFIG_PATH_REJECTED", "无法核验正式配置根及最终路径") from error
+        raise DiagnosticError("CONFIG_IO_ERROR", "核验正式配置根及最终路径时发生工程I/O错误", _EXIT_ENGINEERING) from error
     try:
         with config_path.open("r", encoding="utf-8") as stream:
             config = json.load(stream, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
     except PermissionError as error:
         raise DiagnosticError("CONFIG_PERMISSION_DENIED", "操作系统拒绝读取正式配置", _EXIT_PERMISSION) from error
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+    except OSError as error:
+        raise DiagnosticError("CONFIG_IO_ERROR", "读取正式配置时发生工程I/O错误", _EXIT_ENGINEERING) from error
+    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
         raise DiagnosticError("CONFIG_INVALID", "正式配置无法按UTF-8 JSON读取") from error
     _validate_config(config)
     return config, config_path
