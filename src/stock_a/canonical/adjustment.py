@@ -478,12 +478,24 @@ def adjust_ohlc(
     *,
     tick: object | None = None,
 ) -> tuple[Fraction, Fraction, Fraction, Fraction]:
+    if not isinstance(factor, AdjustmentFactor):
+        raise ContractError("factor必须是AdjustmentFactor")
     if not isinstance(ohlc, tuple) or len(ohlc) != 4:
         raise ContractError("OHLC必须为按开高低收排列的四元组")
-    values = tuple(affine_price(value, factor) for value in ohlc)
-    open_, high, low, close = values
-    if high < max(open_, low, close) or low > min(open_, high, close):
+
+    raw_values = []
+    for value in ohlc:
+        try:
+            raw_price = exact_number(value)
+        except (ValueError, TypeError, OverflowError) as exc:
+            raise ContractError("RAW OHLC价格必须是有限精确数且不能为bool/float") from exc
+        if raw_price <= 0:
+            raise ContractError("RAW OHLC价格必须大于0")
+        raw_values.append(raw_price)
+    raw_open, raw_high, raw_low, raw_close = raw_values
+    if raw_high < max(raw_open, raw_low, raw_close) or raw_low > min(raw_open, raw_high, raw_close):
         raise ContractError("RAW OHLC包络不合法")
+
     if tick is not None:
         try:
             supplied_tick = exact_number(tick)
@@ -491,6 +503,8 @@ def adjust_ohlc(
             raise ContractError("OHLC tick必须是有限精确数且不能为bool/float") from exc
         if supplied_tick != factor.tick:
             raise ContractError("OHLC tick与factor绑定tick不匹配")
+
+    values = tuple(factor.alpha * value + factor.beta for value in raw_values)
     rounded = tuple(
         value if factor.coordinate_mode == EXACT_RESEARCH_COORDINATE else round_to_tick(value, factor.tick)
         for value in values
