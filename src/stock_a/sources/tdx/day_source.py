@@ -469,7 +469,9 @@ class _DayFileContext:
                 try:
                     stream.close()
                 except OSError as close_error:
-                    original.add_note(f"关闭失败的来源句柄时另有错误：{close_error}")
+                    add_note = getattr(original, "add_note", None)
+                    if callable(add_note):
+                        add_note(f"关闭失败的来源句柄时另有错误：{close_error}")
             raise
 
     def __exit__(self, exc_type, exc, traceback) -> bool:
@@ -481,10 +483,9 @@ class _DayFileContext:
             except DayReadError as close_error:
                 if exc is None:
                     raise
-                try:
-                    exc.add_note(f"关闭来源句柄时另有错误：{close_error}")
-                except AttributeError:
-                    pass
+                add_note = getattr(exc, "add_note", None)
+                if callable(add_note):
+                    add_note(f"关闭来源句柄时另有错误：{close_error}")
         return False
 
 
