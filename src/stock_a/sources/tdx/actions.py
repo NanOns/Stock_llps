@@ -291,8 +291,11 @@ def decode_record(
             reasons.append(reason)
 
     if category == 1:
-        for parameter, reason in zip(parameters, _CATEGORY1_REASONS, strict=True):
+        for index, (parameter, reason) in enumerate(
+            zip(parameters, _CATEGORY1_REASONS, strict=True)
+        ):
             if parameter is not None and parameter < 0:
+                parameter_reasons[index] = reason
                 reasons.append(reason)
         if all(parameter is not None for parameter in parameters):
             c3 = parameters[2]
@@ -301,6 +304,7 @@ def decode_record(
                 reasons.append("CATEGORY1_DENOMINATOR_NON_POSITIVE")
 
     data_quality = "INVALID_DATA" if reasons else "VALID"
+    # OBSERVED表示有限值已从float32解码，不单独表示该值通过类别语义约束。
     parameter_quality = tuple(
         "OBSERVED" if parameter is not None else "UNKNOWN_DATA" for parameter in parameters
     )
