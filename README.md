@@ -102,3 +102,29 @@ with open_day_file(source_path, (bound_source_root,), units, limits) as scan:
 ```
 
 `iter_day_records(readonly_stream, units, limits)`复用同一扫描内核，适用于调用方管理的非seekable二进制流，不关闭调用方流。文件入口使用只读Windows句柄，并核验句柄最终路径、身份及扫描前后大小/修改时点。超限、坏日期、重复/冲突、路径越界、扫描中变化及提前退出都不能获得完整摘要；已yield前缀不能视为完整输入。摘要中的原始字节SHA仅描述本次读取字节，不代表来源捕获、PIT时钟、来源封口或业务接受版本。
+
+## GBBQ字节解析
+
+`decode_gbbq_bytes`只解析调用方已经取得的有限字节。调用方必须提供协议版本、类别1单位版本、来源引用及字节/记录预算；它不打开来源文件或读取配置。此示例展示纯解析调用，`source_ref`用于追溯输入，不是证券稳定身份：
+
+```python
+from stock_a.sources.tdx.actions import (
+    GBBQ_PROTOCOL_VERSION,
+    GBBQ_UNIT_VERSION,
+    decode_gbbq_bytes,
+)
+
+parsed = decode_gbbq_bytes(
+    content,
+    source_ref="SYNTHETIC:gbbq-example",
+    protocol_version=GBBQ_PROTOCOL_VERSION,
+    unit_version=GBBQ_UNIT_VERSION,
+    max_bytes=content_byte_budget,
+    max_records=record_budget,
+)
+for record in parsed.records:
+    if record.semantic_status == "SUPPORTED_CATEGORY_1" and record.data_quality == "VALID":
+        fields = record.xrxd_fields()  # Fraction精确值；单位由版本合同固定
+```
+
+解码会保留输入顺序、重复记录、行质量、来源位置及未知类别；类别2–14的经济语义尚未接入类别1解释。市场/代码产生的`source_symbol`不等于稳定`security_id`，解析结果也不证明真实来源、PIT或公司行为准入。协议和类别1单位合同见[实现详细设计](docs/design/实现详细设计.md#32-gbbq协议与类别1解释)。
