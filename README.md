@@ -43,3 +43,39 @@ PG默认G盘配置尚不代表Windows服务已经应用。旧E盘数据不自动
 正常日更业务结果、计划、恢复游标、Owner/索引/回执全部存PG必要类型字段和引用；不生成逐日业务文件，不把源包/二进制/整对象JSON塞进PG。清空隔离测试临时目录不能破坏已入库历史查询和恢复；用户原始TDX来源仍保持只读。
 
 新项目数据库/schema设计身份为stock_a，仍使用唯一PG实例5432；物理G盘、项目/实例/迁移/角色须共同核验，本轮未初始化或切换。FOUNDATION已在现行机器合同绑定为同一执行器的具名范围；生产实现/真实PG/API/UI仍未完成。测试持久资产位于交付根过程资料/测试资产，临时根是执行副本。安装模式保留唯一config槽位，运行包不导入开发源码。
+
+## 安装最小业务包
+
+当前可安装包只包含 `src/stock_a` 业务模块，运行依赖为Python标准库；构建使用固定版本 `flit_core==4.1.0`。支持Python 3.10及以上，当前已核验的解释器版本以外不据此声称逐版本实测。
+
+在Windows PowerShell中构建wheel并安装到独立环境。构建输出、缓存、虚拟环境和临时文件都放在G盘临时根：
+
+```powershell
+$env:TEMP = 'G:\codex_tmp'
+$env:TMP = 'G:\codex_tmp'
+$env:TMPDIR = 'G:\codex_tmp'
+$env:PIP_CACHE_DIR = 'G:\codex_tmp\stock-a\pip-cache'
+python -m pip wheel --no-deps --wheel-dir 'G:\codex_tmp\stock-a\wheel' 'G:\codex work\Stock A'
+python -m venv 'G:\codex_tmp\stock-a\venv'
+& 'G:\codex_tmp\stock-a\venv\Scripts\python.exe' -m pip install 'G:\codex_tmp\stock-a\wheel\stock_a-0.1.0-py3-none-any.whl'
+```
+
+安装后的模块入口不读取项目配置、行情文件或数据库。调用示例显式提供日线单位、画像输入和规则：
+
+```python
+from collections.abc import Mapping
+
+from stock_a.canonical.identity import semantic_digest
+from stock_a.domain import FieldValue
+from stock_a.research.profile import profile
+from stock_a.sources.tdx.day import UnitContract, decode_day_record
+
+def evaluate(raw32: bytes, units: UnitContract, field_id: str,
+             inputs: Mapping[str, FieldValue], rules: Mapping):
+    day = decode_day_record(raw32, units)
+    digest = semantic_digest((day.session_date, day.prices))
+    result = profile(field_id, inputs, rules)
+    return day, digest, result
+```
+
+调用方为 `evaluate` 提供原始32字节记录、单位合同、字段ID、带质量的输入和已登记规则；画像规则需符合字段合同。接口展示纯内核调用，不代表已完成真实来源采集、全域数值验收、数据库写入、服务或页面运行。

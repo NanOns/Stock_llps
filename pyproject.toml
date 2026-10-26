@@ -1,0 +1,15 @@
+[build-system]
+requires = ["flit_core==4.1.0"]
+build-backend = "flit_core.buildapi"
+
+[project]
+name = "stock-a"
+version = "0.1.0"
+description = "A股市场结构研究业务内核"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = []
+
+[tool.flit.module]
+name = "stock_a"
+directory = "src"
