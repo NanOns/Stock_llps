@@ -46,6 +46,25 @@ PG默认G盘配置尚不代表Windows服务已经应用。旧E盘数据不自动
 
 ## 安装最小业务包
 
+安装包提供唯一正式中文CLI，`stock-a`与`python -m stock_a`使用同一调度入口。帮助不需要配置：
+
+```powershell
+stock-a --help
+stock-a doctor
+```
+
+`doctor`读取唯一登记的`config/runtime.defaults.json`，输出包/配置/来源根/数据库身份的结构诊断，不连接PG或来源。当前配置roots为空、数据库部署未应用时返回3，表示本地诊断可读但业务能力未就绪；其输出不授权业务启动。
+
+单文件检查必须显式指定绝对路径、单位与有限预算。金额倍率示例使用0.5元/原始单位，数量倍率示例使用100股/原始单位；调用者须根据真实合同确定数值：
+
+```powershell
+stock-a source-inspect 'G:\已绑定来源根\日线文件.day' `
+  --unit-version SOURCE-UNIT-R1 --amount-to-cny 0.5 --volume-to-shares 100 `
+  --max-bytes 33554432 --max-records 1048576 --chunk-records 256 --max-seconds 30
+```
+
+来源根只从已验证运行配置读取，不能以命令行临时根替代。当前来源根为空，因此该检查会在打开文件前以非零退出拒绝；本例展示接口形状，不代表已有绑定来源。成功摘要采用JSON写stdout，错误JSON写stderr；退出码0为命令完成、2为参数/合同错误、3为配置或来源不可用、4为系统拒绝访问、5为工程错误。所有消息为中文，稳定错误码保留原生标识。
+
 当前可安装包只包含 `src/stock_a` 业务模块，运行依赖为Python标准库；构建使用固定版本 `flit_core==4.1.0`。支持Python 3.10及以上，当前已核验的解释器版本以外不据此声称逐版本实测。
 
 在Windows PowerShell中构建wheel并安装到独立环境。构建输出、缓存、虚拟环境和临时文件都放在G盘临时根：
