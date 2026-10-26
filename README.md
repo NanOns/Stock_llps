@@ -148,7 +148,7 @@ from stock_a.canonical.adjustment import (
 context = AdjustmentContext(
     security_id="SYNTHETIC:entity-1",
     source_basis="RAW:S1",
-    target_basis="ADJUSTED:S2",
+    target_basis="ADJ:S2",
     target_session=date(2026, 1, 2),
     source_cutoff=datetime(2026, 1, 3, tzinfo=timezone.utc),
     tick=Fraction(1, 100),
@@ -165,8 +165,8 @@ event = XrxdEvent(
     rights_per_10=0,
 )
 factor = build_affine_factor([event], source_session=date(2026, 1, 1), context=context)
-adjusted = affine_price(11, factor, tick=context.tick)  # 10
+adjusted = affine_price(11, factor, tick=context.tick)  # Fraction(109, 10)，即10.90
 atr = transport_difference(2, factor)  # 2；仅乘alpha，不加beta
 ```
 
-同日多事件须传唯一`same_day_order`；缺序、重复引用、未知实体或不支持事件跨越均明确拒绝。价格中间过程不舍入，只在目标坐标按显式tick一次HALF_UP。完整合同见[实现详细设计§3.3](docs/design/实现详细设计.md#33-本地仿射)。
+同日多事件须传唯一`same_day_order`；缺序、重复引用、未知实体或不支持事件跨越均明确拒绝。正式`ADJ:`坐标在factor中绑定tick，省略或重复传入tick都按该绑定值计算；不同tick有不同目标坐标身份。需要精确未量化结果时，必须明确使用独立`RESEARCH:`坐标和`EXACT_RESEARCH`模式。正式价格只在最终目标坐标执行一次HALF_UP。完整合同见[实现详细设计§3.3](docs/design/实现详细设计.md#33-本地仿射)。
