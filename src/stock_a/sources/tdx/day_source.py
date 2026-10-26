@@ -185,6 +185,8 @@ def _windows_kernel32():
     kernel32.CreateFileW.restype = wintypes.HANDLE
     kernel32.GetFileType.argtypes = (wintypes.HANDLE,)
     kernel32.GetFileType.restype = wintypes.DWORD
+    kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    kernel32.CloseHandle.restype = wintypes.BOOL
     kernel32.GetFileInformationByHandle.argtypes = (
         wintypes.HANDLE,
         ctypes.POINTER(_BY_HANDLE_FILE_INFORMATION),
@@ -224,10 +226,31 @@ def _open_readonly(path: Path):
         import msvcrt
 
         descriptor = msvcrt.open_osfhandle(int(handle), os.O_RDONLY | os.O_BINARY)
-    except (ImportError, OSError, OverflowError, TypeError) as error:
-        kernel32.CloseHandle(handle)
+    except BaseException as error:
+        try:
+            if not kernel32.CloseHandle(handle):
+                close_error = ctypes.WinError(ctypes.get_last_error())
+                add_note = getattr(error, "add_note", None)
+                if callable(add_note):
+                    add_note(f"关闭未接管的Windows来源句柄时另有错误：{close_error}")
+        except BaseException as close_error:
+            add_note = getattr(error, "add_note", None)
+            if callable(add_note):
+                add_note(f"关闭未接管的Windows来源句柄时另有错误：{close_error}")
+        if not isinstance(error, (ImportError, OSError, OverflowError, TypeError)):
+            raise
         raise _failure("SOURCE_HANDLE_UNVERIFIED", "HANDLE", detail="只读句柄无法接入受控流", cause=error)
-    return os.fdopen(descriptor, "rb", buffering=0), kernel32
+    try:
+        stream = os.fdopen(descriptor, "rb", buffering=0)
+    except BaseException as error:
+        try:
+            os.close(descriptor)
+        except BaseException as close_error:
+            add_note = getattr(error, "add_note", None)
+            if callable(add_note):
+                add_note(f"关闭未接管的来源文件描述符时另有错误：{close_error}")
+        raise
+    return stream, kernel32
 
 
 def _final_path(kernel32, handle: int) -> Path:
