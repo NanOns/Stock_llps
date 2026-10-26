@@ -128,3 +128,45 @@ for record in parsed.records:
 ```
 
 解码会保留输入顺序、重复记录、行质量、来源位置及未知类别；类别2–14的经济语义尚未接入类别1解释。市场/代码产生的`source_symbol`不等于稳定`security_id`，解析结果也不证明真实来源、PIT或公司行为准入。协议和类别1单位合同见[实现详细设计](docs/design/实现详细设计.md#32-gbbq协议与类别1解释)。
+
+## 精确仿射坐标运输
+
+`stock_a.canonical.adjustment`提供无IO的精确仿射系数、价格/逆变换、OHLC与差值运输。每次调用必须显式提供稳定实体、源/目标basis、目标会话、带时区的知识截止及正tick；公司行为的有效会话和可得时钟由上游经过核验后注入。示例只用于合成研究，不能替代真实来源或PIT证明。
+
+```python
+from datetime import date, datetime, timezone
+from fractions import Fraction
+
+from stock_a.canonical.adjustment import (
+    AdjustmentContext,
+    XrxdEvent,
+    affine_price,
+    build_affine_factor,
+    transport_difference,
+)
+
+context = AdjustmentContext(
+    security_id="SYNTHETIC:entity-1",
+    source_basis="RAW:S1",
+    target_basis="ADJUSTED:S2",
+    target_session=date(2026, 1, 2),
+    source_cutoff=datetime(2026, 1, 3, tzinfo=timezone.utc),
+    tick=Fraction(1, 100),
+)
+event = XrxdEvent(
+    event_ref="SYNTHETIC:event-1",
+    source_ref="SYNTHETIC:actions",
+    security_id=context.security_id,
+    effective_session=date(2026, 1, 2),
+    available_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
+    cash_per_10=1,
+    rights_price=0,
+    bonus_per_10=0,
+    rights_per_10=0,
+)
+factor = build_affine_factor([event], source_session=date(2026, 1, 1), context=context)
+adjusted = affine_price(11, factor, tick=context.tick)  # 10
+atr = transport_difference(2, factor)  # 2；仅乘alpha，不加beta
+```
+
+同日多事件须传唯一`same_day_order`；缺序、重复引用、未知实体或不支持事件跨越均明确拒绝。价格中间过程不舍入，只在目标坐标按显式tick一次HALF_UP。完整合同见[实现详细设计§3.3](docs/design/实现详细设计.md#33-本地仿射)。
