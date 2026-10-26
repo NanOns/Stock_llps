@@ -424,11 +424,14 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
         }
         if names:
             sample_path = _safe_file(root / "vipdoc" / market / "lday" / names[0], root)
-            size = sample_path.stat().st_size
+            size = _source_file_size(sample_path)
             if size > args.max_file_bytes or total_bytes + size > args.max_total_bytes:
                 raise DiagnosticError("READ_LIMIT_EXCEEDED", "日线样本超过本次文件或总字节预算", _EXIT_UNAVAILABLE)
             units = UnitContract("TDX_RAW_DIAGNOSTIC_ONLY", Decimal(1), 1)
-            limits = ReadLimits(args.max_file_bytes, args.max_records, 1024, seconds)
+            remaining_total = args.max_total_bytes - total_bytes
+            if remaining_total <= 0:
+                raise DiagnosticError("READ_LIMIT_EXCEEDED", "日线样本没有剩余总字节预算", _EXIT_UNAVAILABLE)
+            limits = ReadLimits(min(args.max_file_bytes, remaining_total), args.max_records, 1024, seconds)
             try:
                 with open_day_file(sample_path, roots, units, limits) as scan:
                     for _record in scan:
@@ -481,47 +484,52 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
     action_path = _safe_file(root / "T0002" / "hq_cache" / "gbbq", root, optional=True)
     action_result: dict[str, Any] = {"status": "UNAVAILABLE", "reason": "来源文件不存在"}
     if action_path is not None:
-        action_size = action_path.stat().st_size
-        if action_size > args.max_file_bytes or total_bytes + action_size > args.max_total_bytes:
-            action_result = {"status": "BLOCKED", "reason": "GBBQ超过本次字节预算", "byte_count": action_size}
+        action_size = _source_file_size(action_path)
+        remaining_total = args.max_total_bytes - total_bytes
+        if remaining_total <= 0 or action_size > args.max_file_bytes or action_size > remaining_total:
+            raise DiagnosticError("READ_LIMIT_EXCEEDED", "GBBQ超过本次文件或总字节预算，未生成完成摘要", _EXIT_UNAVAILABLE)
+        try:
+            raw, identity = read_protected_bytes(
+                action_path,
+                roots,
+                max_bytes=min(args.max_file_bytes, remaining_total),
+                max_seconds=float(seconds),
+            )
+        except DayReadError as error:
+            exit_code = _READ_ERROR_EXIT_CODES.get(error.code, _EXIT_ENGINEERING)
+            raise DiagnosticError(error.code, f"GBBQ真实文件未能完整核验：{error}", exit_code) from error
+        total_bytes += len(raw)
+        try:
+            parsed = decode_gbbq_bytes(
+                raw,
+                source_ref="TDX_LOCAL_GBBQ_CANDIDATE",
+                protocol_version=GBBQ_PROTOCOL_VERSION,
+                unit_version=GBBQ_UNIT_VERSION,
+                max_bytes=args.max_file_bytes,
+                max_records=args.max_records,
+            )
+        except GbbqDecodeError as error:
+            action_result = {"status": "BLOCKED", "reason": "GBBQ内容合同未闭合", "error_code": error.code, "raw_byte_sha256": hashlib.sha256(raw).hexdigest(), "byte_count": len(raw), "handle_path": identity.handle_path}
         else:
-            try:
-                raw, identity = read_protected_bytes(action_path, roots, max_bytes=args.max_file_bytes, max_seconds=float(seconds))
-            except DayReadError as error:
-                exit_code = _READ_ERROR_EXIT_CODES.get(error.code, _EXIT_ENGINEERING)
-                raise DiagnosticError(error.code, f"GBBQ真实文件未能完整核验：{error}", exit_code) from error
-            total_bytes += len(raw)
-            try:
-                parsed = decode_gbbq_bytes(
-                    raw,
-                    source_ref="TDX_LOCAL_GBBQ_CANDIDATE",
-                    protocol_version=GBBQ_PROTOCOL_VERSION,
-                    unit_version=GBBQ_UNIT_VERSION,
-                    max_bytes=args.max_file_bytes,
-                    max_records=args.max_records,
-                )
-            except GbbqDecodeError as error:
-                action_result = {"status": "BLOCKED", "reason": "GBBQ内容合同未闭合", "error_code": error.code, "raw_byte_sha256": hashlib.sha256(raw).hexdigest(), "byte_count": len(raw), "handle_path": identity.handle_path}
-            else:
-                categories: dict[str, int] = {}
-                for record in parsed.records:
-                    categories[record.category_name] = categories.get(record.category_name, 0) + 1
-                action_result = {
-                    "status": "DEGRADED_PASS",
-                    "path": str(action_path),
-                    "handle_path": identity.handle_path,
-                    "raw_byte_sha256": hashlib.sha256(raw).hexdigest(),
-                    "byte_count": len(raw),
-                    "record_count": parsed.parsed_count,
-                    "category_counts": categories,
-                    "protocol_version": parsed.protocol_version,
-                    "unit_version": parsed.unit_version,
-                    "producer": "stock_a.sources.tdx.actions.decode_gbbq_bytes",
-                    "source_authority": "UNVERIFIED_LOCAL_TDX_INSTALLATION",
-                    "identity_status": "SOURCE_SYMBOL_ONLY_NOT_STABLE_ENTITY",
-                    "pit_status": "NOT_ASSERTED_LOCAL_READ_CLOCK_ONLY",
-                    "consumer_admission": "CATEGORY_1_CANDIDATE_ONLY_NO_PIT_OR_OFFICIAL_IDENTITY",
-                }
+            categories: dict[str, int] = {}
+            for record in parsed.records:
+                categories[record.category_name] = categories.get(record.category_name, 0) + 1
+            action_result = {
+                "status": "DEGRADED_PASS",
+                "path": str(action_path),
+                "handle_path": identity.handle_path,
+                "raw_byte_sha256": hashlib.sha256(raw).hexdigest(),
+                "byte_count": len(raw),
+                "record_count": parsed.parsed_count,
+                "category_counts": categories,
+                "protocol_version": parsed.protocol_version,
+                "unit_version": parsed.unit_version,
+                "producer": "stock_a.sources.tdx.actions.decode_gbbq_bytes",
+                "source_authority": "UNVERIFIED_LOCAL_TDX_INSTALLATION",
+                "identity_status": "SOURCE_SYMBOL_ONLY_NOT_STABLE_ENTITY",
+                "pit_status": "NOT_ASSERTED_LOCAL_READ_CLOCK_ONLY",
+                "consumer_admission": "CATEGORY_1_CANDIDATE_ONLY_NO_PIT_OR_OFFICIAL_IDENTITY",
+            }
     capabilities.append({
         "capability": "TDX_GBBQ_CORPORATE_ACTIONS",
         "required": False,
@@ -534,12 +542,12 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
     for relative in ("T0002/hq_cache/tdxhy.cfg", "T0002/hq_cache/infoharbor_block.dat"):
         candidate = _safe_file(root.joinpath(*relative.split("/")), root, optional=True)
         if candidate is not None:
-            classification_candidates.append({"path": str(candidate), "byte_count": candidate.stat().st_size})
+            classification_candidates.append({"path": str(candidate), "byte_count": _source_file_size(candidate)})
     identity_candidates = []
     for relative in ("T0002/hq_cache/ds_stk.dat", "T0002/hq_cache/base.dbf", "T0002/hq_cache/code2name.ini"):
         candidate = _safe_file(root.joinpath(*relative.split("/")), root, optional=True)
         if candidate is not None:
-            identity_candidates.append({"path": str(candidate), "byte_count": candidate.stat().st_size})
+            identity_candidates.append({"path": str(candidate), "byte_count": _source_file_size(candidate)})
     capabilities.extend([
         {"capability": "TDX_INDUSTRY_CONCEPT_MEMBERSHIP", "required": False, "status": "BLOCKED", "reason": "分类候选文件存在但未有新项目解析/有效时钟合同；U03解析内核待后续身份与成员任务接入", "candidates": classification_candidates, "consumer_admission": "DENY"},
         {"capability": "SECURITY_ENTITY_AND_LIFECYCLE", "required": True, "status": "BLOCKED", "reason": "本地目录/代码/首条日线不是官方稳定实体、上市/退市或换码证明；U06候选未在本目标引入", "candidates": identity_candidates, "consumer_admission": "DENY_UNMAPPED"},
@@ -591,6 +599,18 @@ def _safe_file(path: Path, root: Path, *, optional: bool = False) -> Path | None
     if not stat.S_ISREG(mode):
         raise DiagnosticError("SOURCE_PATH_INVALID", "来源目标不是普通文件")
     return resolved
+
+
+def _source_file_size(path: Path) -> int:
+    """读取来源大小元数据，并保留来源缺失、权限拒绝与工程I/O的区别。"""
+    try:
+        return path.stat().st_size
+    except FileNotFoundError as error:
+        raise DiagnosticError("SOURCE_NOT_FOUND", "来源文件在大小核验时已不存在", _EXIT_UNAVAILABLE) from error
+    except PermissionError as error:
+        raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝读取来源文件大小", _EXIT_PERMISSION) from error
+    except OSError as error:
+        raise DiagnosticError("SOURCE_IO_ERROR", "读取来源文件大小时发生工程I/O错误", _EXIT_ENGINEERING) from error
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
