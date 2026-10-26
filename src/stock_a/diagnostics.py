@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import sys
 from typing import Any
+import uuid
 
 from stock_a import __version__
 from stock_a.domain import ContractError
@@ -28,6 +29,27 @@ _EXIT_ARGUMENT = 2
 _EXIT_UNAVAILABLE = 3
 _EXIT_PERMISSION = 4
 _EXIT_ENGINEERING = 5
+
+_READ_ERROR_EXIT_CODES = {
+    "SOURCE_NOT_CONFIGURED": _EXIT_UNAVAILABLE,
+    "SOURCE_PATH_INVALID": _EXIT_UNAVAILABLE,
+    "SOURCE_PATH_OUTSIDE_ROOT": _EXIT_UNAVAILABLE,
+    "SOURCE_NOT_FOUND": _EXIT_UNAVAILABLE,
+    "SOURCE_ACCESS_DENIED": _EXIT_PERMISSION,
+    "SOURCE_HANDLE_UNVERIFIED": _EXIT_UNAVAILABLE,
+    "SOURCE_IO_ERROR": _EXIT_ENGINEERING,
+    "SOURCE_CHANGED": _EXIT_UNAVAILABLE,
+    "READ_LIMIT_EXCEEDED": _EXIT_UNAVAILABLE,
+    "READ_TIMEOUT": _EXIT_UNAVAILABLE,
+    "STREAM_CONTRACT_ERROR": _EXIT_ENGINEERING,
+    "EMPTY_FILE": _EXIT_UNAVAILABLE,
+    "INCOMPLETE_TAIL_RECORD": _EXIT_UNAVAILABLE,
+    "INVALID_DATE": _EXIT_UNAVAILABLE,
+    "DUPLICATE_DATE": _EXIT_UNAVAILABLE,
+    "SAME_DAY_CONFLICT": _EXIT_UNAVAILABLE,
+    "NON_INCREASING_DATE": _EXIT_UNAVAILABLE,
+    "SCAN_NOT_COMPLETE": _EXIT_ENGINEERING,
+}
 
 
 class DiagnosticError(Exception):
@@ -76,6 +98,8 @@ def _load_runtime_config(explicit_path: str | None = None) -> tuple[dict[str, An
                 raise DiagnosticError("CONFIG_PATH_REJECTED", "仅允许读取唯一登记配置runtime.defaults.json")
         except FileNotFoundError as error:
             raise DiagnosticError("CONFIG_MISSING", "唯一正式运行配置不存在") from error
+        except PermissionError as error:
+            raise DiagnosticError("CONFIG_PERMISSION_DENIED", "操作系统拒绝核验正式配置路径", _EXIT_PERMISSION) from error
         except OSError as error:
             raise DiagnosticError("CONFIG_PATH_REJECTED", "无法核验显式配置路径") from error
     try:
@@ -87,6 +111,8 @@ def _load_runtime_config(explicit_path: str | None = None) -> tuple[dict[str, An
             raise DiagnosticError("CONFIG_MISSING", "唯一正式运行配置不是普通文件")
     except FileNotFoundError as error:
         raise DiagnosticError("CONFIG_MISSING", "唯一正式运行配置或配置根不存在") from error
+    except PermissionError as error:
+        raise DiagnosticError("CONFIG_PERMISSION_DENIED", "操作系统拒绝核验正式配置根及最终路径", _EXIT_PERMISSION) from error
     except OSError as error:
         raise DiagnosticError("CONFIG_PATH_REJECTED", "无法核验正式配置根及最终路径") from error
     try:
@@ -143,27 +169,61 @@ def _validate_config(config: Any) -> None:
         raise DiagnosticError("CONFIG_INVALID", "公共配置登记清单与已批准配置槽位不一致")
     sources = _require_mapping(root.get("source_policy"), "source_policy")
     roots = sources.get("configured_tdx_source_roots")
-    if not isinstance(roots, list) or any(not isinstance(item, str) or not Path(item).is_absolute() for item in roots):
+    if (
+        not isinstance(roots, list)
+        or any(not isinstance(item, str) or not item or not Path(item).is_absolute() for item in roots)
+        or sources.get("all_source_roots_read_only") is not True
+        or sources.get("require_phase0_before_dependent_operations") is not True
+    ):
         raise DiagnosticError("CONFIG_INVALID", "TDX来源根必须是绝对路径字符串列表")
     app = _require_mapping(root.get("application_identity"), "application_identity")
-    if app.get("application_id") != "STOCK_A" or not isinstance(app.get("project_uuid"), str):
+    project_uuid = app.get("project_uuid")
+    try:
+        valid_project_uuid = isinstance(project_uuid, str) and str(uuid.UUID(project_uuid)) == project_uuid.lower()
+    except (ValueError, AttributeError):
+        valid_project_uuid = False
+    if app.get("application_id") != "STOCK_A" or not valid_project_uuid:
         raise DiagnosticError("CONFIG_INVALID", "应用身份声明不完整")
     if type(app.get("deployment_applied")) is not bool:
         raise DiagnosticError("CONFIG_INVALID", "deployment_applied必须是布尔值")
-    for key in ("deployment_instance_uuid", "cluster_system_identifier"):
-        if not isinstance(app.get(key), str):
-            raise DiagnosticError("CONFIG_INVALID", f"应用身份{key}类型错误")
+    if not isinstance(app.get("migration_lineage"), str) or not app["migration_lineage"].strip():
+        raise DiagnosticError("CONFIG_INVALID", "应用迁移谱系声明缺失")
+    instance_id = app.get("deployment_instance_uuid")
+    cluster_id = app.get("cluster_system_identifier")
+    if app["deployment_applied"] is False:
+        if instance_id != "BIND_DURING_EXPLICIT_ENABLEMENT" or cluster_id != "BIND_DURING_EXPLICIT_ENABLEMENT":
+            raise DiagnosticError("CONFIG_INVALID", "未部署状态必须使用明确的实例与簇绑定占位值")
+    else:
+        try:
+            valid_instance = isinstance(instance_id, str) and str(uuid.UUID(instance_id)) == instance_id.lower()
+        except (ValueError, AttributeError):
+            valid_instance = False
+        if not valid_instance or not isinstance(cluster_id, str) or not cluster_id.isdecimal() or int(cluster_id) <= 0:
+            raise DiagnosticError("CONFIG_INVALID", "已部署状态的实例或簇身份无效")
     roles = app.get("roles")
     if not isinstance(roles, list) or not roles or any(not isinstance(role, str) or not role for role in roles):
         raise DiagnosticError("CONFIG_INVALID", "应用角色声明必须是非空字符串列表")
     database = _require_mapping(root.get("postgresql"), "postgresql")
     for key in ("database", "business_schema"):
-        if not isinstance(database.get(key), str) or not database[key]:
-            raise DiagnosticError("CONFIG_INVALID", f"数据库声明{key}缺失或类型错误")
+        if database.get(key) != "stock_a":
+            raise DiagnosticError("CONFIG_INVALID", f"数据库声明{key}必须固定为stock_a")
     service_role = _require_mapping(root.get("startup_policy"), "startup_policy")
-    for key in ("require_explicit_validated_configuration", "require_pg_data_directory_match", "allow_legacy_postgres_writes"):
-        if type(service_role.get(key)) is not bool:
-            raise DiagnosticError("CONFIG_INVALID", f"启动策略{key}必须是布尔值")
+    expected_security_policy = {
+        "require_explicit_validated_configuration": True,
+        "require_pg_data_directory_match": True,
+        "allow_legacy_postgres_writes": False,
+        "allow_automatic_pg_initialization": False,
+        "allow_automatic_old_data_migration": False,
+        "allow_port_takeover": False,
+        "require_database_schema_application_instance_and_migration_match": True,
+        "require_role_namespace_match": True,
+        "allow_automatic_identity_bootstrap": False,
+    }
+    for key, expected_value in expected_security_policy.items():
+        if type(service_role.get(key)) is not bool or service_role[key] is not expected_value:
+            raise DiagnosticError("CONFIG_INVALID", f"启动安全策略{key}缺失、类型错误或值违反固定策略")
+    if app.get("runtime_role_must_match_namespace") is not True:
+        raise DiagnosticError("CONFIG_INVALID", "应用角色必须要求与命名空间匹配")
 
 
 def _configuration_snapshot(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
@@ -211,12 +271,38 @@ def _emit(payload: dict[str, Any], *, error: bool = False) -> None:
     print(text, file=sys.stderr if error else sys.stdout)
 
 
-def _parser() -> argparse.ArgumentParser:
-    class ChineseParser(argparse.ArgumentParser):
-        def error(self, message: str) -> None:
-            _emit({"ok": False, "code": "ARGUMENT_ERROR", "message": "参数错误：请核对命令格式及必需参数"}, error=True)
-            raise SystemExit(_EXIT_ARGUMENT)
+class ChineseFormatter(argparse.HelpFormatter):
+    def _format_usage(self, usage, actions, groups, prefix):
+        return super()._format_usage(usage, actions, groups, "用法：")
 
+    def start_section(self, heading):
+        translated = {"positional arguments": "位置参数", "options": "选项"}.get(heading, heading)
+        super().start_section(translated)
+
+
+class ChineseParser(argparse.ArgumentParser):
+    formatter_class = ChineseFormatter
+
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("add_help", False)
+        super().__init__(*args, **kwargs)
+        self.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS, help="显示此帮助信息并退出")
+
+    def format_usage(self) -> str:
+        return super().format_usage().replace("usage:", "用法：", 1)
+
+    def format_help(self) -> str:
+        rendered = super().format_help().replace("usage:", "用法：", 1)
+        for english, chinese in (("positional arguments:", "位置参数："), ("optional arguments:", "选项："), ("options:", "选项：")):
+            rendered = rendered.replace(english, chinese)
+        return rendered
+
+    def error(self, message: str) -> None:
+        _emit({"ok": False, "code": "ARGUMENT_ERROR", "message": "参数错误：请核对命令格式及必需参数"}, error=True)
+        raise SystemExit(_EXIT_ARGUMENT)
+
+
+def _parser() -> argparse.ArgumentParser:
     parser = ChineseParser(prog="stock-a", description="Stock A中文诊断与TDX只读来源检查")
     commands = parser.add_subparsers(dest="command", parser_class=ChineseParser)
     doctor = commands.add_parser("doctor", help="诊断本地配置、包身份和声明能力")
@@ -271,8 +357,8 @@ def _run_source_inspect(args: argparse.Namespace) -> int:
             summary = file_summary.scan
             source = file_summary.source
     except DayReadError as error:
-        exit_code = _EXIT_PERMISSION if error.code == "SOURCE_ACCESS_DENIED" else _EXIT_UNAVAILABLE
-        _emit({"ok": False, "code": error.code, "reason_category": error.reason_category, "message": str(error), "record_index": error.record_index, "byte_offset": error.byte_offset}, error=True)
+        exit_code = _READ_ERROR_EXIT_CODES.get(error.code, _EXIT_ENGINEERING)
+        _emit({"ok": False, "code": error.code, "reason_category": error.reason_category, "cause_type": type(error.__cause__).__name__ if error.__cause__ is not None else None, "message": str(error), "record_index": error.record_index, "byte_offset": error.byte_offset}, error=True)
         return exit_code
     except PermissionError as error:
         raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝读取来源文件", _EXIT_PERMISSION) from error
@@ -316,9 +402,12 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "source-inspect":
             return _run_source_inspect(args)
     except DiagnosticError as error:
-        _emit({"ok": False, "code": error.code, "message": str(error)}, error=True)
+        _emit({"ok": False, "code": error.code, "cause_type": type(error.__cause__).__name__ if error.__cause__ is not None else None, "message": str(error)}, error=True)
         return error.exit_code
+    except KeyboardInterrupt:
+        _emit({"ok": False, "code": "OPERATION_INTERRUPTED", "message": "操作已中断，未生成完整来源摘要"}, error=True)
+        return _EXIT_ENGINEERING
     except Exception as error:
-        _emit({"ok": False, "code": "ENGINEERING_ERROR", "message": f"诊断执行失败：{type(error).__name__}"}, error=True)
+        _emit({"ok": False, "code": "ENGINEERING_ERROR", "cause_type": type(error).__name__, "message": f"诊断执行失败：{type(error).__name__}"}, error=True)
         return _EXIT_ENGINEERING
     return _EXIT_ENGINEERING
