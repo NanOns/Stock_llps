@@ -18383,6 +18383,39 @@
         "generic_day_chain_complete": false
       },
       "implementation_binding_required": true,
+      "day_plan_pure_kernel": {
+        "symbol": "stock_a.planning:assemble_day_plan",
+        "state": "IMPLEMENTED",
+        "implementation_scope": "显式上下文到不可变DayPlan候选、正式scope stage/artifact闭包拓扑、增量分类与上游环境状态聚合",
+        "contract_digest_algorithm": "SHA-256",
+        "contract_digest_canonicalization": "UTF-8 JSON; sorted object keys; compact separators",
+        "required_environment_capabilities": [
+          "validated_configuration",
+          "calendar_authority",
+          "accepted_state_catalog",
+          "contract_registry",
+          "build_identity",
+          "pg_deployment",
+          "source_phase0",
+          "readonly_source_roots"
+        ],
+        "business_digest_fields_ref": "revision_policy.business_input_digest_fields",
+        "business_input_digest_definition": "Canonical JSON SHA-256 over full contract identity, scope revision binding, calendar identity, semantic revisions and registered values/quality/provenance/parameters/producer inputs; target and execution schedule are separate plan identity.",
+        "plan_digest_definition": "Canonical JSON SHA-256 over contract, scope, business input digest, target, complete frozen context, prior context, environment evidence, incremental decision, parent generation and scheduled session/stage closure.",
+        "digest_excludes": [
+          "wall_clock_duration",
+          "request_id",
+          "cache_hit",
+          "temporary_path"
+        ],
+        "input_authentication": "NOT_PERFORMED_UPSTREAM_ASSERTIONS_ONLY",
+        "p00_runtime_validation": "NOT_IMPLEMENTED",
+        "day_plan_persistence": "NOT_IMPLEMENTED_NEEDS_DEPENDENCY",
+        "dag_execution": "NOT_IMPLEMENTED_NEEDS_DEPENDENCY",
+        "worker_lease_and_fencing": "NOT_IMPLEMENTED_NEEDS_DEPENDENCY",
+        "range_repair_execution": "NOT_IMPLEMENTED_NEEDS_DEPENDENCY",
+        "production_pipeline": "NOT_IMPLEMENTED_NEEDS_DEPENDENCY"
+      },
       "runtime_implementation_present": false,
       "within_stage_field_toposort_required": true,
       "parameter_binding_state": "ADOPTED_PROFILE_BASELINE_OTHER_DOMAINS_REQUIRE_BINDING",

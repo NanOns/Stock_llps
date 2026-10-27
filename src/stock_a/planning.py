@@ -5,12 +5,23 @@ from dataclasses import dataclass
 from datetime import date
 from hashlib import sha256
 import json
+from types import MappingProxyType
 
 from stock_a.domain import ContractError
 
 
 # 该摘要固定正式机器合同中的完整scope闭包目录；依赖键仅维护在合同文件。
 _OFFICIAL_SCOPE_CLOSURE_CATALOG_DIGEST = "3cce5f595d838d988e422199df8346359bebe5910811d98f88c94dcfe013f265"
+_OFFICIAL_DAY_CHAIN_CONTRACT_SHA256 = "6af7c44c70d71d73ec6511a1670e8bb758f2318a23261442bea9275e95d4dc6c"
+_DAY_PLAN_KERNEL_SYMBOL = "stock_a.planning:assemble_day_plan"
+
+
+class DayPlanError(ContractError):
+    """DayPlan合同拒绝，带稳定机器原因码。"""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
 
 
 @dataclass(frozen=True)
@@ -287,3 +298,521 @@ def classify_incremental_mode(
     return IncrementalModeDecision(
         "APPEND", target_session, previous.head_generation, sessions_to_append, ()
     )
+
+
+@dataclass(frozen=True)
+class CapabilityEvidence:
+    """上游显式报告的能力状态；本类型不验证该声明的真实性。"""
+
+    status: str
+    evidence_ref: str | None
+
+
+@dataclass(frozen=True)
+class DayPlanRequest:
+    """P00纯计划输入；没有隐式I/O或默认业务身份。"""
+
+    contract: Mapping[str, object]
+    contract_sha256: str
+    scope_id: str
+    target_session: date
+    official_sessions: tuple[date, ...]
+    calendar_id: str
+    calendar_revision: str
+    scope_revision_contract: ScopeRevisionClosureContract
+    semantic_revisions: Mapping[str, str]
+    previous: AcceptedRunIdentity | None
+    historical_repair_required: bool
+    validated_inputs: Mapping[str, CapabilityEvidence]
+    environment_capabilities: Mapping[str, CapabilityEvidence]
+    frozen_context: Mapping[str, object]
+    business_identity: Mapping[str, object]
+    prior_context: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class DayPlan:
+    """不可变计划候选；不表示P00真实生产核验或DAG已执行。"""
+
+    scope_id: str
+    contract_id: str
+    contract_version: str
+    contract_sha256: str
+    plan_sha256: str
+    target_session: date
+    calendar_id: str
+    calendar_revision: str
+    mode: str
+    decision_state: str
+    expected_parent_generation: int | None
+    sessions_to_append: tuple[date, ...]
+    session_range: tuple[date, ...]
+    required_stage_ids: tuple[str, ...]
+    scheduled_stage_ids: tuple[str, ...]
+    stage_kernel_roles: tuple[tuple[str, str], ...]
+    required_owner_roles: tuple[str, ...]
+    required_field_ids: tuple[str, ...]
+    required_consumers: tuple[str, ...]
+    history_policy: Mapping[str, object]
+    frozen_context: Mapping[str, object]
+    input_digest: str
+    reason_codes: tuple[str, ...]
+    candidate_ready: bool
+
+
+@dataclass(frozen=True)
+class EnvironmentGate:
+    """按显式上游状态聚合的计划门，不是运行时部署证明。"""
+
+    status: str
+    capability_states: tuple[tuple[str, str, str | None], ...]
+    reason_codes: tuple[str, ...]
+    upstream_claims_authenticated: bool = False
+
+
+@dataclass(frozen=True)
+class DayPlanResult:
+    day_plan: DayPlan
+    environment_gate: EnvironmentGate
+    prior_context: Mapping[str, object]
+
+
+def _plan_error(code: str, message: str) -> DayPlanError:
+    return DayPlanError(code, message)
+
+
+def _json_identity(value: object, name: str) -> object:
+    """校验并复制稳定JSON身份，拒绝浮点、日期隐式转换及任意对象。"""
+    if value is None or type(value) in (str, bool, int):
+        return value
+    if type(value) is float:
+        raise _plan_error("BUSINESS_IDENTITY_INVALID", name + "不能含二进制浮点数")
+    if isinstance(value, Mapping):
+        result = {}
+        for key, item in value.items():
+            if not isinstance(key, str) or not key:
+                raise _plan_error("BUSINESS_IDENTITY_INVALID", name + "含非法对象键")
+            if key in result:
+                raise _plan_error("BUSINESS_IDENTITY_INVALID", name + "含重复对象键")
+            result[key] = _json_identity(item, name + "." + key)
+        return result
+    if isinstance(value, (tuple, list)):
+        return [_json_identity(item, name + "[]") for item in value]
+    raise _plan_error("BUSINESS_IDENTITY_INVALID", name + "含不支持的身份值")
+
+
+def _freeze_value(value: object) -> object:
+    if isinstance(value, Mapping):
+        return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+    if isinstance(value, list):
+        return tuple(_freeze_value(item) for item in value)
+    return value
+
+
+def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
+    return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+
+
+def _validated_contract(request: DayPlanRequest) -> tuple[Mapping[str, object], str]:
+    if not isinstance(request.contract, Mapping):
+        raise _plan_error("CONTRACT_INVALID", "必须显式提供正式机器合同映射")
+    try:
+        canonical = json.dumps(
+            request.contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    except (TypeError, ValueError) as exc:
+        raise _plan_error("CONTRACT_INVALID", "机器合同不是稳定JSON结构") from exc
+    calculated = sha256(canonical).hexdigest()
+    if request.contract_sha256 != calculated or calculated != _OFFICIAL_DAY_CHAIN_CONTRACT_SHA256:
+        raise _plan_error("CONTRACT_SHA_MISMATCH", "机器合同规范化摘要不是当前正式合同绑定摘要")
+    if (request.contract.get("contract_id") != "STOCK-A-DAY-CHAIN"
+            or request.contract.get("version") != "R10"):
+        raise _plan_error("CONTRACT_VERSION_MISMATCH", "机器合同身份或版本不匹配")
+    binding = request.contract.get("scope_bindings")
+    if not isinstance(binding, Mapping) or "FOUNDATION_EOD" not in binding:
+        raise _plan_error("SCOPE_BINDING_MISSING", "正式合同缺少FOUNDATION_EOD绑定")
+    day_plan_binding = binding["FOUNDATION_EOD"].get("day_plan_pure_kernel")
+    if (not isinstance(day_plan_binding, Mapping)
+            or day_plan_binding.get("contract_digest_algorithm") != "SHA-256"
+            or day_plan_binding.get("contract_digest_canonicalization") != "UTF-8 JSON; sorted object keys; compact separators"):
+        raise _plan_error("CONTRACT_DIGEST_CANONICALIZATION_UNSUPPORTED", "机器合同摘要算法与规范化规则不支持")
+    return request.contract, calculated
+
+
+def _validate_stage_dag(contract: Mapping[str, object], scope_id: str) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
+    bindings = contract.get("scope_bindings")
+    scope = bindings.get(scope_id) if isinstance(bindings, Mapping) else None
+    if not isinstance(scope, Mapping):
+        raise _plan_error("SCOPE_BINDING_MISSING", "所选scope没有正式机器绑定")
+    raw_bindings = scope.get("stage_bindings")
+    raw_stages = contract.get("stages")
+    artifacts = contract.get("artifact_groups")
+    if not isinstance(raw_bindings, list) or not isinstance(raw_stages, list) or not isinstance(artifacts, Mapping):
+        raise _plan_error("DAG_CONTRACT_INCOMPLETE", "机器合同缺少stage或artifact注册表")
+
+    stage_by_id = {}
+    for stage in raw_stages:
+        if not isinstance(stage, Mapping) or not isinstance(stage.get("id"), str):
+            raise _plan_error("DAG_STAGE_INVALID", "全局stage登记结构非法")
+        stage_id = stage["id"]
+        if stage_id in stage_by_id:
+            raise _plan_error("DAG_DUPLICATE_STAGE_ID", "全局stage ID重复")
+        stage_by_id[stage_id] = stage
+    binding_by_id = {}
+    for item in raw_bindings:
+        if not isinstance(item, Mapping) or not isinstance(item.get("stage_id"), str):
+            raise _plan_error("DAG_STAGE_BINDING_INVALID", "scope stage binding结构非法")
+        stage_id = item["stage_id"]
+        if stage_id in binding_by_id:
+            raise _plan_error("DAG_DUPLICATE_STAGE_ID", "scope stage binding ID重复")
+        if stage_id not in stage_by_id:
+            raise _plan_error("DAG_STAGE_MISSING", "scope引用未登记stage: " + stage_id)
+        role = item.get("kernel_role")
+        if not isinstance(role, str) or not role.strip():
+            raise _plan_error("DAG_KERNEL_ROLE_MISSING", "stage缺少具名kernel role: " + stage_id)
+        if item.get("implementation_binding_required") is not True:
+            raise _plan_error("DAG_KERNEL_BINDING_NOT_REQUIRED", "scope stage缺少必需kernel绑定: " + stage_id)
+        global_stage = stage_by_id[stage_id]
+        for binding_key, stage_key in (("required_inputs", "required_inputs"),
+                                       ("optional_inputs", "optional_inputs"),
+                                       ("outputs", "outputs")):
+            projected = item.get(binding_key)
+            declared = global_stage.get(stage_key)
+            if (not isinstance(projected, list) or not isinstance(declared, list)
+                    or any(not isinstance(value, str) for value in projected)
+                    or len(projected) != len(set(projected))
+                    or not set(projected).issubset(set(declared))):
+                raise _plan_error("DAG_STAGE_BINDING_MISMATCH", stage_id + "的" + binding_key + "不是正式stage的合法scope投影")
+        binding_by_id[stage_id] = item
+
+    producer_for_artifact = {}
+    for artifact_id, artifact in artifacts.items():
+        if not isinstance(artifact_id, str) or not isinstance(artifact, Mapping):
+            raise _plan_error("DAG_ARTIFACT_INVALID", "artifact登记结构非法")
+        producer = artifact.get("producer")
+        consumers = artifact.get("consumers")
+        if not isinstance(producer, str) or not isinstance(consumers, list):
+            raise _plan_error("DAG_ARTIFACT_INVALID", "artifact缺少producer或consumer: " + artifact_id)
+        if artifact_id in producer_for_artifact:
+            raise _plan_error("DAG_DUPLICATE_ARTIFACT_ID", "artifact ID重复")
+        producer_for_artifact[artifact_id] = producer
+        if producer not in stage_by_id:
+            raise _plan_error("DAG_UNKNOWN_PRODUCER", "artifact producer未登记: " + artifact_id)
+        if artifact_id not in stage_by_id[producer].get("outputs", []):
+            raise _plan_error("DAG_PRODUCER_OUTPUT_MISMATCH", "artifact producer未声明输出: " + artifact_id)
+        for consumer in consumers:
+            if (consumer not in stage_by_id or artifact_id not in
+                    stage_by_id[consumer].get("required_inputs", []) + stage_by_id[consumer].get("optional_inputs", [])):
+                raise _plan_error("DAG_CONSUMER_INPUT_MISMATCH", "artifact consumer输入声明不匹配: " + artifact_id)
+    for stage_id, binding in binding_by_id.items():
+        for artifact_id in binding.get("required_inputs", []) + binding.get("optional_inputs", []):
+            if artifact_id.startswith("ext."):
+                continue
+            artifact = artifacts.get(artifact_id)
+            if not isinstance(artifact, Mapping) or stage_id not in artifact.get("consumers", []):
+                raise _plan_error("DAG_CONSUMER_INPUT_MISMATCH", stage_id + "输入未登记为artifact消费者: " + artifact_id)
+
+    included = set(binding_by_id)
+    for stage_id, binding in binding_by_id.items():
+        for artifact_id in binding.get("required_inputs", []):
+            if artifact_id.startswith("ext."):
+                continue
+            producer = producer_for_artifact.get(artifact_id)
+            if producer is None:
+                raise _plan_error("DAG_REQUIRED_INPUT_UNBOUND", stage_id + "必需输入无producer: " + artifact_id)
+            if producer not in included:
+                raise _plan_error("DAG_REQUIRED_PRODUCER_OUTSIDE_SCOPE", stage_id + "必需输入producer未纳入scope: " + artifact_id)
+            if artifact_id not in binding_by_id[producer].get("outputs", []):
+                raise _plan_error("DAG_REQUIRED_OUTPUT_UNBOUND", producer + "未在scope输出中绑定必需产物: " + artifact_id)
+        for artifact_id in binding.get("outputs", []):
+            if producer_for_artifact.get(artifact_id) != stage_id:
+                raise _plan_error("DAG_REQUIRED_OUTPUT_UNBOUND", stage_id + "输出未绑定唯一producer: " + artifact_id)
+
+    dependencies = {stage_id: set() for stage_id in included}
+    for stage_id, binding in binding_by_id.items():
+        for artifact_id in binding["required_inputs"]:
+            producer = producer_for_artifact.get(artifact_id)
+            if producer in included and producer != stage_id:
+                dependencies[stage_id].add(producer)
+            elif producer == stage_id:
+                raise _plan_error("DAG_CYCLE", "stage自依赖: " + stage_id)
+    order = []
+    remaining = {stage_id: set(deps) for stage_id, deps in dependencies.items()}
+    while remaining:
+        ready = sorted(stage_id for stage_id, deps in remaining.items() if not deps)
+        if not ready:
+            raise _plan_error("DAG_CYCLE", "scope stage依赖存在环")
+        for stage_id in ready:
+            order.append(stage_id)
+            del remaining[stage_id]
+        for deps in remaining.values():
+            deps.difference_update(ready)
+    roles = tuple((stage_id, binding_by_id[stage_id]["kernel_role"]) for stage_id in order)
+    return tuple(order), roles
+
+
+def _validate_evidence_map(
+    supplied: Mapping[str, CapabilityEvidence], required: tuple[str, ...], name: str
+) -> tuple[tuple[str, str, str | None], ...]:
+    if not isinstance(supplied, Mapping):
+        raise _plan_error("EVIDENCE_MAP_MISSING", name + "必须显式提供")
+    states = []
+    for key in required:
+        evidence = supplied.get(key)
+        if not isinstance(evidence, CapabilityEvidence):
+            states.append((key, "UNKNOWN", None))
+            continue
+        status, ref = evidence.status, evidence.evidence_ref
+        if not isinstance(status, str) or status not in {"READY", "DENY", "UNKNOWN"}:
+            raise _plan_error("EVIDENCE_STATUS_INVALID", name + "状态必须为READY/DENY/UNKNOWN: " + key)
+        if ref is not None and (not isinstance(ref, str) or not ref.strip()):
+            raise _plan_error("EVIDENCE_REF_INVALID", name + "证据引用不能为空白字符串: " + key)
+        states.append((key, status, ref))
+    return tuple(states)
+
+
+def _required_context_fields(contract: Mapping[str, object], scope_id: str) -> tuple[str, ...]:
+    stages = contract["scope_bindings"][scope_id]["stage_bindings"]
+    p00 = [item for item in stages if item.get("stage_id") == "P00"]
+    if len(p00) != 1:
+        raise _plan_error("P00_BINDING_INVALID", "FOUNDATION_EOD必须恰有一个P00绑定")
+    required = p00[0].get("required_inputs")
+    if not isinstance(required, list) or not required:
+        raise _plan_error("P00_INPUTS_INCOMPLETE", "P00必需输入登记缺失")
+    return tuple(required)
+
+
+def _scope_denominators(
+    contract: Mapping[str, object], scope_id: str, stage_ids: tuple[str, ...], context: Mapping[str, object]
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+    scope = contract["scope_bindings"][scope_id]
+    owner_roles = scope.get("owner_roles")
+    field_registry = scope.get("field_registry")
+    consumers = scope.get("required_consumers")
+    if not isinstance(owner_roles, Mapping) or not owner_roles:
+        raise _plan_error("SCOPE_OWNER_REGISTRY_INCOMPLETE", "scope缺少完整owner角色登记")
+    owner_ids = tuple(sorted(owner_roles))
+    for owner_id, artifact_ids in owner_roles.items():
+        if not isinstance(owner_id, str) or not owner_id or not isinstance(artifact_ids, list) or not artifact_ids:
+            raise _plan_error("SCOPE_OWNER_REGISTRY_INVALID", "scope owner角色登记结构非法")
+        if len(artifact_ids) != len(set(artifact_ids)):
+            raise _plan_error("SCOPE_OWNER_REGISTRY_INVALID", "scope owner角色重复登记产物")
+        for artifact_id in artifact_ids:
+            if not isinstance(artifact_id, str) or artifact_id not in contract["artifact_groups"]:
+                raise _plan_error("SCOPE_OWNER_ARTIFACT_UNBOUND", "owner引用未登记artifact")
+            if contract["artifact_groups"][artifact_id].get("producer") not in stage_ids:
+                raise _plan_error("SCOPE_OWNER_ARTIFACT_UNBOUND", "owner产物producer未纳入scope闭包")
+    if not isinstance(field_registry, list) or not field_registry:
+        raise _plan_error("SCOPE_FIELD_REGISTRY_INCOMPLETE", "scope缺少完整字段登记")
+    field_ids = []
+    for field in field_registry:
+        if not isinstance(field, Mapping):
+            raise _plan_error("SCOPE_FIELD_REGISTRY_INVALID", "scope字段登记结构非法")
+        field_id, producer_stage, field_consumers = field.get("field_id"), field.get("producer_stage"), field.get("consumers")
+        if (not isinstance(field_id, str) or not field_id.strip() or field_id in field_ids
+                or producer_stage not in stage_ids or not isinstance(field_consumers, list)
+                or not field_consumers):
+            raise _plan_error("SCOPE_FIELD_REGISTRY_INVALID", "scope字段身份、producer或consumer不完整")
+        field_ids.append(field_id)
+        if any(not isinstance(consumer, str) or not consumer.strip() for consumer in field_consumers):
+            raise _plan_error("SCOPE_FIELD_REGISTRY_INVALID", "scope字段含非法consumer")
+    if not isinstance(consumers, list) or not consumers or any(not isinstance(value, str) or not value for value in consumers):
+        raise _plan_error("SCOPE_CONSUMER_REGISTRY_INCOMPLETE", "scope缺少required consumer登记")
+    if len(consumers) != len(set(consumers)):
+        raise _plan_error("SCOPE_CONSUMER_REGISTRY_INVALID", "scope required consumer重复")
+
+    expected = {
+        "required_owner_roles": set(owner_ids),
+        "required_field_contracts": set(field_ids),
+        "required_consumers": set(consumers),
+    }
+    for key, identities in expected.items():
+        actual = context.get(key)
+        if not isinstance(actual, list) or any(not isinstance(item, str) for item in actual):
+            raise _plan_error("SCOPE_DENOMINATOR_MISSING", "冻结上下文必须以ID列表完整声明" + key)
+        if len(actual) != len(set(actual)) or set(actual) != identities:
+            raise _plan_error("SCOPE_DENOMINATOR_MISMATCH", key + "必须与正式scope目录完整一致")
+    return owner_ids, tuple(sorted(field_ids)), tuple(consumers)
+
+
+def _business_input_digest(request: DayPlanRequest, contract_sha256: str) -> str:
+    identity = _json_identity(request.business_identity, "business_identity")
+    if not isinstance(identity, dict) or not identity:
+        raise _plan_error("BUSINESS_IDENTITY_INVALID", "业务值/质量/provenance/参数/producer身份不能为空")
+    revision_policy = request.contract.get("revision_policy")
+    closure_policy = revision_policy.get("semantic_revision_closure") if isinstance(revision_policy, Mapping) else None
+    digest_fields = closure_policy.get("business_input_digest_fields") if isinstance(closure_policy, Mapping) else None
+    if (not isinstance(digest_fields, list) or not digest_fields
+            or any(not isinstance(key, str) or not key for key in digest_fields)
+            or len(digest_fields) != len(set(digest_fields))):
+        raise _plan_error("BUSINESS_DIGEST_CONTRACT_INVALID", "机器合同缺少正式业务摘要字段登记")
+    required = set(digest_fields)
+    if not required.issubset(identity):
+        raise _plan_error("BUSINESS_IDENTITY_INCOMPLETE", "业务摘要必须包含正式合同登记的values/quality/provenance/parameters/producer字段")
+    if any(identity[key] is None or identity[key] == "" or identity[key] == {} or identity[key] == [] for key in required):
+        raise _plan_error("BUSINESS_IDENTITY_INCOMPLETE", "业务摘要的值/质量/provenance/参数/producer身份不能为空")
+    if not isinstance(request.semantic_revisions, Mapping):
+        raise _plan_error("SEMANTIC_REVISION_INVALID", "语义revision必须显式提供映射")
+    payload = {
+        "contract_id": "STOCK-A-DAY-CHAIN",
+        "contract_version": "R10",
+        "contract_sha256": contract_sha256,
+        "scope_id": request.scope_id,
+        "scope_revision_binding_digest": request.scope_revision_contract.binding_digest,
+        "calendar_id": request.calendar_id,
+        "calendar_revision": request.calendar_revision,
+        "semantic_revisions": dict(request.semantic_revisions),
+        "business_identity": identity,
+    }
+    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256(canonical).hexdigest()
+
+
+def assemble_day_plan(request: DayPlanRequest) -> DayPlanResult:
+    """从显式上游上下文投影不可变P00候选；不认证输入、不执行stage。"""
+    if not isinstance(request, DayPlanRequest):
+        raise _plan_error("REQUEST_INVALID", "必须提供DayPlanRequest")
+    contract, contract_sha = _validated_contract(request)
+    try:
+        closure = _validated_scope_contract(request.scope_revision_contract)
+    except ContractError as exc:
+        raise _plan_error("SCOPE_REVISION_CONTRACT_INVALID", str(exc)) from exc
+    if closure.scope_id != request.scope_id:
+        raise _plan_error("SCOPE_REVISION_MISMATCH", "revision闭包与所选scope不一致")
+    scope_bindings = contract.get("scope_bindings")
+    scope_binding = scope_bindings.get(request.scope_id) if isinstance(scope_bindings, Mapping) else None
+    if not isinstance(scope_binding, Mapping):
+        raise _plan_error("SCOPE_BINDING_MISSING", "所选scope没有正式P00/kernel绑定")
+    kernel_binding = scope_binding.get("day_plan_pure_kernel")
+    if (not isinstance(kernel_binding, Mapping)
+            or kernel_binding.get("symbol") != _DAY_PLAN_KERNEL_SYMBOL
+            or kernel_binding.get("state") != "IMPLEMENTED"
+            or kernel_binding.get("business_digest_fields_ref") != "revision_policy.business_input_digest_fields"):
+        raise _plan_error("P00_KERNEL_BINDING_MISMATCH", "正式scope未绑定当前DayPlan纯内核")
+    stage_order, kernel_roles = _validate_stage_dag(contract, request.scope_id)
+    if type(request.target_session) is not date:
+        raise _plan_error("TARGET_SESSION_INVALID", "目标会话必须是date")
+    if not isinstance(request.frozen_context, Mapping) or not request.frozen_context:
+        raise _plan_error("FROZEN_CONTEXT_MISSING", "DayPlan冻结上下文不能为空")
+    context = _json_identity(request.frozen_context, "frozen_context")
+    if not isinstance(context, dict):
+        raise _plan_error("FROZEN_CONTEXT_INVALID", "DayPlan冻结上下文必须是对象")
+    freeze_keys = contract.get("scope_policy", {}).get("freeze_before_run", [])
+    missing_freeze = [key for key in freeze_keys if key not in context]
+    if missing_freeze:
+        raise _plan_error("FROZEN_CONTEXT_INCOMPLETE", "冻结上下文缺少: " + ",".join(missing_freeze))
+    owner_ids, field_ids, consumer_ids = _scope_denominators(
+        contract, request.scope_id, stage_order, context
+    )
+    history_policy = contract["scope_bindings"][request.scope_id].get("history_policy")
+    if not isinstance(history_policy, Mapping) or not history_policy:
+        raise _plan_error("SCOPE_HISTORY_POLICY_MISSING", "正式scope缺少历史依赖策略")
+    if context.get("target_session") != request.target_session.isoformat():
+        raise _plan_error("FROZEN_TARGET_MISMATCH", "冻结目标会话与计划目标不一致")
+    input_states = _validate_evidence_map(
+        request.validated_inputs, _required_context_fields(contract, request.scope_id), "P00必需输入"
+    )
+    capability_keys = kernel_binding.get("required_environment_capabilities")
+    if (not isinstance(capability_keys, list) or not capability_keys
+            or any(not isinstance(key, str) or not key for key in capability_keys)
+            or len(capability_keys) != len(set(capability_keys))):
+        raise _plan_error("P00_ENVIRONMENT_CONTRACT_INVALID", "正式DayPlan合同缺少必需环境能力登记")
+    capability_states = _validate_evidence_map(
+        request.environment_capabilities, tuple(capability_keys), "P00环境能力"
+    )
+    all_states = input_states + capability_states
+    blocked = tuple(key for key, status, ref in all_states if status != "READY" or not ref)
+    gate = EnvironmentGate(
+        "READY" if not blocked else "BLOCKED",
+        all_states,
+        () if not blocked else tuple("ENVIRONMENT_NOT_READY:" + key for key in blocked),
+        False,
+    )
+    if not isinstance(request.prior_context, Mapping):
+        raise _plan_error("PRIOR_CONTEXT_INVALID", "前态上下文必须显式为映射")
+    prior_context = _json_identity(request.prior_context, "prior_context")
+    if not isinstance(prior_context, dict):
+        raise _plan_error("PRIOR_CONTEXT_INVALID", "前态上下文必须是对象")
+    if request.previous is not None and not isinstance(request.previous, AcceptedRunIdentity):
+        raise _plan_error("PRIOR_CONTEXT_INVALID", "前态必须是AcceptedRunIdentity或None")
+    if request.previous is None and prior_context.get("first_run") is not True:
+        raise _plan_error("FIRST_RUN_CONTEXT_MISSING", "无前态时必须显式声明first_run=true")
+    if request.previous is not None and not isinstance(prior_context.get("accepted_identity_ref"), str):
+        raise _plan_error("PRIOR_CONTEXT_UNBOUND", "有前态时缺已接受身份引用")
+    expected_generation = None if request.previous is None else request.previous.head_generation
+    if context.get("expected_head_generation") != expected_generation:
+        raise _plan_error("FROZEN_PARENT_GENERATION_MISMATCH", "冻结父generation与已接受前态不一致")
+
+    digest = _business_input_digest(request, contract_sha)
+    try:
+        decision = classify_incremental_mode(
+            target_session=request.target_session,
+            official_sessions=request.official_sessions,
+            calendar_id=request.calendar_id,
+            calendar_revision=request.calendar_revision,
+            semantic_revisions=request.semantic_revisions,
+            scope_revision_contract=request.scope_revision_contract,
+            business_input_digest=digest,
+            previous=request.previous,
+            historical_repair_required=request.historical_repair_required,
+        )
+    except ContractError as exc:
+        raise _plan_error("INCREMENTAL_CLASSIFICATION_INVALID", str(exc)) from exc
+    if gate.status != "READY":
+        scheduled, session_range, state, allowed = (), (), "BLOCKED", False
+    elif decision.mode == "NOOP":
+        scheduled, session_range, state, allowed = (), (), "ALREADY_ACCEPTED", False
+    elif decision.mode == "RANGE_REPAIR_REQUIRED":
+        scheduled, session_range, state, allowed = (), (), "REPAIR_REQUIRED", False
+    else:
+        scheduled = stage_order
+        session_range = decision.sessions_to_append if decision.mode == "APPEND" else (request.target_session,)
+        state, allowed = "PLANNED", True
+    reasons = decision.reason_codes + gate.reason_codes
+    plan_identity = {
+        "contract_sha256": contract_sha,
+        "scope_id": request.scope_id,
+        "input_digest": digest,
+        "target_session": request.target_session.isoformat(),
+        "frozen_context": context,
+        "prior_context": prior_context,
+        "environment_capabilities": all_states,
+        "mode": decision.mode,
+        "decision_state": state,
+        "expected_parent_generation": decision.expected_parent_generation,
+        "sessions_to_append": [session.isoformat() for session in decision.sessions_to_append],
+        "session_range": [session.isoformat() for session in session_range],
+        "required_stage_ids": stage_order,
+        "scheduled_stage_ids": scheduled,
+        "reason_codes": reasons,
+    }
+    plan_sha256 = sha256(json.dumps(
+        plan_identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode("utf-8")).hexdigest()
+    plan = DayPlan(
+        scope_id=request.scope_id,
+        contract_id=str(contract["contract_id"]),
+        contract_version=str(contract["version"]),
+        contract_sha256=contract_sha,
+        plan_sha256=plan_sha256,
+        target_session=request.target_session,
+        calendar_id=request.calendar_id,
+        calendar_revision=request.calendar_revision,
+        mode=decision.mode,
+        decision_state=state,
+        expected_parent_generation=decision.expected_parent_generation,
+        sessions_to_append=decision.sessions_to_append,
+        session_range=session_range,
+        required_stage_ids=stage_order,
+        scheduled_stage_ids=scheduled,
+        stage_kernel_roles=kernel_roles,
+        required_owner_roles=owner_ids,
+        required_field_ids=field_ids,
+        required_consumers=consumer_ids,
+        history_policy=_freeze_mapping(history_policy),
+        frozen_context=_freeze_mapping(context),
+        input_digest=digest,
+        reason_codes=reasons,
+        candidate_ready=allowed,
+    )
+    return DayPlanResult(plan, gate, _freeze_mapping(prior_context))
