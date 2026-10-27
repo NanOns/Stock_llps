@@ -457,9 +457,11 @@ def closed_prices_from_period_bars(
     if (type(target_session) is not date or not isinstance(source_cutoff, str) or not source_cutoff
             or not isinstance(coordinate_id, str) or not coordinate_id):
         raise ContractError("Profile周期投影缺少目标会话、来源截止或坐标")
-    if len(period_bars) < minimum_count:
-        raise ContractError("连续闭合周期槽不足")
     selected = tuple(period_bars[-minimum_count:])
+    if not selected:
+        if minimum_count not in {4, 6}:
+            raise ContractError("Profile周/月窗口长度必须遵循已冻结的6周/4月规则")
+        return ClosedPrices((), (), (), (), target_session, coordinate_id)
     required = ("period_kind", "calendar_ordinal", "planned_last_session", "eligible_closed_period",
                 "close", "target_session", "source_cutoff", "coordinate_id", "calendar_closed",
                 "calendar_revision", "status_revision", "action_revision", "aggregation_version")
@@ -473,7 +475,7 @@ def closed_prices_from_period_bars(
         raise ContractError("Profile周/月窗口长度必须遵循已冻结的6周/4月规则")
     ordinals = tuple(row.calendar_ordinal for row in selected)
     if (any(type(value) is not int for value in ordinals)
-            or ordinals != tuple(range(ordinals[0], ordinals[0] + minimum_count))):
+            or ordinals != tuple(range(ordinals[0], ordinals[0] + len(ordinals)))):
         raise ContractError("Profile周期窗口的官方日历序号不连续")
     if any(row.target_session != target_session or row.coordinate_id != coordinate_id for row in selected):
         raise ContractError("Profile周期bar目标会话或坐标身份错配")
@@ -482,8 +484,9 @@ def closed_prices_from_period_bars(
     for attribute in ("calendar_revision", "status_revision", "action_revision", "aggregation_version"):
         if len({getattr(row, attribute) for row in selected}) != 1:
             raise ContractError("Profile周期窗口混用版本：" + attribute)
-    if any(row.calendar_closed is not True for row in selected):
-        raise ContractError("Profile闭合周期窗口含未闭合日历槽")
+    if any(row.calendar_closed is not True
+           and getattr(row, "state", None) != "CALENDAR_COVERAGE_UNPROVEN" for row in selected):
+        raise ContractError("Profile周期窗口含as-of未闭合日历槽")
     if any(not isinstance(row.close, FieldValue) for row in selected):
         raise ContractError("Profile周期收盘缺少质量值")
     sessions = tuple(row.planned_last_session for row in selected)
@@ -491,5 +494,6 @@ def closed_prices_from_period_bars(
         raise ContractError("Profile周期计划末会话非法或未递增")
     return ClosedPrices(
         tuple(row.close for row in selected), ordinals, sessions,
-        tuple(row.eligible_closed_period is True for row in selected), target_session, coordinate_id,
+        tuple(row.eligible_closed_period is True and getattr(row, "calendar_coverage_proven", True)
+              for row in selected), target_session, coordinate_id,
     )

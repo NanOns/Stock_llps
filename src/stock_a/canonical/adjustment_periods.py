@@ -3,8 +3,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, time, timedelta
 from fractions import Fraction
+from zoneinfo import ZoneInfo
 
 from stock_a.canonical.identity import semantic_digest
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
@@ -14,6 +15,30 @@ PERIOD_AGGREGATION_VERSION = "PERIOD_CLOSED_BAR_AGG_R1"
 _PERIODS = {"W", "M"}
 _STATES = {"ACTUAL", "CONFIRMED_SUSPENSION", "PRE_LISTING", "UNKNOWN", "IDENTITY_UNKNOWN", "ADJUSTMENT_UNKNOWN"}
 _PRICE_FIELDS = ("open", "high", "low", "close")
+_SHANGHAI = ZoneInfo("Asia/Shanghai")
+
+
+@dataclass(frozen=True)
+class CalendarCoverageProof:
+    """上游封存的官方日历自然日期覆盖证明；纯内核只校验其自洽性。"""
+
+    calendar_id: str
+    calendar_revision: str
+    coverage_start: date
+    coverage_end: date
+    available_at: datetime
+    seal_basis: str
+    proof_ref: str
+
+    def __post_init__(self) -> None:
+        if not all(isinstance(value, str) and value.strip() for value in
+                   (self.calendar_id, self.calendar_revision, self.seal_basis, self.proof_ref)):
+            raise ContractError("日历覆盖证明必须绑定日历版本、封口依据及稳定引用")
+        if type(self.coverage_start) is not date or type(self.coverage_end) is not date or self.coverage_start > self.coverage_end:
+            raise ContractError("日历覆盖证明日期区间非法")
+        if (not isinstance(self.available_at, datetime) or self.available_at.tzinfo is None
+                or self.available_at.utcoffset() is None):
+            raise ContractError("日历覆盖证明可得时间必须带时区")
 
 
 @dataclass(frozen=True)
@@ -61,6 +86,10 @@ class ClosedPeriodBar:
     action_revision: str
     aggregation_version: str
     input_digest: str
+    calendar_coverage_proven: bool
+    fact_identity_trusted: bool
+    period_fact_digest: str
+    selection_context_digest: str
 
 
 def _period_key(kind: str, session: date) -> tuple[str, date, date, int]:
@@ -107,6 +136,7 @@ def build_closed_period_bars(
     source_cutoff: datetime,
     status_revision: str,
     action_revision: str,
+    calendar_coverage_proof: CalendarCoverageProof | None = None,
 ) -> tuple[ClosedPeriodBar, ...]:
     """以显式官方会话、证券状态和同目标坐标日线构造W/M闭合周期槽。
 
@@ -117,6 +147,8 @@ def build_closed_period_bars(
         raise ContractError("period仅支持W或M")
     if not isinstance(official_calendar, MarketSessionCalendar):
         raise ContractError("必须提供带版本的官方市场日历")
+    if calendar_coverage_proof is not None and not isinstance(calendar_coverage_proof, CalendarCoverageProof):
+        raise ContractError("calendar_coverage_proof类型非法")
     if type(target_session) is not date:
         raise ContractError("target_session必须是date")
     if not isinstance(source_cutoff, datetime) or source_cutoff.tzinfo is None or source_cutoff.utcoffset() is None:
@@ -140,6 +172,9 @@ def build_closed_period_bars(
     if any(not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None
            for value in official_session_closes.values()):
         raise ContractError("官方会话收盘时刻必须带时区")
+    if any(value.astimezone(_SHANGHAI).date() != session
+           for session, value in official_session_closes.items()):
+        raise ContractError("官方会话收盘时刻须落在对应的A股本地会话日期")
     if any(a.session >= b.session for a, b in zip(state_rows, state_rows[1:])):
         raise ContractError("会话状态必须唯一并按日期递增")
     calendar_sessions = official_calendar.sessions
@@ -164,6 +199,12 @@ def build_closed_period_bars(
     start_date = min(calendar_sessions)
     _, first_start, _, _ = _period_key(period, start_date)
     _, _, target_period_end, _ = _period_key(period, target_session)
+    proof_matches = (
+        calendar_coverage_proof is not None
+        and calendar_coverage_proof.calendar_id == official_calendar.calendar_id
+        and calendar_coverage_proof.calendar_revision == official_calendar.revision
+        and calendar_coverage_proof.available_at <= source_cutoff
+    )
     if period == "W":
         cursor = first_start
         step = 7
@@ -191,6 +232,10 @@ def build_closed_period_bars(
             period_id = f"{p_start.year:04d}-{p_start.month:02d}"
             ordinal = p_start.year * 12 + p_start.month - 1
         scheduled = tuple(day for day in calendar_sessions if p_start <= day <= p_end)
+        proof_covers_period = bool(
+            proof_matches and calendar_coverage_proof.coverage_start <= p_start
+            and calendar_coverage_proof.coverage_end >= p_end
+        )
         states = [state_by_day.get(day) for day in scheduled]
         missing_days = [day for day, state in zip(scheduled, states, strict=True) if state is None]
         unknown_days = [day for day, state in zip(scheduled, states, strict=True)
@@ -208,13 +253,23 @@ def build_closed_period_bars(
         all_suspended = bool(scheduled) and coverage and not actual and len([x for x in states if x and x.state == "CONFIRMED_SUSPENSION"]) == len(scheduled)
         if scheduled:
             planned_last = scheduled[-1]
-            calendar_closed = planned_last <= target_session and official_session_closes[planned_last] <= source_cutoff
+            calendar_closed = (proof_covers_period and planned_last <= target_session
+                               and official_session_closes[planned_last] <= source_cutoff)
         else:
             planned_last = p_end
-            calendar_closed = target_session > p_end
-        if not calendar_closed:
+            next_midnight = datetime.combine(p_end + timedelta(days=1), time.min, _SHANGHAI)
+            cutoff_shanghai = source_cutoff.astimezone(_SHANGHAI)
+            calendar_closed = (proof_covers_period and target_session > p_end
+                               and cutoff_shanghai >= next_midnight)
+        # 未证明的已结束自然槽必须留下未知槽，不能被Profile跳过后补取更早历史。
+        period_ended = target_session > p_end and source_cutoff.astimezone(_SHANGHAI) >= datetime.combine(
+            p_end + timedelta(days=1), time.min, _SHANGHAI)
+        if not calendar_closed and (proof_covers_period or not period_ended):
             continue
-        if not scheduled:
+        if not proof_covers_period:
+            state_name = "CALENDAR_COVERAGE_UNPROVEN"
+            fields = _unknown_fields("CALENDAR_COVERAGE_UNPROVEN")
+        elif not scheduled:
             state_name = "NO_MARKET_SESSIONS"
             fields = tuple(FieldValue(None, "NOT_APPLICABLE", "NO_MARKET_SESSIONS") for _ in range(6))
         elif missing_days or unknown_days or missing_actual:
@@ -233,9 +288,23 @@ def build_closed_period_bars(
                                 official_session_closes[row.session]) for row in states)
         daily_identity = tuple((row.session, row.state, row.coordinate_id, row.open, row.high,
                                 row.low, row.close, row.amount, row.volume) for row in actual)
-        input_digest = semantic_digest((PERIOD_AGGREGATION_VERSION, period_id, target_session, source_cutoff,
-                                        official_calendar.calendar_id, official_calendar.revision, status_revision,
-                                        action_revision, target_coordinate_id, state_identity, daily_identity))
+        proof_identity = None if calendar_coverage_proof is None else (
+            calendar_coverage_proof.proof_ref, calendar_coverage_proof.coverage_start,
+            calendar_coverage_proof.coverage_end, calendar_coverage_proof.available_at,
+            calendar_coverage_proof.seal_basis,
+        )
+        # 实体/逐行来源封口由P04/P05→P06适配层提供；纯内核不得把调用者标签当作可信身份。
+        fact_identity_trusted = False
+        period_fact_digest = semantic_digest((PERIOD_AGGREGATION_VERSION, "ENTITY_SOURCE_BINDING_UNVERIFIED",
+                                              period, period_id, ordinal,
+                                              state_name, coverage, listing_complete, proof_covers_period,
+                                              official_calendar.calendar_id, official_calendar.revision,
+                                              proof_identity, target_coordinate_id, state_identity,
+                                              daily_identity, fields))
+        selection_context_digest = semantic_digest((period_fact_digest, target_session, source_cutoff,
+                                                   official_calendar.calendar_id, official_calendar.revision,
+                                                   status_revision, action_revision, tuple(scheduled)))
+        input_digest = period_fact_digest
         result.append(ClosedPeriodBar(
             period, period_id, ordinal, p_start, p_end, planned_last,
             actual_sessions[0] if actual_sessions else None, actual_sessions[-1] if actual_sessions else None,
@@ -243,7 +312,8 @@ def build_closed_period_bars(
             len(missing_days) + len(unknown_days) + len(missing_actual), len(prelisting), calendar_closed,
             coverage, listing_complete, calendar_closed and coverage and listing_complete, state_name,
             *fields, target_session, source_cutoff, target_coordinate_id, official_calendar.calendar_id,
-            official_calendar.revision, status_revision, action_revision, PERIOD_AGGREGATION_VERSION, input_digest))
+            official_calendar.revision, status_revision, action_revision, PERIOD_AGGREGATION_VERSION, input_digest,
+            proof_covers_period, fact_identity_trusted, period_fact_digest, selection_context_digest))
     return tuple(result)
 
 
@@ -253,10 +323,11 @@ def _aggregate_actual(rows: Sequence[CoreObservation]) -> tuple[FieldValue, ...]
     price_rows = [{name: getattr(row, name) for name in _PRICE_FIELDS} for row in rows]
     invalid_envelope = False
     for fields in price_rows:
-        vals = tuple(_field_number(fields[name], name) for name in _PRICE_FIELDS)
-        if any(value is not None and value <= 0 for value in vals):
+        vals = tuple(_observed_price(fields[name]) for name in _PRICE_FIELDS)
+        if any(invalid for _, invalid in vals):
             invalid_envelope = True
-        o, h, low, close = vals
+        values = tuple(value for value, _ in vals)
+        o, h, low, close = values
         if h is not None and any(value is not None and value > h for value in (o, low, close)):
             invalid_envelope = True
         if low is not None and any(value is not None and value < low for value in (o, h, close)):
@@ -280,3 +351,14 @@ def _aggregate_actual(rows: Sequence[CoreObservation]) -> tuple[FieldValue, ...]
     amount = FieldValue(sum(amounts, Fraction())) if all(x is not None for x in amounts) else unknown("AMOUNT_UNAVAILABLE")
     volume = FieldValue(sum(volumes, Fraction())) if all(x is not None for x in volumes) else unknown("VOLUME_UNAVAILABLE")
     return (*prices, amount, volume)
+
+
+def _observed_price(field: FieldValue) -> tuple[Fraction | None, bool]:
+    """返回已观察价格和非法标记；上游UNKNOWN只影响其自身聚合依赖。"""
+    if not isinstance(field, FieldValue) or field.quality != "OBSERVED":
+        return None, False
+    try:
+        value = exact_number(field.value)
+    except (ValueError, TypeError, ZeroDivisionError):
+        return None, True
+    return value, value <= 0
