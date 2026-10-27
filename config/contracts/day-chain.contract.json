@@ -18475,7 +18475,10 @@
             "DEEP"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         },
         "PROFILE_NEAR_HIGH20_R1": {
           "algorithm_family": "ALG-17",
@@ -18578,7 +18581,10 @@
             "BELOW_HIGH"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         },
         "PROFILE_CLOSED_WEEK_TREND_R1": {
           "algorithm_family": "ALG-17",
@@ -18694,7 +18700,10 @@
             "SIDEWAYS"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         },
         "PROFILE_CLOSED_MONTH_TREND_R1": {
           "algorithm_family": "ALG-17",
@@ -18810,7 +18819,10 @@
             "SIDEWAYS"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         },
         "PROFILE_TREND_R1": {
           "algorithm_family": "ALG-17",
@@ -19073,7 +19085,10 @@
             "SIDEWAYS"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         },
         "PROFILE_POSITION_R1": {
           "algorithm_family": "ALG-17",
@@ -19174,7 +19189,10 @@
             "LOW_ZONE"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         },
         "PROFILE_MA_STRUCTURE_R1": {
           "algorithm_family": "ALG-17",
@@ -19357,7 +19375,10 @@
             "MIXED"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         },
         "PROFILE_COMPRESSION_R1": {
           "algorithm_family": "ALG-17",
@@ -19561,7 +19582,10 @@
             "NORMAL"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         },
         "PROFILE_RELATIVE_R1": {
           "algorithm_family": "ALG-17",
@@ -19832,7 +19856,10 @@
             "NEUTRAL"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         },
         "PROFILE_PARTICIPATION_R1": {
           "algorithm_family": "ALG-17",
@@ -20004,7 +20031,10 @@
             "NORMAL_PARTICIPATION"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         },
         "PROFILE_EXTENSION_R1": {
           "algorithm_family": "ALG-17",
@@ -20151,7 +20181,10 @@
             "LOW"
           ],
           "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
-          "pure_kernel_implemented": true
+          "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。"
         }
       },
       "profile_expression_policy": {
@@ -20443,9 +20476,6 @@
       "producer_symbol": "stock_a.research.risk:compose",
       "adoption": "ADOPTED_RESEARCH_BASELINE_CHG015_NOT_MARKET_VALIDATED",
       "pure_kernel_implemented": true,
-          "production_entry_symbol": "stock_a.research.profile:profile",
-          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
-          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
       "runtime_pipeline_implemented": false,
       "input_domains": {
         "P": [
@@ -20701,9 +20731,6 @@
       "producer_symbol": "stock_a.research.state:reduce_episode",
       "adoption": "ADOPTED_RESEARCH_BASELINE_CHG015_NOT_MARKET_VALIDATED",
       "pure_kernel_implemented": true,
-          "production_entry_symbol": "stock_a.research.profile:profile",
-          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
-          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
       "runtime_pipeline_implemented": false,
       "entity_maturities": {
         "STOCK": [
@@ -20836,9 +20863,6 @@
       "stage": "P14",
       "producer_symbol": "stock_a.research.admission:admit",
       "pure_kernel_implemented": true,
-          "production_entry_symbol": "stock_a.research.profile:profile",
-          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
-          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
       "runtime_pipeline_implemented": false,
       "scenario_priority": [
         "LAUNCH_CONFIRM",
@@ -20880,9 +20904,6 @@
       "producer_symbol": "stock_a.research.structure:generate",
       "observer_symbol": "stock_a.research.structure:observe_support",
       "pure_kernel_implemented": true,
-          "production_entry_symbol": "stock_a.research.profile:profile",
-          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
-          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
       "runtime_pipeline_implemented": false,
       "types": {
         "IMPULSE_BODY": {
