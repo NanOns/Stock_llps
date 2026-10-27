@@ -7,7 +7,8 @@ from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
 
-from stock_a.domain import ContractError, exact_number
+from stock_a.canonical.identity import semantic_digest
+from stock_a.domain import ContractError, FieldValue, exact_number
 from stock_a.sources.tdx.actions import GbbqRecord
 
 
@@ -527,3 +528,31 @@ def round_to_tick(value: object, tick: object) -> Fraction:
     if remainder * 2 >= magnitude.denominator:
         whole += 1
     return sign * whole * quantum
+
+
+@dataclass(frozen=True)
+class AdjustedOHLC:
+    """带有质量和完整目标坐标摘要的OHLC字段投影。"""
+
+    field: FieldValue
+    coordinate_id: str
+
+
+def adjust_ohlc_field(
+    field: FieldValue,
+    factor: AdjustmentFactor,
+    *,
+    source_coordinate_id: str,
+) -> AdjustedOHLC:
+    """保留输入质量并将合法RAW OHLC运输到factor绑定的目标坐标。"""
+    if not isinstance(field, FieldValue):
+        raise ContractError("OHLC字段必须包含值和质量")
+    if not isinstance(factor, AdjustmentFactor):
+        raise ContractError("factor必须是AdjustmentFactor")
+    if not isinstance(source_coordinate_id, str) or source_coordinate_id != factor.source_basis:
+        raise ContractError("OHLC源坐标与factor.source_basis不匹配")
+    coordinate_id = semantic_digest(("PRICE_COORDINATE_R1", factor.target_coordinate_id))
+    if field.quality != "OBSERVED":
+        return AdjustedOHLC(field, coordinate_id)
+    adjusted = adjust_ohlc(field.value, factor)
+    return AdjustedOHLC(FieldValue(adjusted), coordinate_id)
