@@ -32,10 +32,28 @@ class UnitContract:
 class DecodedDay:
     session_date: date
     prices: FieldValue  # 合法OHLC四元组，或整组隔离；不推断交易状态
+    raw_open: FieldValue
+    raw_high: FieldValue
+    raw_low: FieldValue
+    raw_close: FieldValue
     amount: FieldValue
     volume: FieldValue
     reserved: int
     unit_version: str
+
+
+def project_ohlc_fields(prices: FieldValue) -> tuple[FieldValue, FieldValue, FieldValue, FieldValue]:
+    """将OHLC组质量无损投影到raw.open/high/low/close四个字段。"""
+    if not isinstance(prices, FieldValue):
+        raise ContractError("OHLC组必须显式携带FieldValue质量")
+    if prices.quality != "OBSERVED":
+        return tuple(
+            FieldValue(None, prices.quality, prices.reason)
+            for _ in range(4)
+        )
+    if not isinstance(prices.value, tuple) or len(prices.value) != 4:
+        raise ContractError("已知OHLC组必须包含按开高低收排列的四个值")
+    return tuple(FieldValue(value, prices.quality, prices.reason) for value in prices.value)
 
 
 def normalize_components(prices, amount, volume, units: UnitContract):
@@ -82,4 +100,6 @@ def decode_day_record(raw32: bytes, units: UnitContract) -> DecodedDay:
     # float32解包后按实际二进制值精确转换；不把NaN/Infinity写成合法金额。
     amount_decimal = Decimal.from_float(amount) if math.isfinite(amount) else Decimal("NaN")
     fields = normalize_components(prices, amount_decimal, volume, units)
-    return DecodedDay(session, *fields, reserved, units.version)
+    price_value, amount_value, volume_value = fields
+    raw_fields = project_ohlc_fields(price_value)
+    return DecodedDay(session, price_value, *raw_fields, amount_value, volume_value, reserved, units.version)
