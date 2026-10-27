@@ -1897,6 +1897,12 @@
       ],
       "requirement": "FULL_RESEARCH_EOD",
       "binding_required_before_capability_enabled": true,
+      "missing_value_dependency_policy": {
+        "high_only_fields": ["core.hhv5", "core.hhv20", "core.hhv60", "core.prior_high5", "core.prior_high20", "core.prior_high60", "core.hh_progress"],
+        "low_only_fields": ["core.llv5", "core.llv20", "core.llv60", "core.prior_low5", "core.prior_low20", "core.prior_low60", "core.ll_progress"],
+        "known_ohlc_contradiction_rejected": true,
+        "unknown_is_not_known_contradiction": true
+      },
       "fieldset_change": {
         "addition": "core.ma10",
         "version": "CORE_PRIMITIVES_FIELDSET_R2",
@@ -1911,7 +1917,11 @@
         "P07"
       ],
       "requirement": "FULL_RESEARCH_EOD",
-      "binding_required_before_capability_enabled": true
+      "binding_required_before_capability_enabled": true,
+      "true_range_inputs": ["current_actual.high", "current_actual.low", "previous_actual.close"],
+      "atr_window": "N根连续选中actual产生N个TR值；每项使用当日high/low和前一选中actual的close。最早bar的high/low与最新bar的close不是依赖字段",
+      "coordinate_consistency_required": true,
+      "known_ohlc_contradiction_rejected": true
     },
     {
       "id": "ALG-07",

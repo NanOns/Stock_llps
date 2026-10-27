@@ -162,7 +162,7 @@ def _column(rows: Sequence[CoreObservation], name: str) -> tuple[list[Fraction] 
     return values, None
 
 
-def _high_low(rows: Sequence[CoreObservation]) -> tuple[list[tuple[Fraction, Fraction]] | None, str | None]:
+def _extreme_column(rows: Sequence[CoreObservation], name: str) -> tuple[list[Fraction] | None, str | None]:
     coordinate_error = _coordinate_error(rows)
     if coordinate_error:
         return None, coordinate_error
@@ -171,15 +171,12 @@ def _high_low(rows: Sequence[CoreObservation]) -> tuple[list[tuple[Fraction, Fra
         error = _known_ohlc_error(row)
         if error:
             return None, error
-        values = []
-        for name in ("high", "low"):
-            value, reason = _number(getattr(row, name), f"DATA_INVALID_{name.upper()}")
-            if reason:
-                return None, reason
-            if value <= 0:
-                return None, f"DATA_INVALID_{name.upper()}"
-            values.append(value)
-        result.append((values[0], values[1]))
+        value, reason = _number(getattr(row, name), f"DATA_INVALID_{name.upper()}")
+        if reason:
+            return None, reason
+        if value <= 0:
+            return None, f"DATA_INVALID_{name.upper()}"
+        result.append(value)
     return result, None
 
 
@@ -262,40 +259,66 @@ def calculate_core(history: Sequence[CoreObservation], *,
         result[f"core.ma{period}"] = _known(mean(values) if values else None,
                                                reason or value_reason)
         if period in (5, 20, 60):
-            extremes, extreme_reason = _high_low(rows) if not reason else (None, reason)
-            extremes = extremes or []
-            result[f"core.hhv{period}"] = _known(max((x[0] for x in extremes), default=None), reason or extreme_reason)
-            result[f"core.llv{period}"] = _known(min((x[1] for x in extremes), default=None), reason or extreme_reason)
+            highs, high_reason = _extreme_column(rows, "high") if not reason else (None, reason)
+            lows, low_reason = _extreme_column(rows, "low") if not reason else (None, reason)
+            result[f"core.hhv{period}"] = _known(max(highs, default=None) if highs else None,
+                                                    reason or high_reason)
+            result[f"core.llv{period}"] = _known(min(lows, default=None) if lows else None,
+                                                    reason or low_reason)
             prior_rows, prior_reason = _actual_window(history, period, exclude_current=True)
-            prior_extremes, price_reason = _high_low(prior_rows) if not prior_reason else (None, prior_reason)
-            prior_extremes = prior_extremes or []
-            result[f"core.prior_high{period}"] = _known(max((x[0] for x in prior_extremes), default=None),
-                                                           prior_reason or price_reason)
-            result[f"core.prior_low{period}"] = _known(min((x[1] for x in prior_extremes), default=None),
-                                                          prior_reason or price_reason)
+            prior_highs, high_reason = _extreme_column(prior_rows, "high") if not prior_reason else (None, prior_reason)
+            prior_lows, low_reason = _extreme_column(prior_rows, "low") if not prior_reason else (None, prior_reason)
+            result[f"core.prior_high{period}"] = _known(max(prior_highs, default=None) if prior_highs else None,
+                                                           prior_reason or high_reason)
+            result[f"core.prior_low{period}"] = _known(min(prior_lows, default=None) if prior_lows else None,
+                                                          prior_reason or low_reason)
 
     # True range uses consecutive selected actual bars; known suspensions may be skipped.
     tr_rows, tr_reason = _actual_window(history, 2)
-    tr_extremes, extreme_reason = _high_low(tr_rows) if not tr_reason else (None, tr_reason)
-    tr_closes, close_reason = _column(tr_rows, "close") if not tr_reason else (None, tr_reason)
-    if tr_extremes and tr_closes:
-        (prev_high, prev_low), (cur_high, cur_low) = tr_extremes
-        prev_close, cur_close = tr_closes
+    if not tr_reason:
+        tr_reason = _coordinate_error(tr_rows)
+    if not tr_reason:
+        tr_highs, high_reason = _extreme_column([tr_rows[-1]], "high")
+        tr_lows, low_reason = _extreme_column([tr_rows[-1]], "low")
+        tr_closes, close_reason = _column([tr_rows[-2]], "close")
+    else:
+        tr_highs, high_reason = None, tr_reason
+        tr_lows, low_reason = None, tr_reason
+        tr_closes, close_reason = None, tr_reason
+    if tr_highs and tr_lows and tr_closes:
+        cur_high, cur_low = tr_highs[0], tr_lows[0]
+        prev_close = tr_closes[0]
         tr = max(cur_high - cur_low, abs(cur_high - prev_close), abs(cur_low - prev_close))
         result["core.tr"] = _known(tr)
     else:
-        result["core.tr"] = unknown(tr_reason or extreme_reason or close_reason)
+        result["core.tr"] = unknown(tr_reason or high_reason or low_reason or close_reason)
 
     for period in (5, 20):
         rows, reason = _actual_window(history, period + 1)
-        extremes, extreme_reason = _high_low(rows) if not reason else (None, reason)
-        closes, close_reason = _column(rows, "close") if not reason else (None, reason)
-        if extremes and closes:
-            true_ranges = [max(cur_h - cur_l, abs(cur_h - prev_c), abs(cur_l - prev_c))
-                           for (cur_h, cur_l), prev_c in zip(extremes[1:], closes[:-1])]
+        if not reason:
+            # Each TR depends only on that day's high/low and the previous
+            # actual session's close. The oldest bar's high/low and newest
+            # bar's close are outside this formula's dependency set.
+            if _coordinate_error(rows):
+                reason = _coordinate_error(rows)
+            else:
+                reason = next((error for row in rows if (error := _known_ohlc_error(row))), None)
+        if not reason:
+            true_ranges = []
+            for previous, current in zip(rows, rows[1:]):
+                highs, high_reason = _extreme_column([current], "high")
+                lows, low_reason = _extreme_column([current], "low")
+                closes, close_reason = _column([previous], "close")
+                dependency_error = high_reason or low_reason or close_reason
+                if dependency_error:
+                    reason = dependency_error
+                    break
+                cur_high, cur_low, prev_close = highs[0], lows[0], closes[0]
+                true_ranges.append(max(cur_high - cur_low, abs(cur_high - prev_close), abs(cur_low - prev_close)))
+        if not reason:
             result[f"core.atr{period}"] = _known(mean(true_ranges))
         else:
-            result[f"core.atr{period}"] = unknown(reason or extreme_reason or close_reason)
+            result[f"core.atr{period}"] = unknown(reason)
 
     # MA slope windows compare current and lagged actual-bar moving averages.
     for period, offset in ((20, 5), (60, 10)):
@@ -332,13 +355,14 @@ def calculate_core(history: Sequence[CoreObservation], *,
                                          else FieldValue(mean(prior_values)))
 
     current_close, current_reason = _column([latest], "close")
-    current_extremes, current_extreme_reason = _high_low([latest])
+    current_highs, current_high_reason = _extreme_column([latest], "high")
+    current_lows, current_low_reason = _extreme_column([latest], "low")
     current_prices = current_close
-    if current_close and current_extremes:
-        h, low = current_extremes[0]
+    if current_close and current_highs and current_lows:
+        h, low = current_highs[0], current_lows[0]
         result["core.clv"] = unknown("ZERO_PRICE_RANGE") if h == low else FieldValue((current_close[0] - low) / (h - low))
     else:
-        result["core.clv"] = unknown(current_reason or current_extreme_reason)
+        result["core.clv"] = unknown(current_reason or current_high_reason or current_low_reason)
 
     result["core.ret1"] = _return(history, 1)
     for period in (3, 5, 20):
@@ -415,13 +439,16 @@ def _derived_price_ratios(result, current_prices):
 
 def _progress(result, history):
     rows, reason = _actual_window(history, 10)
-    values, value_reason = _high_low(rows) if not reason else (None, reason)
-    if reason or value_reason:
-        result["core.hh_progress"] = unknown(reason or value_reason)
-        result["core.ll_progress"] = unknown(reason or value_reason)
-        return
-    result["core.hh_progress"] = FieldValue(max(x[0] for x in values[-5:]) > max(x[0] for x in values[:5]))
-    result["core.ll_progress"] = FieldValue(min(x[1] for x in values[-5:]) < min(x[1] for x in values[:5]))
+    highs, high_reason = _extreme_column(rows, "high") if not reason else (None, reason)
+    lows, low_reason = _extreme_column(rows, "low") if not reason else (None, reason)
+    result["core.hh_progress"] = (
+        unknown(reason or high_reason) if reason or high_reason else
+        FieldValue(max(highs[-5:]) > max(highs[:5]))
+    )
+    result["core.ll_progress"] = (
+        unknown(reason or low_reason) if reason or low_reason else
+        FieldValue(min(lows[-5:]) < min(lows[:5]))
+    )
 
 
 def _prior_percentile(result, history, current_prices):
