@@ -70,7 +70,7 @@
 
 ## A10 固定数据库拓扑
 
-- 新项目唯一活动PG实例沿用5432，逻辑数据库与唯一应用schema均为`stock_a`；版本是列/主键，不按日期、workspace、release、候选、测试建schema或整套表。
+- 新项目唯一活动PG实例沿用5432，逻辑数据库固定为`stock_a`，唯一应用schema固定为`stock`；任何开发、测试、迁移或运行流程均不得新建数据库或schema。版本是列/主键，不按日期、workspace、release、候选、测试建schema或整套表。
 - 新项目启用前通过实际PG连接验证data_directory解析后在`G:/Postgres/data`，日志/WAL/所有业务表空间及临时表空间均在G盘；目录链接不得绕回其它盘。未满足则拒绝新项目写入/发布，不能借连接仍能访问旧库放行。还须核对current_database/schema、application_id、项目UUID、已绑定的簇/实例UUID、迁移lineage及session_user角色；旧V4身份一律拒绝新写入。旧E盘簇只按另行明确操作离线只读核对，不承诺同一实例同时挂载E/G两个物理簇。
 - schema/表/索引变动只能通过集中迁移；业务Reader/GET不得执行DDL。受控会话TEMP可用于有界暂存，不成为永久业务定位。
 - 新模块表只有实际写读用例及生命周期才创建，不提前铺空模型平台。保留业务必要表不受任意表数上限约束；禁止靠改表名前缀规避单schema规则。
@@ -118,7 +118,7 @@
 ## A16 测试环境安全
 
 - 默认测试不得启动旧/正式工作区恢复入口、访问TDX写路径、改正式Head/调度或抓外部来源。启动fixture先校验绝对根、版本、写对象和范围。
-- 纯函数用合成向量；真实PG/并发/CAS必须实际合法连接验证。单库测试用固定表的明确测试run/source/version及有界TEMP，不创建第二实例/库或新业务schema。
+- 纯函数用合成向量；真实PG/并发/CAS必须实际合法连接验证。单库测试用固定表的明确测试run/source/version及有界TEMP；测试不得创建数据库或schema。
 - READ ONLY事务用于读取；需一致快照用REPEATABLE READ或经证实等价机制。提交型故障测试限定合成身份与本任务对象，不被正式manifest引用；回收范围事前明确。
 - 凭据使用现有合法安全配置，不入Git/文档/日志；开发/生产/测试按受控角色和namespace区分，测试身份无生产Head/outbox权限，不重复发明Reader/Writer审批；实际访问拒绝不绕过。
 

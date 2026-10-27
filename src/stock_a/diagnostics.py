@@ -11,6 +11,7 @@ import json
 import math
 import os
 from pathlib import Path
+import re
 import stat
 import sys
 import time
@@ -29,6 +30,7 @@ from stock_a.sources.tdx.actions import (
 from stock_a.sources.tdx.day_source import open_day_file, read_protected_bytes
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
 from stock_a.postgres_identity import inspect_postgres
+from stock_a.postgres_binding import BindingRefused, bind_stock_namespace
 
 
 _WORKSPACE = Path("G:/codex work/Stock A")
@@ -216,7 +218,8 @@ def _validate_config(config: Any) -> None:
     instance_id = app.get("deployment_instance_uuid")
     cluster_id = app.get("cluster_system_identifier")
     if app["deployment_applied"] is False:
-        if instance_id != "BIND_DURING_EXPLICIT_ENABLEMENT" or cluster_id != "BIND_DURING_EXPLICIT_ENABLEMENT":
+        if (instance_id != "BIND_DURING_EXPLICIT_ENABLEMENT" or cluster_id != "BIND_DURING_EXPLICIT_ENABLEMENT"
+                or app.get("migration_digest") != "BIND_DURING_EXPLICIT_ENABLEMENT"):
             raise DiagnosticError("CONFIG_INVALID", "未部署状态必须使用明确的实例与簇绑定占位值")
     else:
         try:
@@ -225,13 +228,24 @@ def _validate_config(config: Any) -> None:
             valid_instance = False
         if not valid_instance or not isinstance(cluster_id, str) or not cluster_id.isdecimal() or int(cluster_id) <= 0:
             raise DiagnosticError("CONFIG_INVALID", "已部署状态的实例或簇身份无效")
+        if not isinstance(app.get("migration_digest"), str) or not re.fullmatch(r"[0-9a-f]{64}", app["migration_digest"]):
+            raise DiagnosticError("CONFIG_INVALID", "已部署状态的迁移账本摘要无效")
     roles = app.get("roles")
     if not isinstance(roles, list) or not roles or any(not isinstance(role, str) or not role for role in roles):
         raise DiagnosticError("CONFIG_INVALID", "应用角色声明必须是非空字符串列表")
+    expected_role_bindings = [
+        {"role": "stock_a_reader", "environment": "PROD", "capability": "READ"},
+        {"role": "stock_a_dev_writer", "environment": "DEV", "capability": "WRITE_CANDIDATE"},
+        {"role": "stock_a_prod_writer", "environment": "PROD", "capability": "ACCEPT"},
+        {"role": "stock_a_test_writer", "environment": "TEST", "capability": "TEST"},
+    ]
+    if app.get("role_namespace_bindings") != expected_role_bindings:
+        raise DiagnosticError("CONFIG_INVALID", "应用角色与运行命名空间绑定不匹配固定合同")
     database = _require_mapping(root.get("postgresql"), "postgresql")
-    for key in ("database", "business_schema"):
-        if database.get(key) != "stock_a":
-            raise DiagnosticError("CONFIG_INVALID", f"数据库声明{key}必须固定为stock_a")
+    if database.get("database") != "stock_a":
+        raise DiagnosticError("CONFIG_INVALID", "PostgreSQL逻辑数据库必须固定为stock_a")
+    if database.get("business_schema") != "stock":
+        raise DiagnosticError("CONFIG_INVALID", "PostgreSQL唯一业务schema必须固定为stock")
     expected_pg_paths = {
         "host": "127.0.0.1", "port": 5432,
         "data_directory": "G:/Postgres/data", "wal_directory": "G:/Postgres/data/pg_wal",
@@ -248,6 +262,8 @@ def _validate_config(config: Any) -> None:
         "require_pg_data_directory_match": True,
         "allow_legacy_postgres_writes": False,
         "allow_automatic_pg_initialization": False,
+        "allow_database_creation": False,
+        "allow_schema_creation": False,
         "allow_automatic_old_data_migration": False,
         "allow_port_takeover": False,
         "require_database_schema_application_instance_and_migration_match": True,
@@ -344,6 +360,8 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--config", help="仅接受唯一登记配置runtime.defaults.json的绝对路径")
     pg = commands.add_parser("pg-identity", help="以只读事务核验PostgreSQL身份与G盘存储")
     pg.add_argument("--timeout-seconds", type=float, default=5.0, help="连接与每条查询的秒数上限，默认5秒，最大30秒")
+    bind = commands.add_parser("pg-bind", help="显式应用身份迁移并绑定已存在的stock schema")
+    bind.add_argument("--timeout-seconds", type=float, default=20.0, help="身份绑定总耗时上限，默认20秒，最大30秒")
     phase0 = commands.add_parser(
         "source-phase0",
         help="有界核验已绑定的本地TDX来源能力",
@@ -681,6 +699,27 @@ def _run_pg_identity(args: argparse.Namespace) -> int:
     return _EXIT_UNAVAILABLE
 
 
+def _run_pg_bind(args: argparse.Namespace) -> int:
+    if type(args.timeout_seconds) not in (int, float) or not math.isfinite(args.timeout_seconds) or not 0 < args.timeout_seconds <= 30:
+        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", "PG绑定超时必须大于0且不超过30秒", _EXIT_ARGUMENT)
+    package = _module_mode()
+    if package.get("mode") != "DEV":
+        raise DiagnosticError("BIND_MODE_REJECTED", "固定身份迁移仅允许从批准源码包的显式开发CLI执行", _EXIT_PERMISSION)
+    config, config_path = _load_runtime_config()
+    try:
+        result = bind_stock_namespace(config, config_path, timeout_seconds=args.timeout_seconds)
+    except BindingRefused as error:
+        _emit({"ok": False, "status": "REJECTED", "code": "PG_BIND_REFUSED",
+               "message": str(error), "business_write_admission": "DENY",
+               "database_write_attempted": "UNKNOWN_IF_FAILURE_AFTER_COMMIT",
+               "configuration_path": str(config_path), "production_switched": False}, error=True)
+        return _EXIT_PERMISSION
+    result.update({"ok": result.get("status") == "BOUND", "package": package,
+                   "configuration_path": str(config_path), "production_switched": False})
+    _emit(result)
+    return _EXIT_OK
+
+
 def _run_source_inspect(args: argparse.Namespace) -> int:
     if not Path(args.path).is_absolute():
         raise DiagnosticError("SOURCE_PATH_INVALID", "来源文件必须使用绝对路径")
@@ -747,6 +786,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_doctor(args)
         if args.command == "pg-identity":
             return _run_pg_identity(args)
+        if args.command == "pg-bind":
+            return _run_pg_bind(args)
         if args.command == "source-phase0":
             return _run_source_phase0(args)
         if args.command == "source-inspect":

@@ -25,6 +25,14 @@ _PRIVATE_CREDENTIALS_PATH = Path("G:/codex work/Stock A/config/private/postgresq
 _PRIVATE_CONFIG_ROOT = Path("G:/codex work/Stock A/config/private")
 _MAX_CREDENTIAL_FILE_BYTES = 8192
 _CREDENTIAL_SCHEMA = "STOCK-A-PG-CREDENTIALS/R1"
+_BUSINESS_SCHEMA = "stock"
+_ROLE_NAMESPACE_BINDINGS = (
+    ("stock_a_reader", "PROD", "READ"),
+    ("stock_a_dev_writer", "DEV", "WRITE_CANDIDATE"),
+    ("stock_a_prod_writer", "PROD", "ACCEPT"),
+    ("stock_a_test_writer", "TEST", "TEST"),
+)
+_IDENTITY_TABLE_NAMES = ("installation_identity", "migration_ledger", "namespaces", "role_bindings")
 
 
 class _CredentialContractError(ValueError):
@@ -105,7 +113,7 @@ def evaluate_identity(
     expected_app = config["application_identity"]
     checks: list[IdentityCheck] = []
     checks.append(_safe_compare(actual.get("database"), "stock_a", "current_database"))
-    checks.append(_safe_compare(actual.get("schema"), "stock_a", "current_schema"))
+    checks.append(_safe_compare(actual.get("schema"), _BUSINESS_SCHEMA, "current_schema"))
     checks.append(_safe_compare(actual.get("application_id"), "STOCK_A", "application_id"))
     checks.append(_safe_compare(actual.get("project_uuid"), expected_app.get("project_uuid"), "project_uuid"))
     expected_instance = expected_app.get("deployment_instance_uuid")
@@ -126,10 +134,17 @@ def evaluate_identity(
     expected_lineage = expected_app.get("migration_lineage")
     checks.append(_safe_compare(actual.get("migration_lineage"), expected_lineage, "migration_lineage"))
     migration_digest = actual.get("migration_digest")
+    expected_migration_digest = expected_app.get("migration_digest")
+    migration_digest_matches = isinstance(migration_digest, str) and migration_digest == expected_migration_digest
+    migration_digest_expected = isinstance(expected_migration_digest, str) and re.fullmatch(r"[0-9a-f]{64}", expected_migration_digest) is not None
+    migration_digest_status = ("BLOCKED" if not deployment_applied else
+                               "PASS" if migration_digest_expected and migration_digest_matches else
+                               "REJECT" if migration_digest_expected else "BLOCKED")
     checks.append(IdentityCheck(
-        "migration_digest", "BLOCKED",
+        "migration_digest", migration_digest_status,
+        expected=expected_migration_digest if migration_digest_expected else None,
         actual=migration_digest if isinstance(migration_digest, str) and re.fullmatch(r"[0-9a-f]{64}", migration_digest) else None,
-        reason="runtime.defaults尚未登记经批准的迁移摘要，不能把存在账本等同精确版本匹配",
+        reason=None if migration_digest_status == "PASS" else "部署身份未绑定，或runtime.defaults迁移账本摘要与实际迁移不匹配",
     ))
     role = actual.get("session_user")
     allowed_roles = expected_app.get("roles", [])
@@ -195,18 +210,69 @@ def _fetch_physical(cursor: Any, *, deadline: float) -> dict[str, Any]:
     else:
         cursor.execute("RELEASE SAVEPOINT stock_a_identity_cluster_probe")
     _check_deadline(deadline)
-    cursor.execute("SELECT to_regclass('stock_a.installation_identity')::text, to_regclass('stock_a.migration_ledger')::text")
+    cursor.execute("""SELECT n.oid::bigint, n.nspname, pg_get_userbyid(n.nspowner),
+       has_schema_privilege(session_user, n.oid, 'USAGE'),
+       has_schema_privilege(session_user, n.oid, 'CREATE'),
+       n.nspacl::text
+       FROM pg_namespace n WHERE n.nspname = %s""", (_BUSINESS_SCHEMA,))
+    schema_row = cursor.fetchone()
+    schema_info = None if schema_row is None else {
+        "oid": int(schema_row[0]), "name": schema_row[1], "owner": schema_row[2],
+        "session_user_usage": bool(schema_row[3]), "session_user_create": bool(schema_row[4]),
+        "acl": schema_row[5],
+    }
+    objects: list[dict[str, Any]] = []
+    if schema_info is not None:
+        _check_deadline(deadline)
+        cursor.execute("""SELECT c.relname, c.relkind, pg_get_userbyid(c.relowner)
+           FROM pg_class c WHERE c.relnamespace = %s::oid ORDER BY c.relname LIMIT %s""",
+                       (schema_info["oid"], _MAX_CHECKS + 1))
+        object_rows = _bounded_rows(cursor, _MAX_CHECKS, "stock schema现有对象数量超过核验预算")
+        objects = [{"name": name, "kind": kind, "owner": owner} for name, kind, owner in object_rows]
+    comment_completeness = {"table_count": 0, "column_count": 0, "missing_table_comments": 0,
+                            "missing_column_comments": 0, "complete": False}
+    if schema_info is not None:
+        cursor.execute("""SELECT count(DISTINCT c.oid) FILTER (WHERE c.relkind IN ('r','p')),
+           count(a.attnum) FILTER (WHERE c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped),
+           count(DISTINCT c.oid) FILTER (WHERE c.relkind IN ('r','p') AND obj_description(c.oid, 'pg_class') IS NULL),
+           count(a.attnum) FILTER (WHERE c.relkind IN ('r','p') AND a.attnum > 0 AND NOT a.attisdropped
+             AND col_description(c.oid, a.attnum) IS NULL)
+           FROM pg_class c LEFT JOIN pg_attribute a ON a.attrelid=c.oid
+           WHERE c.relnamespace=%s::oid""", (schema_info["oid"],))
+        counts = cursor.fetchone()
+        table_count, column_count, missing_table_comments, missing_column_comments = (int(value or 0) for value in counts)
+        comment_completeness = {"table_count": table_count, "column_count": column_count,
+                                "missing_table_comments": missing_table_comments,
+                                "missing_column_comments": missing_column_comments,
+                                "complete": missing_table_comments == 0 and missing_column_comments == 0}
+    business_table_storage: list[dict[str, Any]] = []
+    existing_table_names = {item["name"] for item in objects if item["kind"] == "r"}
+    if set(_IDENTITY_TABLE_NAMES).issubset(existing_table_names):
+        for table_name in _IDENTITY_TABLE_NAMES:
+            cursor.execute(f"SELECT count(*) FROM stock.{table_name}")
+            exact_rows = int(cursor.fetchone()[0])
+            cursor.execute("""SELECT pg_relation_size(c.oid), pg_indexes_size(c.oid),
+               GREATEST(pg_total_relation_size(c.oid)-pg_relation_size(c.oid)-pg_indexes_size(c.oid), 0)
+               FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+               WHERE n.nspname='stock' AND c.relname=%s AND c.relkind='r'""", (table_name,))
+            sizes = cursor.fetchone()
+            if sizes is None:
+                raise RuntimeError("正式身份表在存储测量中消失")
+            business_table_storage.append({"table": table_name, "exact_rows": exact_rows,
+                                           "heap_bytes": int(sizes[0]), "index_bytes": int(sizes[1]),
+                                           "toast_bytes": int(sizes[2])})
+    cursor.execute("SELECT to_regclass('stock.installation_identity')::text, to_regclass('stock.migration_ledger')::text")
     identity_table, migration_table = cursor.fetchone()
     identity = None
     if identity_table:
-        cursor.execute("SELECT application_id, project_uuid::text, instance_uuid::text, cluster_system_identifier, migration_lineage FROM stock_a.installation_identity WHERE singleton IS TRUE")
+        cursor.execute("SELECT application_id, project_uuid::text, instance_uuid::text, cluster_system_identifier, migration_lineage FROM stock.installation_identity WHERE singleton IS TRUE")
         vals = cursor.fetchone()
         if vals:
             identity = dict(zip(("application_id", "project_uuid", "instance_uuid", "cluster_system_identifier", "migration_lineage"), vals))
     migration_digest = None
     if migration_table:
         _check_deadline(deadline)
-        cursor.execute("SELECT migration_id, source_sha, lineage FROM stock_a.migration_ledger ORDER BY migration_id LIMIT %s", (_MAX_MIGRATIONS + 1,))
+        cursor.execute("SELECT migration_id, source_sha, lineage FROM stock.migration_ledger ORDER BY migration_id LIMIT %s", (_MAX_MIGRATIONS + 1,))
         rows = _bounded_rows(cursor, _MAX_MIGRATIONS, "迁移账本行数超过核验预算")
         if rows:
             migration_digest, lineages = _migration_ledger_digest(rows)
@@ -220,10 +286,25 @@ def _fetch_physical(cursor: Any, *, deadline: float) -> dict[str, Any]:
     # Ownership is verified by an explicit catalog query over persistent objects in the business schema.
     _check_deadline(deadline)
     cursor.execute("""SELECT EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-       WHERE n.nspname='stock_a' AND c.relowner=(SELECT oid FROM pg_roles WHERE rolname=session_user))""")
+       WHERE n.nspname='stock' AND c.relowner=(SELECT oid FROM pg_roles WHERE rolname=session_user))""")
     if role_attributes is not None:
         role_attributes["owns_business_objects"] = bool(cursor.fetchone()[0])
-    # Role→namespace needs an explicitly bound runtime namespace, absent from the current contract.
+    namespace_binding = "UNBOUND"
+    if identity is not None:
+        _check_deadline(deadline)
+        cursor.execute("""SELECT r.role_name::text, n.environment, n.instance_uuid::text, r.capability
+           FROM stock.role_bindings r JOIN stock.namespaces n USING (namespace_id)
+           ORDER BY r.role_name, n.environment, r.capability LIMIT %s""", (len(_ROLE_NAMESPACE_BINDINGS) + 1,))
+        binding_rows = _bounded_rows(cursor, len(_ROLE_NAMESPACE_BINDINGS), "角色命名空间绑定数量超过固定预算")
+        try:
+            instance_uuid = uuid.UUID(str(identity["instance_uuid"]))
+            expected_bindings = {
+                (role, environment, str(instance_uuid), capability)
+                for role, environment, capability in _ROLE_NAMESPACE_BINDINGS
+            }
+            namespace_binding = "MATCH" if set(binding_rows) == expected_bindings and len(binding_rows) == len(expected_bindings) else "MISMATCH"
+        except (ValueError, TypeError, KeyError):
+            namespace_binding = "MISMATCH"
     return {
         "database": database, "schema": schema, "session_user": session_user,
         "data_directory": data_dir, "config_file": config_file, "log_directory": log_dir,
@@ -231,9 +312,14 @@ def _fetch_physical(cursor: Any, *, deadline: float) -> dict[str, Any]:
         "server_address": server_address,
         "logging_collector": logging_collector == "on", "current_logfile": current_logfile,
         "tablespaces": tablespaces, "cluster_system_identifier": system_identifier,
+        "search_path": _query_one(cursor, "SELECT current_setting('search_path')"),
+        "business_schema_exists": schema_info is not None, "business_schema": schema_info,
+        "business_schema_objects": objects,
+        "comment_completeness": comment_completeness,
+        "business_table_storage": business_table_storage,
         "identity_table_exists": bool(identity_table), "migration_table_exists": bool(migration_table),
         "identity": identity, "migration_digest": migration_digest, "role_attributes": role_attributes,
-        "namespace_binding": "UNBOUND",
+        "namespace_binding": namespace_binding,
     }
 
 
@@ -643,7 +729,7 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
     start = time.monotonic()
     deadline = start + min(float(timeout_seconds), _MAX_INSPECTION_SECONDS)
     try:
-        connection_parameters.update(connect_timeout=max(1, math.ceil(timeout_seconds)), options=f"-c default_transaction_read_only=on -c statement_timeout={max(1, math.ceil(timeout_seconds * 1000))} -c lock_timeout=1000")
+        connection_parameters.update(connect_timeout=max(1, math.ceil(timeout_seconds)), options=f"-c default_transaction_read_only=on -c search_path=stock,pg_catalog -c statement_timeout={max(1, math.ceil(timeout_seconds * 1000))} -c lock_timeout=1000")
         with psycopg.connect(**connection_parameters, autocommit=True) as conn:
             info = conn.info
             if info.host != "127.0.0.1" or getattr(info, "hostaddr", "127.0.0.1") != "127.0.0.1" or info.port != 5432 or info.dbname != "stock_a":
@@ -658,6 +744,9 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
             checks.extend([
                 _safe_compare(physical["port"], 5432, "server_port"),
                 _safe_compare(physical["server_address"], "127.0.0.1", "server_address"),
+                IdentityCheck("business_schema_exists", "PASS" if physical["business_schema_exists"] else "REJECT",
+                              expected="stock已存在", actual="stock已存在" if physical["business_schema_exists"] else "stock不存在",
+                              reason=None if physical["business_schema_exists"] else "固定schema stock不存在；禁止自动创建schema"),
             ])
             deployment_applied = config["application_identity"].get("deployment_applied") is True
             checks.append(IdentityCheck(
@@ -673,7 +762,7 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                     "migration_digest": physical["migration_digest"], "namespace_binding": physical["namespace_binding"],
                 })
                 checks.extend(
-                    IdentityCheck("migration_lineage", "BLOCKED", reason="stock_a.migration_ledger缺失或为空；迁移须由后续集中迁移实施")
+                    IdentityCheck("migration_lineage", "BLOCKED", reason="stock.migration_ledger缺失或为空；须由集中迁移实施")
                     if item.check == "migration_lineage" else
                     IdentityCheck(item.check, "BLOCKED", expected=item.expected, actual=item.actual,
                                   reason="installation_identity缺失；数据库标记身份尚不可比较")
@@ -682,13 +771,20 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                     else item
                     for item in identity_checks
                 )
-                checks.append(IdentityCheck("installation_identity", "BLOCKED", reason="stock_a.installation_identity缺失或无可读单例；禁止本任务创建"))
+                checks.append(IdentityCheck("installation_identity", "BLOCKED", reason="stock.installation_identity缺失或无可读单例；须由明确集中迁移创建"))
+                checks.append(IdentityCheck("database_comments", "BLOCKED", reason="尚无已绑定的正式表，表/列注释覆盖未验收"))
             else:
                 actual = {**physical["identity"], "database": physical["database"], "schema": physical["schema"],
                           "actual_cluster_system_identifier": physical["cluster_system_identifier"],
                           "session_user": physical["session_user"], "role_attributes": physical["role_attributes"],
                           "migration_digest": physical["migration_digest"], "namespace_binding": physical["namespace_binding"]}
                 checks.extend(evaluate_identity(config, actual))
+                comments = physical["comment_completeness"]
+                comments_complete = comments.get("complete") is True and comments.get("table_count") == 4
+                checks.append(IdentityCheck("database_comments", "PASS" if comments_complete else "REJECT",
+                                            expected="4张表及全部字段均有原生注释",
+                                            actual=f"{comments.get('table_count')}表/{comments.get('column_count')}列；缺表注释{comments.get('missing_table_comments')}项；缺列注释{comments.get('missing_column_comments')}项",
+                                            reason=None if comments_complete else "实际表/字段注释未覆盖集中迁移对象"))
             with conn.cursor() as cursor:
                 _check_deadline(deadline)
                 cursor.execute("COMMIT")
@@ -726,10 +822,10 @@ def write_admission(
     """所有后续PG写入/发布调用方共用的失败关闭准入判定。"""
     if not isinstance(inspection, dict):
         return False, "PostgreSQL核验结果格式无效；拒绝新项目写入与发布"
-    required = {"current_database", "current_schema", "application_id", "project_uuid", "deployment_instance_uuid",
+    required = {"current_database", "current_schema", "business_schema_exists", "application_id", "project_uuid", "deployment_instance_uuid",
                 "cluster_system_identifier", "physical_cluster_system_identifier", "marked_vs_physical_cluster_system_identifier",
                 "migration_lineage", "migration_digest", "session_user",
-                "role_attributes", "role_namespace_binding", "data_directory", "wal_directory", "log_directory",
+                "role_attributes", "role_namespace_binding", "database_comments", "data_directory", "wal_directory", "log_directory",
                 "temp_tablespaces", "server_port", "server_address", "deployment_applied", "current_logfile"}
     checks = inspection.get("checks")
     if not isinstance(checks, list) or len(checks) > _MAX_CHECKS:
@@ -740,7 +836,8 @@ def write_admission(
         "database", "schema", "session_user", "data_directory", "config_file", "log_directory",
         "temp_tablespaces", "port", "server_version_num", "server_address", "logging_collector",
         "current_logfile", "tablespaces", "tablespace_count", "cluster_system_identifier", "identity", "identity_record", "migration_digest",
-        "role_attributes", "namespace_binding",
+        "role_attributes", "namespace_binding", "search_path", "business_schema_exists",
+        "business_schema", "business_schema_objects", "comment_completeness", "business_table_storage",
     }
     tablespaces = physical.get("tablespaces") if isinstance(physical, dict) else None
     tablespace_names: list[str] = []
@@ -787,12 +884,21 @@ def write_admission(
         and all(key in physical["role_attributes"] and type(physical["role_attributes"][key]) is bool
                 for key in _ROLE_ATTRIBUTE_KEYS)
         and all(physical["role_attributes"][key] is False for key in _ROLE_ATTRIBUTE_KEYS)
-        and physical.get("database") == "stock_a" and physical.get("schema") == "stock_a"
+        and physical.get("database") == "stock_a" and physical.get("schema") == "stock"
+        and physical.get("business_schema_exists") is True
+        and isinstance(physical.get("business_schema"), dict)
+        and physical["business_schema"].get("name") == "stock"
+        and physical.get("search_path") == "stock,pg_catalog"
         and _is_fixed_server_address(physical.get("server_address")) and physical.get("port") == 5432
         and isinstance(physical.get("cluster_system_identifier"), str)
         and identity_record.get("cluster_system_identifier") == physical.get("cluster_system_identifier")
         and isinstance(physical.get("migration_digest"), str)
         and re.fullmatch(r"[0-9a-f]{64}", physical.get("migration_digest", "")) is not None
+        and isinstance(physical.get("business_table_storage"), list)
+        and {item.get("table") for item in physical["business_table_storage"] if isinstance(item, dict)} == set(_IDENTITY_TABLE_NAMES)
+        and all(type(item.get("exact_rows")) is int and type(item.get("heap_bytes")) is int
+                and type(item.get("index_bytes")) is int and type(item.get("toast_bytes")) is int
+                for item in physical["business_table_storage"] if isinstance(item, dict))
         and isinstance(config_app, dict) and config_app.get("deployment_applied") is True
         and isinstance(config_app.get("roles"), list)
         and config_app.get("application_id") == "STOCK_A"
@@ -802,6 +908,8 @@ def write_admission(
         and config_app.get("cluster_system_identifier", "").isdecimal()
         and isinstance(config_app.get("migration_lineage"), str) and bool(config_app.get("migration_lineage"))
         and isinstance(config_pg, dict)
+        and config_pg.get("database") == "stock_a" and config_pg.get("business_schema") == "stock"
+        and config_app.get("migration_digest") == physical.get("migration_digest")
         and all(canonical_path(config_pg.get(key)) is not None for key in ("data_directory", "wal_directory", "log_directory"))
         and all(ntpath.splitdrive(canonical_path(config_pg.get(key)) or "")[0].casefold() == "g:" for key in ("data_directory", "wal_directory", "log_directory"))
         and canonical_path(config_pg.get("data_directory")) == canonical_path(physical.get("data_directory") if isinstance(physical, dict) else None)

@@ -2482,7 +2482,9 @@
     "stateful_propagation": "DEPENDENCY_FIXED_POINT_WITH_RECORDED_STOP_REASON"
   },
   "storage_policy": {
-    "business_schema": "stock_a",
+    "business_schema": "stock",
+    "database_creation_forbidden": true,
+    "schema_creation_forbidden": true,
     "typed_families_required": true,
     "generic_payload_for_all_business_forbidden": true,
     "duplicate_full_detail_projection_forbidden": true,
@@ -2498,7 +2500,7 @@
     "logical_database": "stock_a",
     "canonical_partial_quality": {
       "contract": "CANONICAL_PARTIAL_QUALITY_R1",
-      "physical_relation": "stock_a.canonical_daily",
+      "physical_relation": "stock.canonical_daily",
       "independent_groups": [
         "price",
         "amount",
@@ -2639,7 +2641,9 @@
   "deployment_identity_policy": {
     "configuration_identity_ref": "runtime.defaults.json#/application_identity",
     "database": "stock_a",
-    "schema": "stock_a",
+    "schema": "stock",
+    "database_creation": false,
+    "schema_creation": false,
     "must_verify": [
       "PHYSICAL_G_ROOTS",
       "CLUSTER_SYSTEM_IDENTIFIER",
