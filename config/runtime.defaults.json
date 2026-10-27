@@ -75,7 +75,16 @@
     "private_files": {
       "root": "private",
       "git_allowed": false,
-      "allowed_role": "SECRET_CONNECTION_KEYS_ONLY_NOT_BUSINESS_TEST_OR_RESULT_DATA"
+      "allowed_role": "SECRET_CONNECTION_KEYS_ONLY_NOT_BUSINESS_TEST_OR_RESULT_DATA",
+      "registered_files": [
+        {
+          "path": "private/postgresql.credentials.json",
+          "schema": "STOCK-A-PG-CREDENTIALS/R1",
+          "allowed_keys": ["schema", "host", "port", "database", "username", "password"],
+          "consumer": "stock_a.postgres_identity.inspect_postgres（仅pg-identity）",
+          "lifecycle": "STOCK_A_PG_DSN优先；仅在其缺失时由pg-identity进程内存读取；不得输出、摘要、记录、复制或传入子进程参数"
+        }
+      ]
     },
     "unknown_files": "REJECT",
     "outside_root_or_link_escape": "REJECT",

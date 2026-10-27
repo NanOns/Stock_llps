@@ -9,6 +9,7 @@ import ntpath
 import os
 from pathlib import Path
 import re
+import stat
 import time
 from typing import Any
 import uuid
@@ -19,6 +20,10 @@ _MAX_TABLESPACES = 64
 _MAX_MIGRATIONS = 4096
 _MAX_CHECKS = 128
 _MAX_INSPECTION_SECONDS = 30.0
+_PRIVATE_CREDENTIALS_PATH = Path("G:/codex work/Stock A/config/private/postgresql.credentials.json")
+_PRIVATE_CONFIG_ROOT = Path("G:/codex work/Stock A/config/private")
+_MAX_CREDENTIAL_FILE_BYTES = 8192
+_CREDENTIAL_SCHEMA = "STOCK-A-PG-CREDENTIALS/R1"
 
 
 @dataclass(frozen=True)
@@ -266,14 +271,28 @@ def classify_inspection_error(error: Exception) -> str:
     """将参数、权限、不可用和工程错误稳定映射为CLI类别。"""
     code = getattr(error, "sqlstate", None)
     lower = type(error).__name__.casefold()
+    # 某些PostgreSQL/libpq启动错误没有SQLSTATE；仅在内存中有限匹配，不写入结果或日志。
+    try:
+        detail = str(error)[:2048].casefold()
+    except Exception:
+        detail = ""
     if isinstance(error, TimeoutError) or code == "57014" or "timeout" in lower:
         return "TIMEOUT"
-    if code in ("28P01", "28000"):
+    if (code in ("28P01", "28000") or "password authentication failed" in detail
+            or "authentication failed" in detail):
         return "AUTHENTICATION_FAILED"
-    if isinstance(error, OverflowError) or (code and str(code).startswith("08")) or "connect" in lower or "operational" in lower:
-        return "UNAVAILABLE"
-    if isinstance(error, PermissionError) or code and (str(code).startswith("28") or str(code).startswith("42501")) or "permission" in lower:
+    if code == "3D000" or "database" in detail and "does not exist" in detail:
+        return "DATABASE_NOT_FOUND"
+    if code == "42501" or isinstance(error, PermissionError) or "permission" in lower or "permission denied" in detail:
         return "PERMISSION_DENIED"
+    if "timeout expired" in detail or "timed out" in detail or "deadline exceeded" in detail:
+        return "TIMEOUT"
+    if isinstance(error, OverflowError) or (code and str(code).startswith("08")):
+        return "UNAVAILABLE"
+    if code and str(code).startswith("28"):
+        return "PERMISSION_DENIED"
+    if "operational" in lower or "connect" in lower or "network" in lower:
+        return "UNAVAILABLE"
     if isinstance(error, ValueError):
         return "INVALID_ARGUMENT"
     return "ENGINEERING_ERROR"
@@ -397,31 +416,98 @@ def _fixed_connection_parameters(dsn: str, environ: Any, conninfo_to_dict: Any) 
     return result
 
 
+def _load_private_credentials(path: Path | None = None) -> dict[str, Any]:
+    """只读取唯一登记的普通凭据文件；错误消息不包含文件内容或OS路径细节。"""
+    approved_root = _PRIVATE_CONFIG_ROOT
+    path = _PRIVATE_CREDENTIALS_PATH if path is None else path
+    try:
+        # 先拒绝配置根、私密目录或凭据文件的符号链接，再解析最终路径。
+        for candidate in (approved_root.parent, approved_root, path):
+            if candidate.is_symlink():
+                raise ValueError("凭据路径不允许符号链接")
+        root = approved_root.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        if root != approved_root or resolved.parent != root or resolved.name != "postgresql.credentials.json":
+            raise ValueError("凭据路径不在唯一登记位置")
+        info = resolved.stat()
+        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > _MAX_CREDENTIAL_FILE_BYTES:
+            raise ValueError("凭据文件类型或大小不符合合同")
+        with resolved.open("rb") as stream:
+            raw = stream.read(_MAX_CREDENTIAL_FILE_BYTES + 1)
+        if len(raw) > _MAX_CREDENTIAL_FILE_BYTES:
+            raise ValueError("凭据文件超过读取上限")
+        def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("凭据JSON包含重复字段")
+                result[key] = value
+            return result
+
+        data = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
+                          parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+    except FileNotFoundError as error:
+        raise FileNotFoundError("登记的PG凭据文件不存在") from error
+    except PermissionError as error:
+        raise PermissionError("操作系统拒绝读取登记的PG凭据文件") from error
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise RuntimeError("登记的PG凭据文件读取失败") from error
+    if not isinstance(data, dict) or set(data) != {"schema", "host", "port", "database", "username", "password"}:
+        raise ValueError("PG凭据字段不符合登记合同")
+    if (data.get("schema") != _CREDENTIAL_SCHEMA or data.get("host") != "127.0.0.1"
+            or type(data.get("port")) is not int or data["port"] != 5432
+            or data.get("database") != "stock_a"
+            or not isinstance(data.get("username"), str) or not data["username"]
+            or not isinstance(data.get("password"), str) or not data["password"]):
+        raise ValueError("PG凭据版本、目标或字段值不符合固定合同")
+    return data
+
+
+def _private_connection_parameters(credentials: dict[str, Any], make_conninfo: Any,
+                                   conninfo_to_dict: Any) -> dict[str, Any]:
+    """通过psycopg/libpq conninfo构造器转义秘密，再复用固定目标校验。"""
+    conninfo = make_conninfo(
+        host=credentials["host"], hostaddr="127.0.0.1", port=credentials["port"],
+        dbname=credentials["database"], user=credentials["username"], password=credentials["password"],
+    )
+    return _fixed_connection_parameters(conninfo, {}, conninfo_to_dict)
+
+
 def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) -> dict[str, Any]:
-    """使用仅环境提供的DSN建立受限只读会话并返回无秘密的核验摘要。"""
+    """使用固定环境DSN或唯一登记私密配置建立受限只读会话。"""
     if type(timeout_seconds) not in (int, float) or not math.isfinite(timeout_seconds) or timeout_seconds <= 0 or timeout_seconds > _MAX_INSPECTION_SECONDS:
         raise ValueError("timeout_seconds必须在(0,30]内")
-    dsn = os.environ.get("STOCK_A_PG_DSN")
-    if not dsn:
-        return {"status": "BLOCKED", "connection_attempted": False,
-                "reason": "未提供安全环境变量STOCK_A_PG_DSN；未尝试连接", "checks": [], "physical": None}
     try:
         import psycopg
-        from psycopg.conninfo import conninfo_to_dict
+        from psycopg.conninfo import conninfo_to_dict, make_conninfo
     except ImportError:
-        return {"status": "UNAVAILABLE", "connection_attempted": False,
-                "reason": "缺少PostgreSQL驱动psycopg；未尝试连接", "checks": [], "physical": None}
+        return {"status": "DRIVER_MISSING", "connection_attempted": False,
+                "reason": "缺少PostgreSQL驱动psycopg；未尝试连接", "cause_type": "ImportError",
+                "checks": [], "physical": None}
+    dsn = os.environ.get("STOCK_A_PG_DSN")
     try:
-        connection_parameters = _fixed_connection_parameters(dsn, os.environ, conninfo_to_dict)
+        if dsn:
+            connection_parameters = _fixed_connection_parameters(dsn, os.environ, conninfo_to_dict)
+        else:
+            credentials = _load_private_credentials()
+            connection_parameters = _private_connection_parameters(credentials, make_conninfo, conninfo_to_dict)
     except psycopg.ProgrammingError as error:
-        # psycopg 将 conninfo 语法错误包装为 ProgrammingError；仅在此解析边界
-        # 转成参数错误，查询阶段的同类异常仍由主核验分类器处理。
         return {"status": "INVALID_ARGUMENT", "connection_attempted": False,
                 "reason": "DSN语法无效；未尝试连接", "cause_type": type(error).__name__,
                 "sqlstate": getattr(error, "sqlstate", None), "checks": [], "physical": None}
+    except FileNotFoundError:
+        return {"status": "BLOCKED", "connection_attempted": False,
+                "reason": "登记的PG凭据文件不存在；未尝试连接", "checks": [], "physical": None}
+    except PermissionError:
+        return {"status": "PERMISSION_DENIED", "connection_attempted": False,
+                "reason": "操作系统拒绝读取登记的PG凭据文件；未尝试连接", "checks": [], "physical": None}
     except (ValueError, TypeError):
         return {"status": "REJECTED", "connection_attempted": False,
-                "reason": "连接目标或DSN参数不符合固定合同；未尝试连接", "checks": [], "physical": None}
+                "reason": "连接目标或凭据文件不符合固定合同；未尝试连接", "checks": [], "physical": None}
+    except Exception as error:
+        return {"status": "ENGINEERING_ERROR", "connection_attempted": False,
+                "reason": "准备PostgreSQL连接参数时发生工程错误；未尝试连接",
+                "cause_type": type(error).__name__, "checks": [], "physical": None}
     start = time.monotonic()
     deadline = start + min(float(timeout_seconds), _MAX_INSPECTION_SECONDS)
     try:

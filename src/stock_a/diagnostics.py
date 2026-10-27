@@ -166,6 +166,18 @@ def _validate_config(config: Any) -> None:
         or policy.get("unknown_files") != "REJECT"
     ):
         raise DiagnosticError("CONFIG_INVALID", "配置目录安全策略缺失或类型错误")
+    private_policy = _require_mapping(policy.get("private_files"), "configuration_policy.private_files")
+    expected_private_files = [{
+        "path": "private/postgresql.credentials.json",
+        "schema": "STOCK-A-PG-CREDENTIALS/R1",
+        "allowed_keys": ["schema", "host", "port", "database", "username", "password"],
+        "consumer": "stock_a.postgres_identity.inspect_postgres（仅pg-identity）",
+        "lifecycle": "STOCK_A_PG_DSN优先；仅在其缺失时由pg-identity进程内存读取；不得输出、摘要、记录、复制或传入子进程参数",
+    }]
+    if (private_policy.get("root") != "private" or private_policy.get("git_allowed") is not False
+            or private_policy.get("allowed_role") != "SECRET_CONNECTION_KEYS_ONLY_NOT_BUSINESS_TEST_OR_RESULT_DATA"
+            or private_policy.get("registered_files") != expected_private_files):
+        raise DiagnosticError("CONFIG_INVALID", "私密配置登记必须精确匹配唯一PG凭据文件合同")
     registered = policy.get("public_files")
     expected = {
         ("runtime.defaults.json", "BUSINESS_RUNTIME_CONFIGURATION", _CONFIG_CONTRACT),
@@ -657,7 +669,7 @@ def _run_pg_identity(args: argparse.Namespace) -> int:
         "business_write_admission": "ALLOW" if result.get("status") == "READY" else "DENY",
         "production_switched": False,
     })
-    _emit(result, error=result.get("status") in ("PERMISSION_DENIED", "AUTHENTICATION_FAILED", "ENGINEERING_ERROR"))
+    _emit(result, error=result.get("status") != "READY")
     if result.get("status") == "INVALID_ARGUMENT":
         return _EXIT_ARGUMENT
     if result.get("status") == "READY":
