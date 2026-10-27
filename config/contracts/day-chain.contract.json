@@ -7797,6 +7797,16 @@
       "history_policy": {
         "source": "CURRENT_RUN_SEALED_CANONICAL_PLUS_PREVIOUS_ACCEPTED_CANONICAL",
         "selection": "EXACT_DECLARED_FIELD_WINDOWS_AND_ENDPOINT_UNIVERSES",
+        "core_market_session_input": {
+          "required_calendar": "VERSIONED_OFFICIAL_MARKET_SESSION_SET",
+          "required_identity": ["calendar_id", "revision"],
+          "coverage_validation": "OBSERVATION_DATES_EXACTLY_EQUAL_CALENDAR_SESSIONS_WITHIN_SUPPLIED_HISTORY_RANGE",
+          "missing_or_non_session_row": "REJECT_CONTRACT",
+          "session_state": "EXPLICIT_PER_OFFICIAL_SESSION; UNKNOWN_BLOCKS_DEPENDENT_WINDOW",
+          "pre_listing": "EXPLICIT_PRE_LISTING_STATE_PER_SESSION",
+          "non_trading_days": "EXCLUDED_FROM_CALENDAR_AND_INPUT",
+          "pure_function_io": false
+        },
         "first_day": "NEW_VERIFIED_SOURCE_HISTORY_OR_LEGITIMATE_SHORT_HISTORY_NO_OLD_V4_DB",
         "stateful_advanced_prior_required": false,
         "context_dependencies": "TRANSITIVE_UNION_OF_SELECTED_INPUT_AND_WINDOW_CONTEXT_PROJECTIONS_NO_LATEST",

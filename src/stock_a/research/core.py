@@ -27,12 +27,29 @@ class CoreObservation:
     volume: FieldValue | None = None
 
 
+@dataclass(frozen=True)
+class MarketSessionCalendar:
+    """由上游规范日历提供的官方市场会话闭合集合及其身份。"""
+
+    calendar_id: str
+    revision: str
+    sessions: tuple[date, ...]
+
+    def __post_init__(self) -> None:
+        if not self.calendar_id or not self.revision:
+            raise ContractError("官方市场日历必须有身份和版本")
+        if type(self.sessions) is not tuple or not self.sessions or any(type(day) is not date for day in self.sessions):
+            raise ContractError("官方市场日历必须包含date会话")
+        if any(a >= b for a, b in zip(self.sessions, self.sessions[1:])):
+            raise ContractError("官方市场日历会话必须唯一且递增")
+
+
 _STATES = {"ACTUAL", "CONFIRMED_SUSPENSION", "UNKNOWN", "PRE_LISTING",
            "ADJUSTMENT_UNKNOWN", "IDENTITY_UNKNOWN"}
 _PRICE_FIELDS = ("open", "high", "low", "close")
 
 
-def _validate_history(history: Sequence[CoreObservation]) -> None:
+def _validate_history(history: Sequence[CoreObservation], calendar: MarketSessionCalendar) -> None:
     if not history:
         raise ContractError("Core历史会话不能为空")
     for row in history:
@@ -48,6 +65,11 @@ def _validate_history(history: Sequence[CoreObservation]) -> None:
                 raise ContractError("actual bar的价格、金额和数量必须显式携带质量")
     if any(left.session >= right.session for left, right in zip(history, history[1:])):
         raise ContractError("Core会话必须唯一且按日期严格递增")
+    supplied = tuple(row.session for row in history)
+    expected = tuple(day for day in calendar.sessions
+                     if supplied[0] <= day <= supplied[-1])
+    if supplied != expected:
+        raise ContractError("Core输入未与官方市场会话日历闭合；不得压缩缺失会话")
 
 
 def _actual_window(history: Sequence[CoreObservation], count: int,
@@ -95,22 +117,69 @@ def _numeric_column(rows: Sequence[CoreObservation], name: str,
     return values, None
 
 
-def _prices(rows: Sequence[CoreObservation]) -> tuple[list[tuple[Fraction, Fraction, Fraction, Fraction]] | None,
-                                                     str | None]:
-    if len({row.coordinate_id for row in rows}) != 1:
-        return None, "MIXED_PRICE_COORDINATE"
+def _coordinate_error(rows: Sequence[CoreObservation]) -> str | None:
+    coordinates = {row.coordinate_id for row in rows if row.state == "ACTUAL"}
+    return "MIXED_PRICE_COORDINATE" if len(coordinates) > 1 else None
+
+
+def _known_ohlc_error(row: CoreObservation) -> str | None:
+    known: dict[str, Fraction] = {}
+    for name in _PRICE_FIELDS:
+        field = getattr(row, name)
+        if not isinstance(field, FieldValue) or field.quality != "OBSERVED":
+            continue
+        value, reason = _number(field, "DATA_INVALID_OHLC")
+        if reason:
+            return "DATA_INVALID_OHLC"
+        if value <= 0:
+            return "DATA_INVALID_OHLC"
+        known[name] = value
+    o, h, low, c = (known.get(k) for k in ("open", "high", "low", "close"))
+    if h is not None and low is not None and low > h:
+        return "DATA_INVALID_OHLC"
+    if low is not None and any(value is not None and low > value for value in (o, c)):
+        return "DATA_INVALID_OHLC"
+    if h is not None and any(value is not None and value > h for value in (o, c)):
+        return "DATA_INVALID_OHLC"
+    return None
+
+
+def _column(rows: Sequence[CoreObservation], name: str) -> tuple[list[Fraction] | None, str | None]:
+    coordinate_error = _coordinate_error(rows)
+    if coordinate_error:
+        return None, coordinate_error
+    values = []
+    for row in rows:
+        error = _known_ohlc_error(row)
+        if error:
+            return None, error
+        value, reason = _number(getattr(row, name), f"DATA_INVALID_{name.upper()}")
+        if reason:
+            return None, reason
+        if value <= 0:
+            return None, f"DATA_INVALID_{name.upper()}"
+        values.append(value)
+    return values, None
+
+
+def _high_low(rows: Sequence[CoreObservation]) -> tuple[list[tuple[Fraction, Fraction]] | None, str | None]:
+    coordinate_error = _coordinate_error(rows)
+    if coordinate_error:
+        return None, coordinate_error
     result = []
     for row in rows:
-        vals = []
-        for name in _PRICE_FIELDS:
-            value, reason = _number(getattr(row, name), "DATA_INVALID_OHLC")
+        error = _known_ohlc_error(row)
+        if error:
+            return None, error
+        values = []
+        for name in ("high", "low"):
+            value, reason = _number(getattr(row, name), f"DATA_INVALID_{name.upper()}")
             if reason:
-                return None, "DATA_INVALID_OHLC" if reason.startswith("DATA_INVALID") else reason
-            vals.append(value)
-        o, h, low, close = vals
-        if min(vals) <= 0 or low > min(o, close) or max(o, close) > h or h < low:
-            return None, "DATA_INVALID_OHLC"
-        result.append((o, h, low, close))
+                return None, reason
+            if value <= 0:
+                return None, f"DATA_INVALID_{name.upper()}"
+            values.append(value)
+        result.append((values[0], values[1]))
     return result, None
 
 
@@ -118,16 +187,27 @@ def _known(value, reason: str | None = None) -> FieldValue:
     return unknown(reason) if reason else FieldValue(value)
 
 
-def _fixed_session_window(history: Sequence[CoreObservation], periods: int):
+def _fixed_session_window(history: Sequence[CoreObservation], periods: int, *, require_all_actual: bool):
     if len(history) < periods + 1:
         return list(history), "SHORT_SESSION_HISTORY"
     rows = list(history[-periods - 1:])
-    for row in rows:
+    if rows[0].state != "ACTUAL" or rows[-1].state != "ACTUAL":
+        endpoint = rows[0] if rows[0].state != "ACTUAL" else rows[-1]
+        return rows, {
+            "UNKNOWN": "UNKNOWN_SESSION_GAP",
+            "CONFIRMED_SUSPENSION": "SUSPENDED_ENDPOINT_OR_WINDOW",
+            "PRE_LISTING": "PRE_LISTING_ENDPOINT",
+            "ADJUSTMENT_UNKNOWN": "PRICE_IDENTITY_UNKNOWN",
+            "IDENTITY_UNKNOWN": "SECURITY_IDENTITY_UNKNOWN",
+        }[endpoint.state]
+    for row in rows[1:-1]:
+        if row.state == "CONFIRMED_SUSPENSION" and not require_all_actual:
+            continue
         if row.state != "ACTUAL":
             return rows, {
                 "UNKNOWN": "UNKNOWN_SESSION_GAP",
                 "CONFIRMED_SUSPENSION": "SUSPENDED_ENDPOINT_OR_WINDOW",
-                "PRE_LISTING": "PRE_LISTING_ENDPOINT",
+                "PRE_LISTING": "PRE_LISTING_SESSION_WINDOW",
                 "ADJUSTMENT_UNKNOWN": "PRICE_IDENTITY_UNKNOWN",
                 "IDENTITY_UNKNOWN": "SECURITY_IDENTITY_UNKNOWN",
             }[row.state]
@@ -139,13 +219,13 @@ def _decimal_fraction(value: Fraction) -> Decimal:
 
 
 def _volatility(rows: Sequence[CoreObservation], periods: int):
-    session_rows, reason = _fixed_session_window(rows, periods)
+    session_rows, reason = _fixed_session_window(rows, periods, require_all_actual=True)
     if reason:
         return unknown(reason)
-    bars, reason = _prices(session_rows)
+    bars, reason = _column(session_rows, "close")
     if reason:
         return unknown(reason)
-    closes = [bar[3] for bar in bars]
+    closes = bars
     if any(close <= 0 for close in closes):
         return unknown("INVALID_PRICE_DENOMINATOR")
     with localcontext() as ctx:
@@ -157,9 +237,12 @@ def _volatility(rows: Sequence[CoreObservation], periods: int):
         return FieldValue(variance.sqrt())
 
 
-def calculate_core(history: Sequence[CoreObservation]) -> dict[str, FieldValue]:
+def calculate_core(history: Sequence[CoreObservation], *,
+                   official_calendar: MarketSessionCalendar | None = None) -> dict[str, FieldValue]:
     """计算最新actual会话的Core字段，不做IO、发布或隐式缺值回退。"""
-    _validate_history(history)
+    if not isinstance(official_calendar, MarketSessionCalendar):
+        raise ContractError("Core计算必须传入版本化官方市场会话日历")
+    _validate_history(history, official_calendar)
     latest = history[-1]
     if latest.state != "ACTUAL":
         reason = {
@@ -174,45 +257,50 @@ def calculate_core(history: Sequence[CoreObservation]) -> dict[str, FieldValue]:
     result: dict[str, FieldValue] = {}
     for period in (5, 10, 20, 60):
         rows, reason = _actual_window(history, period)
-        values, value_reason = _prices(rows) if not reason else (None, reason)
+        values, value_reason = _column(rows, "close") if not reason else (None, reason)
         values = values or []
-        result[f"core.ma{period}"] = _known(mean([x[3] for x in values]) if values else None,
+        result[f"core.ma{period}"] = _known(mean(values) if values else None,
                                                reason or value_reason)
         if period in (5, 20, 60):
-            result[f"core.hhv{period}"] = _known(max((x[1] for x in values), default=None), reason or value_reason)
-            result[f"core.llv{period}"] = _known(min((x[2] for x in values), default=None), reason or value_reason)
+            extremes, extreme_reason = _high_low(rows) if not reason else (None, reason)
+            extremes = extremes or []
+            result[f"core.hhv{period}"] = _known(max((x[0] for x in extremes), default=None), reason or extreme_reason)
+            result[f"core.llv{period}"] = _known(min((x[1] for x in extremes), default=None), reason or extreme_reason)
             prior_rows, prior_reason = _actual_window(history, period, exclude_current=True)
-            prior_prices, price_reason = _prices(prior_rows) if not prior_reason else (None, prior_reason)
-            prior_prices = prior_prices or []
-            result[f"core.prior_high{period}"] = _known(max((x[1] for x in prior_prices), default=None),
+            prior_extremes, price_reason = _high_low(prior_rows) if not prior_reason else (None, prior_reason)
+            prior_extremes = prior_extremes or []
+            result[f"core.prior_high{period}"] = _known(max((x[0] for x in prior_extremes), default=None),
                                                            prior_reason or price_reason)
-            result[f"core.prior_low{period}"] = _known(min((x[2] for x in prior_prices), default=None),
+            result[f"core.prior_low{period}"] = _known(min((x[1] for x in prior_extremes), default=None),
                                                           prior_reason or price_reason)
 
     # True range uses consecutive selected actual bars; known suspensions may be skipped.
     tr_rows, tr_reason = _actual_window(history, 2)
-    tr_prices, price_reason = _prices(tr_rows) if not tr_reason else (None, tr_reason)
-    if tr_prices:
-        prev, cur = tr_prices
-        tr = max(cur[1] - cur[2], abs(cur[1] - prev[3]), abs(cur[2] - prev[3]))
+    tr_extremes, extreme_reason = _high_low(tr_rows) if not tr_reason else (None, tr_reason)
+    tr_closes, close_reason = _column(tr_rows, "close") if not tr_reason else (None, tr_reason)
+    if tr_extremes and tr_closes:
+        (prev_high, prev_low), (cur_high, cur_low) = tr_extremes
+        prev_close, cur_close = tr_closes
+        tr = max(cur_high - cur_low, abs(cur_high - prev_close), abs(cur_low - prev_close))
         result["core.tr"] = _known(tr)
     else:
-        result["core.tr"] = unknown(tr_reason or price_reason)
+        result["core.tr"] = unknown(tr_reason or extreme_reason or close_reason)
 
     for period in (5, 20):
         rows, reason = _actual_window(history, period + 1)
-        values, value_reason = _prices(rows) if not reason else (None, reason)
-        if values:
-            true_ranges = [max(cur[1] - cur[2], abs(cur[1] - prev[3]), abs(cur[2] - prev[3]))
-                           for prev, cur in zip(values, values[1:])]
+        extremes, extreme_reason = _high_low(rows) if not reason else (None, reason)
+        closes, close_reason = _column(rows, "close") if not reason else (None, reason)
+        if extremes and closes:
+            true_ranges = [max(cur_h - cur_l, abs(cur_h - prev_c), abs(cur_l - prev_c))
+                           for (cur_h, cur_l), prev_c in zip(extremes[1:], closes[:-1])]
             result[f"core.atr{period}"] = _known(mean(true_ranges))
         else:
-            result[f"core.atr{period}"] = unknown(reason or value_reason)
+            result[f"core.atr{period}"] = unknown(reason or extreme_reason or close_reason)
 
     # MA slope windows compare current and lagged actual-bar moving averages.
     for period, offset in ((20, 5), (60, 10)):
         rows, reason = _actual_window(history, period + offset)
-        values, value_reason = _prices(rows) if not reason else (None, reason)
+        values, value_reason = _column(rows, "close") if not reason else (None, reason)
         atr = result["core.atr20"]
         reason = reason or value_reason or (atr.reason if atr.quality != "OBSERVED" else None)
         if not reason and atr.value <= 0:
@@ -222,8 +310,7 @@ def calculate_core(history: Sequence[CoreObservation]) -> dict[str, FieldValue]:
         else:
             earlier = values[-period-offset:-offset]
             current = values[-period:]
-            result[f"core.ma_slope{period}_atr"] = FieldValue((mean(x[3] for x in current)
-                                                                  - mean(x[3] for x in earlier)) / atr.value)
+            result[f"core.ma_slope{period}_atr"] = FieldValue((mean(current) - mean(earlier)) / atr.value)
 
     # Ratios use current raw value over the strict prior-N actual-bar mean.
     for name in ("amount", "volume"):
@@ -244,12 +331,14 @@ def calculate_core(history: Sequence[CoreObservation]) -> dict[str, FieldValue]:
     result["core.liquidity_mean20"] = (unknown(prior_reason or amount_reason) if prior_reason or amount_reason
                                          else FieldValue(mean(prior_values)))
 
-    current_prices, current_reason = _prices([latest])
-    if current_prices:
-        o, h, low, close = current_prices[0]
-        result["core.clv"] = unknown("ZERO_PRICE_RANGE") if h == low else FieldValue((close - low) / (h - low))
+    current_close, current_reason = _column([latest], "close")
+    current_extremes, current_extreme_reason = _high_low([latest])
+    current_prices = current_close
+    if current_close and current_extremes:
+        h, low = current_extremes[0]
+        result["core.clv"] = unknown("ZERO_PRICE_RANGE") if h == low else FieldValue((current_close[0] - low) / (h - low))
     else:
-        result["core.clv"] = unknown(current_reason)
+        result["core.clv"] = unknown(current_reason or current_extreme_reason)
 
     result["core.ret1"] = _return(history, 1)
     for period in (3, 5, 20):
@@ -265,7 +354,7 @@ def calculate_core(history: Sequence[CoreObservation]) -> dict[str, FieldValue]:
     elif hhv60.value == llv60.value:
         result["core.pos60"] = unknown("ZERO_PRICE_RANGE")
     else:
-        result["core.pos60"] = FieldValue((current_prices[0][3] - llv60.value) / (hhv60.value - llv60.value))
+        result["core.pos60"] = FieldValue((current_prices[0] - llv60.value) / (hhv60.value - llv60.value))
     _derived_price_ratios(result, current_prices)
     _progress(result, history)
     _prior_percentile(result, history, current_prices)
@@ -274,18 +363,22 @@ def calculate_core(history: Sequence[CoreObservation]) -> dict[str, FieldValue]:
 
 
 def _return(history: Sequence[CoreObservation], periods: int) -> FieldValue:
-    rows, reason = _fixed_session_window(history, periods)
+    rows, reason = _fixed_session_window(history, periods, require_all_actual=False)
     if reason:
         return unknown(reason)
-    values, price_reason = _prices(rows)
+    for row in rows:
+        error = _known_ohlc_error(row)
+        if error:
+            return unknown(error)
+    values, price_reason = _column((rows[0], rows[-1]), "close")
     if price_reason:
         return unknown(price_reason)
-    start, end = values[0][3], values[-1][3]
+    start, end = values[0], values[-1]
     return unknown("INVALID_PRICE_DENOMINATOR") if start <= 0 else FieldValue(end / start - 1)
 
 
 def _derived_price_ratios(result, current_prices):
-    current = current_prices[0][3] if current_prices else None
+    current = current_prices[0] if current_prices else None
     for target, numerator, denominator in (
         ("core.bias20_atr", "core.ma20", "core.atr20"),
         ("core.dist_high20_atr", "core.prior_high20", "core.atr20"),
@@ -322,23 +415,23 @@ def _derived_price_ratios(result, current_prices):
 
 def _progress(result, history):
     rows, reason = _actual_window(history, 10)
-    values, value_reason = _prices(rows) if not reason else (None, reason)
+    values, value_reason = _high_low(rows) if not reason else (None, reason)
     if reason or value_reason:
         result["core.hh_progress"] = unknown(reason or value_reason)
         result["core.ll_progress"] = unknown(reason or value_reason)
         return
-    result["core.hh_progress"] = FieldValue(max(x[1] for x in values[-5:]) > max(x[1] for x in values[:5]))
-    result["core.ll_progress"] = FieldValue(min(x[2] for x in values[-5:]) < min(x[2] for x in values[:5]))
+    result["core.hh_progress"] = FieldValue(max(x[0] for x in values[-5:]) > max(x[0] for x in values[:5]))
+    result["core.ll_progress"] = FieldValue(min(x[1] for x in values[-5:]) < min(x[1] for x in values[:5]))
 
 
 def _prior_percentile(result, history, current_prices):
     rows, reason = _actual_window(history, 60, exclude_current=True)
-    values, value_reason = _prices(rows) if not reason else (None, reason)
+    values, value_reason = _column(rows, "close") if not reason else (None, reason)
     if reason or value_reason or not current_prices:
         result["core.prior60_percentile"] = unknown(reason or value_reason or "CURRENT_PRICE_UNKNOWN")
         return
-    current = current_prices[0][3]
-    closes = [x[3] for x in values]
+    current = current_prices[0]
+    closes = values
     less = sum(x < current for x in closes)
     equal = sum(x == current for x in closes)
     result["core.prior60_percentile"] = FieldValue(Fraction(100 * (less + Fraction(equal, 2)), 60))
@@ -354,7 +447,7 @@ def _price_damage(result, current_prices):
     else:
         # Adopted research baseline from ALG-15: 0.5 ATR, strictly below and negative ret1.
         result["core.price_damage"] = FieldValue(
-            current_prices[0][3] < prior.value - Fraction(1, 2) * atr.value and ret.value < 0
+            current_prices[0] < prior.value - Fraction(1, 2) * atr.value and ret.value < 0
         )
 
 
