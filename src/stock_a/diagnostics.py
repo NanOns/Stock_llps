@@ -8,6 +8,7 @@ from decimal import Decimal, InvalidOperation
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 from pathlib import Path
 import stat
@@ -643,7 +644,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
 
 
 def _run_pg_identity(args: argparse.Namespace) -> int:
-    if type(args.timeout_seconds) not in (int, float) or not 0 < args.timeout_seconds <= 30:
+    if type(args.timeout_seconds) not in (int, float) or not math.isfinite(args.timeout_seconds) or not 0 < args.timeout_seconds <= 30:
         raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", "PG核验超时必须大于0且不超过30秒", _EXIT_ARGUMENT)
     package = _module_mode()
     config, config_path = _load_runtime_config()
@@ -657,6 +658,8 @@ def _run_pg_identity(args: argparse.Namespace) -> int:
         "production_switched": False,
     })
     _emit(result, error=result.get("status") in ("PERMISSION_DENIED", "AUTHENTICATION_FAILED", "ENGINEERING_ERROR"))
+    if result.get("status") == "INVALID_ARGUMENT":
+        return _EXIT_ARGUMENT
     if result.get("status") == "READY":
         return _EXIT_OK
     if result.get("status") in ("PERMISSION_DENIED", "AUTHENTICATION_FAILED"):
