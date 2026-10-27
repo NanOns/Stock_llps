@@ -27,6 +27,7 @@ from stock_a.sources.tdx.actions import (
 )
 from stock_a.sources.tdx.day_source import open_day_file, read_protected_bytes
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
+from stock_a.postgres_identity import inspect_postgres
 
 
 _WORKSPACE = Path("G:/codex work/Stock A")
@@ -218,6 +219,16 @@ def _validate_config(config: Any) -> None:
     for key in ("database", "business_schema"):
         if database.get(key) != "stock_a":
             raise DiagnosticError("CONFIG_INVALID", f"数据库声明{key}必须固定为stock_a")
+    expected_pg_paths = {
+        "host": "127.0.0.1", "port": 5432,
+        "data_directory": "G:/Postgres/data", "wal_directory": "G:/Postgres/data/pg_wal",
+        "log_directory": "G:/Postgres/log", "manual_export_and_backup_directory": "G:/Postgres/backups",
+        "temp_tablespaces": "",
+    }
+    for key, expected_value in expected_pg_paths.items():
+        value = database.get(key)
+        if type(value) is not type(expected_value) or value != expected_value:
+            raise DiagnosticError("CONFIG_INVALID", f"PostgreSQL配置字段{key}未匹配唯一G盘部署默认")
     service_role = _require_mapping(root.get("startup_policy"), "startup_policy")
     expected_security_policy = {
         "require_explicit_validated_configuration": True,
@@ -318,6 +329,8 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", parser_class=ChineseParser)
     doctor = commands.add_parser("doctor", help="诊断本地配置、包身份和声明能力")
     doctor.add_argument("--config", help="仅接受唯一登记配置runtime.defaults.json的绝对路径")
+    pg = commands.add_parser("pg-identity", help="以只读事务核验PostgreSQL身份与G盘存储")
+    pg.add_argument("--timeout-seconds", type=float, default=5.0, help="连接与每条查询的秒数上限，默认5秒，最大30秒")
     phase0 = commands.add_parser(
         "source-phase0",
         help="有界核验已绑定的本地TDX来源能力",
@@ -629,6 +642,30 @@ def _run_doctor(args: argparse.Namespace) -> int:
     return _EXIT_UNAVAILABLE
 
 
+def _run_pg_identity(args: argparse.Namespace) -> int:
+    if type(args.timeout_seconds) not in (int, float) or not 0 < args.timeout_seconds <= 30:
+        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", "PG核验超时必须大于0且不超过30秒", _EXIT_ARGUMENT)
+    package = _module_mode()
+    config, config_path = _load_runtime_config()
+    result = inspect_postgres(config, timeout_seconds=args.timeout_seconds)
+    result.update({
+        "ok": result.get("status") == "READY",
+        "message": "PostgreSQL只读身份核验完成；只有全部实际条件通过才允许业务写入或发布",
+        "package": package,
+        "configuration_path": str(config_path),
+        "business_write_admission": "ALLOW" if result.get("status") == "READY" else "DENY",
+        "production_switched": False,
+    })
+    _emit(result, error=result.get("status") in ("PERMISSION_DENIED", "AUTHENTICATION_FAILED", "ENGINEERING_ERROR"))
+    if result.get("status") == "READY":
+        return _EXIT_OK
+    if result.get("status") in ("PERMISSION_DENIED", "AUTHENTICATION_FAILED"):
+        return _EXIT_PERMISSION
+    if result.get("status") == "ENGINEERING_ERROR":
+        return _EXIT_ENGINEERING
+    return _EXIT_UNAVAILABLE
+
+
 def _run_source_inspect(args: argparse.Namespace) -> int:
     if not Path(args.path).is_absolute():
         raise DiagnosticError("SOURCE_PATH_INVALID", "来源文件必须使用绝对路径")
@@ -693,6 +730,8 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "doctor":
             return _run_doctor(args)
+        if args.command == "pg-identity":
+            return _run_pg_identity(args)
         if args.command == "source-phase0":
             return _run_source_phase0(args)
         if args.command == "source-inspect":
