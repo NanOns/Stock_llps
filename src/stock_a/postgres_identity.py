@@ -421,19 +421,31 @@ def _load_private_credentials(path: Path | None = None) -> dict[str, Any]:
     approved_root = _PRIVATE_CONFIG_ROOT
     path = _PRIVATE_CREDENTIALS_PATH if path is None else path
     try:
-        # 先拒绝配置根、私密目录或凭据文件的符号链接，再解析最终路径。
+        # 路径检查只作早期拒绝；最终安全判断针对实际打开的同一文件句柄。
         for candidate in (approved_root.parent, approved_root, path):
-            if candidate.is_symlink():
-                raise ValueError("凭据路径不允许符号链接")
+            if candidate.is_symlink() or (hasattr(candidate, "is_junction") and candidate.is_junction()):
+                raise ValueError("凭据路径不允许符号链接或重解析点")
         root = approved_root.resolve(strict=True)
         resolved = path.resolve(strict=True)
         if root != approved_root or resolved.parent != root or resolved.name != "postgresql.credentials.json":
             raise ValueError("凭据路径不在唯一登记位置")
-        info = resolved.stat()
-        if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > _MAX_CREDENTIAL_FILE_BYTES:
-            raise ValueError("凭据文件类型或大小不符合合同")
-        with resolved.open("rb") as stream:
-            raw = stream.read(_MAX_CREDENTIAL_FILE_BYTES + 1)
+        # 只打开一次，在读取前从该句柄核验最终路径和文件类型。
+        # 若检查与打开之间发生替换，实际句柄路径不匹配时会在读取前拒绝。
+        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(resolved, flags)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > _MAX_CREDENTIAL_FILE_BYTES:
+                raise ValueError("凭据文件类型或大小不符合合同")
+            opened_path = _opened_file_path(fd)
+            if _canonical_path(opened_path) != _canonical_path(resolved):
+                raise ValueError("凭据文件句柄不属于唯一登记位置")
+            with os.fdopen(fd, "rb", closefd=False) as stream:
+                raw = stream.read(_MAX_CREDENTIAL_FILE_BYTES + 1)
+        finally:
+            os.close(fd)
         if len(raw) > _MAX_CREDENTIAL_FILE_BYTES:
             raise ValueError("凭据文件超过读取上限")
         def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -461,6 +473,33 @@ def _load_private_credentials(path: Path | None = None) -> dict[str, Any]:
             or not isinstance(data.get("password"), str) or not data["password"]):
         raise ValueError("PG凭据版本、目标或字段值不符合固定合同")
     return data
+
+
+def _canonical_path(path: str | Path) -> str:
+    """统一路径分隔符与Windows大小写，供句柄最终路径比对。"""
+    value = str(path).removeprefix("\\\\?\\")
+    return os.path.normcase(os.path.normpath(value))
+
+
+def _opened_file_path(fd: int) -> str:
+    """返回已打开文件句柄的系统最终路径；不支持的平台失败关闭。"""
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        handle = msvcrt.get_osfhandle(fd)
+        get_path = ctypes.windll.kernel32.GetFinalPathNameByHandleW
+        get_path.argtypes = (ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32)
+        get_path.restype = ctypes.c_uint32
+        buffer = ctypes.create_unicode_buffer(32768)
+        length = get_path(handle, buffer, len(buffer), 0)
+        if length == 0 or length >= len(buffer):
+            raise OSError("无法验证凭据文件句柄最终路径")
+        return buffer.value
+    # POSIX以已打开文件的/proc句柄路径为准，缺少该能力时拒绝私密文件读取。
+    proc_path = Path(f"/proc/self/fd/{fd}")
+    if not proc_path.exists():
+        raise OSError("当前平台不支持验证凭据文件句柄路径")
+    return os.readlink(proc_path)
 
 
 def _private_connection_parameters(credentials: dict[str, Any], make_conninfo: Any,
