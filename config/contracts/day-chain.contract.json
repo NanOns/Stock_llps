@@ -18400,8 +18400,9 @@
           "readonly_source_roots"
         ],
         "business_digest_fields_ref": "revision_policy.business_input_digest_fields",
-        "business_input_digest_definition": "Canonical JSON SHA-256 over full contract identity, scope revision binding, calendar identity, semantic revisions and registered values/quality/provenance/parameters/producer inputs; target and execution schedule are separate plan identity.",
-        "plan_digest_definition": "Canonical JSON SHA-256 over contract, scope, business input digest, target, complete frozen context, prior context, environment evidence, incremental decision, parent generation and scheduled session/stage closure.",
+        "business_input_digest_definition": "Canonical JSON SHA-256 over full contract identity, scope revision binding, calendar identity, semantic revisions and exactly the registered values/quality/provenance/parameters/producer fields; unregistered business_identity keys are ignored, excluded metadata keys are recursively omitted with containers emptied solely by those keys, and target/schedule are separate plan identity.",
+        "plan_digest_definition": "Canonical JSON SHA-256 over contract, scope, business input digest, target, complete frozen context, prior context, environment evidence, incremental decision, parent generation and scheduled session/stage closure after recursive omission of excluded metadata keys and containers emptied solely by those keys.",
+        "digest_exclusion_application": "RECURSIVE_OBJECT_KEY_PROJECTION_BOTH_DIGESTS",
         "digest_excludes": [
           "wall_clock_duration",
           "request_id",

@@ -1,7 +1,7 @@
 """同一DAG计划使用的纯增量模式判定。"""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from hashlib import sha256
 import json
@@ -12,8 +12,9 @@ from stock_a.domain import ContractError
 
 # 该摘要固定正式机器合同中的完整scope闭包目录；依赖键仅维护在合同文件。
 _OFFICIAL_SCOPE_CLOSURE_CATALOG_DIGEST = "3cce5f595d838d988e422199df8346359bebe5910811d98f88c94dcfe013f265"
-_OFFICIAL_DAY_CHAIN_CONTRACT_SHA256 = "6af7c44c70d71d73ec6511a1670e8bb758f2318a23261442bea9275e95d4dc6c"
+_OFFICIAL_DAY_CHAIN_CONTRACT_SHA256 = "89e4150e577196f95ef459a121308e191396bb0a991bc0d2e37829cddb4bb3eb"
 _DAY_PLAN_KERNEL_SYMBOL = "stock_a.planning:assemble_day_plan"
+_OMIT_DIGEST_VALUE = object()
 
 
 class DayPlanError(ContractError):
@@ -306,6 +307,7 @@ class CapabilityEvidence:
 
     status: str
     evidence_ref: str | None
+    metadata: Mapping[str, object] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -365,7 +367,7 @@ class EnvironmentGate:
     """按显式上游状态聚合的计划门，不是运行时部署证明。"""
 
     status: str
-    capability_states: tuple[tuple[str, str, str | None], ...]
+    capability_states: tuple[tuple[str, str, str | None, Mapping[str, object]], ...]
     reason_codes: tuple[str, ...]
     upstream_claims_authenticated: bool = False
 
@@ -381,7 +383,7 @@ def _plan_error(code: str, message: str) -> DayPlanError:
     return DayPlanError(code, message)
 
 
-def _json_identity(value: object, name: str) -> object:
+def _json_identity(value: object, name: str, excluded_keys: frozenset[str] = frozenset()) -> object:
     """校验并复制稳定JSON身份，拒绝浮点、日期隐式转换及任意对象。"""
     if value is None or type(value) in (str, bool, int):
         return value
@@ -392,12 +394,14 @@ def _json_identity(value: object, name: str) -> object:
         for key, item in value.items():
             if not isinstance(key, str) or not key:
                 raise _plan_error("BUSINESS_IDENTITY_INVALID", name + "含非法对象键")
+            if key in excluded_keys:
+                continue
             if key in result:
                 raise _plan_error("BUSINESS_IDENTITY_INVALID", name + "含重复对象键")
-            result[key] = _json_identity(item, name + "." + key)
+            result[key] = _json_identity(item, name + "." + key, excluded_keys)
         return result
     if isinstance(value, (tuple, list)):
-        return [_json_identity(item, name + "[]") for item in value]
+        return [_json_identity(item, name + "[]", excluded_keys) for item in value]
     raise _plan_error("BUSINESS_IDENTITY_INVALID", name + "含不支持的身份值")
 
 
@@ -411,6 +415,30 @@ def _freeze_value(value: object) -> object:
 
 def _freeze_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
     return MappingProxyType({key: _freeze_value(item) for key, item in value.items()})
+
+
+def _without_digest_exclusions(value: object, excluded_keys: frozenset[str]) -> object:
+    """递归投影摘要输入，按合同键名移除所有运行时元数据。"""
+    if isinstance(value, Mapping):
+        projected = {}
+        for key, item in value.items():
+            if key in excluded_keys:
+                continue
+            child = _without_digest_exclusions(item, excluded_keys)
+            if child is not _OMIT_DIGEST_VALUE:
+                projected[key] = child
+        if not projected and value:
+            return _OMIT_DIGEST_VALUE
+        return projected
+    if isinstance(value, (tuple, list)):
+        projected = [
+            child for item in value
+            if (child := _without_digest_exclusions(item, excluded_keys)) is not _OMIT_DIGEST_VALUE
+        ]
+        if not projected and value:
+            return _OMIT_DIGEST_VALUE
+        return projected
+    return value
 
 
 def _validated_contract(request: DayPlanRequest) -> tuple[Mapping[str, object], str]:
@@ -552,22 +580,31 @@ def _validate_stage_dag(contract: Mapping[str, object], scope_id: str) -> tuple[
 
 
 def _validate_evidence_map(
-    supplied: Mapping[str, CapabilityEvidence], required: tuple[str, ...], name: str
-) -> tuple[tuple[str, str, str | None], ...]:
+    supplied: Mapping[str, CapabilityEvidence], required: tuple[str, ...], name: str,
+    excluded_keys: frozenset[str],
+) -> tuple[tuple[str, str, str | None, Mapping[str, object]], ...]:
     if not isinstance(supplied, Mapping):
         raise _plan_error("EVIDENCE_MAP_MISSING", name + "必须显式提供")
     states = []
     for key in required:
         evidence = supplied.get(key)
         if not isinstance(evidence, CapabilityEvidence):
-            states.append((key, "UNKNOWN", None))
+            states.append((key, "UNKNOWN", None, MappingProxyType({})))
             continue
         status, ref = evidence.status, evidence.evidence_ref
         if not isinstance(status, str) or status not in {"READY", "DENY", "UNKNOWN"}:
             raise _plan_error("EVIDENCE_STATUS_INVALID", name + "状态必须为READY/DENY/UNKNOWN: " + key)
         if ref is not None and (not isinstance(ref, str) or not ref.strip()):
             raise _plan_error("EVIDENCE_REF_INVALID", name + "证据引用不能为空白字符串: " + key)
-        states.append((key, status, ref))
+        if not isinstance(evidence.metadata, Mapping):
+            raise _plan_error("EVIDENCE_METADATA_INVALID", name + "证据metadata必须是映射: " + key)
+        projected_metadata = _without_digest_exclusions(evidence.metadata, excluded_keys)
+        if projected_metadata is _OMIT_DIGEST_VALUE:
+            projected_metadata = {}
+        metadata = _json_identity(projected_metadata, name + "." + key + ".metadata")
+        if not isinstance(metadata, dict):
+            raise _plan_error("EVIDENCE_METADATA_INVALID", name + "证据metadata必须是对象: " + key)
+        states.append((key, status, ref, _freeze_mapping(metadata)))
     return tuple(states)
 
 
@@ -635,9 +672,10 @@ def _scope_denominators(
     return owner_ids, tuple(sorted(field_ids)), tuple(consumers)
 
 
-def _business_input_digest(request: DayPlanRequest, contract_sha256: str) -> str:
-    identity = _json_identity(request.business_identity, "business_identity")
-    if not isinstance(identity, dict) or not identity:
+def _business_input_digest(
+    request: DayPlanRequest, contract_sha256: str, excluded_keys: frozenset[str]
+) -> str:
+    if not isinstance(request.business_identity, Mapping):
         raise _plan_error("BUSINESS_IDENTITY_INVALID", "业务值/质量/provenance/参数/producer身份不能为空")
     revision_policy = request.contract.get("revision_policy")
     closure_policy = revision_policy.get("semantic_revision_closure") if isinstance(revision_policy, Mapping) else None
@@ -647,9 +685,15 @@ def _business_input_digest(request: DayPlanRequest, contract_sha256: str) -> str
             or len(digest_fields) != len(set(digest_fields))):
         raise _plan_error("BUSINESS_DIGEST_CONTRACT_INVALID", "机器合同缺少正式业务摘要字段登记")
     required = set(digest_fields)
-    if not required.issubset(identity):
+    if not required.issubset(request.business_identity):
         raise _plan_error("BUSINESS_IDENTITY_INCOMPLETE", "业务摘要必须包含正式合同登记的values/quality/provenance/parameters/producer字段")
-    if any(identity[key] is None or identity[key] == "" or identity[key] == {} or identity[key] == [] for key in required):
+    projected_identity = {}
+    for key in digest_fields:
+        projected = _without_digest_exclusions(request.business_identity[key], excluded_keys)
+        if projected is _OMIT_DIGEST_VALUE:
+            raise _plan_error("BUSINESS_IDENTITY_INCOMPLETE", "业务摘要字段不能只包含被排除的运行元数据: " + key)
+        projected_identity[key] = _json_identity(projected, "business_identity." + key)
+    if any(value is None or value == "" or value == {} or value == [] for value in projected_identity.values()):
         raise _plan_error("BUSINESS_IDENTITY_INCOMPLETE", "业务摘要的值/质量/provenance/参数/producer身份不能为空")
     if not isinstance(request.semantic_revisions, Mapping):
         raise _plan_error("SEMANTIC_REVISION_INVALID", "语义revision必须显式提供映射")
@@ -662,7 +706,7 @@ def _business_input_digest(request: DayPlanRequest, contract_sha256: str) -> str
         "calendar_id": request.calendar_id,
         "calendar_revision": request.calendar_revision,
         "semantic_revisions": dict(request.semantic_revisions),
-        "business_identity": identity,
+        "business_identity": projected_identity,
     }
     canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return sha256(canonical).hexdigest()
@@ -689,12 +733,23 @@ def assemble_day_plan(request: DayPlanRequest) -> DayPlanResult:
             or kernel_binding.get("state") != "IMPLEMENTED"
             or kernel_binding.get("business_digest_fields_ref") != "revision_policy.business_input_digest_fields"):
         raise _plan_error("P00_KERNEL_BINDING_MISMATCH", "正式scope未绑定当前DayPlan纯内核")
+    raw_exclusions = kernel_binding.get("digest_excludes")
+    if (kernel_binding.get("digest_exclusion_application") != "RECURSIVE_OBJECT_KEY_PROJECTION_BOTH_DIGESTS"
+            or not isinstance(raw_exclusions, list)
+            or not raw_exclusions
+            or any(not isinstance(key, str) or not key for key in raw_exclusions)
+            or len(raw_exclusions) != len(set(raw_exclusions))):
+        raise _plan_error("DIGEST_EXCLUSION_CONTRACT_INVALID", "机器合同摘要排除规则缺失或不受支持")
+    digest_exclusions = frozenset(raw_exclusions)
     stage_order, kernel_roles = _validate_stage_dag(contract, request.scope_id)
     if type(request.target_session) is not date:
         raise _plan_error("TARGET_SESSION_INVALID", "目标会话必须是date")
     if not isinstance(request.frozen_context, Mapping) or not request.frozen_context:
         raise _plan_error("FROZEN_CONTEXT_MISSING", "DayPlan冻结上下文不能为空")
-    context = _json_identity(request.frozen_context, "frozen_context")
+    projected_context = _without_digest_exclusions(request.frozen_context, digest_exclusions)
+    if projected_context is _OMIT_DIGEST_VALUE:
+        raise _plan_error("FROZEN_CONTEXT_MISSING", "冻结上下文只包含被排除的运行元数据")
+    context = _json_identity(projected_context, "frozen_context")
     if not isinstance(context, dict):
         raise _plan_error("FROZEN_CONTEXT_INVALID", "DayPlan冻结上下文必须是对象")
     freeze_keys = contract.get("scope_policy", {}).get("freeze_before_run", [])
@@ -710,7 +765,8 @@ def assemble_day_plan(request: DayPlanRequest) -> DayPlanResult:
     if context.get("target_session") != request.target_session.isoformat():
         raise _plan_error("FROZEN_TARGET_MISMATCH", "冻结目标会话与计划目标不一致")
     input_states = _validate_evidence_map(
-        request.validated_inputs, _required_context_fields(contract, request.scope_id), "P00必需输入"
+        request.validated_inputs, _required_context_fields(contract, request.scope_id), "P00必需输入",
+        digest_exclusions,
     )
     capability_keys = kernel_binding.get("required_environment_capabilities")
     if (not isinstance(capability_keys, list) or not capability_keys
@@ -718,10 +774,10 @@ def assemble_day_plan(request: DayPlanRequest) -> DayPlanResult:
             or len(capability_keys) != len(set(capability_keys))):
         raise _plan_error("P00_ENVIRONMENT_CONTRACT_INVALID", "正式DayPlan合同缺少必需环境能力登记")
     capability_states = _validate_evidence_map(
-        request.environment_capabilities, tuple(capability_keys), "P00环境能力"
+        request.environment_capabilities, tuple(capability_keys), "P00环境能力", digest_exclusions
     )
     all_states = input_states + capability_states
-    blocked = tuple(key for key, status, ref in all_states if status != "READY" or not ref)
+    blocked = tuple(key for key, status, ref, _metadata in all_states if status != "READY" or not ref)
     gate = EnvironmentGate(
         "READY" if not blocked else "BLOCKED",
         all_states,
@@ -730,7 +786,10 @@ def assemble_day_plan(request: DayPlanRequest) -> DayPlanResult:
     )
     if not isinstance(request.prior_context, Mapping):
         raise _plan_error("PRIOR_CONTEXT_INVALID", "前态上下文必须显式为映射")
-    prior_context = _json_identity(request.prior_context, "prior_context")
+    projected_prior_context = _without_digest_exclusions(request.prior_context, digest_exclusions)
+    if projected_prior_context is _OMIT_DIGEST_VALUE:
+        raise _plan_error("PRIOR_CONTEXT_INVALID", "前态上下文只包含被排除的运行元数据")
+    prior_context = _json_identity(projected_prior_context, "prior_context")
     if not isinstance(prior_context, dict):
         raise _plan_error("PRIOR_CONTEXT_INVALID", "前态上下文必须是对象")
     if request.previous is not None and not isinstance(request.previous, AcceptedRunIdentity):
@@ -743,7 +802,7 @@ def assemble_day_plan(request: DayPlanRequest) -> DayPlanResult:
     if context.get("expected_head_generation") != expected_generation:
         raise _plan_error("FROZEN_PARENT_GENERATION_MISMATCH", "冻结父generation与已接受前态不一致")
 
-    digest = _business_input_digest(request, contract_sha)
+    digest = _business_input_digest(request, contract_sha, digest_exclusions)
     try:
         decision = classify_incremental_mode(
             target_session=request.target_session,
@@ -786,8 +845,9 @@ def assemble_day_plan(request: DayPlanRequest) -> DayPlanResult:
         "scheduled_stage_ids": scheduled,
         "reason_codes": reasons,
     }
+    projected_plan_identity = _without_digest_exclusions(plan_identity, digest_exclusions)
     plan_sha256 = sha256(json.dumps(
-        plan_identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        projected_plan_identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")).hexdigest()
     plan = DayPlan(
         scope_id=request.scope_id,
