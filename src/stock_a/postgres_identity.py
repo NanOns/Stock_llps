@@ -626,6 +626,9 @@ def write_admission(
     values_consistent = all(check_actual_is(name, value) for name, value in scalar_actuals.items() if name != "current_logfile")
     # 路径检查由既有最终路径解析生成；比对Windows规范形式以兼容大小写和分隔符。
     if isinstance(physical, dict):
+        # 路径派生会调用 ntpath.join；先拒绝不完整摘要和错误类型，避免把输入问题变成异常。
+        if not physical_values_complete or not tablespace_summary_complete:
+            return False, "PostgreSQL物理路径或表空间摘要无效；拒绝新项目写入与发布"
         path_actuals = {
             "data_directory": (physical.get("data_directory"), None),
             "wal_directory": (ntpath.join(physical.get("data_directory", ""), "pg_wal"), None),
