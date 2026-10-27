@@ -13,27 +13,39 @@ from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 _SEMANTIC_FIELDS = frozenset(
     {"session_date", "source_code", "close", "volume", "amount", "turn", "tradestatus", "isST"}
 )
+_INVALID_FIELD_REASONS = {
+    "close": "收盘价数据非法",
+    "volume": "成交量数据非法",
+    "amount": "成交金额数据非法",
+    "turn": "换手率数据非法",
+}
 
 
 @dataclass(frozen=True)
 class BaoUnitContract:
-    """调用方显式提供的单位约定；turn输入固定为百分数。"""
+    """调用方显式提供并版本化的单位约定；输出金额、价格和换手率使用人民币和fraction。"""
 
     version: str
+    close_input_unit: str
+    close_to_cny: object
     amount_to_cny: object
     volume_to_shares: object
     turn_input_unit: str
 
     def __post_init__(self) -> None:
         try:
+            close_scale = exact_number(self.close_to_cny)
             amount_scale = exact_number(self.amount_to_cny)
             volume_scale = exact_number(self.volume_to_shares)
         except ValueError as error:
-            raise ContractError("BaoStock金额和数量倍率必须是精确有限数") from error
-        if amount_scale <= 0 or volume_scale <= 0:
-            raise ContractError("BaoStock金额和数量倍率必须为正")
+            raise ContractError("BaoStock价格、金额和数量倍率必须是精确有限数") from error
+        if close_scale <= 0 or amount_scale <= 0 or volume_scale <= 0:
+            raise ContractError("BaoStock价格、金额和数量倍率必须为正")
         if not isinstance(self.version, str) or not self.version.strip() or self.version != self.version.strip():
             raise ContractError("BaoStock单位合同必须有无首尾空白的版本")
+        if (not isinstance(self.close_input_unit, str) or not self.close_input_unit.strip()
+                or self.close_input_unit != self.close_input_unit.strip()):
+            raise ContractError("BaoStock收盘价输入单位必须显式提供且不能含首尾空白")
         if self.turn_input_unit != "PERCENT":
             raise ContractError("BaoStock换手率输入单位必须明确为PERCENT")
 
@@ -85,20 +97,20 @@ def _field_value(
     *, minimum: Fraction | None = None, integer: bool = False,
 ) -> FieldValue:
     if column not in fields:
-        return unknown("BAO_FIELD_NOT_RETURNED")
+        return unknown("来源未返回该字段")
     if column not in row:
-        return unknown("BAO_RESPONSE_FIELD_MISSING")
+        return unknown("响应缺少已声明字段")
     value = row[column]
     if value is None or value == "":
-        return unknown("BAO_VALUE_MISSING")
+        return unknown("来源值为空")
     try:
         normalized = _numeric(value) * scale
     except ValueError:
-        return unknown(f"BAO_DATA_INVALID_{field_name.upper()}")
+        return unknown(_INVALID_FIELD_REASONS[field_name])
     if minimum is not None and normalized < minimum:
-        return unknown(f"BAO_DATA_INVALID_{field_name.upper()}")
+        return unknown(_INVALID_FIELD_REASONS[field_name])
     if integer and normalized.denominator != 1:
-        return unknown(f"BAO_DATA_INVALID_{field_name.upper()}")
+        return unknown(_INVALID_FIELD_REASONS[field_name])
     return FieldValue(normalized)
 
 
@@ -106,16 +118,16 @@ def _passthrough_field(
     row: Mapping[str, object], fields: frozenset[str], column: str,
 ) -> FieldValue:
     if column not in fields:
-        return unknown("BAO_FIELD_NOT_RETURNED")
+        return unknown("来源未返回该字段")
     if column not in row:
-        return unknown("BAO_RESPONSE_FIELD_MISSING")
+        return unknown("响应缺少已声明字段")
     value = row[column]
     if value is None or value == "":
-        return unknown("BAO_VALUE_MISSING")
+        return unknown("来源值为空")
     if isinstance(value, bool) or not isinstance(value, (str, int)):
-        return unknown("BAO_DATA_INVALID_ENUM_SOURCE_VALUE")
+        return unknown("状态字段原值类型非法")
     if isinstance(value, str) and not value.strip():
-        return unknown("BAO_VALUE_MISSING")
+        return unknown("来源值为空")
     return FieldValue(value)
 
 
@@ -158,14 +170,15 @@ def normalize_daily_row(
     source_code = _required_key(row, columns, field_map["source_code"], "来源证券代码")
 
     try:
+        close_scale = exact_number(units.close_to_cny)
         amount_scale = exact_number(units.amount_to_cny)
         volume_scale = exact_number(units.volume_to_shares)
     except ValueError as error:
-        raise ContractError("BaoStock单位倍率必须是精确有限数") from error
+        raise ContractError("BaoStock价格、金额和数量倍率必须是精确有限数") from error
 
-    close = _field_value(row, columns, field_map["close"], "close", Fraction(1), minimum=Fraction(0))
+    close = _field_value(row, columns, field_map["close"], "close", close_scale, minimum=Fraction(0))
     if close.quality == "OBSERVED" and close.value == 0:
-        close = unknown("BAO_DATA_INVALID_CLOSE")
+        close = unknown(_INVALID_FIELD_REASONS["close"])
     volume = _field_value(row, columns, field_map["volume"], "volume", volume_scale,
                           minimum=Fraction(0), integer=True)
     amount = _field_value(row, columns, field_map["amount"], "amount", amount_scale,
