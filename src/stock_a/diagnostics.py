@@ -180,6 +180,15 @@ def _validate_config(config: Any) -> None:
             or private_policy.get("allowed_role") != "SECRET_CONNECTION_KEYS_ONLY_NOT_BUSINESS_TEST_OR_RESULT_DATA"
             or private_policy.get("registered_files") != expected_private_files):
         raise DiagnosticError("CONFIG_INVALID", "私密配置登记必须精确匹配唯一PG凭据文件合同")
+    expected_deployment_connection = {
+        "name": "STOCK_A_PG_DEPLOYMENT_DSN",
+        "consumer": "stock_a.postgres_identity._deployment_storage_checks",
+        "role": "EXISTING_SUPERUSER_DEPLOYMENT_VERIFICATION_ONLY",
+        "target": "127.0.0.1:5432/stock_a",
+        "lifecycle": "可选安全环境变量；与stock_a业务连接分离；仅作只读实际簇、存储路径和业务后端绑定核验；缺失时拒绝写入、发布和迁移；不得输出、记录或复制秘密",
+    }
+    if policy.get("deployment_connection_environment") != expected_deployment_connection:
+        raise DiagnosticError("CONFIG_INVALID", "独立PG部署核验连接必须按唯一安全环境变量合同登记")
     registered = policy.get("public_files")
     expected = {
         ("runtime.defaults.json", "BUSINESS_RUNTIME_CONFIGURATION", _CONFIG_CONTRACT),

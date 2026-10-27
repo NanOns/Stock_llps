@@ -23,6 +23,9 @@ _PRIVATE_CONFIG_ROOT = Path("G:/codex work/Stock A/config/private")
 _MAX_CREDENTIAL_FILE_BYTES = 8192
 _CREDENTIAL_SCHEMA = "STOCK-A-PG-CREDENTIALS/R1"
 _BUSINESS_SCHEMA = "stock"
+_DEPLOYMENT_PROOF_MAX_AGE_SECONDS = 10.0
+_MAX_DEPLOYMENT_PROOFS = 128
+_DEPLOYMENT_PROOFS: dict[str, tuple[str, float, str]] = {}
 
 
 class _CredentialContractError(ValueError):
@@ -82,6 +85,16 @@ def _is_fixed_server_address(value: Any) -> bool:
 def _configuration_identity(config: dict[str, Any]) -> str:
     config_bytes = json.dumps(config, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
     return hashlib.sha256(config_bytes).hexdigest()
+
+
+def _deployment_fingerprint(physical: dict[str, Any], checks: list[dict[str, Any]]) -> str:
+    deployment_checks = [item for item in checks if isinstance(item, dict)
+                         and isinstance(item.get("check"), str)
+                         and item["check"].startswith(("deployment_", "actual_cluster_", "business_backend_",
+                                                        "resolved_", "tablespace:", "temporary_tablespaces"))]
+    value = {"proof": physical.get("deployment_proof"), "checks": deployment_checks}
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def evaluate_identity(
@@ -151,11 +164,13 @@ def _fetch_business_identity(cursor: Any, *, deadline: float) -> dict[str, Any]:
     """仅读取业务账号可见的连接身份、项目身份和迁移账本，不探测管理员目录。"""
     _check_deadline(deadline)
     cursor.execute("""SELECT current_database(), current_schema(), session_user, current_user,
-       current_setting('port'), inet_server_addr()::text""")
+       current_setting('port'), inet_server_addr()::text, pg_backend_pid(),
+       (SELECT backend_start FROM pg_stat_activity WHERE pid = pg_backend_pid()),
+       current_setting('application_name')""")
     row = cursor.fetchone()
     if row is None:
         raise RuntimeError("PG未返回连接身份")
-    database, schema, session_user, current_user, port, server_address = row
+    database, schema, session_user, current_user, port, server_address, backend_pid, backend_start, application_name = row
     database_owner = _query_one(cursor, "SELECT pg_get_userbyid(datdba) FROM pg_database WHERE datname = current_database()")
     cursor.execute("""SELECT n.nspname, pg_get_userbyid(n.nspowner),
        has_schema_privilege(session_user, n.oid, 'USAGE'),
@@ -201,10 +216,117 @@ def _fetch_business_identity(cursor: Any, *, deadline: float) -> dict[str, Any]:
         "database": database, "database_owner": database_owner,
         "schema": schema, "session_user": session_user, "current_user": current_user,
         "port": int(port), "server_address": server_address,
+        "backend_pid": int(backend_pid), "backend_start": backend_start,
+        "application_name": application_name,
         "business_schema_exists": schema_info is not None, "business_schema": schema_info,
         "identity_table_exists": bool(identity_table), "migration_table_exists": bool(migration_table),
         "identity": identity, "migration_digest": migration_digest, "role_attributes": role_attributes,
     }
+
+
+def _resolved_deployment_path(value: str, *, data_directory: Path) -> Path:
+    path = Path(value)
+    if not path.is_absolute():
+        path = data_directory / path
+    return path.resolve(strict=True)
+
+
+def _deployment_storage_checks(config: dict[str, Any], business: dict[str, Any],
+                               *, timeout_seconds: float) -> tuple[list[IdentityCheck], dict[str, Any] | None]:
+    """以独立超级用户连接核验实际簇、运行存储及其与业务socket的绑定。"""
+    dsn = os.environ.get("STOCK_A_PG_DEPLOYMENT_DSN")
+    if not dsn:
+        return [IdentityCheck("deployment_storage_proof", "BLOCKED",
+                              reason="缺少独立部署核验连接；拒绝写入、发布和迁移")], None
+    try:
+        import psycopg
+        from psycopg.conninfo import conninfo_to_dict
+        params = _fixed_connection_parameters(dsn, {}, conninfo_to_dict)
+        params.update(connect_timeout=max(1, math.ceil(timeout_seconds)),
+                      options=f"-c default_transaction_read_only=on -c search_path=pg_catalog -c statement_timeout={max(1, math.ceil(timeout_seconds * 1000))} -c lock_timeout=1000")
+        with psycopg.connect(**params, autocommit=True) as conn:
+            with conn.cursor() as cursor:
+                cursor.execute("BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY")
+                cursor.execute("""SELECT current_database(), session_user,
+                   r.rolsuper, pg_control_system().system_identifier::text,
+                   current_setting('data_directory'), current_setting('log_directory'),
+                   current_setting('temp_tablespaces'),
+                   current_setting('logging_collector')::boolean, pg_current_logfile()
+                   FROM pg_roles r WHERE r.rolname = session_user""")
+                server = cursor.fetchone()
+                if server is None:
+                    raise RuntimeError("部署核验连接没有角色身份")
+                (database, admin_user, is_superuser, system_identifier, data_dir, log_dir,
+                 temp_names, logging_collector, current_logfile) = server
+                cursor.execute("""SELECT usename, datname, backend_start, application_name
+                   FROM pg_stat_activity WHERE pid = %s""", (business["backend_pid"],))
+                backend = cursor.fetchone()
+                cursor.execute("""SELECT spcname, pg_tablespace_location(oid)
+                   FROM pg_tablespace ORDER BY spcname""")
+                tablespaces = cursor.fetchall()
+                cursor.execute("COMMIT")
+        checks: list[IdentityCheck] = []
+        expected_app = config["application_identity"]
+        checks.append(IdentityCheck("deployment_admin_role", "PASS" if is_superuser is True and admin_user != "stock_a" else "REJECT",
+                                    expected="独立现有超级用户", actual=admin_user if admin_user != "stock_a" else "stock_a",
+                                    reason=None if is_superuser is True and admin_user != "stock_a" else "部署检查必须使用独立超级用户"))
+        checks.append(_safe_compare(database, "stock_a", "deployment_database"))
+        checks.append(_safe_compare(system_identifier, expected_app.get("cluster_system_identifier"), "actual_cluster_system_identifier"))
+        backend_matches = (backend is not None and backend[0] == "stock_a" and backend[1] == "stock_a"
+                           and backend[2] == business["backend_start"]
+                           and backend[3] == business["application_name"])
+        checks.append(IdentityCheck("business_backend_binding", "PASS" if backend_matches else "REJECT",
+                                    expected="同一stock_a业务socket及backend_start",
+                                    actual="已由独立超级用户在同一簇中找到" if backend_matches else None,
+                                    reason=None if backend_matches else "独立连接未能证明与业务连接属于同一运行簇"))
+        expected_pg = config["postgresql"]
+        data_path = _resolved_deployment_path(data_dir, data_directory=Path(data_dir))
+        expected_data = Path(expected_pg["data_directory"]).resolve(strict=True)
+        expected_log = Path(expected_pg["log_directory"]).resolve(strict=True)
+        log_path = _resolved_deployment_path(log_dir, data_directory=data_path)
+        checks.append(IdentityCheck("resolved_data_directory", "PASS" if data_path == expected_data and str(data_path).upper().startswith("G:\\") else "REJECT",
+                                    expected=str(expected_data), actual=str(data_path),
+                                    reason=None if data_path == expected_data and str(data_path).upper().startswith("G:\\") else "实际数据目录或链接最终路径不符合G盘合同"))
+        wal_path = (data_path / "pg_wal").resolve(strict=True)
+        expected_wal = Path(expected_pg["wal_directory"]).resolve(strict=True)
+        checks.append(IdentityCheck("resolved_wal_directory", "PASS" if wal_path == expected_wal and str(wal_path).upper().startswith("G:\\") else "REJECT",
+                                    expected=str(expected_wal), actual=str(wal_path),
+                                    reason=None if wal_path == expected_wal and str(wal_path).upper().startswith("G:\\") else "实际WAL目录或链接最终路径不符合G盘合同"))
+        checks.append(IdentityCheck("resolved_log_directory", "PASS" if log_path == expected_log and str(log_path).upper().startswith("G:\\") else "REJECT",
+                                    expected=str(expected_log), actual=str(log_path),
+                                    reason=None if log_path == expected_log and str(log_path).upper().startswith("G:\\") else "实际日志目录或链接最终路径不符合G盘合同"))
+        logfile_path = (_resolved_deployment_path(current_logfile, data_directory=data_path)
+                        if isinstance(current_logfile, str) and current_logfile else None)
+        logfile_matches = (logging_collector is True and logfile_path is not None
+                           and logfile_path.parent == log_path
+                           and str(logfile_path).upper().startswith("G:\\"))
+        checks.append(IdentityCheck("active_log_file", "PASS" if logfile_matches else "REJECT",
+                                    expected="日志收集器当前日志文件位于登记G盘日志目录",
+                                    actual=str(logfile_path) if logfile_path else None,
+                                    reason=None if logfile_matches else "无法核实当前活动日志文件或最终路径不在G盘登记日志目录"))
+        normalized_spaces = []
+        for name, location in tablespaces:
+            location_path = (data_path / ("global" if name == "pg_global" else "base")) if not location else Path(location)
+            resolved = location_path.resolve(strict=True)
+            normalized_spaces.append({"name": name, "resolved_path": str(resolved)})
+            checks.append(IdentityCheck(f"tablespace:{name}", "PASS" if str(resolved).upper().startswith("G:\\") else "REJECT",
+                                        expected="最终路径位于G盘", actual=str(resolved),
+                                        reason=None if str(resolved).upper().startswith("G:\\") else "业务表空间最终路径不在G盘"))
+        declared_temp = {name.strip() for name in (temp_names or "").split(",") if name.strip()}
+        all_space_names = {name for name, _location in tablespaces}
+        temp_valid = declared_temp <= all_space_names
+        checks.append(IdentityCheck("temporary_tablespaces", "PASS" if temp_valid else "REJECT",
+                                    expected="全部解析为已核验G盘表空间", actual=",".join(sorted(declared_temp)) or "pg_default",
+                                    reason=None if temp_valid else "临时表空间配置含未解析名称"))
+        proof = {"cluster_system_identifier": system_identifier, "backend_pid": business["backend_pid"],
+                 "backend_start": business["backend_start"].isoformat(), "checked_at": time.time(),
+                 "data_directory": str(data_path), "wal_directory": str(wal_path),
+                 "log_directory": str(log_path), "active_log_file": str(logfile_path),
+                 "tablespaces": normalized_spaces}
+        return checks, proof
+    except Exception as error:
+        return [IdentityCheck("deployment_storage_proof", "BLOCKED",
+                              reason=f"独立部署/存储核验未完成（{type(error).__name__}）；拒绝写入、发布和迁移")], None
 
 
 def _check_deadline(deadline: float) -> None:
@@ -578,13 +700,18 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                           "session_user": physical["session_user"], "role_attributes": physical["role_attributes"],
                           "migration_digest": physical["migration_digest"]}
                 checks.extend(evaluate_identity(config, actual))
+            deployment_checks, deployment_proof = _deployment_storage_checks(
+                config, physical, timeout_seconds=max(1.0, min(float(timeout_seconds), _MAX_INSPECTION_SECONDS)))
+            checks.extend(deployment_checks)
             with conn.cursor() as cursor:
                 _check_deadline(deadline)
                 cursor.execute("COMMIT")
             physical_summary = dict(physical)
             physical_summary["identity"] = "PRESENT" if physical["identity"] else "MISSING"
             physical_summary["identity_record"] = physical["identity"]
-            physical_summary["deployment_storage_checks"] = "NOT_RUN_BY_BUSINESS_LOGIN; REQUIRE_SEPARATE_ADMIN_DEPLOYMENT_CHECK"
+            physical_summary["deployment_storage_checks"] = "PASS" if deployment_proof is not None and all(
+                item.status == "PASS" for item in deployment_checks) else "NOT_VERIFIED"
+            physical_summary["deployment_proof"] = deployment_proof
             if len(checks) > _MAX_CHECKS:
                 raise OverflowError("PG核验检查项超过输出预算")
             statuses = {item.status for item in checks}
@@ -601,9 +728,21 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                       "transaction": "REPEATABLE_READ_READ_ONLY", "checks": [item.__dict__ for item in checks],
                       "database_connection": physical_summary, "deployment_applied": config["application_identity"].get("deployment_applied") is True}
             if overall == "READY":
-                result.update({"inspection_context": str(uuid.uuid4()),
-                               "configuration_identity": _configuration_identity(config),
+                context = str(uuid.uuid4())
+                config_identity = _configuration_identity(config)
+                proof_expiry = time.monotonic() + _DEPLOYMENT_PROOF_MAX_AGE_SECONDS
+                result.update({"inspection_context": context,
+                               "configuration_identity": config_identity,
+                               "deployment_proof_expires_in_seconds": _DEPLOYMENT_PROOF_MAX_AGE_SECONDS,
                                "admission_actions": ["WRITE", "PUBLISH"]})
+                _DEPLOYMENT_PROOFS[context] = (
+                    config_identity, proof_expiry,
+                    _deployment_fingerprint(physical_summary, result["checks"]))
+                now = time.monotonic()
+                for stale_context in [key for key, value in _DEPLOYMENT_PROOFS.items() if value[1] < now]:
+                    _DEPLOYMENT_PROOFS.pop(stale_context, None)
+                while len(_DEPLOYMENT_PROOFS) > _MAX_DEPLOYMENT_PROOFS:
+                    _DEPLOYMENT_PROOFS.pop(next(iter(_DEPLOYMENT_PROOFS)))
             return result
     except Exception as error:
         # Do not include exception text: drivers can embed DSNs or server-provided private details.
@@ -618,8 +757,9 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
 def write_admission(
     inspection: dict[str, Any], *, requested_context: str | None = None,
     requested_configuration: dict[str, Any] | None = None, requested_action: str | None = None,
+    requested_connection: Any | None = None,
 ) -> tuple[bool, str]:
-    """按真实stock_a登录、项目身份与已绑定部署配置决定是否可写。"""
+    """在实际业务连接上重新核验并绑定一次性部署证明后决定是否可写。"""
     if not isinstance(inspection, dict) or inspection.get("status") != "DB_MIGRATION_READY":
         return False, "PostgreSQL身份或部署核验未就绪；拒绝新项目写入与发布"
     physical = inspection.get("database_connection")
@@ -653,4 +793,43 @@ def write_admission(
         requested_digest = None
     if requested_digest != inspection.get("configuration_identity"):
         return False, "写入请求配置与实际核验配置不一致"
+    proof_binding = _DEPLOYMENT_PROOFS.pop(context, None)
+    if (proof_binding is None or proof_binding[0] != requested_digest
+            or time.monotonic() > proof_binding[1]
+            or physical.get("deployment_storage_checks") != "PASS"
+            or not isinstance(physical.get("deployment_proof"), dict)
+            or physical["deployment_proof"].get("cluster_system_identifier")
+            != requested_configuration.get("application_identity", {}).get("cluster_system_identifier")
+            or _deployment_fingerprint(physical, checks) != proof_binding[2]):
+        return False, "独立部署存储证明缺失、过期或与当前配置/实际簇不匹配；拒绝新项目写入与发布"
+    if requested_connection is None:
+        return False, "写入准入必须绑定即将执行写入的真实stock_a数据库连接"
+    try:
+        deadline = time.monotonic() + _MAX_INSPECTION_SECONDS
+        with requested_connection.cursor() as cursor:
+            current = _fetch_business_identity(_DeadlineCursor(cursor, deadline), deadline=deadline)
+        current_checks = evaluate_identity(requested_configuration, {
+            **(current.get("identity") or {}), "database": current["database"],
+            "schema": current["schema"], "session_user": current["session_user"],
+            "role_attributes": current["role_attributes"], "migration_digest": current["migration_digest"],
+        })
+        current_checks.extend([
+            _safe_compare(current["port"], 5432, "server_port"),
+            _safe_compare(current["server_address"], "127.0.0.1", "server_address"),
+            _safe_compare(current["current_user"], "stock_a", "current_user"),
+            _safe_compare(current.get("database_owner"), "stock_a", "database_owner"),
+            _safe_compare((current.get("business_schema") or {}).get("owner"), "stock_a", "business_schema_owner"),
+        ])
+        schema = current.get("business_schema") or {}
+        current_checks.extend(IdentityCheck(name, "PASS" if schema.get(key) is True else "REJECT",
+                                            expected="true", actual="true" if schema.get(key) is True else "false",
+                                            reason=None if schema.get(key) is True else "stock_a必须可管理固定stock schema")
+                              for key, name in (("session_user_usage", "schema_usage"),
+                                                ("session_user_create", "schema_create")))
+        deployment_checks, current_proof = _deployment_storage_checks(
+            requested_configuration, current, timeout_seconds=_MAX_INSPECTION_SECONDS)
+        if current_proof is None or any(item.status != "PASS" for item in current_checks + deployment_checks):
+            return False, "即将写入的真实数据库连接未通过项目身份/实际部署复核；拒绝新项目写入与发布"
+    except Exception:
+        return False, "即将写入的真实数据库连接无法完成独立部署复核；拒绝新项目写入与发布"
     return True, "PostgreSQL stock_a业务账号及项目部署身份核验通过"

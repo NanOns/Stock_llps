@@ -95,6 +95,13 @@
         }
       ]
     },
+    "deployment_connection_environment": {
+      "name": "STOCK_A_PG_DEPLOYMENT_DSN",
+      "consumer": "stock_a.postgres_identity._deployment_storage_checks",
+      "role": "EXISTING_SUPERUSER_DEPLOYMENT_VERIFICATION_ONLY",
+      "target": "127.0.0.1:5432/stock_a",
+      "lifecycle": "可选安全环境变量；与stock_a业务连接分离；仅作只读实际簇、存储路径和业务后端绑定核验；缺失时拒绝写入、发布和迁移；不得输出、记录或复制秘密"
+    },
     "unknown_files": "REJECT",
     "outside_root_or_link_escape": "REJECT",
     "recursive_autoload": false,
