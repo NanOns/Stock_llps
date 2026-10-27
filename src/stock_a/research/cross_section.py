@@ -10,15 +10,7 @@ import json
 from typing import Mapping
 
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
-
-
-@dataclass(frozen=True)
-class MarketSessionCalendar:
-    """调用方已核验的官方市场会话有序集；内核不读取或推测日历。"""
-
-    calendar_id: str
-    revision: str
-    sessions: tuple[date, ...]
+from stock_a.research.core import MarketSessionCalendar
 
 
 @dataclass(frozen=True)
@@ -37,6 +29,7 @@ class ReturnEndpoint:
 
     endpoint_date: date
     return_period: int
+    return_start_date: date
     universe_date: date
     universe_id: str
     universe_revision: str
@@ -134,18 +127,25 @@ def _validate_endpoint(
     calendar: MarketSessionCalendar,
     target_coordinates: Mapping[str, PriceCoordinate],
     return_period: int,
+    relative: bool,
 ) -> tuple[str, ...]:
     if not isinstance(endpoint, ReturnEndpoint):
         raise ContractError("横截面端点必须是ReturnEndpoint")
     if type(endpoint.endpoint_date) is not date or endpoint.endpoint_date > target_date:
         raise ContractError("端点日期无效或晚于目标日期")
-    if type(endpoint.universe_date) is not date or endpoint.universe_date > endpoint.endpoint_date:
-        raise ContractError("Universe快照日无效或晚于收益端点")
+    if (type(endpoint.universe_date) is not date or type(endpoint.return_start_date) is not date
+            or endpoint.universe_date > endpoint.endpoint_date
+            or endpoint.return_start_date > endpoint.endpoint_date):
+        raise ContractError("Universe快照日或收益窗口起点无效")
     if type(endpoint.return_period) is not int or endpoint.return_period != return_period:
         raise ContractError("收益窗口长度与字段合同不一致")
     index = _calendar_index(calendar, endpoint.endpoint_date)
-    if index < return_period or calendar.sessions[index - return_period] != endpoint.universe_date:
-        raise ContractError("Universe起点不是该官方市场会话窗口的精确起点")
+    if index < return_period or calendar.sessions[index - return_period] != endpoint.return_start_date:
+        raise ContractError("收益窗口起点不是该官方市场会话窗口的精确起点")
+    expected_universe_date = endpoint.return_start_date if relative else endpoint.endpoint_date
+    if endpoint.universe_date != expected_universe_date:
+        role = "相对市场起点Universe" if relative else "RPS排名端点Universe"
+        raise ContractError(f"{role}日期与字段时间角色不一致")
     for name in ("universe_id", "universe_revision", "producer_version"):
         value = getattr(endpoint, name)
         if not isinstance(value, str) or not value.strip():
@@ -166,6 +166,19 @@ def _validate_endpoint(
         raise ContractError("坐标绑定包含不属于声明Universe的实体")
     if any(entity_id not in members for entity_id in endpoint.window_statuses):
         raise ContractError("窗口状态包含不属于声明Universe的实体")
+    legal_statuses = {"ACTUAL", "CONFIRMED_SUSPENSION", "PRE_LISTING", "UNKNOWN"}
+    for entity_id, coordinate in endpoint.coordinates.items():
+        expected = target_coordinates.get(entity_id)
+        if (not isinstance(coordinate, PriceCoordinate) or not isinstance(expected, PriceCoordinate)
+                or coordinate != expected or coordinate.entity_id != entity_id
+                or type(coordinate.target_date) is not date or coordinate.target_date != target_date
+                or not isinstance(coordinate.coordinate_id, str) or not coordinate.coordinate_id.strip()
+                or not isinstance(coordinate.revision, str) or not coordinate.revision.strip()):
+            raise ContractError("端点含非法或错实体的逐实体坐标身份")
+    for entity_id, statuses in endpoint.window_statuses.items():
+        if (not isinstance(statuses, tuple) or len(statuses) != return_period + 1
+                or any(not isinstance(status, str) or status not in legal_statuses for status in statuses)):
+            raise ContractError("端点含非法收益窗口状态元数据")
     for entity_id, item in endpoint.returns.items():
         if not isinstance(item, FieldValue):
             raise ContractError("每个收益行必须显式携带FieldValue质量")
@@ -180,10 +193,7 @@ def _validate_endpoint(
             expected = target_coordinates.get(entity_id)
             if not isinstance(coordinate, PriceCoordinate) or not isinstance(expected, PriceCoordinate):
                 raise ContractError("已知收益缺少逐实体目标坐标绑定")
-            if (coordinate != expected or coordinate.entity_id != entity_id
-                    or coordinate.target_date != target_date
-                    or not isinstance(coordinate.coordinate_id, str) or not coordinate.coordinate_id.strip()
-                    or not isinstance(coordinate.revision, str) or not coordinate.revision.strip()):
+            if coordinate != expected:
                 raise ContractError("收益坐标的实体、目标日或修订与共同目标坐标集不符")
             statuses = endpoint.window_statuses.get(entity_id)
             if (not isinstance(statuses, tuple) or len(statuses) != return_period + 1
@@ -218,7 +228,7 @@ def _digest(endpoint: ReturnEndpoint, members: tuple[str, ...], calendar: Market
                      endpoint.window_statuses.get(entity_id)))
     encoded = json.dumps(
         [endpoint.endpoint_date.isoformat(), endpoint.return_period,
-         endpoint.universe_date.isoformat(), endpoint.universe_id,
+         endpoint.return_start_date.isoformat(), endpoint.universe_date.isoformat(), endpoint.universe_id,
          endpoint.universe_revision, endpoint.producer_version,
          calendar.calendar_id, calendar.revision, rows],
         ensure_ascii=False, separators=(",", ":"),
@@ -363,6 +373,7 @@ def calculate_cross_section(inputs: CrossSectionInput) -> dict[str, CrossSection
         member_sets[key] = _validate_endpoint(
             endpoint, target_date=inputs.target_date, calendar=inputs.calendar,
             target_coordinates=inputs.target_coordinates, return_period=period,
+            relative=key.startswith("rel_market_"),
         )
     target_index = inputs.calendar.sessions.index(inputs.target_date)
     for period in (5, 20):
