@@ -115,9 +115,11 @@ def _validate_endpoint(endpoint: ReturnEndpoint, *, target_date: date,
             raise ContractError("每个Universe成员必须显式携带FieldValue质量")
         if item.quality == "OBSERVED":
             try:
-                exact_number(item.value)
+                value = exact_number(item.value)
             except (ValueError, TypeError, ZeroDivisionError) as exc:
                 raise ContractError("收益必须是有限精确数值且不能是bool/float") from exc
+            if value <= -1:
+                raise ContractError("正价格端点重算的收益必须严格大于-1")
     return tuple(sorted(endpoint.returns))
 
 
