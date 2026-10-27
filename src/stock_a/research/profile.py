@@ -362,6 +362,11 @@ def evaluate_profile_kernel(field_id: str, handoff: ProfileHandoff, rules: Mappi
                 count = domain["minimum_count"]
                 if not isinstance(value, ClosedPrices) or not value.coordinate_id or type(value.target_session) is not date:
                     raise ValueError("缺少闭合周期或坐标")
+                supplied = handoff.inputs[key]
+                if (value.target_session != handoff.target_session
+                        or value.coordinate_id != handoff.target_coordinate_id
+                        or value.coordinate_id != supplied.coordinate_id):
+                    raise ValueError("闭合周期目标会话或价格坐标与交接身份不一致")
                 size = len(value.closes)
                 if size < count or any(len(x) != size for x in
                                        (value.calendar_ordinals, value.last_sessions, value.complete)):
