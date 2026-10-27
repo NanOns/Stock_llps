@@ -254,6 +254,13 @@ def _metric(
     comparison: tuple[ReturnEndpoint, tuple[str, ...]] | None = None,
 ) -> CrossSectionMetric:
     denominator, known, missing, digest = _metadata(endpoint, members, calendar)
+    coordinate = target_coordinates.get(target_entity_id)
+    if (not isinstance(coordinate, PriceCoordinate)
+            or coordinate.entity_id != target_entity_id
+            or type(coordinate.target_date) is not date
+            or not isinstance(coordinate.coordinate_id, str) or not coordinate.coordinate_id.strip()
+            or not isinstance(coordinate.revision, str) or not coordinate.revision.strip()):
+        raise ContractError("输出目标坐标身份无效，不能生成横截面摘要")
     comparison_fields = {}
     if comparison is not None:
         comparison_endpoint, comparison_members = comparison
@@ -270,10 +277,13 @@ def _metric(
             "comparison_unknown_count": comparison_missing,
             "comparison_input_digest": comparison_digest,
         }
-    digest = hashlib.sha256(
-        f"{digest}:{target_entity_id}:{field_id}:{calendar.calendar_id}:{calendar.revision}".encode("utf-8")
-    ).hexdigest()
-    coordinate = target_coordinates[target_entity_id]
+    digest_input = json.dumps(
+        [digest, target_entity_id, field_id, calendar.calendar_id, calendar.revision,
+         [coordinate.entity_id, coordinate.target_date.isoformat(), coordinate.coordinate_id,
+          coordinate.revision]],
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")
+    digest = hashlib.sha256(digest_input).hexdigest()
     return CrossSectionMetric(
         target_entity_id=target_entity_id,
         field_id=field_id,
