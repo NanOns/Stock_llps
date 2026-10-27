@@ -47,8 +47,8 @@
     "allow_automatic_old_data_migration": false,
     "allow_port_takeover": false,
     "require_database_schema_application_instance_and_migration_match": true,
-    "require_role_namespace_match": true,
-    "allow_automatic_identity_bootstrap": false
+    "allow_automatic_identity_bootstrap": false,
+    "require_business_login_match": true
   },
   "git_content_policy": {
     "business_and_normative_documents_only": true,
@@ -82,7 +82,14 @@
         {
           "path": "private/postgresql.credentials.json",
           "schema": "STOCK-A-PG-CREDENTIALS/R1",
-          "allowed_keys": ["schema", "host", "port", "database", "username", "password"],
+          "allowed_keys": [
+            "schema",
+            "host",
+            "port",
+            "database",
+            "username",
+            "password"
+          ],
           "consumer": "stock_a.postgres_identity.inspect_postgres（仅pg-identity）",
           "lifecycle": "STOCK_A_PG_DSN优先；仅在其缺失时由pg-identity进程内存读取；不得输出、摘要、记录、复制或传入子进程参数"
         }
@@ -120,20 +127,7 @@
     "deployment_instance_uuid": "ff29a9f9-074e-4e37-b64f-e04db9ec933c",
     "cluster_system_identifier": "7688198230782699460",
     "deployment_applied": true,
-    "migration_digest": "e2f0d11285be172a71701a668ddaf948dfb9c1c4894f051b80c094dba8fe8af5",
-    "role_namespace_bindings": [
-      {"role": "stock_a_reader", "environment": "PROD", "capability": "READ"},
-      {"role": "stock_a_dev_writer", "environment": "DEV", "capability": "WRITE_CANDIDATE"},
-      {"role": "stock_a_prod_writer", "environment": "PROD", "capability": "ACCEPT"},
-      {"role": "stock_a_test_writer", "environment": "TEST", "capability": "TEST"}
-    ],
-    "roles": [
-      "stock_a_reader",
-      "stock_a_dev_writer",
-      "stock_a_prod_writer",
-      "stock_a_test_writer",
-      "stock_a_migrator"
-    ],
-    "runtime_role_must_match_namespace": true
+    "migration_digest": "0e89c072cc4abf1e33c5f2be2b66b4ae64b37302e3a92004524e7c12c15652e0",
+    "business_login": "stock_a"
   }
 }

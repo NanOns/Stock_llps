@@ -2651,7 +2651,7 @@
       "APPLICATION_PROJECT_UUID",
       "INSTANCE_UUID",
       "MIGRATION_LINEAGE_AND_DIGEST",
-      "SESSION_USER_ROLE_NAMESPACE"
+      "SESSION_USER_STOCK_A"
     ],
     "legacy_market_research_v4_binding": "REJECT",
     "automatic_bootstrap": false
@@ -13475,7 +13475,7 @@
           "data_date"
         ],
         "mutates": true,
-        "auth": "LOCAL_SESSION_ORIGIN_HOST_CSRF_AND_NAMESPACE_ROLE",
+        "auth": "LOCAL_SESSION_ORIGIN_HOST_CSRF",
         "free_command_allowed": false,
         "allowed_context_kinds": [
           "RESEARCH"
@@ -13498,7 +13498,7 @@
           "data_date"
         ],
         "mutates": true,
-        "auth": "LOCAL_SESSION_ORIGIN_HOST_CSRF_AND_NAMESPACE_ROLE",
+        "auth": "LOCAL_SESSION_ORIGIN_HOST_CSRF",
         "free_command_allowed": false,
         "allowed_context_kinds": [
           "RESEARCH",
@@ -13519,7 +13519,7 @@
           "data_date"
         ],
         "mutates": true,
-        "auth": "LOCAL_SESSION_ORIGIN_HOST_CSRF_AND_NAMESPACE_ROLE",
+        "auth": "LOCAL_SESSION_ORIGIN_HOST_CSRF",
         "free_command_allowed": false,
         "allowed_context_kinds": [
           "RESEARCH"

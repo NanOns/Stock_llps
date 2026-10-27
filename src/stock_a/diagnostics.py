@@ -230,17 +230,8 @@ def _validate_config(config: Any) -> None:
             raise DiagnosticError("CONFIG_INVALID", "已部署状态的实例或簇身份无效")
         if not isinstance(app.get("migration_digest"), str) or not re.fullmatch(r"[0-9a-f]{64}", app["migration_digest"]):
             raise DiagnosticError("CONFIG_INVALID", "已部署状态的迁移账本摘要无效")
-    roles = app.get("roles")
-    if not isinstance(roles, list) or not roles or any(not isinstance(role, str) or not role for role in roles):
-        raise DiagnosticError("CONFIG_INVALID", "应用角色声明必须是非空字符串列表")
-    expected_role_bindings = [
-        {"role": "stock_a_reader", "environment": "PROD", "capability": "READ"},
-        {"role": "stock_a_dev_writer", "environment": "DEV", "capability": "WRITE_CANDIDATE"},
-        {"role": "stock_a_prod_writer", "environment": "PROD", "capability": "ACCEPT"},
-        {"role": "stock_a_test_writer", "environment": "TEST", "capability": "TEST"},
-    ]
-    if app.get("role_namespace_bindings") != expected_role_bindings:
-        raise DiagnosticError("CONFIG_INVALID", "应用角色与运行命名空间绑定不匹配固定合同")
+    if app.get("business_login") != "stock_a":
+        raise DiagnosticError("CONFIG_INVALID", "PostgreSQL业务连接账号必须固定为stock_a")
     database = _require_mapping(root.get("postgresql"), "postgresql")
     if database.get("database") != "stock_a":
         raise DiagnosticError("CONFIG_INVALID", "PostgreSQL逻辑数据库必须固定为stock_a")
@@ -267,14 +258,14 @@ def _validate_config(config: Any) -> None:
         "allow_automatic_old_data_migration": False,
         "allow_port_takeover": False,
         "require_database_schema_application_instance_and_migration_match": True,
-        "require_role_namespace_match": True,
+        "require_business_login_match": True,
         "allow_automatic_identity_bootstrap": False,
     }
     for key, expected_value in expected_security_policy.items():
         if type(service_role.get(key)) is not bool or service_role[key] is not expected_value:
             raise DiagnosticError("CONFIG_INVALID", f"启动安全策略{key}缺失、类型错误或值违反固定策略")
-    if app.get("runtime_role_must_match_namespace") is not True:
-        raise DiagnosticError("CONFIG_INVALID", "应用角色必须要求与命名空间匹配")
+    if app.get("business_login") != "stock_a":
+        raise DiagnosticError("CONFIG_INVALID", "应用运行账号必须固定为stock_a")
 
 
 def _configuration_snapshot(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
@@ -290,7 +281,7 @@ def _configuration_snapshot(config: dict[str, Any], config_path: Path) -> dict[s
         "configuration_path": str(config_path),
         "configuration_contract": config["contract"],
         "workspace_root": paths["workspace_root"],
-        "service_role": {"configured_roles": app["roles"], "actual_session_role": "NOT_CONNECTED_NOT_VERIFIED"},
+        "service_role": {"business_login": app["business_login"], "actual_session_role": "NOT_CONNECTED_NOT_VERIFIED"},
         "source_roots": roots,
         "source_status": "NOT_CONFIGURED" if not roots else "DECLARED_NOT_VERIFIED",
         "database": {
@@ -358,9 +349,9 @@ def _parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", parser_class=ChineseParser)
     doctor = commands.add_parser("doctor", help="诊断本地配置、包身份和声明能力")
     doctor.add_argument("--config", help="仅接受唯一登记配置runtime.defaults.json的绝对路径")
-    pg = commands.add_parser("pg-identity", help="以只读事务核验PostgreSQL身份与G盘存储")
+    pg = commands.add_parser("pg-identity", help="以只读事务核验stock_a登录、固定数据库/schema及项目迁移身份")
     pg.add_argument("--timeout-seconds", type=float, default=5.0, help="连接与每条查询的秒数上限，默认5秒，最大30秒")
-    bind = commands.add_parser("pg-bind", help="显式应用身份迁移并绑定已存在的stock schema")
+    bind = commands.add_parser("pg-bind", help="以stock_a账号应用待执行的Stock A集中前向迁移")
     bind.add_argument("--timeout-seconds", type=float, default=20.0, help="身份绑定总耗时上限，默认20秒，最大30秒")
     phase0 = commands.add_parser(
         "source-phase0",
@@ -680,17 +671,17 @@ def _run_pg_identity(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config()
     result = inspect_postgres(config, timeout_seconds=args.timeout_seconds)
     result.update({
-        "ok": result.get("status") == "READY",
-        "message": "PostgreSQL只读身份核验完成；只有全部实际条件通过才允许业务写入或发布",
+        "ok": result.get("status") == "DB_MIGRATION_READY",
+        "message": "PG目标与账号核验结束；数据库状态不代表业务流水线已完成",
         "package": package,
         "configuration_path": str(config_path),
-        "business_write_admission": "ALLOW" if result.get("status") == "READY" else "DENY",
+        "business_write_admission": "ALLOW_DATABASE_CAPABILITY" if result.get("status") == "DB_MIGRATION_READY" else "DENY",
         "production_switched": False,
     })
-    _emit(result, error=result.get("status") != "READY")
+    _emit(result, error=result.get("status") != "DB_MIGRATION_READY")
     if result.get("status") == "INVALID_ARGUMENT":
         return _EXIT_ARGUMENT
-    if result.get("status") == "READY":
+    if result.get("status") == "DB_MIGRATION_READY":
         return _EXIT_OK
     if result.get("status") in ("PERMISSION_DENIED", "AUTHENTICATION_FAILED"):
         return _EXIT_PERMISSION
