@@ -49,10 +49,10 @@ class ProfileInput:
 
 @dataclass(frozen=True)
 class ProfileHandoff:
-    """一个画像字段的封闭输入集合及由上游选择器独立提供的期望身份。
+    """画像纯内核的输入集合及调用方声明的比较期望。
 
-    expected_windows/expected_context 必须由未来FOUNDATION阶段执行器从实际
-    选择结果构造，不能从 inputs 回填。当前执行器未实现，生产流水线仍阻断。
+    此对象本身不证明来源可信。生产准入必须来自独立验证过的FOUNDATION选择器；
+    该选择器尚未实现，故 profile() 生产入口当前一律阻断。
     """
     inputs: Mapping[str, ProfileInput]
     target_session: date
@@ -71,7 +71,7 @@ def _rule_for(field_id: str, rules: Mapping) -> Mapping:
 
 def validate_profile_handoff(field_id: str, handoff: ProfileHandoff,
                              rules: Mapping, field_registry: list[Mapping]) -> dict[str, FieldValue]:
-    """按机器field_registry核验Core→Profile边界，再返回不可扩张的值映射。"""
+    """核验纯内核交接与机器合同的一致性，不认证来源、选择结果或期望身份可信性。"""
     if not isinstance(handoff, ProfileHandoff) or type(handoff.target_session) is not date:
         raise ContractError("Core→Profile交接缺少明确目标会话")
     if not isinstance(handoff.source_cutoff, str) or not handoff.source_cutoff or handoff.source_cutoff.casefold() == "latest":
@@ -317,9 +317,9 @@ def _derived_unavailable(qualities: list[str], reasons: list[str]) -> FieldValue
     return unknown(reason)
 
 
-def profile(field_id: str, handoff: ProfileHandoff, rules: Mapping,
-            field_registry: list[Mapping]) -> FieldValue:
-    """校验精确Core→Profile交接后求值；缺实现/错身份是合同错误。"""
+def evaluate_profile_kernel(field_id: str, handoff: ProfileHandoff, rules: Mapping,
+                            field_registry: list[Mapping]) -> FieldValue:
+    """执行可独立验证的纯画像规则；不构成生产准入或可信身份证明。"""
     rule = _rule_for(field_id, rules)
     _validate_rule(rule)
     inputs = validate_profile_handoff(field_id, handoff, rules, field_registry)
@@ -423,3 +423,14 @@ def profile(field_id: str, handoff: ProfileHandoff, rules: Mapping,
                 raise ContractError("规则输出未注册")
             return FieldValue(branch["value"])
     raise ContractError("规则缺少穷尽分支")
+
+
+def profile(field_id: str, handoff: ProfileHandoff, rules: Mapping,
+            field_registry: list[Mapping]) -> FieldValue:
+    """生产画像入口；可信FOUNDATION选择器未实现时先拒绝全部生产求值。"""
+    rule = _rule_for(field_id, rules)
+    _validate_rule(rule)
+    # 先执行可独立核验的合同拒绝，避免重复registry、缺producer等错误被遮蔽。
+    # 这些比较只验证结构一致性；同一调用方仍可同时伪造输入和期望身份。
+    validate_profile_handoff(field_id, handoff, rules, field_registry)
+    raise ContractError("生产画像准入阻断：可信FOUNDATION选择器及已验证行选择结果尚未实现")

@@ -3048,8 +3048,8 @@
         "evidence": "R02.02 bounded PASS; no numerical retest in R02.01"
         },
         "profile": {
-        "symbol": "stock_a.research.profile:profile",
-        "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+        "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+        "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
         "covered_fields": 11,
         "evidence": "contract pure_kernel_implemented flags plus exact one-to-one registry/rule field_id match; no pipeline execution claimed"
         },
@@ -13269,19 +13269,25 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_TREND_R1",
               "rule_field_id": "profile.trend",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.trend",
-              "invocation": "profile(\"profile.trend\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.trend\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "adjusted.close",
                 "core.ma20",
@@ -13416,7 +13422,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "profile.position",
@@ -13468,19 +13474,25 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_POSITION_R1",
               "rule_field_id": "profile.position",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.position",
-              "invocation": "profile(\"profile.position\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.position\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.bias20_atr",
                 "core.pos60"
@@ -13567,7 +13579,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "profile.ma_structure",
@@ -13621,19 +13633,25 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_MA_STRUCTURE_R1",
               "rule_field_id": "profile.ma_structure",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.ma_structure",
-              "invocation": "profile(\"profile.ma_structure\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.ma_structure\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.ma5",
                 "core.ma10",
@@ -13737,7 +13755,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "profile.relative",
@@ -13794,19 +13812,25 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_RELATIVE_R1",
               "rule_field_id": "profile.relative",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.relative",
-              "invocation": "profile(\"profile.relative\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.relative\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "cross.rps5_delta3_pp",
                 "cross.rps20",
@@ -13917,7 +13941,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "profile.compression",
@@ -13972,19 +13996,25 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_COMPRESSION_R1",
               "rule_field_id": "profile.compression",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.compression",
-              "invocation": "profile(\"profile.compression\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.compression\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.range_ratio",
                 "core.atr_ratio",
@@ -14096,7 +14126,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "profile.participation",
@@ -14149,19 +14179,25 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_PARTICIPATION_R1",
               "rule_field_id": "profile.participation",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.participation",
-              "invocation": "profile(\"profile.participation\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.participation\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.ret1",
                 "core.clv",
@@ -14256,7 +14292,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "profile.extension",
@@ -14310,19 +14346,25 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_EXTENSION_R1",
               "rule_field_id": "profile.extension",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.extension",
-              "invocation": "profile(\"profile.extension\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.extension\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.bias20_atr",
                 "core.ret5",
@@ -14441,7 +14483,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "profile.near_high20",
@@ -14491,19 +14533,25 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_NEAR_HIGH20_R1",
               "rule_field_id": "profile.near_high20",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.near_high20",
-              "invocation": "profile(\"profile.near_high20\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.near_high20\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "adjusted.close",
                 "core.prior_high20",
@@ -14598,7 +14646,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "profile.drawdown60",
@@ -14647,19 +14695,25 @@
           "output_artifact": "core_profiles",
           "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_DRAWDOWN60_R1",
               "rule_field_id": "profile.drawdown60",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.drawdown60",
-              "invocation": "profile(\"profile.drawdown60\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.drawdown60\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "adjusted.close",
                 "core.hhv60"
@@ -14746,7 +14800,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "period.closed_week",
@@ -15011,19 +15065,25 @@
           "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
           "minimum_closed_period_count": 6,
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_CLOSED_WEEK_TREND_R1",
               "rule_field_id": "profile.closed_week_trend",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.closed_week_trend",
-              "invocation": "profile(\"profile.closed_week_trend\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.closed_week_trend\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "period.closed_week"
               ],
@@ -15102,7 +15162,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "period.closed_month",
@@ -15367,19 +15427,25 @@
           "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
           "parameter_binding_state": "ADOPTED_RESEARCH_BASELINE_PIPELINE_BINDING_REQUIRED",
           "minimum_closed_period_count": 4,
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
           "production_binding": {
             "pure_kernel": {
               "state": "IMPLEMENTED",
-              "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
+              "symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7",
               "rule_id": "PROFILE_CLOSED_MONTH_TREND_R1",
               "rule_field_id": "profile.closed_month_trend",
-              "rule_kernel_symbol": "stock_a.research.profile:profile",
-              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
+              "rule_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
+              "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PRODUCTION_ADMISSION_BLOCKED",
+              "production_entry_symbol": "stock_a.research.profile:profile",
+              "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+              "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
               "field_output": "profile.closed_month_trend",
-              "invocation": "profile(\"profile.closed_month_trend\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
+              "invocation": "evaluate_profile_kernel(\"profile.closed_month_trend\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "period.closed_month"
               ],
@@ -15458,7 +15524,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
+          "producer_source_sha256": "f786b325870aa79f765d8e5ce44a7814b7aa111240cd33006fb240f33c9d35e7"
         },
         {
           "field_id": "plan.scope",
@@ -18408,7 +18474,7 @@
             "MODERATE",
             "DEEP"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         },
         "PROFILE_NEAR_HIGH20_R1": {
@@ -18511,7 +18577,7 @@
             "NEAR_HIGH",
             "BELOW_HIGH"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         },
         "PROFILE_CLOSED_WEEK_TREND_R1": {
@@ -18627,7 +18693,7 @@
             "DOWNTREND",
             "SIDEWAYS"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         },
         "PROFILE_CLOSED_MONTH_TREND_R1": {
@@ -18743,7 +18809,7 @@
             "DOWNTREND",
             "SIDEWAYS"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         },
         "PROFILE_TREND_R1": {
@@ -19006,7 +19072,7 @@
             "SIDEWAYS_STRONG",
             "SIDEWAYS"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         },
         "PROFILE_POSITION_R1": {
@@ -19107,7 +19173,7 @@
             "MID_LOW",
             "LOW_ZONE"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         },
         "PROFILE_MA_STRUCTURE_R1": {
@@ -19290,7 +19356,7 @@
             "BEAR_TRANSITION",
             "MIXED"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         },
         "PROFILE_COMPRESSION_R1": {
@@ -19494,7 +19560,7 @@
             "COMPRESSING",
             "NORMAL"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         },
         "PROFILE_RELATIVE_R1": {
@@ -19765,7 +19831,7 @@
             "LAGGING",
             "NEUTRAL"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         },
         "PROFILE_PARTICIPATION_R1": {
@@ -19937,7 +20003,7 @@
             "LOW_PARTICIPATION_DECLINE",
             "NORMAL_PARTICIPATION"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         },
         "PROFILE_EXTENSION_R1": {
@@ -20084,7 +20150,7 @@
             "MEDIUM",
             "LOW"
           ],
-          "pure_kernel_symbol": "stock_a.research.profile:profile",
+          "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
           "pure_kernel_implemented": true
         }
       },
@@ -20377,6 +20443,9 @@
       "producer_symbol": "stock_a.research.risk:compose",
       "adoption": "ADOPTED_RESEARCH_BASELINE_CHG015_NOT_MARKET_VALIDATED",
       "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
       "runtime_pipeline_implemented": false,
       "input_domains": {
         "P": [
@@ -20632,6 +20701,9 @@
       "producer_symbol": "stock_a.research.state:reduce_episode",
       "adoption": "ADOPTED_RESEARCH_BASELINE_CHG015_NOT_MARKET_VALIDATED",
       "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
       "runtime_pipeline_implemented": false,
       "entity_maturities": {
         "STOCK": [
@@ -20764,6 +20836,9 @@
       "stage": "P14",
       "producer_symbol": "stock_a.research.admission:admit",
       "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
       "runtime_pipeline_implemented": false,
       "scenario_priority": [
         "LAUNCH_CONFIRM",
@@ -20805,6 +20880,9 @@
       "producer_symbol": "stock_a.research.structure:generate",
       "observer_symbol": "stock_a.research.structure:observe_support",
       "pure_kernel_implemented": true,
+          "production_entry_symbol": "stock_a.research.profile:profile",
+          "production_entry_state": "BLOCKED_TRUSTED_SELECTOR_NOT_IMPLEMENTED",
+          "production_entry_block_reason_zh": "可信FOUNDATION选择器及已验证行选择结果尚未实现；同一调用方声明的输入与期望不构成生产身份。",
       "runtime_pipeline_implemented": false,
       "types": {
         "IMPULSE_BODY": {
