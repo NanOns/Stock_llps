@@ -2489,8 +2489,33 @@
     "normal_mode": "APPEND_NEW_SESSIONS_WITH_REQUIRED_WINDOWS",
     "changed_source_actions_membership_algorithm": "BOUNDED_RANGE_REPAIR",
     "semantic_revision_closure": {
-      "required_keys_source": "EXPLICIT_SCOPE_INPUT_CONTRACT",
-      "current_key_set": "EXACT_MATCH_TO_REQUIRED_SCOPE_KEYS",
+      "binding_schema_version": "1",
+      "binding_digest_algorithm": "SHA-256",
+      "binding_digest_canonicalization": "UTF-8 JSON; sorted object keys; compact separators; required keys sorted lexicographically",
+      "scope_contracts": {
+        "SOURCE_INGRESS": {
+          "contract_id": "STOCK-A-DAY-CHAIN",
+          "contract_version": "R10",
+          "required_semantic_revision_keys": [
+            "source"
+          ],
+          "binding_digest": "f15df7407e8764e64abc40c0cb7ff9c20fc04d3b7857e010b5b56b31936b6a93"
+        },
+        "FOUNDATION_EOD": {
+          "contract_id": "STOCK-A-DAY-CHAIN",
+          "contract_version": "R10",
+          "required_semantic_revision_keys": [
+            "actions",
+            "algorithm",
+            "membership",
+            "source"
+          ],
+          "binding_digest": "195d8e847905946d6845b5d1244ab1b5838cb9ad662021b279449ae6ebb5b2a6"
+        }
+      },
+      "scope_catalog_digest": "3cce5f595d838d988e422199df8346359bebe5910811d98f88c94dcfe013f265",
+      "current_key_set": "EXACT_MATCH_TO_FORMAL_SCOPE_CONTRACT_REQUIRED_KEYS",
+      "accepted_scope_or_contract_mismatch": "RANGE_REPAIR_REQUIRED",
       "accepted_key_set_mismatch": "RANGE_REPAIR_REQUIRED",
       "append_requires_complete_and_equal_key_value_mapping": true,
       "same_target_idempotency_requires_business_input_digest_match": true,
