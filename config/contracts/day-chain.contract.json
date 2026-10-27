@@ -3049,7 +3049,7 @@
         },
         "profile": {
         "symbol": "stock_a.research.profile:profile",
-        "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+        "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
         "covered_fields": 11,
         "evidence": "contract pure_kernel_implemented flags plus exact one-to-one registry/rule field_id match; no pipeline execution claimed"
         },
@@ -13275,13 +13275,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_TREND_R1",
               "rule_field_id": "profile.trend",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.trend",
-              "invocation": "profile(\"profile.trend\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.trend\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "adjusted.close",
                 "core.ma20",
@@ -13416,7 +13416,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "profile.position",
@@ -13474,13 +13474,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_POSITION_R1",
               "rule_field_id": "profile.position",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.position",
-              "invocation": "profile(\"profile.position\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.position\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.bias20_atr",
                 "core.pos60"
@@ -13567,7 +13567,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "profile.ma_structure",
@@ -13627,13 +13627,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_MA_STRUCTURE_R1",
               "rule_field_id": "profile.ma_structure",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.ma_structure",
-              "invocation": "profile(\"profile.ma_structure\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.ma_structure\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.ma5",
                 "core.ma10",
@@ -13737,7 +13737,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "profile.relative",
@@ -13800,13 +13800,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_RELATIVE_R1",
               "rule_field_id": "profile.relative",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.relative",
-              "invocation": "profile(\"profile.relative\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.relative\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "cross.rps5_delta3_pp",
                 "cross.rps20",
@@ -13917,7 +13917,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "profile.compression",
@@ -13978,13 +13978,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_COMPRESSION_R1",
               "rule_field_id": "profile.compression",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.compression",
-              "invocation": "profile(\"profile.compression\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.compression\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.range_ratio",
                 "core.atr_ratio",
@@ -14096,7 +14096,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "profile.participation",
@@ -14155,13 +14155,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_PARTICIPATION_R1",
               "rule_field_id": "profile.participation",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.participation",
-              "invocation": "profile(\"profile.participation\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.participation\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.ret1",
                 "core.clv",
@@ -14256,7 +14256,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "profile.extension",
@@ -14316,13 +14316,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_EXTENSION_R1",
               "rule_field_id": "profile.extension",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.extension",
-              "invocation": "profile(\"profile.extension\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.extension\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.bias20_atr",
                 "core.ret5",
@@ -14441,7 +14441,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "profile.near_high20",
@@ -14497,13 +14497,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_NEAR_HIGH20_R1",
               "rule_field_id": "profile.near_high20",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.near_high20",
-              "invocation": "profile(\"profile.near_high20\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.near_high20\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "adjusted.close",
                 "core.prior_high20",
@@ -14598,7 +14598,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "profile.drawdown60",
@@ -14653,13 +14653,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_DRAWDOWN60_R1",
               "rule_field_id": "profile.drawdown60",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.drawdown60",
-              "invocation": "profile(\"profile.drawdown60\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.drawdown60\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "adjusted.close",
                 "core.hhv60"
@@ -14746,7 +14746,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "period.closed_week",
@@ -15017,13 +15017,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_CLOSED_WEEK_TREND_R1",
               "rule_field_id": "profile.closed_week_trend",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.closed_week_trend",
-              "invocation": "profile(\"profile.closed_week_trend\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.closed_week_trend\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "period.closed_week"
               ],
@@ -15102,7 +15102,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "period.closed_month",
@@ -15373,13 +15373,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
+              "source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d",
               "rule_id": "PROFILE_CLOSED_MONTH_TREND_R1",
               "rule_field_id": "profile.closed_month_trend",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.closed_month_trend",
-              "invocation": "profile(\"profile.closed_month_trend\", ProfileHandoff, profile_expression_registry, field_registry)",
+              "invocation": "profile(\"profile.closed_month_trend\", ProfileHandoff(inputs, selector_expected_windows, selector_expected_context), profile_expression_registry, field_registry)",
               "input_fields": [
                 "period.closed_month"
               ],
@@ -15458,7 +15458,7 @@
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
           },
-          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
+          "producer_source_sha256": "72fc05f04ea5e5e8b8d5492e390be8a3c46f6290efa17a923fce4ccabad7ae3d"
         },
         {
           "field_id": "plan.scope",
@@ -20286,6 +20286,10 @@
       },
       "context_identity_policy": {
         "applies_to": "NUMERIC_FIELD_AND_WINDOW_IDENTITIES",
+        "profile_handoff_expectations": "SEPARATE_FROM_INPUT_VALUES; BUILT_BY_FOUNDATION_EXECUTOR_FROM_VERIFIED_SELECTION_RESULT; COMPARE_EXACT_ENDPOINTS_SELECTED_ROWS_DIGEST_CALENDAR_REVISION_STATUS_REVISION_AND_DECLARED_CONTEXT",
+        "profile_handoff_executor_status": "NOT_IMPLEMENTED; PROFILE PURE ENTRY REQUIRES EXPLICIT EXPECTATIONS BUT DOES NOT CLAIM A TRUSTED PRODUCTION SELECTOR",
+        "profile_registry_duplicate_ids": "REJECT_BEFORE_MAP_CONSTRUCTION",
+        "profile_missing_producer": "CONTRACT_ERROR_AT_FORMAL_PROFILE_ENTRY; KEEP_FOUNDATION_EOD_BLOCKED",
         "context.source_cutoff": "SELECTED_FACT_AND_COORDINATE_ELIGIBILITY_PROJECTION_NOT_GLOBAL_RUN_WALLCLOCK",
         "context.calendar_ref": "ACTUAL_CONSUMED_SESSION_PROJECTION_NOT_WHOLE_NEW_CALENDAR_VERSION",
         "selected_provenance": "KEEP_ORIGINAL_SELECTED_BINDING_AND_ITS_REAL_ASOF_CLOCKS_UNLESS_FACT_SELECTION_CHANGES",

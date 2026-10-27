@@ -49,11 +49,17 @@ class ProfileInput:
 
 @dataclass(frozen=True)
 class ProfileHandoff:
-    """一个画像字段的封闭输入集合与目标运行上下文。"""
+    """一个画像字段的封闭输入集合及由上游选择器独立提供的期望身份。
+
+    expected_windows/expected_context 必须由未来FOUNDATION阶段执行器从实际
+    选择结果构造，不能从 inputs 回填。当前执行器未实现，生产流水线仍阻断。
+    """
     inputs: Mapping[str, ProfileInput]
     target_session: date
     source_cutoff: str
     target_coordinate_id: str | None
+    expected_windows: Mapping[str, WindowIdentity]
+    expected_context: Mapping[str, Mapping[str, object]]
 
 
 def _rule_for(field_id: str, rules: Mapping) -> Mapping:
@@ -74,10 +80,23 @@ def validate_profile_handoff(field_id: str, handoff: ProfileHandoff,
     required = rule.get("input_fields")
     if not isinstance(required, list) or set(required) != set(handoff.inputs):
         raise ContractError("Core→Profile输入字段集合与规则不完全一致")
+    if not isinstance(field_registry, list):
+        raise ContractError("Core→Profile field_registry必须是列表")
+    registry_ids = [item.get("field_id") for item in field_registry if isinstance(item, Mapping)]
+    if (len(registry_ids) != len(field_registry)
+            or any(not isinstance(name, str) or not name for name in registry_ids)
+            or len(registry_ids) != len(set(registry_ids))):
+        raise ContractError("Core→Profile field_registry含重复或非法field_id")
     entries = [item for item in field_registry if item.get("field_id") in required]
     by_id = {item["field_id"]: item for item in entries}
     if len(by_id) != len(required):
         raise ContractError("Core→Profile输入字段缺少唯一field_registry绑定")
+    window_fields = {name for name in required if by_id[name].get("window_contract", "NONE") != "NONE"}
+    if (not isinstance(handoff.expected_windows, Mapping)
+            or set(handoff.expected_windows) != window_fields
+            or not isinstance(handoff.expected_context, Mapping)
+            or set(handoff.expected_context) != set(required)):
+        raise ContractError("Core→Profile选择器期望身份集合缺失或含多余字段")
 
     values: dict[str, FieldValue] = {}
     target_coordinates: set[str] = set()
@@ -93,6 +112,8 @@ def validate_profile_handoff(field_id: str, handoff: ProfileHandoff,
                 or any(ch not in "0123456789abcdef" for ch in source_digest)
                 or not expected.get("expression_ref") or not expected.get("parameter_version")):
             raise ContractError("Core→Profile上游producer/算法合同未绑定：" + name)
+        if expected.get("requiredness") in {"OPTIONAL", "optional", False}:
+            raise ContractError("Profile规则依赖字段不得在registry中降为optional：" + name)
         exact = {
             "unit": expected.get("unit"),
             "producer_stage": expected.get("producer_stage"),
@@ -106,18 +127,24 @@ def validate_profile_handoff(field_id: str, handoff: ProfileHandoff,
         if any(getattr(supplied, key) != value for key, value in exact.items()):
             raise ContractError("Core→Profile字段单位/producer/算法/坐标绑定错配：" + name)
         window_contract = expected.get("window_contract", "NONE")
+        expected_window = handoff.expected_windows.get(name)
+        if (window_contract != "NONE") != isinstance(expected_window, WindowIdentity):
+            raise ContractError("Core→Profile独立窗口期望集合与合同不一致：" + name)
         if supplied.window is None:
-            if window_contract != "NONE":
+            if window_contract != "NONE" or expected_window is not None:
                 raise ContractError("Core→Profile缺少精确窗口身份：" + name)
         else:
             window = supplied.window
+            if not isinstance(expected_window, WindowIdentity):
+                raise ContractError("Core→Profile缺少独立选择器窗口期望：" + name)
             if (window.contract != window_contract or type(window.first_endpoint) is not date
                     or type(window.last_endpoint) is not date or window.first_endpoint > window.last_endpoint
                     or window.last_endpoint > handoff.target_session
                     or len(window.selected_rows_digest) != 64
                     or any(ch not in "0123456789abcdef" for ch in window.selected_rows_digest)
                     or not window.calendar_revision
-                    or not window.status_revision):
+                    or not window.status_revision
+                    or window != expected_window):
                 raise ContractError("Core→Profile窗口端点/坐标时序/版本身份错配：" + name)
         if expected.get("coordinate_role") == "TARGET_SESSION":
             if (not handoff.target_coordinate_id or supplied.coordinate_id != handoff.target_coordinate_id
@@ -125,9 +152,14 @@ def validate_profile_handoff(field_id: str, handoff: ProfileHandoff,
                 raise ContractError("Core→Profile目标会话坐标缺失或错日：" + name)
             target_coordinates.add(supplied.coordinate_id)
         dependencies = expected.get("context_dependencies", [])
+        expected_context = handoff.expected_context.get(name)
+        if not isinstance(expected_context, Mapping):
+            raise ContractError("Core→Profile缺少独立期望上下文：" + name)
         for dependency in dependencies:
-            if dependency not in supplied.context:
+            if dependency not in supplied.context or dependency not in expected_context:
                 raise ContractError("Core→Profile缺少上下文依赖：" + dependency)
+            if supplied.context[dependency] != expected_context[dependency]:
+                raise ContractError("Core→Profile字段上下文与独立期望不符：" + dependency)
             if supplied.context[dependency] != handoff.target_session and dependency == "context.target_session":
                 raise ContractError("Core→Profile目标会话上下文错配：" + name)
             if dependency == "context.source_cutoff" and supplied.context[dependency] != handoff.source_cutoff:
