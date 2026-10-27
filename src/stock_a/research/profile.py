@@ -1,5 +1,5 @@
 """唯一基础画像有序表达求值器，规则由调用者显式注入。"""
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date
 from fractions import Fraction
@@ -439,3 +439,57 @@ def profile(field_id: str, handoff: ProfileHandoff, rules: Mapping,
     # 这些比较只验证结构一致性；同一调用方仍可同时伪造输入和期望身份。
     validate_profile_handoff(field_id, handoff, rules, field_registry)
     raise ContractError("生产画像准入阻断：可信FOUNDATION选择器及已验证行选择结果尚未实现")
+
+
+def closed_prices_from_period_bars(
+    period_bars: Sequence[object],
+    *,
+    minimum_count: int,
+    target_session: date,
+    source_cutoff: str,
+    coordinate_id: str,
+) -> ClosedPrices:
+    """把连续周期槽投影为Profile既有ClosedPrices输入，不跳过坏槽。"""
+    if not isinstance(period_bars, Sequence) or isinstance(period_bars, (str, bytes)):
+        raise ContractError("period_bars必须是有序序列")
+    if type(minimum_count) is not int or minimum_count < 2:
+        raise ContractError("minimum_count必须是至少2的整数")
+    if (type(target_session) is not date or not isinstance(source_cutoff, str) or not source_cutoff
+            or not isinstance(coordinate_id, str) or not coordinate_id):
+        raise ContractError("Profile周期投影缺少目标会话、来源截止或坐标")
+    if len(period_bars) < minimum_count:
+        raise ContractError("连续闭合周期槽不足")
+    selected = tuple(period_bars[-minimum_count:])
+    required = ("period_kind", "calendar_ordinal", "planned_last_session", "eligible_closed_period",
+                "close", "target_session", "source_cutoff", "coordinate_id", "calendar_closed",
+                "calendar_revision", "status_revision", "action_revision", "aggregation_version")
+    if any(any(not hasattr(row, name) for name in required) for row in selected):
+        raise ContractError("period_bar缺少Profile映射所需字段")
+    kind = selected[0].period_kind
+    if any(row.period_kind != kind for row in selected):
+        raise ContractError("Profile周期窗口混合W/M")
+    frozen_count = 6 if kind == "W" else 4 if kind == "M" else None
+    if frozen_count is None or minimum_count != frozen_count:
+        raise ContractError("Profile周/月窗口长度必须遵循已冻结的6周/4月规则")
+    ordinals = tuple(row.calendar_ordinal for row in selected)
+    if (any(type(value) is not int for value in ordinals)
+            or ordinals != tuple(range(ordinals[0], ordinals[0] + minimum_count))):
+        raise ContractError("Profile周期窗口的官方日历序号不连续")
+    if any(row.target_session != target_session or row.coordinate_id != coordinate_id for row in selected):
+        raise ContractError("Profile周期bar目标会话或坐标身份错配")
+    if any(row.source_cutoff.isoformat() != source_cutoff for row in selected):
+        raise ContractError("Profile周期bar来源截止错配")
+    for attribute in ("calendar_revision", "status_revision", "action_revision", "aggregation_version"):
+        if len({getattr(row, attribute) for row in selected}) != 1:
+            raise ContractError("Profile周期窗口混用版本：" + attribute)
+    if any(row.calendar_closed is not True for row in selected):
+        raise ContractError("Profile闭合周期窗口含未闭合日历槽")
+    if any(not isinstance(row.close, FieldValue) for row in selected):
+        raise ContractError("Profile周期收盘缺少质量值")
+    sessions = tuple(row.planned_last_session for row in selected)
+    if any(type(session) is not date for session in sessions) or sessions != tuple(sorted(set(sessions))):
+        raise ContractError("Profile周期计划末会话非法或未递增")
+    return ClosedPrices(
+        tuple(row.close for row in selected), ordinals, sessions,
+        tuple(row.eligible_closed_period is True for row in selected), target_session, coordinate_id,
+    )

@@ -14805,7 +14805,7 @@
         {
           "field_id": "period.closed_week",
           "producer_stage": "P06",
-          "producer_symbol": null,
+          "producer_symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars",
           "value_type": "typed_bar_set_reference",
           "unit": "OHLCV",
           "expression_ref": "ALG-03",
@@ -14829,7 +14829,7 @@
             "DATA_STATUS",
             "P09"
           ],
-          "implementation_state": "PRODUCER_PIPELINE_NOT_BOUND",
+          "implementation_state": "PURE_AGGREGATION_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
           "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
@@ -14866,16 +14866,18 @@
             "partial_ipo_period": "NOT_COMPLETE_PERIOD_FOR_TREND",
             "component_quality": "PRICE_TREND_DOES_NOT_REQUIRE_KNOWN_AMOUNT_OR_VOLUME"
           },
-          "intended_producer_symbol": "stock_a.canonical.adjustment_periods:period",
+          "intended_producer_symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars",
           "production_binding": {
             "pure_kernel": {
-              "state": "NOT_BOUND",
-              "symbol": null,
-              "intended_symbol": "stock_a.canonical.adjustment_periods:period",
-              "field_level_output_binding": false
+              "state": "IMPLEMENTED",
+              "symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars",
+              "source_sha256": "00e5b916fc8cac9f72afc3d5197cae6a773d493e38a850cd0672495b53f9f3a2",
+              "intended_symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars",
+              "field_level_output_binding": true,
+              "invocation": "build_closed_period_bars(period=\"W\", official_calendar, session_states, canonical_daily, official_session_closes, target_coordinate_id, target_session, source_cutoff, status_revision, action_revision)"
             },
             "pipeline_state": "NOT_CONNECTED",
-            "consumer_binding_state": "DECLARED_ONLY",
+            "consumer_binding_state": "PURE_CLOSED_PRICES_ADAPTER_IMPLEMENTED_PRODUCTION_NOT_CONNECTED",
             "declared_consumers": [
               "BASE_STOCK_DETAIL",
               "CHART",
@@ -15167,7 +15169,7 @@
         {
           "field_id": "period.closed_month",
           "producer_stage": "P06",
-          "producer_symbol": null,
+          "producer_symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars",
           "value_type": "typed_bar_set_reference",
           "unit": "OHLCV",
           "expression_ref": "ALG-03",
@@ -15191,7 +15193,7 @@
             "DATA_STATUS",
             "P09"
           ],
-          "implementation_state": "PRODUCER_PIPELINE_NOT_BOUND",
+          "implementation_state": "PURE_AGGREGATION_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
           "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
           "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
           "value_schema": {
@@ -15228,16 +15230,18 @@
             "partial_ipo_period": "NOT_COMPLETE_PERIOD_FOR_TREND",
             "component_quality": "PRICE_TREND_DOES_NOT_REQUIRE_KNOWN_AMOUNT_OR_VOLUME"
           },
-          "intended_producer_symbol": "stock_a.canonical.adjustment_periods:period",
+          "intended_producer_symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars",
           "production_binding": {
             "pure_kernel": {
-              "state": "NOT_BOUND",
-              "symbol": null,
-              "intended_symbol": "stock_a.canonical.adjustment_periods:period",
-              "field_level_output_binding": false
+              "state": "IMPLEMENTED",
+              "symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars",
+              "source_sha256": "00e5b916fc8cac9f72afc3d5197cae6a773d493e38a850cd0672495b53f9f3a2",
+              "intended_symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars",
+              "field_level_output_binding": true,
+              "invocation": "build_closed_period_bars(period=\"M\", official_calendar, session_states, canonical_daily, official_session_closes, target_coordinate_id, target_session, source_cutoff, status_revision, action_revision)"
             },
             "pipeline_state": "NOT_CONNECTED",
-            "consumer_binding_state": "DECLARED_ONLY",
+            "consumer_binding_state": "PURE_CLOSED_PRICES_ADAPTER_IMPLEMENTED_PRODUCTION_NOT_CONNECTED",
             "declared_consumers": [
               "BASE_STOCK_DETAIL",
               "CHART",
