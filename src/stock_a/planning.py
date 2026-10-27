@@ -16,6 +16,7 @@ class AcceptedRunIdentity:
     calendar_id: str
     calendar_revision: str
     semantic_revisions: Mapping[str, str]
+    business_input_digest: str
 
 
 @dataclass(frozen=True)
@@ -42,6 +43,20 @@ def _revision_map(value: Mapping[str, str], name: str) -> dict[str, str]:
     return result
 
 
+def _required_revision_keys(value: tuple[str, ...]) -> tuple[str, ...]:
+    if (not isinstance(value, tuple) or not value
+            or any(not isinstance(key, str) or not key.strip() for key in value)
+            or len(set(value)) != len(value)):
+        raise ContractError("scope必需revision键必须是非空、无重复的字符串元组")
+    return value
+
+
+def _business_digest(value: str, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ContractError(name + "必须是非空业务输入摘要")
+    return value
+
+
 def classify_incremental_mode(
     *,
     target_session: date,
@@ -49,6 +64,8 @@ def classify_incremental_mode(
     calendar_id: str,
     calendar_revision: str,
     semantic_revisions: Mapping[str, str],
+    required_semantic_revision_keys: tuple[str, ...],
+    business_input_digest: str,
     previous: AcceptedRunIdentity | None,
     historical_repair_required: bool = False,
 ) -> IncrementalModeDecision:
@@ -70,10 +87,15 @@ def classify_incremental_mode(
     if type(historical_repair_required) is not bool:
         raise ContractError("historical_repair_required必须为bool")
     current_revisions = _revision_map(semantic_revisions, "当前语义revision")
+    required_keys = _required_revision_keys(required_semantic_revision_keys)
+    current_digest = _business_digest(business_input_digest, "当前业务输入摘要")
+
+    if set(current_revisions) != set(required_keys):
+        raise ContractError("当前语义revision闭包键集必须与scope输入合同精确一致")
+    if any(not revision.strip() for revision in current_revisions.values()):
+        raise ContractError("当前语义revision闭包含空值")
 
     if previous is None:
-        if not current_revisions or any(not revision.strip() for revision in current_revisions.values()):
-            raise ContractError("首次计划缺少完整语义revision")
         return IncrementalModeDecision("INITIAL", target_session, None, (), ())
     if not isinstance(previous, AcceptedRunIdentity):
         raise ContractError("previous必须是AcceptedRunIdentity或None")
@@ -85,6 +107,28 @@ def classify_incremental_mode(
             or not isinstance(previous.calendar_revision, str) or not previous.calendar_revision.strip()):
         raise ContractError("前一接受状态缺少官方日历身份")
     prior_revisions = _revision_map(previous.semantic_revisions, "前一语义revision")
+    previous_digest = _business_digest(previous.business_input_digest, "前一业务输入摘要")
+
+    if set(prior_revisions) != set(required_keys):
+        return IncrementalModeDecision(
+            "RANGE_REPAIR_REQUIRED", target_session, previous.head_generation, (),
+            ("PRIOR_REVISION_CLOSURE_UNBOUND",),
+        )
+    if any(not revision.strip() for revision in prior_revisions.values()):
+        return IncrementalModeDecision(
+            "RANGE_REPAIR_REQUIRED", target_session, previous.head_generation, (),
+            ("SEMANTIC_REVISION_MISSING",),
+        )
+
+    if (target_session == previous.target_session
+            and previous.calendar_id == calendar_id
+            and previous.calendar_revision == calendar_revision
+            and prior_revisions == current_revisions
+            and previous_digest == current_digest
+            and not historical_repair_required):
+        return IncrementalModeDecision(
+            "NOOP", target_session, previous.head_generation, (), ("ALREADY_ACCEPTED",)
+        )
 
     reasons = []
     if historical_repair_required:
@@ -94,13 +138,12 @@ def classify_incremental_mode(
         reasons.append("CALENDAR_IDENTITY_CHANGED")
     if target_session <= previous.target_session:
         reasons.append("TARGET_NOT_AFTER_ACCEPTED_SESSION")
-    if (not prior_revisions or not current_revisions
-            or any(not revision.strip() for revision in (*prior_revisions.values(), *current_revisions.values()))):
-        reasons.append("SEMANTIC_REVISION_MISSING")
-    elif set(prior_revisions) != set(current_revisions):
+    if set(prior_revisions) != set(current_revisions):
         reasons.append("SEMANTIC_REVISION_SET_CHANGED")
     elif prior_revisions != current_revisions:
         reasons.append("SEMANTIC_REVISION_CHANGED")
+    if previous_digest != current_digest:
+        reasons.append("BUSINESS_INPUT_IDENTITY_CHANGED")
 
     if reasons:
         return IncrementalModeDecision(

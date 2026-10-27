@@ -2488,6 +2488,20 @@
   "revision_policy": {
     "normal_mode": "APPEND_NEW_SESSIONS_WITH_REQUIRED_WINDOWS",
     "changed_source_actions_membership_algorithm": "BOUNDED_RANGE_REPAIR",
+    "semantic_revision_closure": {
+      "required_keys_source": "EXPLICIT_SCOPE_INPUT_CONTRACT",
+      "current_key_set": "EXACT_MATCH_TO_REQUIRED_SCOPE_KEYS",
+      "accepted_key_set_mismatch": "RANGE_REPAIR_REQUIRED",
+      "append_requires_complete_and_equal_key_value_mapping": true,
+      "same_target_idempotency_requires_business_input_digest_match": true,
+      "business_input_digest_fields": [
+        "values",
+        "quality",
+        "provenance",
+        "parameters",
+        "producer"
+      ]
+    },
     "immutable_t0_and_accepted_history": true,
     "stateful_propagation": "DEPENDENCY_FIXED_POINT_WITH_RECORDED_STOP_REASON"
   },
