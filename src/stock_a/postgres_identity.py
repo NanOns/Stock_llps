@@ -26,6 +26,18 @@ _MAX_CREDENTIAL_FILE_BYTES = 8192
 _CREDENTIAL_SCHEMA = "STOCK-A-PG-CREDENTIALS/R1"
 
 
+class _CredentialContractError(ValueError):
+    """凭据合同拒绝的安全原因码；不携带路径或凭据字段值。"""
+
+    def __init__(self, reason_code: str, *, missing_fields: tuple[str, ...] = (),
+                 invalid_fields: tuple[str, ...] = (), extra_field_count: int = 0) -> None:
+        self.reason_code = reason_code
+        self.missing_fields = missing_fields
+        self.invalid_fields = invalid_fields
+        self.extra_field_count = extra_field_count
+        super().__init__(reason_code)
+
+
 @dataclass(frozen=True)
 class IdentityCheck:
     """一个不含秘密的PG身份或部署条件检查结果。"""
@@ -424,11 +436,11 @@ def _load_private_credentials(path: Path | None = None) -> dict[str, Any]:
         # 路径检查只作早期拒绝；最终安全判断针对实际打开的同一文件句柄。
         for candidate in (approved_root.parent, approved_root, path):
             if candidate.is_symlink() or (hasattr(candidate, "is_junction") and candidate.is_junction()):
-                raise ValueError("凭据路径不允许符号链接或重解析点")
+                raise _CredentialContractError("PATH_REPARSE_POINT")
         root = approved_root.resolve(strict=True)
         resolved = path.resolve(strict=True)
         if root != approved_root or resolved.parent != root or resolved.name != "postgresql.credentials.json":
-            raise ValueError("凭据路径不在唯一登记位置")
+            raise _CredentialContractError("PATH_OUTSIDE_REGISTERED_ROOT")
         # 只打开一次，在读取前从该句柄核验最终路径和文件类型。
         # 若检查与打开之间发生替换，实际句柄路径不匹配时会在读取前拒绝。
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
@@ -438,40 +450,58 @@ def _load_private_credentials(path: Path | None = None) -> dict[str, Any]:
         try:
             info = os.fstat(fd)
             if not stat.S_ISREG(info.st_mode) or info.st_size <= 0 or info.st_size > _MAX_CREDENTIAL_FILE_BYTES:
-                raise ValueError("凭据文件类型或大小不符合合同")
+                raise _CredentialContractError("FILE_TYPE_OR_SIZE")
             opened_path = _opened_file_path(fd)
             if _canonical_path(opened_path) != _canonical_path(resolved):
-                raise ValueError("凭据文件句柄不属于唯一登记位置")
+                raise _CredentialContractError("OPEN_HANDLE_PATH_MISMATCH")
             with os.fdopen(fd, "rb", closefd=False) as stream:
                 raw = stream.read(_MAX_CREDENTIAL_FILE_BYTES + 1)
         finally:
             os.close(fd)
         if len(raw) > _MAX_CREDENTIAL_FILE_BYTES:
-            raise ValueError("凭据文件超过读取上限")
+            raise _CredentialContractError("FILE_EXCEEDS_READ_LIMIT")
         def reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
             result: dict[str, Any] = {}
             for key, value in pairs:
                 if key in result:
-                    raise ValueError("凭据JSON包含重复字段")
+                    raise _CredentialContractError("JSON_DUPLICATE_FIELD")
                 result[key] = value
             return result
 
+        def reject_non_finite(_value: str) -> None:
+            raise _CredentialContractError("JSON_NON_FINITE_NUMBER")
+
         data = json.loads(raw.decode("utf-8"), object_pairs_hook=reject_duplicate_keys,
-                          parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
+                          parse_constant=reject_non_finite)
     except FileNotFoundError as error:
         raise FileNotFoundError("登记的PG凭据文件不存在") from error
     except PermissionError as error:
         raise PermissionError("操作系统拒绝读取登记的PG凭据文件") from error
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise RuntimeError("登记的PG凭据文件读取失败") from error
-    if not isinstance(data, dict) or set(data) != {"schema", "host", "port", "database", "username", "password"}:
-        raise ValueError("PG凭据字段不符合登记合同")
-    if (data.get("schema") != _CREDENTIAL_SCHEMA or data.get("host") != "127.0.0.1"
-            or type(data.get("port")) is not int or data["port"] != 5432
-            or data.get("database") != "stock_a"
-            or not isinstance(data.get("username"), str) or not data["username"]
-            or not isinstance(data.get("password"), str) or not data["password"]):
-        raise ValueError("PG凭据版本、目标或字段值不符合固定合同")
+    allowed_fields = {"schema", "host", "port", "database", "username", "password"}
+    if not isinstance(data, dict):
+        raise _CredentialContractError("JSON_ROOT_NOT_OBJECT")
+    missing_fields = tuple(sorted(allowed_fields - set(data)))
+    extra_field_count = len(set(data) - allowed_fields)
+    if missing_fields or extra_field_count:
+        raise _CredentialContractError("FIELD_SET_MISMATCH", missing_fields=missing_fields,
+                                       extra_field_count=extra_field_count)
+    invalid_fields: list[str] = []
+    if data.get("schema") != _CREDENTIAL_SCHEMA:
+        invalid_fields.append("schema")
+    if data.get("host") != "127.0.0.1":
+        invalid_fields.append("host")
+    if type(data.get("port")) is not int or data["port"] != 5432:
+        invalid_fields.append("port")
+    if data.get("database") != "stock_a":
+        invalid_fields.append("database")
+    if not isinstance(data.get("username"), str) or not data["username"]:
+        invalid_fields.append("username")
+    if not isinstance(data.get("password"), str) or not data["password"]:
+        invalid_fields.append("password")
+    if invalid_fields:
+        raise _CredentialContractError("SCHEMA_TARGET_OR_VALUE_INVALID", invalid_fields=tuple(sorted(invalid_fields)))
     return data
 
 
@@ -552,10 +582,22 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
             return {"status": "PERMISSION_DENIED", "connection_attempted": False,
                     "reason": "操作系统拒绝读取登记的PG凭据文件；未尝试连接",
                     "preparation_failure": "PRIVATE_CREDENTIALS_ACCESS_DENIED", "checks": [], "physical": None}
+        except _CredentialContractError as error:
+            return {"status": "REJECTED", "connection_attempted": False,
+                    "reason": "登记的PG凭据文件路径、结构或目标合同无效；未尝试连接",
+                    "preparation_failure": "PRIVATE_CREDENTIALS_CONTRACT",
+                    "credential_failure": error.reason_code,
+                    **({"missing_registered_fields": list(error.missing_fields),
+                       "unregistered_field_count": error.extra_field_count}
+                       if error.reason_code == "FIELD_SET_MISMATCH" else {}),
+                    **({"invalid_registered_fields": list(error.invalid_fields)}
+                       if error.reason_code == "SCHEMA_TARGET_OR_VALUE_INVALID" else {}),
+                    "checks": [], "physical": None}
         except ValueError:
             return {"status": "REJECTED", "connection_attempted": False,
                     "reason": "登记的PG凭据文件路径、结构或目标合同无效；未尝试连接",
-                    "preparation_failure": "PRIVATE_CREDENTIALS_CONTRACT", "checks": [], "physical": None}
+                    "preparation_failure": "PRIVATE_CREDENTIALS_CONTRACT",
+                    "credential_failure": "UNCLASSIFIED_CONTRACT_REJECTION", "checks": [], "physical": None}
         except RuntimeError:
             return {"status": "ENGINEERING_ERROR", "connection_attempted": False,
                     "reason": "读取登记的PG凭据文件时发生工程错误；未尝试连接",
