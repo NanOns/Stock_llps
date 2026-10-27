@@ -25,6 +25,21 @@ _ROLE_BINDINGS = (
 _ROLE_NAMES = ("stock_a_owner", "stock_a_migrator", "stock_a_reader",
                "stock_a_dev_writer", "stock_a_prod_writer", "stock_a_test_writer")
 _EXPECTED_TABLES = {"installation_identity", "migration_ledger", "namespaces", "role_bindings"}
+_EXPECTED_RELATIONS = _EXPECTED_TABLES | {
+    "installation_identity_pkey", "migration_ledger_pkey", "namespaces_pkey",
+    "namespaces_environment_instance_uuid_key", "installation_identity_instance_uuid_key",
+    "role_bindings_pkey",
+}
+_EXPECTED_CONSTRAINTS = {
+    "installation_identity_application_id_check", "installation_identity_cluster_system_identifier_check",
+    "installation_identity_instance_uuid_key", "installation_identity_migration_lineage_check",
+    "installation_identity_pkey", "installation_identity_singleton_check",
+    "migration_ledger_lineage_check", "migration_ledger_migration_id_check", "migration_ledger_pkey",
+    "migration_ledger_source_sha_check", "namespaces_environment_check",
+    "namespaces_environment_instance_uuid_key", "namespaces_instance_uuid_fkey", "namespaces_pkey",
+    "role_bindings_capability_check", "role_bindings_namespace_id_fkey", "role_bindings_pkey",
+}
+_ROLE_MARKER = "Stock A受控数据库角色/R1"
 
 
 class BindingRefused(Exception):
@@ -62,6 +77,66 @@ def _schema_tables(cursor: Any) -> set[str]:
     return {row[0] for row in cursor.fetchall()}
 
 
+def _schema_objects(cursor: Any) -> dict[str, set[str]]:
+    """列举schema命名空间中的对象；不能只看pg_class关系。"""
+    queries = {
+        "relations": """SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='stock' ORDER BY c.relname""",
+        "routines": """SELECT p.proname || '(' || pg_get_function_identity_arguments(p.oid) || ')'
+            FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname='stock' ORDER BY 1""",
+        "types": """SELECT t.typname FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+            WHERE n.nspname='stock' AND t.typrelid=0 AND t.typcategory <> 'A' ORDER BY t.typname""",
+        "operators": """SELECT o.oprname FROM pg_operator o JOIN pg_namespace n ON n.oid=o.oprnamespace
+            WHERE n.nspname='stock' ORDER BY o.oprname""",
+        "opclasses": """SELECT o.opcname FROM pg_opclass o JOIN pg_namespace n ON n.oid=o.opcnamespace
+            WHERE n.nspname='stock' ORDER BY o.opcname""",
+        "opfamilies": """SELECT o.opfname FROM pg_opfamily o JOIN pg_namespace n ON n.oid=o.opfnamespace
+            WHERE n.nspname='stock' ORDER BY o.opfname""",
+        "collations": """SELECT c.collname FROM pg_collation c JOIN pg_namespace n ON n.oid=c.collnamespace
+            WHERE n.nspname='stock' ORDER BY c.collname""",
+        "conversions": """SELECT c.conname FROM pg_conversion c JOIN pg_namespace n ON n.oid=c.connamespace
+            WHERE n.nspname='stock' ORDER BY c.conname""",
+        "statistics": """SELECT s.stxname FROM pg_statistic_ext s JOIN pg_namespace n ON n.oid=s.stxnamespace
+            WHERE n.nspname='stock' ORDER BY s.stxname""",
+        "text_search": """SELECT x.name FROM (
+            SELECT cfgname AS name, cfgnamespace AS nsp FROM pg_ts_config
+            UNION ALL SELECT prsname, prsnamespace FROM pg_ts_parser
+            UNION ALL SELECT dictname, dictnamespace FROM pg_ts_dict
+            UNION ALL SELECT tmplname, tmplnamespace FROM pg_ts_template
+        ) x JOIN pg_namespace n ON n.oid=x.nsp WHERE n.nspname='stock' ORDER BY 1""",
+        "triggers": """SELECT c.relname || ':' || t.tgname FROM pg_trigger t
+            JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='stock' AND NOT t.tgisinternal ORDER BY 1""",
+        "policies": """SELECT c.relname || ':' || p.polname FROM pg_policy p
+            JOIN pg_class c ON c.oid=p.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='stock' ORDER BY 1""",
+        "rules": """SELECT c.relname || ':' || r.rulename FROM pg_rewrite r
+            JOIN pg_class c ON c.oid=r.ev_class JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname='stock' AND r.rulename <> '_RETURN' ORDER BY 1""",
+        "constraints": """SELECT c.conname FROM pg_constraint c
+            JOIN pg_namespace n ON n.oid=c.connamespace
+            WHERE n.nspname='stock' AND c.contype <> 'n' ORDER BY c.conname""",
+        "extensions": """SELECT e.extname FROM pg_extension e
+            JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname='stock' ORDER BY e.extname""",
+    }
+    objects: dict[str, set[str]] = {}
+    for category, statement in queries.items():
+        cursor.execute(statement)
+        objects[category] = {str(row[0]) for row in cursor.fetchall()}
+    return objects
+
+
+def _unknown_schema_objects(objects: dict[str, set[str]], *, identity_present: bool) -> dict[str, list[str]]:
+    unknown = {key: sorted(value) for key, value in objects.items() if value}
+    if identity_present:
+        actual_relations = objects.get("relations", set())
+        actual_constraints = objects.get("constraints", set())
+        unknown["relations"] = sorted(actual_relations ^ _EXPECTED_RELATIONS)
+        unknown["constraints"] = sorted(actual_constraints ^ _EXPECTED_CONSTRAINTS)
+        unknown = {key: value for key, value in unknown.items() if value}
+    return unknown
+
+
 def _role_state(cursor: Any, role: str) -> tuple[bool, ...] | None:
     cursor.execute("""SELECT rolcanlogin, rolsuper, rolcreatedb, rolcreaterole,
        rolreplication, rolbypassrls, rolinherit FROM pg_roles WHERE rolname=%s""", (role,))
@@ -69,19 +144,43 @@ def _role_state(cursor: Any, role: str) -> tuple[bool, ...] | None:
     return None if row is None else tuple(bool(value) for value in row)
 
 
-def _validate_or_create_roles(cursor: Any, sql: Any) -> None:
+def _validate_or_create_roles(cursor: Any, sql: Any) -> list[str]:
     states = {name: _role_state(cursor, name) for name in _ROLE_NAMES}
+    unmarked: list[str] = []
     for name, state in states.items():
         if state is not None and state != _ROLE_FLAGS:
             raise BindingRefused(f"角色{name}已存在但属性不符合受控无登录角色合同，拒绝修改")
+    cursor.execute("""WITH RECURSIVE memberships(roleid, member, depth) AS (
+          SELECT roleid, member, 1 FROM pg_auth_members
+          UNION ALL
+          SELECT edge.roleid, memberships.member, memberships.depth + 1
+          FROM pg_auth_members edge JOIN memberships ON edge.member=memberships.roleid
+          WHERE memberships.depth < 32
+       ) SELECT DISTINCT target.rolname FROM pg_roles target
+       WHERE target.rolname = ANY(%s) AND EXISTS (
+         SELECT 1 FROM memberships m WHERE m.roleid=target.oid OR m.member=target.oid)
+       ORDER BY target.rolname""", (list(_ROLE_NAMES),))
+    if cursor.fetchall():
+        raise BindingRefused("项目角色存在未知成员关系或继承边，拒绝接管")
     for name, state in states.items():
         if state is None:
             cursor.execute(sql.SQL("CREATE ROLE {} NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS NOINHERIT").format(sql.Identifier(name)))
+            cursor.execute(sql.SQL("COMMENT ON ROLE {} IS {}").format(sql.Identifier(name), sql.Literal(_ROLE_MARKER)))
+        else:
+            cursor.execute("SELECT shobj_description(oid, 'pg_authid') FROM pg_roles WHERE rolname=%s", (name,))
+            comment = cursor.fetchone()
+            if comment is None:
+                raise BindingRefused(f"既有角色{name}身份读取不完整，拒绝按同名或属性接管")
+            if comment[0] is None:
+                unmarked.append(name)
+            elif comment[0] != _ROLE_MARKER:
+                raise BindingRefused(f"既有角色{name}存在冲突身份标记，拒绝接管")
     cursor.execute("""SELECT rolname, rolsuper, rolcreatedb, rolcreaterole, rolreplication,
        rolbypassrls FROM pg_roles WHERE rolname = ANY(%s) ORDER BY rolname""", (list(_ROLE_NAMES),))
     rows = cursor.fetchall()
     if len(rows) != len(_ROLE_NAMES) or any(any(bool(flag) for flag in row[1:]) for row in rows):
         raise BindingRefused("受控项目角色创建后属性核验失败")
+    return unmarked
 
 
 def _database_seed(cursor: Any, *, project_uuid: uuid.UUID, instance_uuid: uuid.UUID,
@@ -145,24 +244,64 @@ def _verify_effective_roles(cursor: Any) -> list[dict[str, Any]]:
            has_schema_privilege(current_user, 'stock', 'USAGE'),
            has_schema_privilege(current_user, 'stock', 'CREATE'),
            has_table_privilege(current_user, 'stock.installation_identity', 'SELECT'),
+           has_table_privilege(current_user, 'stock.installation_identity', 'INSERT'),
            has_table_privilege(current_user, 'stock.installation_identity', 'UPDATE'),
+           has_table_privilege(current_user, 'stock.installation_identity', 'DELETE'),
+           has_table_privilege(current_user, 'stock.installation_identity', 'TRUNCATE'),
+           (SELECT array_agg(c.relname ORDER BY c.relname) FROM pg_class c
+             JOIN pg_namespace n ON n.oid=c.relnamespace
+             WHERE n.nspname='stock' AND c.relowner=(SELECT oid FROM pg_roles WHERE rolname=current_user)),
            EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
-             WHERE n.nspname='stock' AND c.relowner=(SELECT oid FROM pg_roles WHERE rolname=current_user))""")
+             WHERE n.nspname='stock' AND c.relkind <> 'S' AND (has_table_privilege(current_user, c.oid, 'SELECT')
+               OR has_table_privilege(current_user, c.oid, 'INSERT') OR has_table_privilege(current_user, c.oid, 'UPDATE')
+               OR has_table_privilege(current_user, c.oid, 'DELETE') OR has_table_privilege(current_user, c.oid, 'TRUNCATE')
+               OR has_table_privilege(current_user, c.oid, 'REFERENCES') OR has_table_privilege(current_user, c.oid, 'TRIGGER'))),
+           EXISTS (SELECT 1 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+             WHERE n.nspname='stock' AND has_function_privilege(current_user, p.oid, 'EXECUTE')),
+           EXISTS (SELECT 1 FROM pg_type t JOIN pg_namespace n ON n.oid=t.typnamespace
+             WHERE n.nspname='stock' AND t.typrelid=0 AND t.typcategory <> 'A'
+               AND has_type_privilege(current_user, t.oid, 'USAGE')),
+           EXISTS (SELECT 1 FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+             WHERE n.nspname='stock' AND c.relkind='S' AND (has_sequence_privilege(current_user, c.oid, 'USAGE')
+               OR has_sequence_privilege(current_user, c.oid, 'SELECT') OR has_sequence_privilege(current_user, c.oid, 'UPDATE')))""")
         row = cursor.fetchone()
         if row is None or row[0] != role:
             raise BindingRefused("角色有效权限检查未能切换到目标角色")
-        expected = (True, role == "stock_a_owner", role == "stock_a_owner",
-                    role == "stock_a_owner", role == "stock_a_owner")
-        actual = (bool(row[1]), bool(row[2]), bool(row[3]), bool(row[4]), bool(row[5]))
-        if actual != expected:
-            raise BindingRefused(f"角色{role}的schema/table/owner权限不符合最低权限预期")
+        expected = _expected_role_privileges(role)
+        actual_values = list(row[1:8])
+        actual_values.append(_role_ownership_matches_contract(role, row[8]))
+        actual_values.extend(row[9:])
+        actual = tuple(bool(value) for value in actual_values)
+        _validate_role_privileges(role, actual, expected)
         checks.append({"role": role, "schema_create": bool(row[2]), "identity_table_select": bool(row[3]),
-                       "identity_table_update": bool(row[4]), "owns_business_objects": bool(row[5]),
+                       "identity_table_insert": bool(row[4]), "identity_table_update": bool(row[5]),
+                       "identity_table_delete": bool(row[6]), "identity_table_truncate": bool(row[7]),
+                       "owns_business_objects": bool(row[8]), "any_relation_privilege": bool(row[9]),
+                       "any_function_execute": bool(row[10]), "any_type_usage": bool(row[11]),
+                       "any_sequence_privilege": bool(row[12]),
                        "login": False, "superuser": False, "createdb": False,
                        "createrole": False, "bypassrls": False, "inherit": False,
                        "tested_as": "SET_LOCAL_ROLE_IN_ADMIN_SESSION"})
         cursor.execute("RESET ROLE")
     return checks
+
+
+def _expected_role_privileges(role: str) -> tuple[bool, ...]:
+    """固定顺序：schema USAGE/CREATE、身份表CRUD/TRUNCATE、对象所有权及全对象ACL。"""
+    owner = role == "stock_a_owner"
+    return (True,) + (owner,) * 6 + (True, owner) + (False,) * 3
+
+
+def _role_ownership_matches_contract(role: str, owned_relations: Any) -> bool:
+    actual = set(owned_relations or ())
+    return actual == _EXPECTED_RELATIONS if role == "stock_a_owner" else not actual
+
+
+def _validate_role_privileges(role: str, actual: tuple[bool, ...],
+                               expected: tuple[bool, ...] | None = None) -> None:
+    expected = _expected_role_privileges(role) if expected is None else expected
+    if actual != expected:
+        raise BindingRefused(f"角色{role}的schema/table/owner权限不符合最低权限预期：actual={actual!r}, expected={expected!r}")
 
 
 def _update_runtime_config(config_path: Path, config: dict[str, Any], *, instance_uuid: uuid.UUID,
@@ -226,6 +365,10 @@ def bind_stock_namespace(config: dict[str, Any], config_path: Path, *, timeout_s
                 config_cluster = app.get("cluster_system_identifier")
                 tables = _schema_tables(cursor)
                 identity_present = physical["identity"] is not None
+                schema_objects = _schema_objects(cursor)
+                unknown_objects = _unknown_schema_objects(schema_objects, identity_present=identity_present)
+                if unknown_objects:
+                    raise BindingRefused("stock schema包含未登记的非关系对象或冲突对象，拒绝修改；只读对象盘点已发现冲突")
                 migration_action = "IDEMPOTENT_REUSE" if identity_present else "APPLIED"
                 ledger_present = physical["migration_table_exists"] and physical["migration_digest"] is not None
                 if not identity_present and (ledger_present or tables):
@@ -247,7 +390,7 @@ def bind_stock_namespace(config: dict[str, Any], config_path: Path, *, timeout_s
                     if tables:
                         raise BindingRefused("stock schema并非空schema，拒绝覆盖既有对象")
                     instance_uuid = uuid.uuid4()
-                _validate_or_create_roles(cursor, sql)
+                unmarked_roles = _validate_or_create_roles(cursor, sql)
                 if not identity_present:
                     # migration内只有固定stock限定的CREATE TABLE/COMMENT/OWNER语句；从不创建数据库或schema。
                     cursor.execute(migration.decode("utf-8"))
@@ -262,6 +405,11 @@ def bind_stock_namespace(config: dict[str, Any], config_path: Path, *, timeout_s
                 _verify_seed(cursor, project_uuid=project_uuid, instance_uuid=instance_uuid,
                              cluster_id=cluster_id, migration_sha=migration_sha)
                 role_checks = _verify_effective_roles(cursor)
+                # 仅在安装身份、迁移账本、角色绑定和全部有效权限都精确匹配后，
+                # 为无冲突的历史受控角色补写项目身份标记。
+                for role in unmarked_roles:
+                    cursor.execute(sql.SQL("COMMENT ON ROLE {} IS {}").format(
+                        sql.Identifier(role), sql.Literal(_ROLE_MARKER)))
             # Context manager commits here; failed SQL rolls the whole bootstrap back.
         _update_runtime_config(config_path, config, instance_uuid=instance_uuid,
                                cluster_id=cluster_id, migration_digest=expected_migration_digest)
