@@ -94,7 +94,7 @@ def evaluate_identity(
     migration_digest = actual.get("migration_digest")
     checks.append(IdentityCheck(
         "migration_digest", "BLOCKED",
-        actual="已读取" if isinstance(migration_digest, str) and re.fullmatch(r"[0-9a-f]{64}", migration_digest) else None,
+        actual=migration_digest if isinstance(migration_digest, str) and re.fullmatch(r"[0-9a-f]{64}", migration_digest) else None,
         reason="runtime.defaults尚未登记经批准的迁移摘要，不能把存在账本等同精确版本匹配",
     ))
     role = actual.get("session_user")
@@ -476,6 +476,7 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                 cursor.execute("COMMIT")
             physical_summary = {k: v for k, v in physical.items() if k not in ("identity",)}
             physical_summary["identity"] = "PRESENT" if physical["identity"] else "MISSING"
+            physical_summary["identity_record"] = physical["identity"]
             physical_summary["tablespace_count"] = len(physical["tablespaces"])
             if len(checks) > _MAX_CHECKS:
                 raise OverflowError("PG核验检查项超过输出预算")
@@ -520,7 +521,7 @@ def write_admission(
     physical_required = {
         "database", "schema", "session_user", "data_directory", "config_file", "log_directory",
         "temp_tablespaces", "port", "server_version_num", "server_address", "logging_collector",
-        "current_logfile", "tablespaces", "tablespace_count", "cluster_system_identifier", "identity", "migration_digest",
+        "current_logfile", "tablespaces", "tablespace_count", "cluster_system_identifier", "identity", "identity_record", "migration_digest",
         "role_attributes", "namespace_binding",
     }
     tablespaces = physical.get("tablespaces") if isinstance(physical, dict) else None
@@ -541,6 +542,16 @@ def write_admission(
         and isinstance(physical, dict) and type(physical.get("tablespace_count")) is int
         and physical.get("tablespace_count") == len(tablespaces)
     )
+    identity_record = physical.get("identity_record") if isinstance(physical, dict) else None
+    config_app = requested_configuration.get("application_identity") if isinstance(requested_configuration, dict) else None
+    config_pg = requested_configuration.get("postgresql") if isinstance(requested_configuration, dict) else None
+
+    def canonical_path(value: Any, base: Any = None) -> str | None:
+        if not isinstance(value, str) or not value:
+            return None
+        candidate = value if ntpath.isabs(value) else ntpath.join(str(base), value) if isinstance(base, str) else None
+        return ntpath.normcase(ntpath.normpath(candidate)) if candidate and ntpath.isabs(candidate) else None
+
     physical_values_complete = (
         isinstance(physical, dict)
         and all(isinstance(physical.get(key), str) and bool(physical[key]) for key in (
@@ -548,12 +559,107 @@ def write_admission(
         ))
         and type(physical.get("port")) is int and physical["port"] > 0
         and type(physical.get("server_version_num")) is int and physical["server_version_num"] > 0
-        and physical.get("identity") in ("PRESENT", "MISSING")
-        and isinstance(physical.get("namespace_binding"), str) and bool(physical["namespace_binding"])
+        and physical.get("identity") == "PRESENT"
+        and isinstance(identity_record, dict)
+        and all(isinstance(identity_record.get(key), str) and bool(identity_record[key]) for key in (
+            "application_id", "project_uuid", "instance_uuid", "cluster_system_identifier", "migration_lineage",
+        ))
+        and physical.get("namespace_binding") == "MATCH"
         and isinstance(physical.get("role_attributes"), dict)
         and all(key in physical["role_attributes"] and type(physical["role_attributes"][key]) is bool
                 for key in _ROLE_ATTRIBUTE_KEYS)
+        and all(physical["role_attributes"][key] is False for key in _ROLE_ATTRIBUTE_KEYS)
+        and physical.get("database") == "stock_a" and physical.get("schema") == "stock_a"
+        and physical.get("server_address") == "127.0.0.1" and physical.get("port") == 5432
+        and isinstance(physical.get("cluster_system_identifier"), str)
+        and identity_record.get("cluster_system_identifier") == physical.get("cluster_system_identifier")
+        and isinstance(physical.get("migration_digest"), str)
+        and re.fullmatch(r"[0-9a-f]{64}", physical.get("migration_digest", "")) is not None
+        and isinstance(config_app, dict) and config_app.get("deployment_applied") is True
+        and isinstance(config_app.get("roles"), list)
+        and config_app.get("application_id") == "STOCK_A"
+        and _valid_uuid(config_app.get("project_uuid"))
+        and _valid_uuid(config_app.get("deployment_instance_uuid"))
+        and isinstance(config_app.get("cluster_system_identifier"), str)
+        and config_app.get("cluster_system_identifier", "").isdecimal()
+        and isinstance(config_app.get("migration_lineage"), str) and bool(config_app.get("migration_lineage"))
+        and isinstance(config_pg, dict)
+        and all(canonical_path(config_pg.get(key)) is not None for key in ("data_directory", "wal_directory", "log_directory"))
+        and all(ntpath.splitdrive(canonical_path(config_pg.get(key)) or "")[0].casefold() == "g:" for key in ("data_directory", "wal_directory", "log_directory"))
+        and canonical_path(config_pg.get("data_directory")) == canonical_path(physical.get("data_directory") if isinstance(physical, dict) else None)
+        and canonical_path(config_pg.get("wal_directory")) == canonical_path(ntpath.join(physical.get("data_directory", ""), "pg_wal") if isinstance(physical, dict) else None)
+        and canonical_path(config_pg.get("log_directory")) == canonical_path(physical.get("log_directory") if isinstance(physical, dict) else None, physical.get("data_directory") if isinstance(physical, dict) else None)
+        and config_pg.get("temp_tablespaces") == physical.get("temp_tablespaces")
+        and identity_record.get("application_id") == "STOCK_A"
+        and identity_record.get("project_uuid") == config_app.get("project_uuid")
+        and identity_record.get("instance_uuid") == config_app.get("deployment_instance_uuid")
+        and identity_record.get("cluster_system_identifier") == config_app.get("cluster_system_identifier")
+        and identity_record.get("migration_lineage") == config_app.get("migration_lineage")
+        and physical.get("session_user") in config_app.get("roles", [])
     )
+
+    def check_actual_is(name: str, expected: Any) -> bool:
+        item = by_name.get(name)
+        return isinstance(item, dict) and item.get("actual") == (None if expected is None else str(expected))
+
+    # PASS项必须逐值反映本次摘要。否则一份手工拼出的READY检查不能覆盖冲突摘要。
+    scalar_actuals = {
+        "current_database": physical.get("database") if isinstance(physical, dict) else None,
+        "current_schema": physical.get("schema") if isinstance(physical, dict) else None,
+        "application_id": identity_record.get("application_id") if isinstance(identity_record, dict) else None,
+        "project_uuid": identity_record.get("project_uuid") if isinstance(identity_record, dict) else None,
+        "deployment_instance_uuid": identity_record.get("instance_uuid") if isinstance(identity_record, dict) else None,
+        "cluster_system_identifier": identity_record.get("cluster_system_identifier") if isinstance(identity_record, dict) else None,
+        "physical_cluster_system_identifier": physical.get("cluster_system_identifier") if isinstance(physical, dict) else None,
+        "marked_vs_physical_cluster_system_identifier": identity_record.get("cluster_system_identifier") if isinstance(identity_record, dict) else None,
+        "migration_lineage": identity_record.get("migration_lineage") if isinstance(identity_record, dict) else None,
+        "migration_digest": physical.get("migration_digest") if isinstance(physical, dict) else None,
+        "session_user": physical.get("session_user") if isinstance(physical, dict) else None,
+        "role_attributes": "安全属性已核验",
+        "role_namespace_binding": physical.get("namespace_binding") if isinstance(physical, dict) else None,
+        "temp_tablespaces": "未设置temp_tablespaces" if isinstance(physical, dict) and physical.get("temp_tablespaces") == "" else physical.get("temp_tablespaces") if isinstance(physical, dict) else None,
+        "server_port": physical.get("port") if isinstance(physical, dict) else None,
+        "server_address": physical.get("server_address") if isinstance(physical, dict) else None,
+        "deployment_applied": "true",
+        "current_logfile": None,
+    }
+    values_consistent = all(check_actual_is(name, value) for name, value in scalar_actuals.items() if name != "current_logfile")
+    # 路径检查由既有最终路径解析生成；比对Windows规范形式以兼容大小写和分隔符。
+    if isinstance(physical, dict):
+        path_actuals = {
+            "data_directory": (physical.get("data_directory"), None),
+            "wal_directory": (ntpath.join(physical.get("data_directory", ""), "pg_wal"), None),
+            "log_directory": (physical.get("log_directory"), physical.get("data_directory")),
+            "current_logfile": (physical.get("current_logfile"), physical.get("data_directory")),
+        }
+        values_consistent = values_consistent and all(
+            isinstance(by_name.get(name), dict)
+            and canonical_path(by_name[name].get("actual")) == canonical_path(value, base)
+            for name, (value, base) in path_actuals.items()
+        )
+        configured_paths = {
+            "data_directory": config_pg.get("data_directory") if isinstance(config_pg, dict) else None,
+            "wal_directory": config_pg.get("wal_directory") if isinstance(config_pg, dict) else None,
+            "log_directory": config_pg.get("log_directory") if isinstance(config_pg, dict) else None,
+        }
+        for name, configured in configured_paths.items():
+            item = by_name.get(name)
+            values_consistent = values_consistent and isinstance(item, dict) and canonical_path(item.get("expected")) == canonical_path(configured)
+        temp_item = by_name.get("temp_tablespaces")
+        temp_expected = "数据库默认表空间" if physical.get("temp_tablespaces") == "" else physical.get("temp_tablespaces")
+        values_consistent = values_consistent and isinstance(temp_item, dict) and temp_item.get("expected") == temp_expected
+        for name in ("current_logfile",):
+            item = by_name.get(name)
+            actual_path = canonical_path(item.get("actual")) if isinstance(item, dict) else None
+            values_consistent = values_consistent and isinstance(item, dict) and item.get("expected") == "G盘" and actual_path is not None and ntpath.splitdrive(actual_path)[0].casefold() == "g:"
+        for tablespace in tablespaces if isinstance(tablespaces, list) else []:
+            name = tablespace.get("name") if isinstance(tablespace, dict) else None
+            location = (physical.get("data_directory") if name == "pg_default" else
+                        ntpath.join(physical.get("data_directory", ""), "global") if name == "pg_global" else
+                        tablespace.get("location") if isinstance(tablespace, dict) else None)
+            item = by_name.get(f"tablespace:{name}") if isinstance(name, str) else None
+            actual_path = canonical_path(item.get("actual")) if isinstance(item, dict) else None
+            values_consistent = values_consistent and isinstance(item, dict) and item.get("expected") == "G盘" and canonical_path(item.get("actual")) == canonical_path(location) and actual_path is not None and ntpath.splitdrive(actual_path)[0].casefold() == "g:"
     dynamic_required = {f"tablespace:{name}" for name in tablespace_names}
     required.update(dynamic_required)
     actions = inspection.get("admission_actions")
@@ -570,7 +676,7 @@ def write_admission(
             or not isinstance(physical, dict) or not physical_required.issubset(physical)
             or not isinstance(physical.get("current_logfile"), str) or not physical["current_logfile"]
             or physical.get("logging_collector") is not True or not tablespace_summary_complete
-            or not physical_values_complete or not dynamic_required
+            or not physical_values_complete or not dynamic_required or not values_consistent
             or not isinstance(inspection.get("configuration_identity"), str)
             or requested_identity != inspection.get("configuration_identity")
             or set(by_name) != required
