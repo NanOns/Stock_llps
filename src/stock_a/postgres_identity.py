@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import hashlib
+import ipaddress
 import json
 import math
 import ntpath
@@ -70,9 +71,25 @@ def _on_g_drive(path: Path) -> bool:
 
 
 def _safe_compare(actual: Any, expected: Any, check: str) -> IdentityCheck:
+    if check == "server_address" and expected == "127.0.0.1":
+        if _is_fixed_server_address(actual):
+            return IdentityCheck(check, "PASS", str(expected), str(actual))
+        return IdentityCheck(check, "REJECT", str(expected), str(actual), "实际地址不是固定的127.0.0.1/32主机地址")
     if actual is not None and expected is not None and actual == expected:
         return IdentityCheck(check, "PASS", str(expected), str(actual))
     return IdentityCheck(check, "REJECT", str(expected), str(actual), "实际值与固定项目身份不一致")
+
+
+def _is_fixed_server_address(value: Any) -> bool:
+    """接受固定IPv4主机地址及其/32表示，拒绝网络掩码和其它地址。"""
+    if not isinstance(value, str) or not value or value != value.strip():
+        return False
+    try:
+        interface = ipaddress.ip_interface(value)
+    except ValueError:
+        return False
+    return (interface.version == 4 and interface.network.prefixlen == 32
+            and interface.ip == ipaddress.IPv4Address("127.0.0.1"))
 
 
 def _configuration_identity(config: dict[str, Any]) -> str:
@@ -771,7 +788,7 @@ def write_admission(
                 for key in _ROLE_ATTRIBUTE_KEYS)
         and all(physical["role_attributes"][key] is False for key in _ROLE_ATTRIBUTE_KEYS)
         and physical.get("database") == "stock_a" and physical.get("schema") == "stock_a"
-        and physical.get("server_address") == "127.0.0.1" and physical.get("port") == 5432
+        and _is_fixed_server_address(physical.get("server_address")) and physical.get("port") == 5432
         and isinstance(physical.get("cluster_system_identifier"), str)
         and identity_record.get("cluster_system_identifier") == physical.get("cluster_system_identifier")
         and isinstance(physical.get("migration_digest"), str)
@@ -801,6 +818,10 @@ def write_admission(
 
     def check_actual_is(name: str, expected: Any) -> bool:
         item = by_name.get(name)
+        if name == "server_address":
+            return (isinstance(item, dict) and item.get("status") == "PASS"
+                    and _is_fixed_server_address(item.get("actual"))
+                    and _is_fixed_server_address(expected))
         return isinstance(item, dict) and item.get("actual") == (None if expected is None else str(expected))
 
     # PASS项必须逐值反映本次摘要。否则一份手工拼出的READY检查不能覆盖冲突摘要。
