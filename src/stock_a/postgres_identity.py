@@ -524,29 +524,63 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                 "reason": "缺少PostgreSQL驱动psycopg；未尝试连接", "cause_type": "ImportError",
                 "checks": [], "physical": None}
     dsn = os.environ.get("STOCK_A_PG_DSN")
-    try:
-        if dsn:
+    if dsn:
+        try:
             connection_parameters = _fixed_connection_parameters(dsn, os.environ, conninfo_to_dict)
-        else:
+        except psycopg.ProgrammingError as error:
+            return {"status": "INVALID_ARGUMENT", "connection_attempted": False,
+                    "reason": "STOCK_A_PG_DSN语法无效；未尝试连接", "preparation_failure": "ENVIRONMENT_DSN_SYNTAX",
+                    "cause_type": type(error).__name__, "sqlstate": getattr(error, "sqlstate", None),
+                    "checks": [], "physical": None}
+        except (ValueError, TypeError):
+            return {"status": "REJECTED", "connection_attempted": False,
+                    "reason": "STOCK_A_PG_DSN目标或参数不符合固定合同；未尝试连接",
+                    "preparation_failure": "ENVIRONMENT_DSN_CONTRACT", "checks": [], "physical": None}
+        except Exception as error:
+            return {"status": "ENGINEERING_ERROR", "connection_attempted": False,
+                    "reason": "准备STOCK_A_PG_DSN连接参数时发生工程错误；未尝试连接",
+                    "preparation_failure": "ENVIRONMENT_DSN_PREPARATION", "cause_type": type(error).__name__,
+                    "checks": [], "physical": None}
+    else:
+        try:
             credentials = _load_private_credentials()
+        except FileNotFoundError:
+            return {"status": "BLOCKED", "connection_attempted": False,
+                    "reason": "登记的PG凭据文件不存在；未尝试连接",
+                    "preparation_failure": "PRIVATE_CREDENTIALS_MISSING", "checks": [], "physical": None}
+        except PermissionError:
+            return {"status": "PERMISSION_DENIED", "connection_attempted": False,
+                    "reason": "操作系统拒绝读取登记的PG凭据文件；未尝试连接",
+                    "preparation_failure": "PRIVATE_CREDENTIALS_ACCESS_DENIED", "checks": [], "physical": None}
+        except ValueError:
+            return {"status": "REJECTED", "connection_attempted": False,
+                    "reason": "登记的PG凭据文件路径、结构或目标合同无效；未尝试连接",
+                    "preparation_failure": "PRIVATE_CREDENTIALS_CONTRACT", "checks": [], "physical": None}
+        except RuntimeError:
+            return {"status": "ENGINEERING_ERROR", "connection_attempted": False,
+                    "reason": "读取登记的PG凭据文件时发生工程错误；未尝试连接",
+                    "preparation_failure": "PRIVATE_CREDENTIALS_IO", "checks": [], "physical": None}
+        except Exception as error:
+            return {"status": "ENGINEERING_ERROR", "connection_attempted": False,
+                    "reason": "准备登记的PG凭据文件时发生工程错误；未尝试连接",
+                    "preparation_failure": "PRIVATE_CREDENTIALS_PREPARATION", "cause_type": type(error).__name__,
+                    "checks": [], "physical": None}
+        try:
             connection_parameters = _private_connection_parameters(credentials, make_conninfo, conninfo_to_dict)
-    except psycopg.ProgrammingError as error:
-        return {"status": "INVALID_ARGUMENT", "connection_attempted": False,
-                "reason": "DSN语法无效；未尝试连接", "cause_type": type(error).__name__,
-                "sqlstate": getattr(error, "sqlstate", None), "checks": [], "physical": None}
-    except FileNotFoundError:
-        return {"status": "BLOCKED", "connection_attempted": False,
-                "reason": "登记的PG凭据文件不存在；未尝试连接", "checks": [], "physical": None}
-    except PermissionError:
-        return {"status": "PERMISSION_DENIED", "connection_attempted": False,
-                "reason": "操作系统拒绝读取登记的PG凭据文件；未尝试连接", "checks": [], "physical": None}
-    except (ValueError, TypeError):
-        return {"status": "REJECTED", "connection_attempted": False,
-                "reason": "连接目标或凭据文件不符合固定合同；未尝试连接", "checks": [], "physical": None}
-    except Exception as error:
-        return {"status": "ENGINEERING_ERROR", "connection_attempted": False,
-                "reason": "准备PostgreSQL连接参数时发生工程错误；未尝试连接",
-                "cause_type": type(error).__name__, "checks": [], "physical": None}
+        except psycopg.ProgrammingError as error:
+            return {"status": "INVALID_ARGUMENT", "connection_attempted": False,
+                    "reason": "登记的PG凭据无法构造固定连接参数；未尝试连接",
+                    "preparation_failure": "PRIVATE_CREDENTIALS_CONNINFO", "cause_type": type(error).__name__,
+                    "sqlstate": getattr(error, "sqlstate", None), "checks": [], "physical": None}
+        except (ValueError, TypeError):
+            return {"status": "REJECTED", "connection_attempted": False,
+                    "reason": "登记的PG凭据无法形成固定目标连接参数；未尝试连接",
+                    "preparation_failure": "PRIVATE_CREDENTIALS_TARGET", "checks": [], "physical": None}
+        except Exception as error:
+            return {"status": "ENGINEERING_ERROR", "connection_attempted": False,
+                    "reason": "准备登记的PG固定连接参数时发生工程错误；未尝试连接",
+                    "preparation_failure": "PRIVATE_CREDENTIALS_CONNINFO", "cause_type": type(error).__name__,
+                    "checks": [], "physical": None}
     start = time.monotonic()
     deadline = start + min(float(timeout_seconds), _MAX_INSPECTION_SECONDS)
     try:
