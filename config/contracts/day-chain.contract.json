@@ -3049,7 +3049,7 @@
         },
         "profile": {
         "symbol": "stock_a.research.profile:profile",
-        "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+        "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
         "covered_fields": 11,
         "evidence": "contract pure_kernel_implemented flags plus exact one-to-one registry/rule field_id match; no pipeline execution claimed"
         },
@@ -5232,7 +5232,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "d21695d41f6ffd3c160f25f9a0bb75dd6ecbb0142f7532b3d96e944b5c1646bb"
         },
         {
           "field_id": "core.ma5",
@@ -5377,7 +5378,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.ma10",
@@ -5522,7 +5524,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.ma20",
@@ -5669,7 +5672,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.ma60",
@@ -5816,7 +5820,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.hhv5",
@@ -6829,7 +6834,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.prior_low20",
@@ -7121,7 +7127,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.llv60",
@@ -8011,7 +8018,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.ma_slope20_atr",
@@ -8177,7 +8185,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.ma_slope60_atr",
@@ -8343,7 +8352,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.ret1",
@@ -8492,7 +8502,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.ret3",
@@ -8784,7 +8795,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.ret20",
@@ -9650,7 +9662,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.volume_ratio20",
@@ -9940,7 +9953,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.clv",
@@ -10093,7 +10107,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.pos60",
@@ -10246,7 +10261,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.bias20_atr",
@@ -10399,7 +10415,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.dist_high20_atr",
@@ -10711,7 +10728,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.atr_ratio",
@@ -10856,7 +10874,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.vol_ratio",
@@ -11001,7 +11020,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.hh_progress",
@@ -11146,7 +11166,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.ll_progress",
@@ -11291,7 +11312,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.price_damage",
@@ -11452,7 +11474,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f26cf817d63af48006a4c223ab5229a728c03a307d66e75d70745ec3e1973308"
         },
         {
           "field_id": "core.prior60_percentile",
@@ -13252,13 +13275,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_TREND_R1",
               "rule_field_id": "profile.trend",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.trend",
-              "invocation": "profile(\"profile.trend\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.trend\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "adjusted.close",
                 "core.ma20",
@@ -13392,7 +13415,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "profile.position",
@@ -13450,13 +13474,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_POSITION_R1",
               "rule_field_id": "profile.position",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.position",
-              "invocation": "profile(\"profile.position\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.position\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.bias20_atr",
                 "core.pos60"
@@ -13542,7 +13566,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "profile.ma_structure",
@@ -13602,13 +13627,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_MA_STRUCTURE_R1",
               "rule_field_id": "profile.ma_structure",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.ma_structure",
-              "invocation": "profile(\"profile.ma_structure\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.ma_structure\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.ma5",
                 "core.ma10",
@@ -13711,7 +13736,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "profile.relative",
@@ -13774,13 +13800,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_RELATIVE_R1",
               "rule_field_id": "profile.relative",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.relative",
-              "invocation": "profile(\"profile.relative\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.relative\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "cross.rps5_delta3_pp",
                 "cross.rps20",
@@ -13890,7 +13916,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "profile.compression",
@@ -13951,13 +13978,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_COMPRESSION_R1",
               "rule_field_id": "profile.compression",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.compression",
-              "invocation": "profile(\"profile.compression\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.compression\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.range_ratio",
                 "core.atr_ratio",
@@ -14068,7 +14095,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "profile.participation",
@@ -14127,13 +14155,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_PARTICIPATION_R1",
               "rule_field_id": "profile.participation",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.participation",
-              "invocation": "profile(\"profile.participation\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.participation\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.ret1",
                 "core.clv",
@@ -14227,7 +14255,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "profile.extension",
@@ -14287,13 +14316,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_EXTENSION_R1",
               "rule_field_id": "profile.extension",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.extension",
-              "invocation": "profile(\"profile.extension\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.extension\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "core.bias20_atr",
                 "core.ret5",
@@ -14411,7 +14440,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "profile.near_high20",
@@ -14467,13 +14497,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_NEAR_HIGH20_R1",
               "rule_field_id": "profile.near_high20",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.near_high20",
-              "invocation": "profile(\"profile.near_high20\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.near_high20\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "adjusted.close",
                 "core.prior_high20",
@@ -14567,7 +14597,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "profile.drawdown60",
@@ -14622,13 +14653,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_DRAWDOWN60_R1",
               "rule_field_id": "profile.drawdown60",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.drawdown60",
-              "invocation": "profile(\"profile.drawdown60\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.drawdown60\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "adjusted.close",
                 "core.hhv60"
@@ -14714,7 +14745,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "period.closed_week",
@@ -14985,13 +15017,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_CLOSED_WEEK_TREND_R1",
               "rule_field_id": "profile.closed_week_trend",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.closed_week_trend",
-              "invocation": "profile(\"profile.closed_week_trend\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.closed_week_trend\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "period.closed_week"
               ],
@@ -15069,7 +15101,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "period.closed_month",
@@ -15340,13 +15373,13 @@
             "pure_kernel": {
               "state": "IMPLEMENTED",
               "symbol": "stock_a.research.profile:profile",
-              "source_sha256": "ed334112bc57f11b28252de70874073281d08d157ce926192336587a3da46140",
+              "source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b",
               "rule_id": "PROFILE_CLOSED_MONTH_TREND_R1",
               "rule_field_id": "profile.closed_month_trend",
               "rule_kernel_symbol": "stock_a.research.profile:profile",
               "rule_contract_state": "PURE_KERNEL_IMPLEMENTED_PIPELINE_NOT_BOUND",
               "field_output": "profile.closed_month_trend",
-              "invocation": "profile(\"profile.closed_month_trend\", exact_FieldValue_inputs, scope.profile_expression_registry)",
+              "invocation": "profile(\"profile.closed_month_trend\", ProfileHandoff, profile_expression_registry, field_registry)",
               "input_fields": [
                 "period.closed_month"
               ],
@@ -15424,7 +15457,8 @@
               "state": "CONTRACT_ONLY_NO_CANONICAL_ROW_PRODUCER"
             },
             "pg_read_write_state": "NOT_ATTEMPTED_IDENTITY_UNVERIFIED"
-          }
+          },
+          "producer_source_sha256": "f3d43ec2b87b95310a89cda5baf1de5ecc53b9ca2750588354c426a6c5b3ba9b"
         },
         {
           "field_id": "plan.scope",

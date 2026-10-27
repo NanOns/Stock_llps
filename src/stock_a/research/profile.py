@@ -18,6 +18,131 @@ class ClosedPrices:
     coordinate_id: str
 
 
+@dataclass(frozen=True)
+class WindowIdentity:
+    """显式窗口身份；不给算法使用latest或隐式端点的机会。"""
+    contract: str
+    first_endpoint: date
+    last_endpoint: date
+    selected_rows_digest: str
+    calendar_revision: str
+    status_revision: str
+
+
+@dataclass(frozen=True)
+class ProfileInput:
+    """Core/上游字段值及其可核验的生产身份与上下文。"""
+    field_id: str
+    field: FieldValue
+    unit: str
+    producer_stage: str
+    producer_symbol: str
+    producer_source_sha256: str
+    expression_ref: str
+    algorithm_version: str | None
+    parameter_version: str
+    window: WindowIdentity | None
+    coordinate_role: str
+    coordinate_id: str | None
+    context: Mapping[str, object]
+
+
+@dataclass(frozen=True)
+class ProfileHandoff:
+    """一个画像字段的封闭输入集合与目标运行上下文。"""
+    inputs: Mapping[str, ProfileInput]
+    target_session: date
+    source_cutoff: str
+    target_coordinate_id: str | None
+
+
+def _rule_for(field_id: str, rules: Mapping) -> Mapping:
+    matches = [rule for rule in rules.values() if rule.get("field_id") == field_id]
+    if len(matches) != 1:
+        raise ContractError("画像字段必须有唯一规则：" + field_id)
+    return matches[0]
+
+
+def validate_profile_handoff(field_id: str, handoff: ProfileHandoff,
+                             rules: Mapping, field_registry: list[Mapping]) -> dict[str, FieldValue]:
+    """按机器field_registry核验Core→Profile边界，再返回不可扩张的值映射。"""
+    if not isinstance(handoff, ProfileHandoff) or type(handoff.target_session) is not date:
+        raise ContractError("Core→Profile交接缺少明确目标会话")
+    if not isinstance(handoff.source_cutoff, str) or not handoff.source_cutoff or handoff.source_cutoff.casefold() == "latest":
+        raise ContractError("Core→Profile交接缺少真实source cutoff身份")
+    rule = _rule_for(field_id, rules)
+    required = rule.get("input_fields")
+    if not isinstance(required, list) or set(required) != set(handoff.inputs):
+        raise ContractError("Core→Profile输入字段集合与规则不完全一致")
+    entries = [item for item in field_registry if item.get("field_id") in required]
+    by_id = {item["field_id"]: item for item in entries}
+    if len(by_id) != len(required):
+        raise ContractError("Core→Profile输入字段缺少唯一field_registry绑定")
+
+    values: dict[str, FieldValue] = {}
+    target_coordinates: set[str] = set()
+    context_values: dict[str, object] = {}
+    for name in required:
+        supplied = handoff.inputs[name]
+        expected = by_id[name]
+        if not isinstance(supplied, ProfileInput) or supplied.field_id != name or not isinstance(supplied.field, FieldValue):
+            raise ContractError("Core→Profile字段身份或值类型错误：" + name)
+        source_digest = expected.get("producer_source_sha256")
+        if (not expected.get("producer_stage") or not expected.get("producer_symbol")
+                or not isinstance(source_digest, str) or len(source_digest) != 64
+                or any(ch not in "0123456789abcdef" for ch in source_digest)
+                or not expected.get("expression_ref") or not expected.get("parameter_version")):
+            raise ContractError("Core→Profile上游producer/算法合同未绑定：" + name)
+        exact = {
+            "unit": expected.get("unit"),
+            "producer_stage": expected.get("producer_stage"),
+            "producer_symbol": expected.get("producer_symbol"),
+            "producer_source_sha256": expected.get("producer_source_sha256"),
+            "expression_ref": expected.get("expression_ref"),
+            "algorithm_version": expected.get("algorithm_version"),
+            "parameter_version": expected.get("parameter_version"),
+            "coordinate_role": expected.get("coordinate_role"),
+        }
+        if any(getattr(supplied, key) != value for key, value in exact.items()):
+            raise ContractError("Core→Profile字段单位/producer/算法/坐标绑定错配：" + name)
+        window_contract = expected.get("window_contract", "NONE")
+        if supplied.window is None:
+            if window_contract != "NONE":
+                raise ContractError("Core→Profile缺少精确窗口身份：" + name)
+        else:
+            window = supplied.window
+            if (window.contract != window_contract or type(window.first_endpoint) is not date
+                    or type(window.last_endpoint) is not date or window.first_endpoint > window.last_endpoint
+                    or window.last_endpoint > handoff.target_session
+                    or len(window.selected_rows_digest) != 64
+                    or any(ch not in "0123456789abcdef" for ch in window.selected_rows_digest)
+                    or not window.calendar_revision
+                    or not window.status_revision):
+                raise ContractError("Core→Profile窗口端点/坐标时序/版本身份错配：" + name)
+        if expected.get("coordinate_role") == "TARGET_SESSION":
+            if (not handoff.target_coordinate_id or supplied.coordinate_id != handoff.target_coordinate_id
+                    or supplied.context.get("context.target_session") != handoff.target_session):
+                raise ContractError("Core→Profile目标会话坐标缺失或错日：" + name)
+            target_coordinates.add(supplied.coordinate_id)
+        dependencies = expected.get("context_dependencies", [])
+        for dependency in dependencies:
+            if dependency not in supplied.context:
+                raise ContractError("Core→Profile缺少上下文依赖：" + dependency)
+            if supplied.context[dependency] != handoff.target_session and dependency == "context.target_session":
+                raise ContractError("Core→Profile目标会话上下文错配：" + name)
+            if dependency == "context.source_cutoff" and supplied.context[dependency] != handoff.source_cutoff:
+                raise ContractError("Core→Profile source cutoff上下文错配：" + name)
+            if dependency in context_values and context_values[dependency] != supplied.context[dependency]:
+                raise ContractError("Core→Profile输入上下文版本不一致：" + dependency)
+            context_values[dependency] = supplied.context[dependency]
+        values[name] = supplied.field
+    if len(target_coordinates) > 1:
+        raise ContractError("Core→Profile输入混用价格坐标")
+    if target_coordinates and target_coordinates != {handoff.target_coordinate_id}:
+        raise ContractError("Core→Profile目标价格坐标身份错配")
+    return values
+
+
 def _validate_rule(rule):
     """数据门之前拒绝坏合同；只允许固定操作集，不执行代码。"""
     inputs = rule.get("input_fields")
@@ -95,17 +220,18 @@ def _truth(value):
     raise ContractError("谓词必须为三态布尔值")
 
 
-def _evaluate(node, values):
+def _evaluate_detail(node, values, missing_refs):
     if isinstance(node, bool):
-        return node
+        return node, set()
     if isinstance(node, str):
-        return node
+        return node, set()
     if not isinstance(node, Mapping):
-        return exact_number(node)
+        return exact_number(node), set()
     if set(node) == {"ref"}:
         if node["ref"] not in values:
             raise ContractError("表达引用未绑定：" + node["ref"])
-        return values[node["ref"]]
+        value = values[node["ref"]]
+        return value, set(missing_refs.get(node["ref"], ())) if value is None else set()
     if set(node) != {"op", "args"}:
         raise ContractError("表达节点结构非法")
     op, args = node["op"], node["args"]
@@ -117,42 +243,55 @@ def _evaluate(node, values):
         raise ContractError("未支持的表达操作：" + str(op))
     if (op in arity and len(args) != arity[op]) or (op in {"and", "or", "in"} and not args):
         raise ContractError("表达参数数量非法")
-    evaluated = [_evaluate(arg, values) for arg in args]
+    details = [_evaluate_detail(arg, values, missing_refs) for arg in args]
+    evaluated = [value for value, _ in details]
+    unavailable = [refs for value, refs in details if value is None]
     if op in {"and", "or"}:
         terms = [_truth(x) for x in evaluated]
         if op == "and":
-            return False if False in terms else None if None in terms else True
-        return True if True in terms else None if None in terms else False
+            return (False, set()) if False in terms else (None, set().union(*unavailable)) if None in terms else (True, set())
+        return (True, set()) if True in terms else (None, set().union(*unavailable)) if None in terms else (False, set())
     if op == "not":
         term = _truth(evaluated[0])
-        return None if term is None else not term
+        return (None, unavailable[0]) if term is None else (not term, set())
     if any(item is None for item in evaluated):
-        return None
+        return None, set().union(*unavailable)
     if op == "in":
-        return evaluated[0] in evaluated[1:]
+        return evaluated[0] in evaluated[1:], set()
     left, right = evaluated
     if op == "eq":
-        return left == right
+        return left == right, set()
     if any(type(x) is bool or not isinstance(x, Fraction) for x in evaluated):
         raise ContractError("比较/算术操作必须使用精确数值")
     if op == "subtract":
-        return left - right
+        return left - right, set()
     if op == "multiply":
-        return left * right
+        return left * right, set()
     if op == "divide":
-        return left / right if right > 0 else None
+        return (left / right if right > 0 else None), set()
     return {"lt": lambda: left < right, "lte": lambda: left <= right,
-            "gt": lambda: left > right, "gte": lambda: left >= right}[op]()
+            "gt": lambda: left > right, "gte": lambda: left >= right}[op](), set()
 
 
-def profile(field_id: str, inputs: Mapping[str, FieldValue], rules: Mapping) -> FieldValue:
-    """求一个注册字段；未绑定实现/合同报错，真实未知保留为字段质量。"""
-    matches = [rule for rule in rules.values() if rule["field_id"] == field_id]
-    if len(matches) != 1:
-        raise ContractError("画像字段必须有唯一规则：" + field_id)
-    rule = matches[0]
+def _evaluate(node, values):
+    return _evaluate_detail(node, values, {})[0]
+
+
+def _derived_unavailable(qualities: list[str], reasons: list[str]) -> FieldValue:
+    """UNKNOWN支配NA；只有NA来源时派生字段仍为NA。"""
+    reason = ";".join(reasons) or "REQUIRED_INPUT_UNAVAILABLE"
+    if qualities and all(quality == "NOT_APPLICABLE" for quality in qualities):
+        return FieldValue(None, "NOT_APPLICABLE", reason)
+    return unknown(reason)
+
+
+def profile(field_id: str, handoff: ProfileHandoff, rules: Mapping,
+            field_registry: list[Mapping]) -> FieldValue:
+    """校验精确Core→Profile交接后求值；缺实现/错身份是合同错误。"""
+    rule = _rule_for(field_id, rules)
     _validate_rule(rule)
-    values, reasons = {}, []
+    inputs = validate_profile_handoff(field_id, handoff, rules, field_registry)
+    values, reasons, unavailable_qualities, missing_refs = {}, [], {}, {}
     for name, parameter in rule["parameters"].items():
         if parameter.get("adoption_state") != "ADOPTED_RESEARCH_BASELINE" or parameter.get("value") is None:
             raise ContractError("参数尚未采用：" + name)
@@ -170,6 +309,8 @@ def profile(field_id: str, inputs: Mapping[str, FieldValue], rules: Mapping) -> 
         if field.quality != "OBSERVED":
             values[key] = None
             reasons.append(key + ":" + field.quality + ":" + field.reason)
+            unavailable_qualities[key] = field.quality
+            missing_refs[key] = {key}
             continue
         try:
             value = field.value
@@ -212,26 +353,39 @@ def profile(field_id: str, inputs: Mapping[str, FieldValue], rules: Mapping) -> 
         except ValueError:
             values[key] = None
             reasons.append(key + ":DATA_INVALID")
+            unavailable_qualities[key] = "UNKNOWN_DATA"
+            missing_refs[key] = {key}
     if rule.get("data_gate") == "ALL_INPUTS_KNOWN" and reasons:
-        return unknown(";".join(reasons))
+        return _derived_unavailable(list(unavailable_qualities.values()), reasons)
     for name, operand in rule["operands"].items():
         if "expression" in operand:
-            value = _evaluate(operand["expression"], values)
+            value, dependencies = _evaluate_detail(operand["expression"], values, missing_refs)
         else:
             series = values[operand["field_id"]]
             end = len(series) + operand["endpoint_offset"] if series is not None else 0
             count = operand.get("count", 1)
             value = sum(series[end-count:end], Fraction(0)) / count if series is not None else None
+            dependencies = set() if value is not None else set(missing_refs.get(operand["field_id"], {operand["field_id"]}))
         if value is not None and "valid_range" in operand:
             low, high = map(exact_number, operand["valid_range"])
             if value < low or value > high or (operand.get("lower_exclusive") and value == low):
                 value = None
                 reasons.append(name + ":DATA_INVALID_RANGE")
+                unavailable_qualities[name] = "UNKNOWN_DATA"
+                dependencies = {name}
         values[name] = value
+        if value is None:
+            missing_refs[name] = dependencies
     for branch in rule["ordered_branches"]:
-        result = _truth(_evaluate(branch["when"], values))
+        result, unresolved_refs = _evaluate_detail(branch["when"], values, missing_refs)
+        result = _truth(result)
         if result is None:
-            return unknown(";".join(reasons) or "REQUIRED_INPUT_OR_DENOMINATOR_UNAVAILABLE")
+            ordered_names = (*rule["input_fields"], *rule["operands"].keys())
+            relevant = [name for name in ordered_names if name in unresolved_refs and name in unavailable_qualities]
+            qualities = [unavailable_qualities[name] for name in relevant]
+            cause_by_name = {item.split(":", 1)[0]: item for item in reasons}
+            relevant_reasons = [cause_by_name[name] for name in relevant if name in cause_by_name]
+            return _derived_unavailable(qualities, relevant_reasons)
         if result:
             if branch["value"] not in rule["output_values"]:
                 raise ContractError("规则输出未注册")
