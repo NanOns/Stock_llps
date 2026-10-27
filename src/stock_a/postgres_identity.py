@@ -413,6 +413,12 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                 "reason": "缺少PostgreSQL驱动psycopg；未尝试连接", "checks": [], "physical": None}
     try:
         connection_parameters = _fixed_connection_parameters(dsn, os.environ, conninfo_to_dict)
+    except psycopg.ProgrammingError as error:
+        # psycopg 将 conninfo 语法错误包装为 ProgrammingError；仅在此解析边界
+        # 转成参数错误，查询阶段的同类异常仍由主核验分类器处理。
+        return {"status": "INVALID_ARGUMENT", "connection_attempted": False,
+                "reason": "DSN语法无效；未尝试连接", "cause_type": type(error).__name__,
+                "sqlstate": getattr(error, "sqlstate", None), "checks": [], "physical": None}
     except (ValueError, TypeError):
         return {"status": "REJECTED", "connection_attempted": False,
                 "reason": "连接目标或DSN参数不符合固定合同；未尝试连接", "checks": [], "physical": None}
@@ -441,17 +447,24 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                 expected="true", actual="true" if deployment_applied else "false",
                 reason=None if deployment_applied else "配置仍标记未部署；业务读写与发布在显式部署绑定前拒绝"))
             if physical["identity"] is None:
-                checks.extend(evaluate_identity(config, {
+                identity_checks = evaluate_identity(config, {
                     "database": physical["database"], "schema": physical["schema"],
                     "cluster_system_identifier": None,
                     "actual_cluster_system_identifier": physical["cluster_system_identifier"],
                     "session_user": physical["session_user"], "role_attributes": physical["role_attributes"],
                     "migration_digest": physical["migration_digest"], "namespace_binding": physical["namespace_binding"],
-                }))
-                checks.extend([
-                    IdentityCheck("installation_identity", "BLOCKED", reason="stock_a.installation_identity缺失或无可读单例；禁止本任务创建"),
-                    IdentityCheck("migration_lineage", "BLOCKED", reason="stock_a.migration_ledger缺失或为空；迁移须由后续集中迁移实施"),
-                ])
+                })
+                checks.extend(
+                    IdentityCheck("migration_lineage", "BLOCKED", reason="stock_a.migration_ledger缺失或为空；迁移须由后续集中迁移实施")
+                    if item.check == "migration_lineage" else
+                    IdentityCheck(item.check, "BLOCKED", expected=item.expected, actual=item.actual,
+                                  reason="installation_identity缺失；数据库标记身份尚不可比较")
+                    if item.check in {"application_id", "project_uuid", "deployment_instance_uuid",
+                                      "cluster_system_identifier", "marked_vs_physical_cluster_system_identifier"}
+                    else item
+                    for item in identity_checks
+                )
+                checks.append(IdentityCheck("installation_identity", "BLOCKED", reason="stock_a.installation_identity缺失或无可读单例；禁止本任务创建"))
             else:
                 actual = {**physical["identity"], "database": physical["database"], "schema": physical["schema"],
                           "actual_cluster_system_identifier": physical["cluster_system_identifier"],
@@ -463,6 +476,7 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                 cursor.execute("COMMIT")
             physical_summary = {k: v for k, v in physical.items() if k not in ("identity",)}
             physical_summary["identity"] = "PRESENT" if physical["identity"] else "MISSING"
+            physical_summary["tablespace_count"] = len(physical["tablespaces"])
             if len(checks) > _MAX_CHECKS:
                 raise OverflowError("PG核验检查项超过输出预算")
             statuses = {item.status for item in checks}
@@ -497,12 +511,51 @@ def write_admission(
                 "cluster_system_identifier", "physical_cluster_system_identifier", "marked_vs_physical_cluster_system_identifier",
                 "migration_lineage", "migration_digest", "session_user",
                 "role_attributes", "role_namespace_binding", "data_directory", "wal_directory", "log_directory",
-                "temp_tablespaces", "server_port", "server_address", "deployment_applied"}
+                "temp_tablespaces", "server_port", "server_address", "deployment_applied", "current_logfile"}
     checks = inspection.get("checks")
     if not isinstance(checks, list) or len(checks) > _MAX_CHECKS:
         return False, "PG核验检查项缺失或超过输出预算；拒绝新项目写入与发布"
     by_name = {item.get("check"): item for item in checks if isinstance(item, dict)}
     physical = inspection.get("physical")
+    physical_required = {
+        "database", "schema", "session_user", "data_directory", "config_file", "log_directory",
+        "temp_tablespaces", "port", "server_version_num", "server_address", "logging_collector",
+        "current_logfile", "tablespaces", "tablespace_count", "cluster_system_identifier", "identity", "migration_digest",
+        "role_attributes", "namespace_binding",
+    }
+    tablespaces = physical.get("tablespaces") if isinstance(physical, dict) else None
+    tablespace_names: list[str] = []
+    if isinstance(tablespaces, list) and 0 < len(tablespaces) <= _MAX_TABLESPACES:
+        for tablespace in tablespaces:
+            if (not isinstance(tablespace, dict)
+                    or not isinstance(tablespace.get("name"), str) or not tablespace["name"]
+                    or type(tablespace.get("oid")) is not int
+                    or not isinstance(tablespace.get("location"), str)):
+                tablespace_names = []
+                break
+            tablespace_names.append(tablespace["name"])
+    if len(set(tablespace_names)) != len(tablespace_names):
+        tablespace_names = []
+    tablespace_summary_complete = (
+        isinstance(tablespaces, list) and 0 < len(tablespace_names) == len(tablespaces) <= _MAX_TABLESPACES
+        and isinstance(physical, dict) and type(physical.get("tablespace_count")) is int
+        and physical.get("tablespace_count") == len(tablespaces)
+    )
+    physical_values_complete = (
+        isinstance(physical, dict)
+        and all(isinstance(physical.get(key), str) and bool(physical[key]) for key in (
+            "database", "schema", "session_user", "data_directory", "config_file", "log_directory", "server_address",
+        ))
+        and type(physical.get("port")) is int and physical["port"] > 0
+        and type(physical.get("server_version_num")) is int and physical["server_version_num"] > 0
+        and physical.get("identity") in ("PRESENT", "MISSING")
+        and isinstance(physical.get("namespace_binding"), str) and bool(physical["namespace_binding"])
+        and isinstance(physical.get("role_attributes"), dict)
+        and all(key in physical["role_attributes"] and type(physical["role_attributes"][key]) is bool
+                for key in _ROLE_ATTRIBUTE_KEYS)
+    )
+    dynamic_required = {f"tablespace:{name}" for name in tablespace_names}
+    required.update(dynamic_required)
     actions = inspection.get("admission_actions")
     try:
         requested_identity = _configuration_identity(requested_configuration) if isinstance(requested_configuration, dict) else None
@@ -514,9 +567,13 @@ def write_admission(
             or requested_context != inspection.get("inspection_context")
             or requested_action not in ("WRITE", "PUBLISH")
             or not isinstance(actions, list) or requested_action not in actions
-            or not isinstance(physical, dict) or not isinstance(inspection.get("configuration_identity"), str)
+            or not isinstance(physical, dict) or not physical_required.issubset(physical)
+            or not isinstance(physical.get("current_logfile"), str) or not physical["current_logfile"]
+            or physical.get("logging_collector") is not True or not tablespace_summary_complete
+            or not physical_values_complete or not dynamic_required
+            or not isinstance(inspection.get("configuration_identity"), str)
             or requested_identity != inspection.get("configuration_identity")
-            or not required.issubset(by_name)
+            or set(by_name) != required
             or len(by_name) != len(checks)
             or any(item.get("status") != "PASS" or item.get("actual") is None for item in by_name.values())):
         return False, "PostgreSQL身份或物理存储尚未全部核验通过；拒绝新项目写入与发布"
