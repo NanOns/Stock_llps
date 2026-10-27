@@ -51,6 +51,33 @@ class PeriodSessionStatus:
 
 
 @dataclass(frozen=True)
+class PeriodDependencyIdentity:
+    """一个周期实际选中的状态、公司行为及目标坐标依赖身份。"""
+
+    status_dependencies: tuple[tuple[date, str, str], ...]
+    action_dependencies: tuple[tuple[str, str], ...]
+    coordinate_dependency_ref: str
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.status_dependencies, tuple) or not isinstance(self.action_dependencies, tuple):
+            raise ContractError("周期依赖身份必须使用不可变元组")
+        if any(not isinstance(item, tuple) or len(item) != 3 or type(item[0]) is not date
+               or not all(isinstance(value, str) and value.strip() for value in item[1:])
+               for item in self.status_dependencies):
+            raise ContractError("周期状态依赖须逐会话绑定非空版本与稳定引用")
+        if len({item[0] for item in self.status_dependencies}) != len(self.status_dependencies):
+            raise ContractError("周期状态依赖不得重复会话")
+        if any(not isinstance(item, tuple) or len(item) != 2
+               or not all(isinstance(value, str) and value.strip() for value in item)
+               for item in self.action_dependencies):
+            raise ContractError("周期公司行为依赖须绑定稳定事件引用与修订")
+        if len({item[0] for item in self.action_dependencies}) != len(self.action_dependencies):
+            raise ContractError("周期公司行为依赖不得重复事件引用")
+        if not isinstance(self.coordinate_dependency_ref, str) or not self.coordinate_dependency_ref.strip():
+            raise ContractError("周期目标坐标依赖须绑定稳定引用")
+
+
+@dataclass(frozen=True)
 class ClosedPeriodBar:
     """一个自然日历槽的闭合OHLCV/Amount及独立质量。"""
 
@@ -88,6 +115,7 @@ class ClosedPeriodBar:
     input_digest: str
     calendar_coverage_proven: bool
     fact_identity_trusted: bool
+    fact_dependency_closure_bound: bool
     period_fact_digest: str
     selection_context_digest: str
 
@@ -137,6 +165,7 @@ def build_closed_period_bars(
     status_revision: str,
     action_revision: str,
     calendar_coverage_proof: CalendarCoverageProof | None = None,
+    period_dependency_identities: Mapping[str, PeriodDependencyIdentity] | None = None,
 ) -> tuple[ClosedPeriodBar, ...]:
     """以显式官方会话、证券状态和同目标坐标日线构造W/M闭合周期槽。
 
@@ -149,6 +178,11 @@ def build_closed_period_bars(
         raise ContractError("必须提供带版本的官方市场日历")
     if calendar_coverage_proof is not None and not isinstance(calendar_coverage_proof, CalendarCoverageProof):
         raise ContractError("calendar_coverage_proof类型非法")
+    if period_dependency_identities is not None and (
+            not isinstance(period_dependency_identities, Mapping)
+            or any(not isinstance(key, str) or not isinstance(value, PeriodDependencyIdentity)
+                   for key, value in period_dependency_identities.items())):
+        raise ContractError("周期依赖身份映射类型非法")
     if type(target_session) is not date:
         raise ContractError("target_session必须是date")
     if not isinstance(source_cutoff, datetime) or source_cutoff.tzinfo is None or source_cutoff.utcoffset() is None:
@@ -295,12 +329,25 @@ def build_closed_period_bars(
         )
         # 实体/逐行来源封口由P04/P05→P06适配层提供；纯内核不得把调用者标签当作可信身份。
         fact_identity_trusted = False
+        dependency_identity = (period_dependency_identities or {}).get(period_id)
+        selected_state_sessions = {row.session for row in states if row is not None}
+        dependency_closure_bound = bool(
+            dependency_identity is not None
+            and not missing_days
+            and {item[0] for item in dependency_identity.status_dependencies} == selected_state_sessions
+            and selected_state_sessions == set(scheduled)
+        )
+        dependency_identity_value = (
+            tuple(sorted(dependency_identity.status_dependencies)),
+            tuple(sorted(dependency_identity.action_dependencies)),
+            dependency_identity.coordinate_dependency_ref,
+        ) if dependency_closure_bound and dependency_identity is not None else "DEPENDENCY_CLOSURE_UNBOUND"
         period_fact_digest = semantic_digest((PERIOD_AGGREGATION_VERSION, "ENTITY_SOURCE_BINDING_UNVERIFIED",
                                               period, period_id, ordinal,
                                               state_name, coverage, listing_complete, proof_covers_period,
                                               official_calendar.calendar_id, official_calendar.revision,
                                               proof_identity, target_coordinate_id, state_identity,
-                                              daily_identity, fields))
+                                              daily_identity, dependency_identity_value, fields))
         selection_context_digest = semantic_digest((period_fact_digest, target_session, source_cutoff,
                                                    official_calendar.calendar_id, official_calendar.revision,
                                                    status_revision, action_revision, tuple(scheduled)))
@@ -313,7 +360,8 @@ def build_closed_period_bars(
             coverage, listing_complete, calendar_closed and coverage and listing_complete, state_name,
             *fields, target_session, source_cutoff, target_coordinate_id, official_calendar.calendar_id,
             official_calendar.revision, status_revision, action_revision, PERIOD_AGGREGATION_VERSION, input_digest,
-            proof_covers_period, fact_identity_trusted, period_fact_digest, selection_context_digest))
+            proof_covers_period, fact_identity_trusted, dependency_closure_bound,
+            period_fact_digest, selection_context_digest))
     return tuple(result)
 
 
