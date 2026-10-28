@@ -31,6 +31,7 @@ from stock_a.sources.tdx.day_source import open_day_file, read_protected_bytes
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
 from stock_a.postgres_identity import inspect_postgres
 from stock_a.postgres_binding import BindingRefused, bind_stock_namespace
+from stock_a.research.entry import ResearchEntryError, research_compare, research_stock
 
 
 _WORKSPACE = Path("G:/codex work/Stock A")
@@ -381,7 +382,24 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--max-records", required=True, type=int, help="本次最大记录数")
     inspect.add_argument("--chunk-records", default=256, type=int, help="单次读取块记录数，默认256")
     inspect.add_argument("--max-seconds", default="30", help="本次最大读取秒数，默认30")
+    stock = commands.add_parser("research-stock", help="只读读取一只股票并复用Core计算历史研究字段")
+    stock.add_argument("symbol", help="来源代码，格式SH.六位代码或SZ.六位代码")
+    _add_research_arguments(stock)
+    compare = commands.add_parser("research-compare", help="同一交易会话只读对比多只股票的Core字段")
+    compare.add_argument("symbols", nargs="+", help="一个或多个来源代码，格式SH.六位代码或SZ.六位代码")
+    _add_research_arguments(compare)
     return parser
+
+
+def _add_research_arguments(command: argparse.ArgumentParser) -> None:
+    command.add_argument("--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD")
+    command.add_argument("--unit-version", required=True, help="本次研究使用的显式TDX单位合同版本")
+    command.add_argument("--amount-to-cny", required=True, help="金额到人民币元的精确十进制倍率")
+    command.add_argument("--volume-to-shares", required=True, type=int, help="数量到股的正整数倍率")
+    command.add_argument("--max-bytes", type=int, default=16777216, help="单文件最多读取字节数，默认16777216")
+    command.add_argument("--max-records", type=int, default=200000, help="单文件最多读取记录数，默认200000")
+    command.add_argument("--chunk-records", type=int, default=256, help="单次读取块记录数，默认256")
+    command.add_argument("--max-seconds", default="30", help="单文件最大读取秒数，默认30")
 
 
 def _safe_child(path: Path, root: Path) -> Path:
@@ -771,6 +789,70 @@ def _run_source_inspect(args: argparse.Namespace) -> int:
     return _EXIT_OK
 
 
+def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
+    config, config_path = _load_runtime_config()
+    roots = config["source_policy"]["configured_tdx_source_roots"]
+    if not roots:
+        raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX来源保护根，拒绝读取行情")
+    try:
+        units = UnitContract(args.unit_version, Decimal(args.amount_to_cny), args.volume_to_shares)
+        limits = ReadLimits(
+            args.max_bytes,
+            args.max_records,
+            args.chunk_records,
+            Decimal(args.max_seconds),
+        )
+    except (InvalidOperation, ValueError, ContractError) as error:
+        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或读取预算无效：{error}", _EXIT_ARGUMENT) from error
+    try:
+        if compare:
+            result = research_compare(
+                symbols=args.symbols,
+                target_session=args.target_session,
+                source_roots=roots,
+                units=units,
+                limits=limits,
+            )
+        else:
+            result = research_stock(
+                symbol=args.symbol,
+                target_session=args.target_session,
+                source_roots=roots,
+                units=units,
+                limits=limits,
+            )
+    except ResearchEntryError as error:
+        if error.code == "SOURCE_ACCESS_DENIED":
+            code = _EXIT_PERMISSION
+        elif error.code == "SOURCE_IO_ERROR":
+            code = _EXIT_ENGINEERING
+        else:
+            code = _EXIT_ARGUMENT if error.code in {
+                "TARGET_DATE_INVALID", "SYMBOL_INVALID", "SYMBOL_OUT_OF_SCOPE",
+                "COMPARE_SIZE_INVALID", "DUPLICATE_SYMBOL",
+            } else _EXIT_UNAVAILABLE
+        _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
+        return code
+    except DayReadError as error:
+        exit_code = _READ_ERROR_EXIT_CODES.get(error.code, _EXIT_ENGINEERING)
+        _emit({
+            "ok": False,
+            "code": error.code,
+            "reason_category": error.reason_category,
+            "message": str(error),
+            "database_io_attempted": False,
+        }, error=True)
+        return exit_code
+    result.update({
+        "ok": result.get("status") in ("AVAILABLE", "COMPLETE_WITH_DISCLOSURES"),
+        "configuration_path": str(config_path),
+        "database_io_attempted": False,
+        "database_write_attempted": False,
+    })
+    _emit(result)
+    return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -792,6 +874,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_phase0(args)
         if args.command == "source-inspect":
             return _run_source_inspect(args)
+        if args.command == "research-stock":
+            return _run_research(args, compare=False)
+        if args.command == "research-compare":
+            return _run_research(args, compare=True)
     except DiagnosticError as error:
         _emit({"ok": False, "code": error.code, "cause_type": type(error.__cause__).__name__ if error.__cause__ is not None else None, "message": str(error)}, error=True)
         return error.exit_code

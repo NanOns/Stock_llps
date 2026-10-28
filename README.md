@@ -122,6 +122,22 @@ with open_day_file(source_path, (bound_source_root,), units, limits) as scan:
 
 `iter_day_records(readonly_stream, units, limits)`复用同一扫描内核，适用于调用方管理的非seekable二进制流，不关闭调用方流。文件入口使用只读Windows句柄，并核验句柄最终路径、身份及扫描前后大小/修改时点。超限、坏日期、重复/冲突、路径越界、扫描中变化及提前退出都不能获得完整摘要；已yield前缀不能视为完整输入。摘要中的原始字节SHA仅描述本次读取字节，不代表来源捕获、PIT时钟、来源封口或业务接受版本。
 
+## TDX真实数据研究查询
+
+研究查询从`runtime.defaults.json`中的TDX只读来源根定位日线文件，按显式单位合同与预算完成整文件扫描，再复用既有Core。目标日期必须显式指定；交易日历资源目前覆盖2026年沪深A股官方年度会话。来源代码仅是研究序列定位键，不提供稳定`security_id`证明。输出始终标记`NON_PIT_RETROSPECTIVE`和原始未复权坐标；不得当作当前行情、严格PIT、公司行为已调整或生产结论。命令不连接PostgreSQL、不写数据库或持久业务文件。
+
+```powershell
+stock-a research-stock SH.600000 --target-session YYYY-MM-DD `
+  --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
+  --max-bytes 16777216 --max-records 200000 --max-seconds 30
+
+stock-a research-compare SH.600000 SZ.000001 SZ.300001 --target-session YYYY-MM-DD `
+  --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
+  --max-bytes 16777216 --max-records 200000 --max-seconds 30
+```
+
+`--amount-to-cny`和`--volume-to-shares`是调用方声明的研究单位假设，不能替代经独立来源合同验收的单位权威。对比输出按请求证券保留可用、失败、部分未知及字段未知分母；不对证券做身份推断或静默去重。
+
 ## GBBQ字节解析
 
 `decode_gbbq_bytes`只解析调用方已经取得的有限字节。调用方必须提供协议版本、类别1单位版本、来源引用及字节/记录预算；它不打开来源文件或读取配置。此示例展示纯解析调用，`source_ref`用于追溯输入，不是证券稳定身份：
