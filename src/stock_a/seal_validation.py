@@ -4,6 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+from fractions import Fraction
 from hashlib import sha256
 import json
 import math
@@ -275,6 +276,178 @@ def validate_source_inventory(
     )
 
 
+def validate_required_inventories(
+    *,
+    required_datasets: Sequence[Mapping[str, object]],
+    inventories: Sequence[Mapping[str, object]],
+    expected_entities_by_dataset: Mapping[str, Sequence[Mapping[str, object]] | None],
+    actual_entities_by_dataset: Mapping[str, Sequence[Mapping[str, object]]],
+) -> SealProofResult:
+    """逐项核对scope所需数据集集合，并分别验证每个数据集的实体会话覆盖。"""
+    identity_fields = ("dataset_id", "dataset_version", "source_role", "source_revision", "query_scope")
+    def identity(item: Mapping[str, object]) -> tuple[str, ...]:
+        if not isinstance(item, Mapping) or any(key not in item for key in identity_fields) or not isinstance(item.get("query_scope"), Mapping):
+            _fail("SOURCE_SEAL_REQUIRED_DATASET_INVALID", "required dataset身份不完整")
+        scalar = tuple(item[key] for key in identity_fields[:4])
+        if any(not isinstance(value, str) or not value for value in scalar):
+            _fail("SOURCE_SEAL_REQUIRED_DATASET_INVALID", "required dataset身份字段必须为非空字符串")
+        return (*scalar, semantic_digest("DATASET_QUERY_SCOPE_V1", item["query_scope"]))
+
+    if not isinstance(required_datasets, Sequence) or isinstance(required_datasets, (str, bytes)) or not required_datasets:
+        _fail("SOURCE_SEAL_REQUIRED_DATASET_INVALID", "P20 scope的required dataset集合缺失")
+    if not isinstance(inventories, Sequence) or isinstance(inventories, (str, bytes)):
+        _fail("SOURCE_SEAL_REQUIRED_DATASET_INVALID", "实际来源inventory集合非法")
+    if not isinstance(expected_entities_by_dataset, Mapping) or not isinstance(actual_entities_by_dataset, Mapping):
+        _fail("SOURCE_SEAL_REQUIRED_DATASET_INVALID", "required dataset覆盖映射类型非法")
+    required_keys = [identity(item) for item in required_datasets]
+    actual_keys = [identity(item) for item in inventories]
+    required_ids = [item["dataset_id"] for item in required_datasets]
+    actual_ids = [item["dataset_id"] for item in inventories]
+    if len(set(required_keys)) != len(required_keys) or len(set(actual_keys)) != len(actual_keys) or len(set(required_ids)) != len(required_ids) or len(set(actual_ids)) != len(actual_ids):
+        _fail("SOURCE_SEAL_DUPLICATE_BUSINESS_KEY", "required或实际来源dataset集合含重复身份")
+    if set(required_keys) != set(actual_keys):
+        return SealProofResult("PARTIAL_DECLARED_SCOPE", errors=("REQUIRED_DATASET_SET_MISMATCH",))
+    required_id_set = set(required_ids)
+    expected_id_set, actual_id_set = set(expected_entities_by_dataset), set(actual_entities_by_dataset)
+    if not required_id_set <= expected_id_set or not required_id_set <= actual_id_set:
+        return SealProofResult("COVERAGE_UNPROVEN", errors=("DATASET_COVERAGE_EVIDENCE_MISSING",))
+    if expected_id_set != required_id_set or actual_id_set != required_id_set:
+        return SealProofResult("PARTIAL_DECLARED_SCOPE", errors=("DATASET_COVERAGE_EVIDENCE_SCOPE_MISMATCH",))
+    actual_by_id = {item["dataset_id"]: item for item in inventories}
+    proofs: list[tuple[str, str]] = []
+    unresolved = False
+    for required in required_datasets:
+        dataset_id = required["dataset_id"]
+        inventory = actual_by_id[dataset_id]
+        expected = expected_entities_by_dataset.get(dataset_id)
+        actual = actual_entities_by_dataset.get(dataset_id)
+        if dataset_id not in expected_entities_by_dataset or dataset_id not in actual_entities_by_dataset:
+            return SealProofResult("COVERAGE_UNPROVEN", errors=(f"DATASET_COVERAGE_EVIDENCE_MISSING:{dataset_id}",))
+        result = validate_source_inventory(inventory, expected, actual)
+        if result.status == "COVERAGE_UNPROVEN":
+            return result
+        if result.status != "COMPLETE_DECLARED_SCOPE":
+            unresolved = True
+        proofs.extend((f"{dataset_id}:{name}", digest) for name, digest in result.proof_digests)
+    digest = semantic_digest("REQUIRED_DATASET_SET_V1", {
+        "required": sorted((list(key) for key in required_keys)),
+        "proofs": sorted(proofs),
+    })
+    proofs.append(("required_dataset_set_digest", digest))
+    return SealProofResult("PARTIAL_DECLARED_SCOPE" if unresolved else "COMPLETE_DECLARED_SCOPE", digest, errors=("ONE_OR_MORE_DATASETS_PARTIAL",) if unresolved else (), proof_digests=tuple(proofs))
+
+
+def _fraction_decimal_text(value: str, numerator: int, denominator: int) -> str:
+    if not isinstance(value, str) or not value or len(value) > 128 or "e" in value.lower() or not isinstance(numerator, int) or isinstance(numerator, bool) or not isinstance(denominator, int) or isinstance(denominator, bool) or denominator <= 0 or abs(numerator) > 2**63 - 1 or denominator > 2**63 - 1:
+        _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "精确单位换算需要十进制文本和整数有理倍率")
+    try:
+        result = Fraction(Decimal(value)) * Fraction(numerator, denominator)
+    except (InvalidOperation, ValueError, ZeroDivisionError):
+        _fail("SOURCE_SEAL_CONVERSION_VALUE_INVALID", "解析行的精确数值或单位倍率非法")
+    reduced_denominator = result.denominator
+    twos = fives = 0
+    while reduced_denominator % 2 == 0:
+        reduced_denominator //= 2
+        twos += 1
+    while reduced_denominator % 5 == 0:
+        reduced_denominator //= 5
+        fives += 1
+    if reduced_denominator != 1:
+        _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "单位倍率结果不能有限十进制定点表达")
+    scale = 10 ** max(twos, fives)
+    scaled = result.numerator * (scale // result.denominator)
+    sign = "-" if scaled < 0 else ""
+    digits = str(abs(scaled)).rjust(max(1, len(str(scale)) - 1), "0")
+    if scale == 1:
+        return sign + digits
+    split = len(digits) - (len(str(scale)) - 1)
+    integer, fractional = digits[:split] or "0", digits[split:]
+    fractional = fractional.rstrip("0")
+    return sign + integer + ("." + fractional if fractional else "")
+
+
+def derive_canonical_rows(
+    *,
+    parsed_rows: Sequence[Mapping[str, object]],
+    mapped_rows: Sequence[Mapping[str, object]],
+    field_rules: Sequence[Mapping[str, object]],
+    source_binding_id: str,
+    p04_mapping_version: str,
+    unit_version: str,
+    normalization_version: str,
+) -> tuple[Mapping[str, object], ...]:
+    """按显式字段/单位规则由P03解析行和P04映射独立计算预期P05行。"""
+    if not all(isinstance(item, str) and item for item in (source_binding_id, p04_mapping_version, unit_version, normalization_version)):
+        _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "P05计算缺少source binding或版本")
+    if not isinstance(field_rules, Sequence) or isinstance(field_rules, (str, bytes)) or not field_rules:
+        _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "P05字段转换规则缺失")
+    parsed_by_key: dict[str, Mapping[str, object]] = {}
+    for row in parsed_rows:
+        key = row.get("source_record_key") if isinstance(row, Mapping) else None
+        if not isinstance(key, str) or not key or key in parsed_by_key:
+            _fail("SOURCE_SEAL_RECORD_KEY_INVALID", "解析行来源记录键缺失或重复")
+        parsed_by_key[key] = row
+    rules_by_field: dict[str, Mapping[str, object]] = {}
+    for rule in field_rules:
+        required = ("source_field", "canonical_field", "operation", "factor_numerator", "factor_denominator", "quality_field", "reason_field")
+        if not isinstance(rule, Mapping) or any(key not in rule for key in required):
+            _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "P05字段规则缺少字段映射、字段级质量/原因、运算或单位倍率")
+        source_field, canonical_field = rule["source_field"], rule["canonical_field"]
+        if not all(isinstance(item, str) and item for item in (source_field, canonical_field, rule["quality_field"], rule["reason_field"])) or canonical_field in rules_by_field:
+            _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "P05字段规则含非法字段或重复目标字段")
+        if rule["operation"] not in {"DECIMAL_RATIONAL", "IDENTITY"}:
+            _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "P05字段运算必须为DECIMAL_RATIONAL或IDENTITY")
+        if not all(isinstance(rule[key], int) and not isinstance(rule[key], bool) for key in ("factor_numerator", "factor_denominator")) or rule["factor_denominator"] <= 0:
+            _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "P05有理单位倍率非法")
+        rules_by_field[canonical_field] = rule
+    expected: list[Mapping[str, object]] = []
+    mapping_by_source: dict[str, tuple[str, str]] = {}
+    for mapped in mapped_rows:
+        key = mapped.get("source_record_key")
+        parsed = parsed_by_key.get(key)
+        if parsed is None:
+            _fail("SOURCE_SEAL_CANONICAL_BINDING_MISMATCH", "P04映射引用不存在的解析行")
+        if not all(isinstance(mapped.get(name), str) and mapped[name] for name in ("entity_id", "session", "mapping_version", "identity_revision", "calendar_revision")) or mapped["mapping_version"] != p04_mapping_version:
+            _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "P04映射行缺少实体/会话/身份或日历版本")
+        target = (mapped["entity_id"], mapped["session"])
+        if key in mapping_by_source and mapping_by_source[key] != target:
+            _fail("SOURCE_SEAL_COVERAGE_CONFLICT", "同一来源记录映射到多个实体会话")
+        mapping_by_source[key] = target
+        for canonical_field, rule in rules_by_field.items():
+            source_field = rule["source_field"]
+            quality_field, reason_field = rule["quality_field"], rule["reason_field"]
+            if any(name not in parsed for name in (source_field, quality_field, reason_field)):
+                _fail("SOURCE_SEAL_CONVERSION_VALUE_INVALID", "解析行缺少字段规则所需输入")
+            quality, reason = parsed[quality_field], parsed[reason_field]
+            if quality not in {"OBSERVED", "UNKNOWN_DATA", "NOT_APPLICABLE"}:
+                _fail("SOURCE_SEAL_CONVERSION_VALUE_INVALID", "解析行缺少合法字段质量")
+            source_value = parsed[source_field]
+            if quality != "OBSERVED":
+                if source_value is not None:
+                    _fail("SOURCE_SEAL_CONVERSION_VALUE_INVALID", "非OBSERVED解析值必须显式为空")
+                canonical_value = None
+            elif rule["operation"] == "DECIMAL_RATIONAL":
+                canonical_value = _fraction_decimal_text(source_value, rule["factor_numerator"], rule["factor_denominator"])
+            else:
+                canonical_value = source_value
+                _canonical_value(canonical_value)
+            expected.append({
+                "entity_id": mapped["entity_id"],
+                "session": mapped["session"],
+                "field": canonical_field,
+                "value": canonical_value,
+                "quality": quality,
+                "reason": reason,
+                "source_binding_id": source_binding_id,
+                "source_record_keys": [key],
+                "unit_version": unit_version,
+                "normalization_version": normalization_version,
+                "identity_revision": mapped["identity_revision"],
+                "calendar_revision": mapped["calendar_revision"],
+            })
+    return tuple(expected)
+
+
 def verify_transformation_chain(
     *,
     source_bytes: bytes | None,
@@ -284,6 +457,9 @@ def verify_transformation_chain(
     p04_mapping_version: str,
     p05_conversion_version: str,
     p05_field_projection_version: str,
+    source_binding_id: str,
+    normalization_version: str,
+    field_rules: Sequence[Mapping[str, object]],
     parsed_rows: Sequence[Mapping[str, object]],
     mapped_rows: Sequence[Mapping[str, object]],
     canonical_rows: Sequence[Mapping[str, object]],
@@ -292,7 +468,7 @@ def verify_transformation_chain(
     replayable_source_bytes_requested: bool = False,
 ) -> SealProofResult:
     """复算捕获、解析、P04映射、P05行集及转换合同的分阶段摘要。"""
-    if not all(isinstance(value, str) and value for value in (parser_version, unit_version, p04_mapping_version, p05_conversion_version, p05_field_projection_version)):
+    if not all(isinstance(value, str) and value for value in (parser_version, unit_version, p04_mapping_version, p05_conversion_version, p05_field_projection_version, source_binding_id, normalization_version)):
         _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "转换链缺少parser/unit/P04/P05字段投影版本")
     source_digest = _require_sha256(source_byte_sha256, "SOURCE_SEAL_SOURCE_DIGEST_INVALID")
     replayability = "VERIFIED_AT_CAPTURE"
@@ -302,7 +478,7 @@ def verify_transformation_chain(
         actual_source_digest = sha256(source_bytes).hexdigest()
         if actual_source_digest != source_digest:
             _fail("SOURCE_SEAL_SOURCE_BYTES_MISMATCH", "原始字节SHA与封存摘要不一致")
-        replayability = "REPLAYABLE_SOURCE_BYTES"
+        replayability = "SOURCE_BYTES_PRESENT_PARSER_REPLAY_PENDING"
     elif replayable_source_bytes_requested:
         _fail("SOURCE_SEAL_SOURCE_BYTES_UNAVAILABLE", "缺少原始字节，不得声称可回放来源")
     else:
@@ -332,11 +508,24 @@ def verify_transformation_chain(
             _fail("SOURCE_SEAL_DUPLICATE_BUSINESS_KEY", "P05来源记录绑定含非法或重复键")
         if any(key not in mapped_by_entity_session.get((row.get("entity_id"), row.get("session")), set()) for key in keys):
             _fail("SOURCE_SEAL_CANONICAL_BINDING_MISMATCH", "P05规范行未绑定同实体会话的P04映射记录")
+    expected_canonical_rows = derive_canonical_rows(
+        parsed_rows=parsed_rows,
+        mapped_rows=mapped_rows,
+        field_rules=field_rules,
+        source_binding_id=source_binding_id,
+        p04_mapping_version=p04_mapping_version,
+        unit_version=unit_version,
+        normalization_version=normalization_version,
+    )
     canonical_projection = [
         {**row, "source_record_keys": sorted(row["source_record_keys"], key=lambda value: str(value).encode("utf-8"))}
         for row in canonical_rows
     ]
     canonical_digest = records_digest("P05_CANONICAL_ROWS_V1", canonical_projection, ("entity_id", "session", "field"))
+    expected_canonical_digest = records_digest("P05_CANONICAL_ROWS_V1", expected_canonical_rows, ("entity_id", "session", "field"))
+    if canonical_digest != expected_canonical_digest:
+        _fail("SOURCE_SEAL_CANONICAL_BINDING_MISMATCH", "P05规范值/质量/原因与解析行、P04映射或转换规则不一致")
+    field_rules_digest = records_digest("P05_FIELD_RULES_V1", field_rules, ("canonical_field",))
     capture_evidence_digest = (
         semantic_digest("CAPTURE_VERIFICATION_V1", capture_verification)
         if source_bytes is None and isinstance(capture_verification, Mapping)
@@ -349,6 +538,9 @@ def verify_transformation_chain(
         "p04_mapping_version": p04_mapping_version,
         "p05_conversion_version": p05_conversion_version,
         "p05_field_projection_version": p05_field_projection_version,
+        "source_binding_id": source_binding_id,
+        "normalization_version": normalization_version,
+        "field_rules_digest": field_rules_digest,
         "capture_evidence_digest": capture_evidence_digest,
         "parsed_digest": parsed_digest,
         "mapped_digest": mapped_digest,
@@ -507,6 +699,75 @@ def validate_seal_revision(existing: Sequence[Mapping[str, object]], candidate: 
     if revision_numbers and candidate["revision"] <= max(revision_numbers):
         _fail("SOURCE_SEAL_REVISION_NOT_APPEND_ONLY", "合法修订必须追加更高revision，不得覆盖历史")
     return SealProofResult("APPEND_NEW_REVISION", digest)
+
+
+def compute_seal_snapshot(
+    *,
+    scope: str,
+    source_binding_id: str,
+    revision: int,
+    seal_id: str,
+    rows: Sequence[Mapping[str, object]],
+    references: Sequence[Mapping[str, object]],
+    row_key_fields: tuple[str, ...],
+) -> Mapping[str, object]:
+    """计算封口快照摘要；不写库、不证明快照来自PG事务或不可变存储。"""
+    if not all(isinstance(value, str) and value for value in (scope, source_binding_id, seal_id)) or not isinstance(revision, int) or isinstance(revision, bool) or revision < 1:
+        _fail("SOURCE_SEAL_SNAPSHOT_INVALID", "封口快照身份字段非法")
+    if not isinstance(references, Sequence) or isinstance(references, (str, bytes)) or not any(isinstance(item, Mapping) and item.get("reference_type") == "SOURCE_SEAL" for item in references):
+        _fail("SOURCE_SEAL_SNAPSHOT_INVALID", "Owner封口引用闭包必须含source_seal引用")
+    row_digest = records_digest("OWNER_SEALED_ROWS_V1", rows, row_key_fields)
+    reference_digest = records_digest("OWNER_SEALED_REFERENCES_V1", references, ("reference_type", "reference_id", "target_version"))
+    snapshot_content_digest = semantic_digest("P20_SEAL_SNAPSHOT_V1", {
+        "scope": scope,
+        "source_binding_id": source_binding_id,
+        "revision": revision,
+        "seal_id": seal_id,
+        "row_count": len(rows),
+        "row_digest": row_digest,
+        "reference_count": len(references),
+        "reference_digest": reference_digest,
+    })
+    return {
+        "scope": scope,
+        "source_binding_id": source_binding_id,
+        "revision": revision,
+        "seal_id": seal_id,
+        "row_count": len(rows),
+        "row_digest": row_digest,
+        "reference_count": len(references),
+        "reference_digest": reference_digest,
+        "content_digest": snapshot_content_digest,
+    }
+
+
+def validate_seal_snapshot(
+    *,
+    sealed_snapshot: Mapping[str, object],
+    readback_rows: Sequence[Mapping[str, object]],
+    readback_references: Sequence[Mapping[str, object]],
+    row_key_fields: tuple[str, ...],
+) -> SealProofResult:
+    """比较封口记录和显式读回行集的ID/count/digest/引用闭包。"""
+    required = ("scope", "source_binding_id", "revision", "seal_id", "row_count", "row_digest", "reference_count", "reference_digest", "content_digest")
+    if not isinstance(sealed_snapshot, Mapping) or any(key not in sealed_snapshot for key in required):
+        _fail("SOURCE_SEAL_SNAPSHOT_INVALID", "封口快照缺少ID/count/digest/引用字段")
+    try:
+        readback = compute_seal_snapshot(
+            scope=sealed_snapshot["scope"],
+            source_binding_id=sealed_snapshot["source_binding_id"],
+            revision=sealed_snapshot["revision"],
+            seal_id=sealed_snapshot["seal_id"],
+            rows=readback_rows,
+            references=readback_references,
+            row_key_fields=row_key_fields,
+        )
+    except SourceSealValidationError:
+        raise
+    for key in required:
+        if readback[key] != sealed_snapshot[key]:
+            _fail("SOURCE_SEAL_SNAPSHOT_MISMATCH", f"封口后读回与快照不一致：{key}")
+    return SealProofResult("SEALED_SNAPSHOT_MATCH", sealed_snapshot["content_digest"])
 
 
 OWNER_INPUT_FIELDS = (

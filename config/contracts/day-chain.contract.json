@@ -20569,6 +20569,7 @@
       "coverage": {
         "source_inventory_digest": "inventory_digest",
         "entity_session_digest": "coverage_digest",
+        "required_dataset_set": "EXACT_ONE_TO_ONE_SCOPE_IDENTITY_SET_REJECT_MISSING_EXTRA_OR_DUPLICATE",
         "required_inventory_fields": [
           "dataset_id", "dataset_version", "source_role", "source_revision", "query_scope",
           "parser_version", "unit_version", "capture_id", "source_content_sha256", "entries",
@@ -20586,9 +20587,12 @@
         "source_byte_sha256", "parsed_row_set_digest", "mapped_fact_digest",
         "p05_canonical_digest", "conversion_contract_digest"
       ],
-      "conversion_contract_fields": ["parser_version", "unit_version", "p04_mapping_version", "p05_conversion_version", "p05_field_projection_version"],
+      "conversion_contract_fields": ["parser_version", "unit_version", "p04_mapping_version", "p05_conversion_version", "p05_field_projection_version", "source_binding_id", "normalization_version", "field_rules_digest"],
+      "p05_recomputation": "APPLY_EXPLICIT_FIELD_RULES_AND_RATIONAL_UNIT_FACTORS_TO_PARSED_ROWS_WITH_P04_IDENTITY_CALENDAR_MAPPING_THEN_COMPARE_EXACT_VALUE_QUALITY_REASON_AND_SOURCE_BINDING",
+      "field_rule_fields": ["source_field", "canonical_field", "quality_field", "reason_field", "operation", "factor_numerator", "factor_denominator"],
       "p05_row_source_binding": "SOURCE_RECORD_KEYS_MUST_RESOLVE_TO_P04_MAPPING_FOR_SAME_ENTITY_SESSION",
       "missing_source_bytes_outcome": "VERIFIED_AT_CAPTURE_NOT_REPLAYABLE_SOURCE_BYTES",
+      "source_bytes_present_outcome": "SOURCE_BYTES_PRESENT_PARSER_REPLAY_PENDING_UNLESS_TRUSTED_PARSER_ACTUALLY_REPLAYED",
       "clock_order": [
         "read_started_at<=read_completed_at", "read_completed_at<=validated_complete_at",
         "validated_complete_at<=durable_commit_observed_at", "durable_commit_observed_at<=source_sealed_at"
@@ -20597,6 +20601,7 @@
       "ready_at": "MAX_OF_ACTUAL_REQUIRED_DOWNLOAD_READ_VALIDATION_AND_VERIFIED_AVAILABILITY_OBSERVATIONS",
       "late_seal": "NON_PIT_EOD_MAY_SEAL_AFTER_SOURCE_CUTOFF_BUT_NEVER_INHERITS_LIVE_OR_PIT",
       "seal_revision": "SAME_KEY_SAME_CONTENT_IDEMPOTENT_SAME_KEY_DIFFERENT_CONTENT_CONFLICT_NEW_REVISION_APPEND_ONLY",
+      "sealed_snapshot_readback": "RECOMPARE_SEAL_ID_ROW_COUNT_ROW_DIGEST_REFERENCE_COUNT_AND_REFERENCE_DIGEST",
       "owner_input_projection": {
         "schema": "OWNER_INPUT_PROJECTION_V1",
         "fields": ["owner_scope", "source_seal", "fact_inputs", "derived_inputs", "rule_inputs", "provenance_pit", "result_identity"],
