@@ -1548,6 +1548,7 @@ def research_compare(
     units: UnitContract,
     limits: ReadLimits,
     budget: CompareBudget | None = None,
+    profile_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """同一日期逐代码只读计算，并对整批请求共享字节、记录和耗时预算。"""
     budget = budget or CompareBudget()
@@ -1622,6 +1623,7 @@ def research_compare(
                 source_roots=roots,
                 units=units,
                 limits=per_symbol_limits,
+                profile_contract=profile_contract,
             )
             item_bytes = result["source"]["byte_count"]
             item_records = result["source"]["record_count"]
@@ -1774,6 +1776,7 @@ def research_universe_preview(
     board_filter: str = "ALL",
     discovery_budget: UniverseDiscoveryBudget | None = None,
     budget: CompareBudget | None = None,
+    profile_contract: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """只读发现TDX来源代码候选并对单页复用既有Core和累计预算。"""
     started = time.monotonic()
@@ -1855,6 +1858,7 @@ def research_universe_preview(
             units=units,
             limits=limits,
             budget=CompareBudget(remaining_bytes, remaining_records, remaining_seconds),
+            profile_contract=profile_contract,
         )
         total_bytes += chunk["budget"]["used_bytes"]
         total_records += chunk["budget"]["used_records"]
@@ -1885,13 +1889,40 @@ def research_universe_preview(
             context={"page_requested": len(page_candidates), "classified": classified},
         )
 
+    profile_preview_denominators: dict[str, Any] | None = None
+    if profile_contract is not None:
+        preview_results = [item for item in page_results if isinstance(item.get("profile_preview"), dict)]
+        component_counts = {
+            "total": 0,
+            "evaluated": 0,
+            "observed": 0,
+            "unknown_data": 0,
+            "not_implemented": 0,
+            "contract_unbound": 0,
+        }
+        for item in preview_results:
+            preview = item["profile_preview"]
+            for name in component_counts:
+                component_counts[name] += preview["counts"][name]
+        profile_preview_denominators = {
+            "page_requested": len(page_candidates),
+            "objects_with_profile_preview": len(preview_results),
+            "objects_available": available,
+            "objects_partial_unknown": partial_unknown,
+            "objects_failed": failed,
+            "objects_not_evaluated": not_evaluated,
+            "objects_without_profile_preview": failed + not_evaluated,
+            "object_partition_complete": len(preview_results) + failed + not_evaluated == len(page_candidates),
+            "components": component_counts,
+        }
+
     short_summary: list[dict[str, Any]] = []
     for item in page_results:
         candidate = item["source_candidate"]
         observation = item.get("observation_summary", {})
         fields = observation.get("fields", {})
         positions = fields.get("moving_average_position", {})
-        short_summary.append({
+        summary_item = {
             "symbol": candidate["symbol"],
             "market": candidate["market"],
             "board": candidate["board"],
@@ -1929,12 +1960,34 @@ def research_universe_preview(
                 "contract": "同一来源代码、目标日、单位和单文件预算；详情在同一次Raw/Core读取上追加非PIT画像预览",
             },
             "error_code": item.get("error_code"),
-        })
+        }
+        if isinstance(item.get("profile_preview"), dict):
+            preview = item["profile_preview"]
+            summary_item["profile_preview"] = {
+                "contract": preview["contract"],
+                "scope": preview["scope"],
+                "target_session": preview["target_session"],
+                "source_last_session": preview["source_last_session"],
+                "counts": preview["counts"],
+                "components": [
+                    {
+                        key: component[key]
+                        for key in (
+                            "field_id", "rule_id", "expression_ref", "status", "quality",
+                            "value", "reason", "missing_inputs", "input_fields",
+                            "production_eligibility",
+                        )
+                        if key in component
+                    }
+                    for component in preview["components"]
+                ],
+            }
+        short_summary.append(summary_item)
 
     page_remaining = max(0, candidate_total - min(offset + len(page_candidates), candidate_total))
     evaluated_page = available + failed + partial_unknown
     status = "COMPLETE_WITH_DISCLOSURES" if failed == 0 and partial_unknown == 0 and not_evaluated == 0 else "PARTIAL"
-    return {
+    result = {
         "status": status,
         "status_explanation": "COMPLETE_WITH_DISCLOSURES仅表示当前页请求已处理并附带数据披露；不表示全候选池已读取，也不表示所有Raw/Core字段已知。请检查本页、未评价分母和逐字段quality/reason。",
         "candidate_contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
@@ -1983,3 +2036,6 @@ def research_universe_preview(
         "summary": short_summary,
         "results": page_results,
     }
+    if profile_preview_denominators is not None:
+        result["profile_preview_denominators"] = profile_preview_denominators
+    return result

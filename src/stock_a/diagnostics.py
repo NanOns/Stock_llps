@@ -428,6 +428,7 @@ def _parser() -> argparse.ArgumentParser:
     universe.add_argument("--market", choices=("ALL", "SH", "SZ"), default="ALL", help="市场过滤，默认ALL")
     universe.add_argument("--board", choices=("ALL", "MAIN_BOARD", "GEM"), default="ALL", help="板别过滤，默认ALL")
     universe.add_argument("--format", dest="output_format", choices=("summary", "json"), default="summary", help="输出短摘要或完整JSON，默认summary")
+    universe.add_argument("--include-profile-preview", action="store_true", help="在本页已评价Raw/Core结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
     universe.add_argument("--max-directory-entries", type=int, default=50000, help="来源目录累计枚举上限，默认50000")
     universe.add_argument("--max-discovery-seconds", type=float, default=30.0, help="来源目录发现时间上限秒，默认30")
     universe.add_argument("--max-total-bytes", type=int, default=335544320, help="当前页累计TDX读取字节上限，默认335544320")
@@ -1065,6 +1066,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
     denominators = result["denominators"]
     page = result["page"]
     budget = result["budget"]
+    profile_denominators = result.get("profile_preview_denominators")
     lines = [
         f"TDX来源候选盘后观察 | {result['target_session']} | {result['candidate_contract']} | {result['price_coordinate']}",
         (
@@ -1089,6 +1091,20 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
         ),
         "代码 | 市场/板别 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | 未知原因/错误 | 单股回查",
     ]
+    if profile_denominators is not None:
+        components = profile_denominators["components"]
+        lines.insert(
+            5,
+            (
+                f"Profile本页分母：请求对象={profile_denominators['page_requested']}，"
+                f"已返回画像={profile_denominators['objects_with_profile_preview']}，"
+                f"失败={profile_denominators['objects_failed']}，未评价={profile_denominators['objects_not_evaluated']}；"
+                f"组件总数={components['total']}，evaluated={components['evaluated']}，"
+                f"observed={components['observed']}，unknown_data={components['unknown_data']}，"
+                f"not_implemented={components['not_implemented']}，contract_unbound={components['contract_unbound']}"
+            ),
+        )
+        lines[-1] += " | Profile组件（字段=质量/状态:值或原因）"
     for item in result["summary"]:
         raw = item.get("raw_availability") or {}
         core = item.get("core_availability") or {}
@@ -1104,7 +1120,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
         detail_command = "stock-a " + " ".join(
             _powershell_quote(value) for value in detail.get("arguments", [])
         ) if detail else "—"
-        lines.append(" | ".join((
+        row = [
             item["symbol"],
             f"{item['market']}/{item['board']}",
             item.get("source_last_session") or "—",
@@ -1121,7 +1137,29 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
             f"{raw_text}/{core_text}",
             reason_text or "—",
             detail_command,
-        )))
+        ]
+        if profile_denominators is not None:
+            preview = item.get("profile_preview")
+            if isinstance(preview, dict):
+                component_text = []
+                for component in preview["components"]:
+                    field_id = component["field_id"]
+                    if component["status"] == "EVALUATED":
+                        if component["quality"] == "OBSERVED":
+                            value_text = component.get("value")
+                            component_text.append(f"{field_id}=OBSERVED:{value_text}")
+                        else:
+                            component_text.append(
+                                f"{field_id}=UNKNOWN_DATA:{component.get('reason') or '原因未明'}"
+                            )
+                    else:
+                        component_text.append(
+                            f"{field_id}={component['status']}:{component.get('reason') or '原因未登记'}"
+                        )
+                row.append("；".join(component_text))
+            else:
+                row.append(f"{item.get('status')}:{item.get('error_code') or '未返回画像'}")
+        lines.append(" | ".join(row))
     return "\n".join(lines)
 
 
@@ -1149,6 +1187,13 @@ def _run_research_universe(args: argparse.Namespace) -> int:
         )
     except (InvalidOperation, ValueError, ContractError, ResearchEntryError) as error:
         raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或预算合同无效：{error}", _EXIT_ARGUMENT) from error
+    profile_contract = None
+    if args.include_profile_preview:
+        try:
+            profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+        except DayChainContractError as error:
+            _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
+            return _EXIT_UNAVAILABLE
     try:
         result = research_universe_preview(
             target_session=args.target_session,
@@ -1161,6 +1206,7 @@ def _run_research_universe(args: argparse.Namespace) -> int:
             board_filter=args.board,
             discovery_budget=discovery_budget,
             budget=budget,
+            profile_contract=profile_contract,
         )
     except ResearchEntryError as error:
         if error.code == "SOURCE_ACCESS_DENIED":
