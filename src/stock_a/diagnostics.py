@@ -31,7 +31,14 @@ from stock_a.sources.tdx.day_source import open_day_file, read_protected_bytes
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
 from stock_a.postgres_identity import inspect_postgres
 from stock_a.postgres_binding import BindingRefused, bind_stock_namespace
-from stock_a.research.entry import CompareBudget, ResearchEntryError, research_compare, research_stock
+from stock_a.research.entry import (
+    CompareBudget,
+    ResearchEntryError,
+    UniverseDiscoveryBudget,
+    research_compare,
+    research_stock,
+    research_universe_preview,
+)
 
 
 _WORKSPACE = Path("G:/codex work/Stock A")
@@ -391,6 +398,21 @@ def _parser() -> argparse.ArgumentParser:
     compare.add_argument("--max-total-bytes", type=int, default=335544320, help="本次多股票扫描总字节上限，默认335544320")
     compare.add_argument("--max-total-records", type=int, default=4000000, help="本次多股票解析总记录上限，默认4000000")
     compare.add_argument("--max-total-seconds", type=float, default=120.0, help="本次多股票扫描总耗时秒数上限，默认120")
+    universe = commands.add_parser(
+        "research-universe-preview",
+        help="发现沪深主板/创业板TDX来源候选并分页查看盘后基础观察",
+    )
+    _add_research_arguments(universe)
+    universe.add_argument("--offset", type=int, default=0, help="来源候选分页起点，默认0")
+    universe.add_argument("--limit", type=int, default=20, help="本页证券数，默认20，最多100")
+    universe.add_argument("--market", choices=("ALL", "SH", "SZ"), default="ALL", help="市场过滤，默认ALL")
+    universe.add_argument("--board", choices=("ALL", "MAIN_BOARD", "GEM"), default="ALL", help="板别过滤，默认ALL")
+    universe.add_argument("--format", dest="output_format", choices=("summary", "json"), default="summary", help="输出短摘要或完整JSON，默认summary")
+    universe.add_argument("--max-directory-entries", type=int, default=50000, help="来源目录累计枚举上限，默认50000")
+    universe.add_argument("--max-discovery-seconds", type=float, default=30.0, help="来源目录发现时间上限秒，默认30")
+    universe.add_argument("--max-total-bytes", type=int, default=335544320, help="当前页累计TDX读取字节上限，默认335544320")
+    universe.add_argument("--max-total-records", type=int, default=4000000, help="当前页累计TDX记录上限，默认4000000")
+    universe.add_argument("--max-total-seconds", type=float, default=120.0, help="当前页累计扫描秒数上限，默认120")
     return parser
 
 
@@ -862,6 +884,149 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
     return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
 
 
+def _summary_field(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "—"
+    quality = value.get("quality", "UNKNOWN_DATA")
+    if quality != "OBSERVED":
+        return f"未知:{value.get('reason') or '原因未明'}"
+    rendered = value.get("value")
+    if isinstance(rendered, dict):
+        rendered = rendered.get("decimal", rendered.get("exact"))
+    return f"{rendered} [{quality}]"
+
+
+def _render_universe_summary(result: dict[str, Any]) -> str:
+    discovery = result["discovery"]
+    denominators = result["denominators"]
+    page = result["page"]
+    budget = result["budget"]
+    lines = [
+        f"TDX来源候选盘后观察 | {result['target_session']} | {result['candidate_contract']} | {result['price_coordinate']}",
+        (
+            f"来源目录项={discovery['directory_entries_scanned']}，.day文件={discovery['day_file_entries']}，"
+            f"范围候选={denominators['source_candidate_total']}，越界类别排除={discovery['excluded_out_of_scope']}，"
+            f"无效文件名={discovery['invalid_day_filenames']}"
+        ),
+        (
+            f"过滤后分母={denominators['filtered_candidate_total']}；本页offset={page['offset']}、"
+            f"limit={page['limit']}、返回={page['returned']}、页后剩余={page['remaining_after_page']}、"
+            f"本页未评价={denominators['page_not_evaluated']}、全过滤集合未评价={denominators['not_evaluated_in_filtered_candidate_set']}"
+        ),
+        (
+            f"本页分类 available={denominators['page_available']}、failed={denominators['page_failed']}、"
+            f"partial_unknown={denominators['page_partial_unknown']}、not_evaluated={denominators['page_not_evaluated']}；"
+            f"Raw/Core状态见逐行列"
+        ),
+        (
+            f"读取={budget['used_bytes']}字节/{budget['used_records']}条，"
+            f"发现={budget['discovery_elapsed_seconds']}秒，总耗时={budget['elapsed_seconds']}秒；"
+            f"未复权、NON_PIT，不代表全候选池已读取或全部指标已知"
+        ),
+        "代码 | 市场/板别 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | 未知原因/错误",
+    ]
+    for item in result["summary"]:
+        raw = item.get("raw_availability") or {}
+        core = item.get("core_availability") or {}
+        raw_text = f"{raw.get('status', '未评价')} {raw.get('observed_fields', 0)}/{raw.get('total_fields', 0)}"
+        core_text = f"{core.get('status', '未评价')} {core.get('observed_fields', 0)}/{core.get('total_fields', 0)}"
+        reasons = dict(core.get("unknown_reasons", {}))
+        for reason, count in (raw.get("unknown_reasons") or {}).items():
+            reasons[f"Raw:{reason}"] = count
+        reason_text = ";".join(f"{name}×{count}" for name, count in sorted(reasons.items()))
+        if item.get("error_code"):
+            reason_text = ";".join(filter(None, (reason_text, item["error_code"])))
+        lines.append(" | ".join((
+            item["symbol"],
+            f"{item['market']}/{item['board']}",
+            item.get("source_last_session") or "—",
+            _summary_field(item.get("raw_close")),
+            _summary_field(item.get("ma5")),
+            _summary_field(item.get("ma20")),
+            _summary_field(item.get("ma60")),
+            _summary_field(item.get("atr20")),
+            _summary_field(item.get("ret5")),
+            _summary_field(item.get("ret20")),
+            _summary_field(item.get("close_vs_ma20")),
+            _summary_field(item.get("amount")),
+            _summary_field(item.get("volume")),
+            f"{raw_text}/{core_text}",
+            reason_text or "—",
+        )))
+    return "\n".join(lines)
+
+
+def _run_research_universe(args: argparse.Namespace) -> int:
+    config, config_path = _load_runtime_config()
+    roots = config["source_policy"]["configured_tdx_source_roots"]
+    if not roots:
+        raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX只读来源根，拒绝发现来源候选")
+    try:
+        units = UnitContract(args.unit_version, Decimal(args.amount_to_cny), args.volume_to_shares)
+        limits = ReadLimits(
+            args.max_bytes,
+            args.max_records,
+            args.chunk_records,
+            Decimal(args.max_seconds),
+        )
+        discovery_budget = UniverseDiscoveryBudget(
+            args.max_directory_entries,
+            args.max_discovery_seconds,
+        )
+        budget = CompareBudget(
+            args.max_total_bytes,
+            args.max_total_records,
+            args.max_total_seconds,
+        )
+    except (InvalidOperation, ValueError, ContractError, ResearchEntryError) as error:
+        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或预算合同无效：{error}", _EXIT_ARGUMENT) from error
+    try:
+        result = research_universe_preview(
+            target_session=args.target_session,
+            source_roots=roots,
+            units=units,
+            limits=limits,
+            offset=args.offset,
+            limit=args.limit,
+            market_filter=args.market,
+            board_filter=args.board,
+            discovery_budget=discovery_budget,
+            budget=budget,
+        )
+    except ResearchEntryError as error:
+        if error.code == "SOURCE_ACCESS_DENIED":
+            code = _EXIT_PERMISSION
+        elif error.code == "SOURCE_IO_ERROR":
+            code = _EXIT_ENGINEERING
+        elif error.code in {
+            "TARGET_DATE_INVALID", "UNIVERSE_PAGE_INVALID", "UNIVERSE_FILTER_INVALID",
+            "UNIVERSE_BUDGET_INVALID", "COMPARE_BUDGET_INVALID",
+        }:
+            code = _EXIT_ARGUMENT
+        else:
+            code = _EXIT_UNAVAILABLE
+        _emit({
+            "ok": False,
+            "code": error.code,
+            "message": str(error),
+            "context": error.context,
+            "database_io_attempted": False,
+            "database_write_attempted": False,
+        }, error=True)
+        return code
+    result.update({
+        "ok": result["status"] == "COMPLETE_WITH_DISCLOSURES",
+        "configuration_path": str(config_path),
+        "database_io_attempted": False,
+        "database_write_attempted": False,
+    })
+    if args.output_format == "summary":
+        sys.stdout.write(_render_universe_summary(result) + "\n")
+    else:
+        _emit(result)
+    return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -887,6 +1052,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_research(args, compare=False)
         if args.command == "research-compare":
             return _run_research(args, compare=True)
+        if args.command == "research-universe-preview":
+            return _run_research_universe(args)
     except DiagnosticError as error:
         _emit({"ok": False, "code": error.code, "cause_type": type(error.__cause__).__name__ if error.__cause__ is not None else None, "message": str(error)}, error=True)
         return error.exit_code

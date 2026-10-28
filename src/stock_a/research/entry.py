@@ -9,8 +9,10 @@ import hashlib
 from importlib.resources import files
 import json
 import math
+import os
 from pathlib import Path
 import re
+import stat
 import time
 from typing import Any, Iterable
 
@@ -28,7 +30,12 @@ from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
 
 _CALENDAR_RESOURCE_PATTERN = re.compile(r"^cn_equity_sessions_([0-9]{4})\.json$")
 _SYMBOL_PATTERN = re.compile(r"^(SH|SZ)[.]?([0-9]{6})$", re.IGNORECASE)
+_DAY_FILENAME_PATTERN = re.compile(r"^(SH|SZ)([0-9]{6})[.]DAY$", re.IGNORECASE)
 _MAX_COMPARE_SYMBOLS = 20
+_MAX_UNIVERSE_PAGE_SIZE = 100
+_DEFAULT_UNIVERSE_PAGE_SIZE = 20
+_DEFAULT_MAX_DIRECTORY_ENTRIES = 50000
+_DEFAULT_MAX_DISCOVERY_SECONDS = 30.0
 _DEFAULT_MAX_TOTAL_BYTES = 335544320
 _DEFAULT_MAX_TOTAL_RECORDS = 4000000
 _DEFAULT_MAX_TOTAL_SECONDS = 120.0
@@ -73,6 +80,27 @@ class CompareBudget:
         if not math.isfinite(seconds) or seconds <= 0:
             raise ResearchEntryError("COMPARE_BUDGET_INVALID", "全批最大耗时必须为有限正数")
         object.__setattr__(self, "max_total_seconds", seconds)
+
+
+@dataclass(frozen=True)
+class UniverseDiscoveryBudget:
+    """发现来源候选目录时的总目录项与耗时上限。"""
+
+    max_directory_entries: int = _DEFAULT_MAX_DIRECTORY_ENTRIES
+    max_seconds: float = _DEFAULT_MAX_DISCOVERY_SECONDS
+
+    def __post_init__(self) -> None:
+        if type(self.max_directory_entries) is not int or self.max_directory_entries <= 0:
+            raise ResearchEntryError("UNIVERSE_BUDGET_INVALID", "来源目录项上限必须为正整数")
+        if isinstance(self.max_seconds, bool) or not isinstance(self.max_seconds, (int, float)):
+            raise ResearchEntryError("UNIVERSE_BUDGET_INVALID", "来源发现耗时必须为有限正数")
+        try:
+            seconds = float(self.max_seconds)
+        except (OverflowError, TypeError, ValueError) as error:
+            raise ResearchEntryError("UNIVERSE_BUDGET_INVALID", "来源发现耗时必须可表示为有限正数") from error
+        if not math.isfinite(seconds) or seconds <= 0:
+            raise ResearchEntryError("UNIVERSE_BUDGET_INVALID", "来源发现耗时必须为有限正数")
+        object.__setattr__(self, "max_seconds", seconds)
 
 
 def _calendar_payload(resource_name: str, year: int) -> tuple[dict[str, Any], str, tuple[date, ...]]:
@@ -243,6 +271,314 @@ def _normalize_symbol(value: str) -> tuple[str, str, str]:
         raise ResearchEntryError("SYMBOL_OUT_OF_SCOPE", "代码类别不属于本入口的沪深主板/创业板范围")
     symbol = f"{market}.{code}"
     return symbol, directory, board
+
+
+def _availability_record(fields: dict[str, Any], *, subject: str) -> dict[str, Any]:
+    total = len(fields)
+    observed = sum(item.get("quality") == "OBSERVED" for item in fields.values())
+    unknown_reasons: dict[str, int] = {}
+    for item in fields.values():
+        if item.get("quality") != "OBSERVED":
+            reason = item.get("reason") or "UNKNOWN_REASON_UNSPECIFIED"
+            unknown_reasons[reason] = unknown_reasons.get(reason, 0) + 1
+    if observed == total:
+        status = "AVAILABLE"
+        message = f"{subject}字段全部可用"
+    elif observed == 0:
+        status = "UNAVAILABLE"
+        message = f"{subject}字段均不可用；逐项原因见unknown_reasons"
+    else:
+        status = "PARTIAL_UNKNOWN"
+        message = f"{subject}部分字段可用；本状态不表示全部指标已知"
+    return {
+        "status": status,
+        "observed_fields": observed,
+        "unknown_fields": total - observed,
+        "total_fields": total,
+        "unknown_reasons": dict(sorted(unknown_reasons.items())),
+        "message": message,
+    }
+
+
+def _aggregate_availability(results: list[dict[str, Any]], field_name: str) -> dict[str, Any]:
+    counts = {
+        "AVAILABLE": 0,
+        "PARTIAL_UNKNOWN": 0,
+        "UNAVAILABLE": 0,
+        "FAILED": 0,
+        "NOT_EVALUATED": 0,
+    }
+    for item in results:
+        item_status = item.get("status")
+        if item_status == "FAILED":
+            counts["FAILED"] += 1
+        elif item_status == "NOT_EVALUATED":
+            counts["NOT_EVALUATED"] += 1
+        else:
+            availability = item.get(field_name, {})
+            status = availability.get("status")
+            if status in counts:
+                counts[status] += 1
+            else:
+                counts["UNAVAILABLE"] += 1
+    return {
+        "counts": counts,
+        "requested": len(results),
+        "message": "仅汇总本次已选页对象；AVAILABLE不代表另一组Raw/Core字段全部已知",
+    }
+
+
+def _discover_source_candidates(
+    source_roots: Iterable[str],
+    budget: UniverseDiscoveryBudget,
+) -> tuple[tuple[dict[str, str], ...], dict[str, Any]]:
+    if not isinstance(budget, UniverseDiscoveryBudget):
+        raise ResearchEntryError("UNIVERSE_BUDGET_INVALID", "缺少有效的来源发现预算")
+    if isinstance(source_roots, (str, bytes, os.PathLike)):
+        raise ResearchEntryError("SOURCE_PATH_INVALID", "source_roots必须是根路径序列")
+    try:
+        configured_roots = tuple(source_roots)
+    except TypeError as error:
+        raise ResearchEntryError("SOURCE_PATH_INVALID", "source_roots必须是根路径序列") from error
+    if not configured_roots:
+        raise ResearchEntryError("SOURCE_NOT_CONFIGURED", "没有配置只读TDX保护根")
+
+    started = time.monotonic()
+    roots: list[Path] = []
+    for value in configured_roots:
+        try:
+            root = Path(value).resolve(strict=True)
+        except FileNotFoundError as error:
+            raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根不存在") from error
+        except PermissionError as error:
+            raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验配置的TDX来源根") from error
+        except (RuntimeError, RecursionError, ValueError) as error:
+            raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根无法安全解析") from error
+        except (OSError, TypeError) as error:
+            raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根无法核验") from error
+        if not root.is_dir():
+            raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根不是目录")
+        roots.append(root)
+
+    candidates_by_symbol: dict[str, dict[str, str]] = {}
+    candidate_sources: dict[str, str] = {}
+    directory_summaries: list[dict[str, Any]] = []
+    directory_entries_scanned = 0
+    day_file_entries = 0
+    excluded_out_of_scope = 0
+    invalid_day_filenames = 0
+    invalid_day_filename_samples: list[str] = []
+    by_market = {"SH": 0, "SZ": 0}
+    by_board = {"MAIN_BOARD": 0, "GEM": 0}
+    for root in roots:
+        for market, directory in (("SH", "sh"), ("SZ", "sz")):
+            logical_directory = root / "vipdoc" / directory / "lday"
+            try:
+                resolved_directory = logical_directory.resolve(strict=True)
+            except FileNotFoundError as error:
+                raise ResearchEntryError(
+                    "SOURCE_DIRECTORY_UNAVAILABLE",
+                    f"缺少必需的TDX来源目录vipdoc/{directory}/lday；无法给出完整候选分母",
+                    context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                ) from error
+            except PermissionError as error:
+                raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验TDX来源目录") from error
+            except (RuntimeError, RecursionError, ValueError) as error:
+                raise ResearchEntryError(
+                    "SOURCE_PATH_INVALID",
+                    f"TDX来源目录vipdoc/{directory}/lday无法安全解析",
+                    context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                ) from error
+            except OSError as error:
+                raise ResearchEntryError("SOURCE_IO_ERROR", "核验TDX来源目录时发生I/O错误") from error
+            try:
+                resolved_directory.relative_to(root)
+            except ValueError as error:
+                raise ResearchEntryError(
+                    "SOURCE_PATH_OUTSIDE_ROOT",
+                    "TDX行情目录最终路径离开已配置来源保护根",
+                    context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                ) from error
+            try:
+                directory_stat_before = resolved_directory.stat()
+            except PermissionError as error:
+                raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝读取TDX来源目录") from error
+            except OSError as error:
+                raise ResearchEntryError("SOURCE_IO_ERROR", "读取TDX来源目录状态时发生I/O错误") from error
+            if not stat.S_ISDIR(directory_stat_before.st_mode):
+                raise ResearchEntryError(
+                    "SOURCE_DIRECTORY_UNAVAILABLE",
+                    f"TDX来源路径vipdoc/{directory}/lday不是目录",
+                    context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                )
+
+            entry_count = 0
+            day_count = 0
+            directory_candidates = 0
+            directory_excluded = 0
+            directory_invalid_names = 0
+            try:
+                with os.scandir(resolved_directory) as iterator:
+                    for entry in iterator:
+                        entry_count += 1
+                        directory_entries_scanned += 1
+                        if directory_entries_scanned > budget.max_directory_entries:
+                            raise ResearchEntryError(
+                                "UNIVERSE_DISCOVERY_BUDGET_EXCEEDED",
+                                "来源候选目录项超过发现预算；已停止且不声明完整候选总数",
+                                context={
+                                    "discovery_complete": False,
+                                    "directory_entries_scanned": directory_entries_scanned,
+                                    "day_file_entries_seen": day_file_entries,
+                                    "max_directory_entries": budget.max_directory_entries,
+                                },
+                            )
+                        if entry_count % 256 == 0 and time.monotonic() - started >= budget.max_seconds:
+                            raise ResearchEntryError(
+                                "UNIVERSE_DISCOVERY_BUDGET_EXCEEDED",
+                                "来源候选发现超过耗时预算；已停止且不声明完整候选总数",
+                                context={
+                                    "discovery_complete": False,
+                                    "directory_entries_scanned": directory_entries_scanned,
+                                    "day_file_entries_seen": day_file_entries,
+                                    "max_seconds": budget.max_seconds,
+                                },
+                            )
+                        if not entry.name.casefold().endswith(".day"):
+                            continue
+                        day_file_entries += 1
+                        day_count += 1
+                        entry_path = Path(entry.path)
+                        try:
+                            resolved_entry = entry_path.resolve(strict=True)
+                            entry_stat = resolved_entry.stat()
+                        except FileNotFoundError as error:
+                            raise ResearchEntryError(
+                                "SOURCE_CANDIDATE_CHANGED",
+                                "枚举期间TDX日线来源文件消失；候选总分母不完整",
+                                context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                            ) from error
+                        except PermissionError as error:
+                            raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验TDX日线文件") from error
+                        except (RuntimeError, RecursionError, ValueError) as error:
+                            raise ResearchEntryError(
+                                "SOURCE_PATH_INVALID",
+                                "TDX日线候选最终路径无法安全解析",
+                                context={"filename": entry.name, "discovery_complete": False},
+                            ) from error
+                        except OSError as error:
+                            raise ResearchEntryError("SOURCE_IO_ERROR", "核验TDX日线文件时发生I/O错误") from error
+                        try:
+                            resolved_entry.relative_to(root)
+                        except ValueError as error:
+                            raise ResearchEntryError(
+                                "SOURCE_PATH_OUTSIDE_ROOT",
+                                "TDX日线候选最终路径离开已配置来源保护根",
+                                context={"filename": entry.name, "discovery_complete": False},
+                            ) from error
+                        if not stat.S_ISREG(entry_stat.st_mode):
+                            raise ResearchEntryError(
+                                "SOURCE_CANDIDATE_INVALID",
+                                "后缀为.day的来源候选不是普通文件",
+                                context={"filename": entry.name, "discovery_complete": False},
+                            )
+                        match = _DAY_FILENAME_PATTERN.fullmatch(entry.name)
+                        if match is None or match.group(1).upper() != market:
+                            invalid_day_filenames += 1
+                            directory_invalid_names += 1
+                            if len(invalid_day_filename_samples) < 100:
+                                invalid_day_filename_samples.append(
+                                    f"vipdoc/{directory}/lday/{entry.name}"
+                                )
+                            continue
+                        code = match.group(2)
+                        try:
+                            symbol, _resolved_market_dir, board = _normalize_symbol(f"{market}.{code}")
+                        except ResearchEntryError as error:
+                            if error.code != "SYMBOL_OUT_OF_SCOPE":
+                                raise
+                            excluded_out_of_scope += 1
+                            directory_excluded += 1
+                            continue
+                        if symbol in candidates_by_symbol:
+                            raise ResearchEntryError(
+                                "UNIVERSE_DUPLICATE_SYMBOL",
+                                "多个TDX目录项归一为同一来源代码；拒绝静默去重",
+                                context={
+                                    "symbol": symbol,
+                                    "first_source": candidate_sources[symbol],
+                                    "duplicate_source": f"vipdoc/{directory}/lday/{entry.name}",
+                                    "discovery_complete": False,
+                                },
+                            )
+                        candidates_by_symbol[symbol] = {
+                            "symbol": symbol,
+                            "market": market,
+                            "board": board,
+                        }
+                        candidate_sources[symbol] = f"vipdoc/{directory}/lday/{entry.name}"
+                        directory_candidates += 1
+                        by_market[market] += 1
+                        by_board[board] += 1
+            except ResearchEntryError:
+                raise
+            except PermissionError as error:
+                raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝枚举TDX来源目录") from error
+            except OSError as error:
+                raise ResearchEntryError("SOURCE_IO_ERROR", "枚举TDX来源目录时发生I/O错误") from error
+            try:
+                directory_stat_after = resolved_directory.stat()
+            except PermissionError as error:
+                raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝复核TDX来源目录") from error
+            except OSError as error:
+                raise ResearchEntryError("SOURCE_IO_ERROR", "复核TDX来源目录时发生I/O错误") from error
+            identity_before = (directory_stat_before.st_dev, directory_stat_before.st_ino, directory_stat_before.st_mtime_ns)
+            identity_after = (directory_stat_after.st_dev, directory_stat_after.st_ino, directory_stat_after.st_mtime_ns)
+            if identity_before != identity_after:
+                raise ResearchEntryError(
+                    "SOURCE_DIRECTORY_CHANGED",
+                    "候选发现期间TDX目录发生变化；拒绝声明稳定分母",
+                    context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                )
+            directory_summaries.append({
+                "market": market,
+                "directory": f"vipdoc/{directory}/lday",
+                "directory_entries": entry_count,
+                "day_file_entries": day_count,
+                "in_scope_candidates": directory_candidates,
+                "excluded_out_of_scope": directory_excluded,
+                "invalid_day_filenames": directory_invalid_names,
+            })
+            if time.monotonic() - started >= budget.max_seconds:
+                raise ResearchEntryError(
+                    "UNIVERSE_DISCOVERY_BUDGET_EXCEEDED",
+                    "来源候选发现超过耗时预算；已停止且不声明完整候选总数",
+                    context={
+                        "discovery_complete": False,
+                        "directory_entries_scanned": directory_entries_scanned,
+                        "day_file_entries_seen": day_file_entries,
+                        "max_seconds": budget.max_seconds,
+                    },
+                )
+
+    candidates = tuple(candidates_by_symbol[name] for name in sorted(candidates_by_symbol))
+    return candidates, {
+        "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
+        "complete": True,
+        "configured_root_count": len(roots),
+        "directories": directory_summaries,
+        "directory_entries_scanned": directory_entries_scanned,
+        "day_file_entries": day_file_entries,
+        "candidate_count": len(candidates),
+        "excluded_out_of_scope": excluded_out_of_scope,
+        "invalid_day_filenames": invalid_day_filenames,
+        "invalid_day_filename_samples": sorted(invalid_day_filename_samples),
+        "invalid_day_filename_sample_limit": 100,
+        "candidate_counts_by_market": by_market,
+        "candidate_counts_by_board": by_board,
+        "elapsed_seconds": round(time.monotonic() - started, 6),
+        "identity_disclosure": "文件名仅形成TDX来源代码候选；不证明稳定实体、上市、当日可交易、ST状态或来源更新时点",
+    }
 
 
 def _render_value(value: Any) -> Any:
@@ -495,6 +831,9 @@ def research_stock(
     unknown_core = sum(field.quality != "OBSERVED" for field in core.values())
     raw_fields = _render_raw(target_bar, units)
     raw_close = target_bar.raw_close if target_bar is not None else unknown("TARGET_BAR_MISSING")
+    rendered_core_fields = {name: _render_field(value) for name, value in sorted(core.items())}
+    raw_availability = _availability_record(raw_fields, subject="Raw")
+    core_availability = _availability_record(rendered_core_fields, subject="Core")
     observation_summary = _observation_summary(
         symbol=normalized,
         target_session=target,
@@ -529,6 +868,9 @@ def research_stock(
     target_prices_usable = target_bar is not None and target_bar.prices.quality == "OBSERVED"
     return {
         "status": "AVAILABLE" if target_prices_usable else "PARTIAL_UNKNOWN",
+        "status_explanation": "兼容状态仅按目标日原始价格组判定；Raw/Core整体可用性及字段原因分别见raw_availability、core_availability和逐字段quality/reason。",
+        "raw_availability": raw_availability,
+        "core_availability": core_availability,
         "requested_symbol": normalized,
         "board_scope": board,
         "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_SERIES_ONLY",
@@ -599,7 +941,7 @@ def research_stock(
         "target_bar_present": target_bar is not None,
         "target_prices_usable": target_prices_usable,
         "target_raw_fields": raw_fields,
-        "core_fields": {name: _render_field(value) for name, value in sorted(core.items())},
+        "core_fields": rendered_core_fields,
         "observation_summary": observation_summary,
         "core_field_disclosures": {
             "price_coordinate": "RAW_UNADJUSTED；身份和公司行为时钟未绑定",
@@ -781,6 +1123,7 @@ def research_compare(
     complete = failed == 0 and unknown_symbols == 0 and not_evaluated == 0
     return {
         "status": "COMPLETE_WITH_DISCLOSURES" if complete else "PARTIAL",
+        "status_explanation": "COMPLETE_WITH_DISCLOSURES仅表示请求对象已处理且披露已附上；不表示所有Raw/Core字段均已知。请分别检查raw_availability、core_availability及逐字段quality/reason。",
         "target_session": target_session,
         "denominators": {
             "requested": len(requested),
@@ -809,6 +1152,8 @@ def research_compare(
             "requested": len(requested),
             "partition_complete": True,
         },
+        "raw_availability": _aggregate_availability(results, "raw_availability"),
+        "core_availability": _aggregate_availability(results, "core_availability"),
         "budget": {
             "max_total_bytes": budget.max_total_bytes,
             "max_total_records": budget.max_total_records,
@@ -831,4 +1176,209 @@ def research_compare(
             for name in _COMPARE_FIELDS
         },
         "results": results,
+    }
+
+
+def research_universe_preview(
+    *,
+    target_session: str,
+    source_roots: Iterable[str],
+    units: UnitContract,
+    limits: ReadLimits,
+    offset: int = 0,
+    limit: int = _DEFAULT_UNIVERSE_PAGE_SIZE,
+    market_filter: str = "ALL",
+    board_filter: str = "ALL",
+    discovery_budget: UniverseDiscoveryBudget | None = None,
+    budget: CompareBudget | None = None,
+) -> dict[str, Any]:
+    """只读发现TDX来源代码候选并对单页复用既有Core和累计预算。"""
+    started = time.monotonic()
+    target = _parse_target(target_session)
+    _load_calendar(target)
+    if type(offset) is not int or offset < 0:
+        raise ResearchEntryError("UNIVERSE_PAGE_INVALID", "分页offset必须为非负整数")
+    if type(limit) is not int or not 1 <= limit <= _MAX_UNIVERSE_PAGE_SIZE:
+        raise ResearchEntryError("UNIVERSE_PAGE_INVALID", f"每页limit必须为1至{_MAX_UNIVERSE_PAGE_SIZE}只")
+    if not isinstance(market_filter, str) or market_filter.upper() not in {"ALL", "SH", "SZ"}:
+        raise ResearchEntryError("UNIVERSE_FILTER_INVALID", "market过滤只接受ALL、SH或SZ")
+    if not isinstance(board_filter, str) or board_filter.upper() not in {"ALL", "MAIN_BOARD", "GEM"}:
+        raise ResearchEntryError("UNIVERSE_FILTER_INVALID", "board过滤只接受ALL、MAIN_BOARD或GEM")
+    market_filter = market_filter.upper()
+    board_filter = board_filter.upper()
+    discovery_budget = discovery_budget or UniverseDiscoveryBudget()
+    budget = budget or CompareBudget()
+    if not isinstance(budget, CompareBudget):
+        raise ResearchEntryError("COMPARE_BUDGET_INVALID", "缺少有效的全批累计预算")
+
+    if isinstance(source_roots, (str, bytes, os.PathLike)):
+        raise ResearchEntryError("SOURCE_PATH_INVALID", "source_roots必须是根路径序列")
+    try:
+        roots = tuple(source_roots)
+    except TypeError as error:
+        raise ResearchEntryError("SOURCE_PATH_INVALID", "source_roots必须是根路径序列") from error
+    candidates, catalog = _discover_source_candidates(roots, discovery_budget)
+    selected = tuple(
+        candidate for candidate in candidates
+        if (market_filter == "ALL" or candidate["market"] == market_filter)
+        and (board_filter == "ALL" or candidate["board"] == board_filter)
+    )
+    candidate_total = len(selected)
+    page_candidates = selected[offset:offset + limit]
+    candidate_by_symbol = {item["symbol"]: item for item in page_candidates}
+    page_results: list[dict[str, Any]] = []
+    total_bytes = 0
+    total_records = 0
+    stop_code: str | None = None
+    next_position = 0
+
+    def mark_page_not_evaluated(symbols: Iterable[str], code: str) -> None:
+        for symbol in symbols:
+            candidate = candidate_by_symbol[symbol]
+            page_results.append({
+                "status": "NOT_EVALUATED",
+                "requested_symbol": symbol,
+                "error_code": code,
+                "message": "本页累计读取预算耗尽；对象保留在分页分母且未扫描",
+                "read_usage": {"bytes": 0, "records": 0},
+                "source_candidate": {
+                    **candidate,
+                    "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
+                },
+            })
+
+    while next_position < len(page_candidates):
+        elapsed = time.monotonic() - started
+        remaining_seconds = budget.max_total_seconds - elapsed
+        remaining_bytes = budget.max_total_bytes - total_bytes
+        remaining_records = budget.max_total_records - total_records
+        if remaining_seconds <= 0:
+            stop_code = "MAX_TOTAL_SECONDS_EXCEEDED"
+        elif remaining_bytes <= 0:
+            stop_code = "MAX_TOTAL_BYTES_EXCEEDED"
+        elif remaining_records <= 0:
+            stop_code = "MAX_TOTAL_RECORDS_EXCEEDED"
+        if stop_code is not None:
+            mark_page_not_evaluated(
+                (item["symbol"] for item in page_candidates[next_position:]), stop_code
+            )
+            break
+
+        chunk_candidates = page_candidates[next_position:next_position + _MAX_COMPARE_SYMBOLS]
+        chunk = research_compare(
+            symbols=tuple(item["symbol"] for item in chunk_candidates),
+            target_session=target.isoformat(),
+            source_roots=roots,
+            units=units,
+            limits=limits,
+            budget=CompareBudget(remaining_bytes, remaining_records, remaining_seconds),
+        )
+        total_bytes += chunk["budget"]["used_bytes"]
+        total_records += chunk["budget"]["used_records"]
+        for result in chunk["results"]:
+            candidate = candidate_by_symbol[result["requested_symbol"]]
+            result["source_candidate"] = {
+                **candidate,
+                "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
+            }
+            page_results.append(result)
+        next_position += len(chunk["results"])
+        stop_code = chunk["budget"]["exhausted_by"]
+        if stop_code is not None and next_position < len(page_candidates):
+            mark_page_not_evaluated(
+                (item["symbol"] for item in page_candidates[next_position:]), stop_code
+            )
+            break
+
+    available = sum(item.get("status") == "AVAILABLE" for item in page_results)
+    failed = sum(item.get("status") == "FAILED" for item in page_results)
+    partial_unknown = sum(item.get("status") == "PARTIAL_UNKNOWN" for item in page_results)
+    not_evaluated = sum(item.get("status") == "NOT_EVALUATED" for item in page_results)
+    classified = available + failed + partial_unknown + not_evaluated
+    if classified != len(page_candidates):
+        raise ResearchEntryError(
+            "UNIVERSE_CLASSIFICATION_INCOMPLETE",
+            "本页来源候选未按可用、失败、部分未知和未评价完整分区",
+            context={"page_requested": len(page_candidates), "classified": classified},
+        )
+
+    short_summary: list[dict[str, Any]] = []
+    for item in page_results:
+        candidate = item["source_candidate"]
+        observation = item.get("observation_summary", {})
+        fields = observation.get("fields", {})
+        positions = fields.get("moving_average_position", {})
+        short_summary.append({
+            "symbol": candidate["symbol"],
+            "market": candidate["market"],
+            "board": candidate["board"],
+            "target_session": target.isoformat(),
+            "status": item["status"],
+            "source_last_session": item.get("source_last_session"),
+            "raw_close": fields.get("raw_close"),
+            "ma5": fields.get("ma5"),
+            "ma20": fields.get("ma20"),
+            "ma60": fields.get("ma60"),
+            "atr20": fields.get("atr20"),
+            "ret5": fields.get("ret5"),
+            "ret20": fields.get("ret20"),
+            "amount": fields.get("amount"),
+            "volume": fields.get("volume"),
+            "close_vs_ma20": positions.get("close_vs_ma20"),
+            "raw_availability": item.get("raw_availability"),
+            "core_availability": item.get("core_availability"),
+            "error_code": item.get("error_code"),
+        })
+
+    page_remaining = max(0, candidate_total - min(offset + len(page_candidates), candidate_total))
+    evaluated_page = available + failed + partial_unknown
+    status = "COMPLETE_WITH_DISCLOSURES" if failed == 0 and partial_unknown == 0 and not_evaluated == 0 else "PARTIAL"
+    return {
+        "status": status,
+        "status_explanation": "COMPLETE_WITH_DISCLOSURES仅表示当前页请求已处理并附带数据披露；不表示全候选池已读取，也不表示所有Raw/Core字段已知。请检查本页、未评价分母和逐字段quality/reason。",
+        "candidate_contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
+        "target_session": target.isoformat(),
+        "research_mode": "NON_PIT_RETROSPECTIVE",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "discovery": catalog,
+        "filters": {"market": market_filter, "board": board_filter},
+        "denominators": {
+            "source_candidate_total": catalog["candidate_count"],
+            "filtered_candidate_total": candidate_total,
+            "page_requested": len(page_candidates),
+            "page_evaluated": evaluated_page,
+            "page_available": available,
+            "page_failed": failed,
+            "page_partial_unknown": partial_unknown,
+            "page_not_evaluated": not_evaluated,
+            "page_classified": classified,
+            "page_partition_complete": classified == len(page_candidates),
+            "unselected_by_this_page": candidate_total - len(page_candidates),
+            "unselected_before_offset": min(offset, candidate_total),
+            "remaining_after_page": page_remaining,
+            "not_evaluated_in_filtered_candidate_set": max(0, candidate_total - evaluated_page),
+        },
+        "page": {
+            "offset": offset,
+            "limit": limit,
+            "returned": len(page_candidates),
+            "next_offset": offset + len(page_candidates) if page_remaining else None,
+            "remaining_after_page": page_remaining,
+            "symbols": [item["symbol"] for item in page_candidates],
+        },
+        "raw_availability": _aggregate_availability(page_results, "raw_availability"),
+        "core_availability": _aggregate_availability(page_results, "core_availability"),
+        "budget": {
+            "max_total_bytes": budget.max_total_bytes,
+            "max_total_records": budget.max_total_records,
+            "max_total_seconds": budget.max_total_seconds,
+            "used_bytes": total_bytes,
+            "used_records": total_records,
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+            "discovery_elapsed_seconds": catalog["elapsed_seconds"],
+            "exhausted_by": stop_code,
+            "enforcement": "ONE_SHARED_PAGE_BUDGET_ACROSS_RESEARCH_COMPARE_SUBBATCHES_OF_20",
+        },
+        "summary": short_summary,
+        "results": page_results,
     }
