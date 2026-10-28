@@ -467,6 +467,77 @@ def _validated_contract(request: DayPlanRequest) -> tuple[Mapping[str, object], 
     return request.contract, calculated
 
 
+def _validate_field_dependency_closure(
+    scope: Mapping[str, object],
+    included_stages: set[str],
+    binding_by_id: Mapping[str, Mapping[str, object]],
+    artifacts: Mapping[str, object],
+) -> None:
+    field_registry = scope.get("field_registry")
+    if not isinstance(field_registry, list) or not field_registry:
+        raise _plan_error("DAG_FIELD_REGISTRY_INCOMPLETE", "scope缺少字段依赖登记")
+    if scope.get("within_stage_field_toposort_required") is not True:
+        raise _plan_error("DAG_FIELD_TOPOLOGY_NOT_REQUIRED", "scope未要求同stage字段依赖拓扑校验")
+
+    fields_by_id: dict[str, Mapping[str, object]] = {}
+    for field in field_registry:
+        if not isinstance(field, Mapping):
+            raise _plan_error("DAG_FIELD_INVALID", "字段依赖登记结构非法")
+        field_id = field.get("field_id")
+        producer_stage = field.get("producer_stage")
+        output_artifact = field.get("output_artifact")
+        consumers = field.get("consumers")
+        input_fields = field.get("input_fields")
+        if (not isinstance(field_id, str) or not field_id.strip() or field_id in fields_by_id
+                or not isinstance(producer_stage, str) or producer_stage not in included_stages
+                or not isinstance(output_artifact, str) or not output_artifact
+                or not isinstance(consumers, list) or not consumers
+                or any(not isinstance(item, str) or not item.strip() for item in consumers)
+                or len(consumers) != len(set(consumers))
+                or not isinstance(input_fields, list)
+                or any(not isinstance(item, str) or not item.strip() for item in input_fields)
+                or len(input_fields) != len(set(input_fields))):
+            raise _plan_error("DAG_FIELD_INVALID", "字段身份、stage、输入或consumer登记非法")
+        artifact = artifacts.get(output_artifact)
+        stage_binding = binding_by_id.get(producer_stage)
+        if (not isinstance(artifact, Mapping) or artifact.get("producer") != producer_stage
+                or not isinstance(stage_binding, Mapping)
+                or output_artifact not in stage_binding.get("outputs", [])):
+            raise _plan_error("DAG_FIELD_OUTPUT_UNBOUND", "字段输出产物未由其producer stage正式产生: " + field_id)
+        fields_by_id[field_id] = field
+
+    dependencies: dict[str, set[str]] = {field_id: set() for field_id in fields_by_id}
+    for field_id, field in fields_by_id.items():
+        producer_stage = field["producer_stage"]
+        for input_field_id in field["input_fields"]:
+            source = fields_by_id.get(input_field_id)
+            if source is None:
+                raise _plan_error("DAG_FIELD_INPUT_UNBOUND", field_id + "引用未登记字段: " + input_field_id)
+            source_stage = source["producer_stage"]
+            source_artifact = source["output_artifact"]
+            if source_stage != producer_stage:
+                stage_binding = binding_by_id[producer_stage]
+                source_artifact_contract = artifacts[source_artifact]
+                if (source_artifact not in stage_binding.get("required_inputs", [])
+                        or producer_stage not in source["consumers"]
+                        or producer_stage not in source_artifact_contract.get("consumers", [])):
+                    raise _plan_error(
+                        "DAG_FIELD_CONSUMER_MISMATCH",
+                        field_id + "的跨stage字段输入未同时绑定required artifact及字段/产物consumer: " + input_field_id,
+                    )
+            dependencies[field_id].add(input_field_id)
+
+    remaining = {field_id: set(inputs) for field_id, inputs in dependencies.items()}
+    while remaining:
+        ready = sorted(field_id for field_id, inputs in remaining.items() if not inputs)
+        if not ready:
+            raise _plan_error("DAG_FIELD_CYCLE", "scope字段依赖存在环")
+        for field_id in ready:
+            del remaining[field_id]
+        for inputs in remaining.values():
+            inputs.difference_update(ready)
+
+
 def _validate_stage_dag(contract: Mapping[str, object], scope_id: str) -> tuple[tuple[str, ...], tuple[tuple[str, str], ...]]:
     bindings = contract.get("scope_bindings")
     scope = bindings.get(scope_id) if isinstance(bindings, Mapping) else None
@@ -541,6 +612,8 @@ def _validate_stage_dag(contract: Mapping[str, object], scope_id: str) -> tuple[
                 raise _plan_error("DAG_CONSUMER_INPUT_MISMATCH", stage_id + "输入未登记为artifact消费者: " + artifact_id)
 
     included = set(binding_by_id)
+    _validate_field_dependency_closure(scope, included, binding_by_id, artifacts)
+
     for stage_id, binding in binding_by_id.items():
         for artifact_id in binding.get("required_inputs", []):
             if artifact_id.startswith("ext."):
