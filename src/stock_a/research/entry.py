@@ -1323,6 +1323,7 @@ def research_stock(
     units: UnitContract,
     limits: ReadLimits,
     profile_contract: dict[str, Any] | None = None,
+    include_baostock_evidence: bool = False,
 ) -> dict[str, Any]:
     """验证目标会话后保留可读Raw；仅在可用前态上调用现有Core。"""
     target = _parse_target(target_session)
@@ -1536,6 +1537,20 @@ def research_stock(
             core=core,
             calendar_revision=calendar_revision,
             contract=profile_contract,
+        )
+    if type(include_baostock_evidence) is not bool:
+        raise ResearchEntryError("BAOSTOCK_OPTION_INVALID", "BaoStock证据开关必须为布尔值")
+    if include_baostock_evidence:
+        # 可选SDK仅在用户显式请求research-stock补充证据时延迟导入。
+        from stock_a.sources.baostock.client import query_daily_rows
+        from stock_a.sources.baostock.evidence import project_baostock_evidence
+
+        query = query_daily_rows(normalized, target.isoformat())
+        result["baostock_evidence"] = project_baostock_evidence(
+            query=query,
+            requested_symbol=normalized,
+            target_session=target.isoformat(),
+            tdx_result=result,
         )
     return result
 

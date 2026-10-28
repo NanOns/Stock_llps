@@ -13,6 +13,9 @@ dependencies = [
     "tzdata>=2026.5; platform_system == 'Windows'",
 ]
 
+[project.optional-dependencies]
+baostock = ["baostock==0.9.3"]
+
 [project.scripts]
 stock-a = "stock_a.diagnostics:main"
 

@@ -412,6 +412,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_research_arguments(stock)
     stock.add_argument("--format", dest="output_format", choices=("summary", "json"), default="json", help="输出可读事实摘要或完整JSON，默认json")
     stock.add_argument("--include-profile-preview", action="store_true", help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
+    stock.add_argument("--include-baostock-evidence", action="store_true", help="显式查询目标日单条BaoStock只读补充字段；可能联网，单位与身份仍需独立核验")
     compare = commands.add_parser("research-compare", help="盘后只读输出有界多标的Core基础观察摘要")
     compare.add_argument("symbols", nargs="+", help="一个或多个来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(compare)
@@ -898,6 +899,7 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 units=units,
                 limits=limits,
                 profile_contract=profile_contract,
+                include_baostock_evidence=getattr(args, "include_baostock_evidence", False),
             )
     except ResearchEntryError as error:
         if error.code == "SOURCE_ACCESS_DENIED":
@@ -1058,6 +1060,29 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
                     f"{component['field_id']}：{component['status']}；缺少={missing or '未登记生产者'}；"
                     f"原因={component['reason']}"
                 )
+    bao = result.get("baostock_evidence")
+    if bao:
+        fields = bao.get("fields", {})
+        comparisons = bao.get("comparisons", {})
+        lines.append(
+            f"BaoStock补充来源：{bao.get('status')}；代码={bao.get('requested_source_code')}；"
+            f"请求时钟={bao.get('request_started_at')}至{bao.get('request_completed_at')}；"
+            "NON_PIT_RETROSPECTIVE/RAW_UNADJUSTED/SOURCE_SYMBOL_ONLY；TDX主结果未替换。"
+        )
+        for key, label in (("close", "收盘"), ("volume", "成交量"), ("amount", "成交金额"), ("turn", "换手")):
+            field = fields.get(key, {})
+            lines.append(f"Bao {label}：{_summary_field(field)}；对照={comparisons.get(key, {}).get('status', '—')}"
+                         f"/{comparisons.get(key, {}).get('observed_relation_under_declared_units', '—')}")
+        for key, label in (("tradestatus", "来源交易状态"), ("isST", "来源ST")):
+            field = fields.get(key, {})
+            lines.append(f"Bao {label}：{field.get('status', 'UNKNOWN')}；原值={field.get('raw_value')}；"
+                         f"质量={field.get('quality')}；原因={field.get('reason') or '无'}")
+        lines.append(
+            f"Bao金额差(Bao−TDX)={comparisons.get('amount', {}).get('difference_baostock_minus_tdx')}；"
+            f"成交量差(Bao−TDX)={comparisons.get('volume', {}).get('difference_baostock_minus_tdx')}；"
+            "差值基于调用方TDX倍率假设，不构成单位权威或TDX错误判定。"
+        )
+        lines.append("正式profile()生产准入仍阻断；本查询不计算换手历史分位、不写来源或数据库。")
     return "\n".join(lines)
 
 
