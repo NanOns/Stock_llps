@@ -1,6 +1,7 @@
 # Stock A：默认拒绝，仅放行业务和正式规范；用途仍须人工审查。
 *
 !/.gitignore
+!/自动推进进度及问题_临时分享.md
 !/.gitattributes
 !/AGENTS.md
 !/PROJECT_SPEC.md
