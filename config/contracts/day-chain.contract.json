@@ -20584,13 +20584,19 @@
       },
       "inventory_entry_fields": ["source_key", "byte_size", "content_sha256"],
       "transformation_digest_chain": [
-        "source_byte_sha256", "parsed_row_set_digest", "mapped_fact_digest",
+        "source_byte_sha256", "parsed_row_set_digest", "mapped_fact_digest", "mapping_disposition_digest",
         "p05_canonical_digest", "conversion_contract_digest"
       ],
       "conversion_contract_fields": ["parser_version", "unit_version", "p04_mapping_version", "p05_conversion_version", "p05_field_projection_version", "source_binding_id", "normalization_version", "field_rules_digest"],
       "p05_recomputation": "APPLY_EXPLICIT_FIELD_RULES_AND_RATIONAL_UNIT_FACTORS_TO_PARSED_ROWS_WITH_P04_IDENTITY_CALENDAR_MAPPING_THEN_COMPARE_EXACT_VALUE_QUALITY_REASON_AND_SOURCE_BINDING",
       "field_rule_fields": ["source_field", "canonical_field", "quality_field", "reason_field", "operation", "factor_numerator", "factor_denominator"],
       "p05_row_source_binding": "SOURCE_RECORD_KEYS_MUST_RESOLVE_TO_P04_MAPPING_FOR_SAME_ENTITY_SESSION",
+      "source_mapping_dispositions": {
+        "required_per_parsed_record": true,
+        "fields": ["source_record_key", "status", "reason"],
+        "statuses": ["MAPPED", "UNMAPPED", "IDENTITY_CONFLICT", "REJECTED_BY_SCOPE"],
+        "unresolved_outcome": "PARTIAL_DECLARED_SCOPE_NOT_CANONICAL_BOUND"
+      },
       "missing_source_bytes_outcome": "VERIFIED_AT_CAPTURE_NOT_REPLAYABLE_SOURCE_BYTES",
       "source_bytes_present_outcome": "SOURCE_BYTES_PRESENT_PARSER_REPLAY_PENDING_UNLESS_TRUSTED_PARSER_ACTUALLY_REPLAYED",
       "clock_order": [

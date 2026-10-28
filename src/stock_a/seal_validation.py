@@ -366,21 +366,68 @@ def _fraction_decimal_text(value: str, numerator: int, denominator: int) -> str:
     return sign + integer + ("." + fractional if fractional else "")
 
 
+def _source_mapping_disposition_digest(
+    parsed_rows: Sequence[Mapping[str, object]],
+    mapped_rows: Sequence[Mapping[str, object]],
+    mapping_dispositions: Sequence[Mapping[str, object]],
+) -> tuple[str, tuple[str, ...]]:
+    if not isinstance(mapping_dispositions, Sequence) or isinstance(mapping_dispositions, (str, bytes)):
+        _fail("SOURCE_SEAL_MAPPING_DISPOSITION_INVALID", "来源映射处置集合类型非法")
+    parsed_keys = [row.get("source_record_key") if isinstance(row, Mapping) else None for row in parsed_rows]
+    if any(not isinstance(key, str) or not key for key in parsed_keys) or len(set(parsed_keys)) != len(parsed_keys):
+        _fail("SOURCE_SEAL_RECORD_KEY_INVALID", "解析来源记录键缺失或重复")
+    disposition_by_key: dict[str, Mapping[str, object]] = {}
+    allowed = {"MAPPED", "UNMAPPED", "IDENTITY_CONFLICT", "REJECTED_BY_SCOPE"}
+    for item in mapping_dispositions:
+        if not isinstance(item, Mapping):
+            _fail("SOURCE_SEAL_MAPPING_DISPOSITION_INVALID", "来源映射处置必须是结构化记录")
+        key, status = item.get("source_record_key"), item.get("status")
+        if not isinstance(key, str) or not key or status not in allowed or "reason" not in item:
+            _fail("SOURCE_SEAL_MAPPING_DISPOSITION_INVALID", "来源映射处置缺少记录键、允许状态或显式原因")
+        if item["reason"] is not None and (not isinstance(item["reason"], str) or not item["reason"]):
+            _fail("SOURCE_SEAL_MAPPING_DISPOSITION_INVALID", "来源映射处置原因必须为空或非空字符串")
+        if key in disposition_by_key:
+            _fail("SOURCE_SEAL_DUPLICATE_BUSINESS_KEY", "解析来源记录存在重复映射处置")
+        disposition_by_key[key] = item
+    if set(disposition_by_key) != set(parsed_keys):
+        _fail("SOURCE_SEAL_MAPPING_DISPOSITION_INCOMPLETE", "每条解析来源记录必须恰有一条映射或具名例外处置")
+    mapped_keys: list[str] = []
+    for row in mapped_rows:
+        key = row.get("source_record_key") if isinstance(row, Mapping) else None
+        if not isinstance(key, str) or not key:
+            _fail("SOURCE_SEAL_RECORD_KEY_INVALID", "P04映射来源记录键缺失")
+        mapped_keys.append(key)
+    if len(set(mapped_keys)) != len(mapped_keys):
+        _fail("SOURCE_SEAL_DUPLICATE_BUSINESS_KEY", "同一解析来源记录存在重复P04映射")
+    mapped_set = set(mapped_keys)
+    declared_mapped = {key for key, item in disposition_by_key.items() if item["status"] == "MAPPED"}
+    if mapped_set != declared_mapped:
+        _fail("SOURCE_SEAL_MAPPING_DISPOSITION_MISMATCH", "P04实际映射集合与逐记录处置不一致")
+    digest = records_digest("P04_SOURCE_MAPPING_DISPOSITIONS_V1", list(mapping_dispositions), ("source_record_key",))
+    unresolved = tuple(sorted((item["status"] for item in disposition_by_key.values() if item["status"] != "MAPPED")))
+    return digest, unresolved
+
+
 def derive_canonical_rows(
     *,
     parsed_rows: Sequence[Mapping[str, object]],
     mapped_rows: Sequence[Mapping[str, object]],
+    mapping_dispositions: Sequence[Mapping[str, object]],
     field_rules: Sequence[Mapping[str, object]],
     source_binding_id: str,
     p04_mapping_version: str,
     unit_version: str,
     normalization_version: str,
+    allow_partial_mapping: bool = False,
 ) -> tuple[Mapping[str, object], ...]:
     """按显式字段/单位规则由P03解析行和P04映射独立计算预期P05行。"""
     if not all(isinstance(item, str) and item for item in (source_binding_id, p04_mapping_version, unit_version, normalization_version)):
         _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "P05计算缺少source binding或版本")
     if not isinstance(field_rules, Sequence) or isinstance(field_rules, (str, bytes)) or not field_rules:
         _fail("SOURCE_SEAL_CONVERSION_CONTRACT_INVALID", "P05字段转换规则缺失")
+    _, unresolved = _source_mapping_disposition_digest(parsed_rows, mapped_rows, mapping_dispositions)
+    if unresolved and not allow_partial_mapping:
+        _fail("SOURCE_SEAL_MAPPING_DISPOSITION_UNRESOLVED", "存在已明确处置但未成功映射的解析记录")
     parsed_by_key: dict[str, Mapping[str, object]] = {}
     for row in parsed_rows:
         key = row.get("source_record_key") if isinstance(row, Mapping) else None
@@ -462,6 +509,7 @@ def verify_transformation_chain(
     field_rules: Sequence[Mapping[str, object]],
     parsed_rows: Sequence[Mapping[str, object]],
     mapped_rows: Sequence[Mapping[str, object]],
+    mapping_dispositions: Sequence[Mapping[str, object]],
     canonical_rows: Sequence[Mapping[str, object]],
     claimed_digests: Mapping[str, str],
     capture_verification: Mapping[str, object] | None = None,
@@ -494,6 +542,7 @@ def verify_transformation_chain(
             _fail("SOURCE_SEAL_CAPTURE_VERIFICATION_INVALID", "捕获验证记录缺少算法或证据引用")
     parsed_digest = records_digest("PARSED_ROW_SET_V1", parsed_rows, ("source_record_key",))
     mapped_digest = records_digest("P04_MAPPED_FACTS_V1", mapped_rows, ("source_record_key", "entity_id", "session"))
+    mapping_disposition_digest, unresolved_mappings = _source_mapping_disposition_digest(parsed_rows, mapped_rows, mapping_dispositions)
     parsed_keys = {row["source_record_key"] for row in parsed_rows}
     mapped_by_entity_session: dict[tuple[object, object], set[object]] = {}
     for row in mapped_rows:
@@ -511,11 +560,13 @@ def verify_transformation_chain(
     expected_canonical_rows = derive_canonical_rows(
         parsed_rows=parsed_rows,
         mapped_rows=mapped_rows,
+        mapping_dispositions=mapping_dispositions,
         field_rules=field_rules,
         source_binding_id=source_binding_id,
         p04_mapping_version=p04_mapping_version,
         unit_version=unit_version,
         normalization_version=normalization_version,
+        allow_partial_mapping=True,
     )
     canonical_projection = [
         {**row, "source_record_keys": sorted(row["source_record_keys"], key=lambda value: str(value).encode("utf-8"))}
@@ -544,6 +595,7 @@ def verify_transformation_chain(
         "capture_evidence_digest": capture_evidence_digest,
         "parsed_digest": parsed_digest,
         "mapped_digest": mapped_digest,
+        "mapping_disposition_digest": mapping_disposition_digest,
         "canonical_digest": canonical_digest,
     })
     actual = {
@@ -557,11 +609,13 @@ def verify_transformation_chain(
         if key not in claimed_digests or _require_sha256(claimed_digests[key], "SOURCE_SEAL_CONVERSION_DIGEST_INVALID") != digest:
             _fail("SOURCE_SEAL_CANONICAL_BINDING_MISMATCH", f"转换链阶段摘要不一致：{key}")
     return SealProofResult(
-        "CANONICAL_BOUND", transformation_digest, replayability=replayability,
+        "PARTIAL_DECLARED_SCOPE" if unresolved_mappings else "CANONICAL_BOUND", transformation_digest,
+        errors=("SOURCE_MAPPING_NOT_FULLY_RESOLVED",) if unresolved_mappings else (), replayability=replayability,
         proof_digests=(
             ("source_byte_sha256", source_digest),
             ("parsed_row_set_digest", parsed_digest),
             ("mapped_fact_digest", mapped_digest),
+            ("mapping_disposition_digest", mapping_disposition_digest),
             ("p05_canonical_digest", canonical_digest),
             ("conversion_contract_digest", transformation_digest),
         ),
