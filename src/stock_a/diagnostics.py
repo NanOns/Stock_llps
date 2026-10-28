@@ -318,7 +318,7 @@ def _json_default(value: Any) -> Any:
 
 
 def _emit(payload: dict[str, Any], *, error: bool = False) -> None:
-    text = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"))
+    text = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"), default=_json_default)
     print(text, file=sys.stderr if error else sys.stdout)
 
 
