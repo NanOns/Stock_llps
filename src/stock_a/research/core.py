@@ -47,6 +47,9 @@ class MarketSessionCalendar:
 _STATES = {"ACTUAL", "CONFIRMED_SUSPENSION", "UNKNOWN", "PRE_LISTING",
            "ADJUSTMENT_UNKNOWN", "IDENTITY_UNKNOWN"}
 _PRICE_FIELDS = ("open", "high", "low", "close")
+_MA_PERIODS = (5, 10, 20, 60)
+_MA_SLOPE_WINDOWS = ((20, 5), (60, 10))
+CORE_MAX_ACTUAL_LOOKBACK = max(max(_MA_PERIODS), *(period + offset for period, offset in _MA_SLOPE_WINDOWS))
 
 
 def _validate_history(history: Sequence[CoreObservation], calendar: MarketSessionCalendar) -> None:
@@ -252,7 +255,7 @@ def calculate_core(history: Sequence[CoreObservation], *,
         return {name: unknown(reason) for name in _OUTPUT_FIELDS}
 
     result: dict[str, FieldValue] = {}
-    for period in (5, 10, 20, 60):
+    for period in _MA_PERIODS:
         rows, reason = _actual_window(history, period)
         values, value_reason = _column(rows, "close") if not reason else (None, reason)
         values = values or []
@@ -321,7 +324,7 @@ def calculate_core(history: Sequence[CoreObservation], *,
             result[f"core.atr{period}"] = unknown(reason)
 
     # MA slope windows compare current and lagged actual-bar moving averages.
-    for period, offset in ((20, 5), (60, 10)):
+    for period, offset in _MA_SLOPE_WINDOWS:
         rows, reason = _actual_window(history, period + offset)
         values, value_reason = _column(rows, "close") if not reason else (None, reason)
         atr = result["core.atr20"]

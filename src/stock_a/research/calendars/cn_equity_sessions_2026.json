@@ -8,7 +8,7 @@
     "SSE",
     "SZSE"
   ],
-  "weekend_policy": "周六周日休市；以下列表只含官方年度安排中工作日照常开市的会话",
+  "weekend_policy": "周六周日休市；不因补班推断周末开市",
   "closed_weekday_ranges": [
     [
       "2026-01-01",
@@ -40,8 +40,10 @@
     ]
   ],
   "source_urls": [
-    "https://www.sse.com.cn/disclosure/dealinstruc/closed/",
-    "https://www.szse.cn/English/services/trading/calendar/"
+    "https://www.sse.com.cn/disclosure/announcement/general/c/c_20251222_10802507.shtml",
+    "https://www.szse.cn/disclosure/notice/general/t20251222_618087.html",
+    "https://www.sse.com.cn/disclosure/announcement/general/c/c_20260915_10832273.shtml",
+    "https://www.szse.cn/www/disclosure/notice/general/t20260917_622911.html"
   ],
   "source_snapshot_as_of": "2026-10-28",
   "sessions": [
@@ -287,5 +289,8 @@
     "2026-12-29",
     "2026-12-30",
     "2026-12-31"
-  ]
+  ],
+  "evidence_status": "VERIFIED_EXCHANGE_NOTICES_CROSSCHECKED",
+  "evidence_reviewed_at": "2026-10-28",
+  "weekday_policy": "WEEKDAYS_EXCEPT_LISTED_OFFICIAL_CLOSURES"
 }

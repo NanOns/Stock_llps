@@ -31,7 +31,7 @@ from stock_a.sources.tdx.day_source import open_day_file, read_protected_bytes
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
 from stock_a.postgres_identity import inspect_postgres
 from stock_a.postgres_binding import BindingRefused, bind_stock_namespace
-from stock_a.research.entry import ResearchEntryError, research_compare, research_stock
+from stock_a.research.entry import CompareBudget, ResearchEntryError, research_compare, research_stock
 
 
 _WORKSPACE = Path("G:/codex work/Stock A")
@@ -388,6 +388,9 @@ def _parser() -> argparse.ArgumentParser:
     compare = commands.add_parser("research-compare", help="同一交易会话只读对比多只股票的Core字段")
     compare.add_argument("symbols", nargs="+", help="一个或多个来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(compare)
+    compare.add_argument("--max-total-bytes", type=int, default=335544320, help="本次多股票扫描总字节上限，默认335544320")
+    compare.add_argument("--max-total-records", type=int, default=4000000, help="本次多股票解析总记录上限，默认4000000")
+    compare.add_argument("--max-total-seconds", type=float, default=120.0, help="本次多股票扫描总耗时秒数上限，默认120")
     return parser
 
 
@@ -806,12 +809,18 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或读取预算无效：{error}", _EXIT_ARGUMENT) from error
     try:
         if compare:
+            budget = CompareBudget(
+                args.max_total_bytes,
+                args.max_total_records,
+                args.max_total_seconds,
+            )
             result = research_compare(
                 symbols=args.symbols,
                 target_session=args.target_session,
                 source_roots=roots,
                 units=units,
                 limits=limits,
+                budget=budget,
             )
         else:
             result = research_stock(

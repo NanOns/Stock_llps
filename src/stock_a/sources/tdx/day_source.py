@@ -13,7 +13,7 @@ import time
 from typing import Callable, Iterable, Iterator
 
 from stock_a.domain import ContractError
-from stock_a.sources.tdx.day import UnitContract
+from stock_a.sources.tdx.day import DAY_STRUCT, UnitContract
 from stock_a.sources.tdx.day_stream import (
     DayReadError,
     DayRecordScan,
@@ -351,6 +351,10 @@ class _FileDayScan(Iterator[LocatedDay]):
         return self._scan.complete
 
     @property
+    def progress(self) -> tuple[int, int]:
+        return self._scan.progress
+
+    @property
     def source_handle_closed(self) -> bool:
         return self._stream.closed
 
@@ -407,6 +411,30 @@ class _DayFileContext:
         if not _inside_roots(initial_path, roots):
             raise _failure("SOURCE_PATH_OUTSIDE_ROOT", "PATH")
         initial_stat = _stat_version(initial_path)
+        if initial_stat.st_size > self._limits.max_bytes:
+            raise DayReadError(
+                "READ_LIMIT_EXCEEDED",
+                "BUDGET",
+                context={
+                    "byte_count": 0,
+                    "record_count": 0,
+                    "source_size_bytes": int(initial_stat.st_size),
+                    "max_bytes": self._limits.max_bytes,
+                },
+            )
+        record_limit_bytes = self._limits.max_records * DAY_STRUCT.size
+        if initial_stat.st_size > record_limit_bytes:
+            raise DayReadError(
+                "READ_LIMIT_EXCEEDED",
+                "BUDGET",
+                context={
+                    "byte_count": 0,
+                    "record_count": 0,
+                    "source_size_bytes": int(initial_stat.st_size),
+                    "source_record_limit_bytes": record_limit_bytes,
+                    "max_records": self._limits.max_records,
+                },
+            )
         if any(":" in part for part in initial_path.parts[1:]):
             raise _failure("SOURCE_PATH_INVALID", "PATH", detail="不接受NTFS备用数据流路径")
         if _clock_value(self._monotonic) - started_at > self._limits.max_seconds:

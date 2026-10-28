@@ -214,6 +214,11 @@ class DayRecordScan(Iterator[LocatedDay]):
     def complete(self) -> bool:
         return self._complete
 
+    @property
+    def progress(self) -> tuple[int, int]:
+        """返回截至当前已读字节数与已解码记录数，供累计预算准确记账。"""
+        return self._byte_count, self._record_count
+
     def close(self) -> None:
         """结束扫描但不关闭调用方拥有的流。"""
         if not self._complete:
@@ -467,6 +472,16 @@ class DayRecordScan(Iterator[LocatedDay]):
             else:
                 finished = False
                 row = self._located(raw)
+        except DayReadError as error:
+            error.context.setdefault("byte_count", self._byte_count)
+            error.context.setdefault("record_count", self._record_count)
+            attempted_index = error.record_index
+            if error.code in {"INVALID_DATE", "DUPLICATE_DATE", "SAME_DAY_CONFLICT", "NON_INCREASING_DATE"} and attempted_index is not None:
+                error.context.setdefault("records_attempted", attempted_index + 1)
+            else:
+                error.context.setdefault("records_attempted", self._record_count)
+            self._invalidate()
+            raise
         except BaseException:
             self._invalidate()
             raise
