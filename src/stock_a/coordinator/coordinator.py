@@ -8,7 +8,7 @@ ROOT = pathlib.Path(r'G:\codex work\Stock A')
 DELIVERY = pathlib.Path(r'G:\codex work\Stock A 交付\过程资料\协调器')
 TMP = r'G:\codex_tmp'
 VALIDATION_ROOT = pathlib.Path(r'G:\codex_tmp\test_temp\Stock A\coordinator_real_smoke')
-MODELS = {'EXEC': ('gpt-6-luna', 'high'), 'AUDIT': ('gpt-6.1-terra', 'low'), 'STAGE': ('gpt-6.1-sol', 'high')}
+MODELS = {'EXEC': ('gpt-6-luna', 'high'), 'AUDIT': ('gpt-6-luna', 'xhigh'), 'STAGE': ('gpt-6.1-terra', 'low')}
 TERMINAL = {'PASS', 'BLOCKED', 'RECOVERY_REQUIRED'}
 
 def now(): return datetime.datetime.now(datetime.timezone.utc).isoformat()
