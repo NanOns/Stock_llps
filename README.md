@@ -124,7 +124,7 @@ with open_day_file(source_path, (bound_source_root,), units, limits) as scan:
 
 ## TDX真实数据研究查询
 
-研究查询从`runtime.defaults.json`中的TDX只读来源根定位日线文件，按显式单位合同与预算完成整文件扫描，再复用既有Core。年度日历资源按文件年份动态装载；当前含经沪深交易所年度公告交叉核验的2025、2026年会话，资源记录版本、覆盖、来源URL和摘要。跨年查询使用此前已核验年度会话，不因目标年变化截断上一年窗口。只有缺bar的正式会话标为`UNKNOWN`，不会据此推断停牌或上市前；源记录落在已覆盖年度的休市日时拒绝计算。目标日期必须显式指定且为已核验交易会话；若目标年头70个会话缺少前一年日历，查询会以`CALENDAR_LOOKBACK_NOT_COVERED`拒绝，避免把跨年MA窗口误算为短历史。
+研究查询从`runtime.defaults.json`中的TDX只读来源根定位日线文件，按显式单位合同与预算完成整文件扫描，再复用既有Core。年度日历资源按文件年份动态装载；当前含经沪深交易所年度公告交叉核验的2025、2026年会话，资源记录版本、覆盖、来源URL和摘要。跨年查询只连接目标年前连续覆盖的年度后缀，缺失中间年度会明确报告日历缺口，不会把两侧会话拼成连续历史。目标日期必须显式指定且为已核验交易会话；若目标年不足70个已知会话且缺少连续前置年度，Core依赖足够历史的字段标记`CALENDAR_LOOKBACK_NOT_COVERED`，独立可验证的目标日原始行情仍会返回。缺bar的正式会话标为`UNKNOWN`，不会据此推断停牌或上市前；源记录落在已覆盖年度的休市日时拒绝计算。
 
 来源代码仅是研究序列定位键，不提供稳定`security_id`证明。输出区分`source_last_session`、`target_session`与本机`read_time`；金额/数量的解码质量和单位可信度分列，倍率仍是调用方假设。结果始终标记`NON_PIT_RETROSPECTIVE`和原始未复权坐标；不得当作当前行情、严格PIT、公司行为已调整或生产结论。命令不连接PostgreSQL、不写数据库或持久业务文件。
 
@@ -139,7 +139,7 @@ stock-a research-compare SH.600000 SZ.000001 SZ.300001 --target-session YYYY-MM-
   --max-total-bytes 335544320 --max-total-records 4000000 --max-total-seconds 120
 ```
 
-`--amount-to-cny`和`--volume-to-shares`是调用方声明的研究单位假设，不能替代经独立来源合同验收的单位权威。`research-compare`在每只证券的读取上限外再共享`--max-total-bytes`、`--max-total-records`、`--max-total-seconds`。超限后保留全部请求分母；已评价、失败和`NOT_EVALUATED`分别列明，后续证券不会被静默省略。耗时上限在每个读取块和证券边界检查，文件系统调用本身无法被同步扫描中断时，单个正在执行的系统调用可能延后返回。对比不对证券做身份推断或静默去重。
+`research-stock`和`research-compare`输出同一既有Core的盘后基础观察摘要，标记`RESEARCH_PREVIEW_NON_PIT`，包含原始收盘、MA5/20/60、ATR20、ret5/20、金额/数量质量和均线位置；每个值保留质量与未知原因。它只描述客观观察，不生成Profile、Seed、Priority、评分、排序或交易信号。`--amount-to-cny`和`--volume-to-shares`是调用方声明的研究单位假设，不能替代经独立来源合同验收的单位权威。`research-compare`最多接受20个不同证券，并在每只证券的读取上限外共享`--max-total-bytes`、`--max-total-records`、`--max-total-seconds`。超限后保留全部请求分母；`available`、`failed`、`partial_unknown`和`not_evaluated`构成精确分类分区，后续证券不会被静默省略。耗时上限在每个读取块和证券边界检查，文件系统调用本身无法被同步扫描中断时，单个正在执行的系统调用可能延后返回。对比不对证券做身份推断或静默去重。
 
 ## GBBQ字节解析
 

@@ -14,7 +14,7 @@ import re
 import time
 from typing import Any, Iterable
 
-from stock_a.domain import FieldValue, unknown
+from stock_a.domain import FieldValue, exact_number, unknown
 from stock_a.research.core import (
     CORE_MAX_ACTUAL_LOOKBACK,
     CoreObservation,
@@ -161,7 +161,13 @@ def _load_calendar(target: date) -> tuple[dict[str, Any], tuple[dict[str, Any], 
             resources[int(match.group(1))] = item.name
     if target.year not in resources:
         raise ResearchEntryError("CALENDAR_NOT_COVERED", "没有已核验的年度资源覆盖目标日期；本次不推断交易日")
-    selected_years = sorted(year for year in resources if year <= target.year)
+    available_years = sorted(year for year in resources if year <= target.year)
+    selected_years_descending: list[int] = []
+    year = target.year
+    while year in resources:
+        selected_years_descending.append(year)
+        year -= 1
+    selected_years = tuple(reversed(selected_years_descending))
     loaded: list[tuple[int, dict[str, Any], str, tuple[date, ...]]] = []
     for year in selected_years:
         payload, digest, sessions = _calendar_payload(resources[year], year)
@@ -176,12 +182,27 @@ def _load_calendar(target: date) -> tuple[dict[str, Any], tuple[dict[str, Any], 
     current_year_sessions_to_target = sum(
         day.year == target.year and day <= target for day in target_sessions
     )
-    prior_calendar_available = target.year - 1 in resources
-    if current_year_sessions_to_target < CORE_MAX_ACTUAL_LOOKBACK and not prior_calendar_available:
-        raise ResearchEntryError(
-            "CALENDAR_LOOKBACK_NOT_COVERED",
-            f"目标会话前不足{CORE_MAX_ACTUAL_LOOKBACK}个本年度官方会话，且缺少前一年度日历；为避免跨年窗口误算已阻止查询",
-        )
+    missing_intermediate_years = tuple(
+        missing_year for missing_year in range(available_years[0], target.year)
+        if missing_year not in resources
+    )
+    prior_calendar_available = target.year - 1 in selected_years
+    core_lookback_complete = (
+        current_year_sessions_to_target >= CORE_MAX_ACTUAL_LOOKBACK
+        or prior_calendar_available
+    )
+    coverage_context = {
+        "known_resource_years": available_years,
+        "calculation_years": selected_years,
+        "missing_intermediate_years": missing_intermediate_years,
+        "resource_continuity_status": "GAP_DETECTED" if missing_intermediate_years else "CONTIGUOUS",
+        "required_actual_sessions": CORE_MAX_ACTUAL_LOOKBACK,
+        "current_year_sessions_to_target": current_year_sessions_to_target,
+        "available_calendar_sessions_to_target": sum(day <= target for day in sessions),
+        "prior_year_resource_available": prior_calendar_available,
+        "core_lookback_complete": core_lookback_complete,
+        "core_lookback_reason": None if core_lookback_complete else "CALENDAR_LOOKBACK_NOT_COVERED",
+    }
     metadata = tuple({
         "calendar_id": payload["calendar_id"],
         "revision": payload["revision"],
@@ -194,6 +215,7 @@ def _load_calendar(target: date) -> tuple[dict[str, Any], tuple[dict[str, Any], 
         "resource_sha256": digest,
         "source_urls": payload["source_urls"],
     } for year, payload, digest, year_sessions in loaded)
+    metadata = (*metadata[:-1], {**metadata[-1], "coverage_context": coverage_context})
     revisions = "+".join(f"{item['year']}:{item['revision']}" for item in metadata)
     return target_item[1], metadata, revisions, sessions
 
@@ -249,12 +271,12 @@ def _render_raw(decoded: DecodedDay | None, units: UnitContract) -> dict[str, An
         fields = {name: _render_field(unknown("TARGET_BAR_MISSING")) for name in _RAW_FIELDS}
     else:
         fields = {
-        "open": _render_field(decoded.raw_open),
-        "high": _render_field(decoded.raw_high),
-        "low": _render_field(decoded.raw_low),
-        "close": _render_field(decoded.raw_close),
-        "amount": _render_field(decoded.amount),
-        "volume": _render_field(decoded.volume),
+            "open": _render_field(decoded.raw_open),
+            "high": _render_field(decoded.raw_high),
+            "low": _render_field(decoded.raw_low),
+            "close": _render_field(decoded.raw_close),
+            "amount": _render_field(decoded.amount),
+            "volume": _render_field(decoded.volume),
         }
     fields["amount"]["unit_trust"] = {
         "status": "CALLER_DECLARED_ASSUMPTION",
@@ -267,6 +289,90 @@ def _render_raw(decoded: DecodedDay | None, units: UnitContract) -> dict[str, An
         "volume_to_shares": units.volume_to_shares,
     }
     return fields
+
+
+def _field_relation(left: FieldValue, right: FieldValue) -> FieldValue:
+    if left.quality != "OBSERVED":
+        return unknown(left.reason or "UPSTREAM_UNKNOWN")
+    if right.quality != "OBSERVED":
+        return unknown(right.reason or "UPSTREAM_UNKNOWN")
+    try:
+        left_value = exact_number(left.value)
+        right_value = exact_number(right.value)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return unknown("INVALID_OBSERVATION_INPUT")
+    if left_value > right_value:
+        return FieldValue("ABOVE")
+    if left_value < right_value:
+        return FieldValue("BELOW")
+    return FieldValue("EQUAL")
+
+
+def _field_greater_than(left: FieldValue, right: FieldValue) -> FieldValue:
+    relation = _field_relation(left, right)
+    if relation.quality != "OBSERVED":
+        return unknown(relation.reason or "UPSTREAM_UNKNOWN")
+    return FieldValue(relation.value == "ABOVE")
+
+
+def _apply_calendar_coverage_to_core(
+    core: dict[str, FieldValue],
+    history: tuple[CoreObservation, ...],
+    coverage_context: dict[str, Any],
+) -> None:
+    if coverage_context.get("core_lookback_complete") or not history:
+        return
+    if any(row.state != "ACTUAL" for row in history):
+        return
+    for name, field in tuple(core.items()):
+        if field.quality != "OBSERVED" and field.reason in {"SHORT_HISTORY", "SHORT_SESSION_HISTORY"}:
+            core[name] = unknown("CALENDAR_LOOKBACK_NOT_COVERED")
+
+
+def _observation_summary(
+    *,
+    symbol: str,
+    target_session: date,
+    source_last_session: date,
+    raw_fields: dict[str, Any],
+    raw_close: FieldValue,
+    core: dict[str, FieldValue],
+) -> dict[str, Any]:
+    return {
+        "contract": "RESEARCH_PREVIEW_NON_PIT",
+        "scope": "OBJECTIVE_OBSERVATIONS_ONLY_NO_PROFILE_SEED_PRIORITY_OR_TRADE_SIGNAL",
+        "requested_symbol": symbol,
+        "target_session": target_session.isoformat(),
+        "source_last_session": source_last_session.isoformat(),
+        "price_coordinate": "RAW_UNADJUSTED",
+        "fields": {
+            "raw_close": raw_fields["close"],
+            "ma5": _render_field(core["core.ma5"]),
+            "ma20": _render_field(core["core.ma20"]),
+            "ma60": _render_field(core["core.ma60"]),
+            "atr20": _render_field(core["core.atr20"]),
+            "ret5": _render_field(core["core.ret5"]),
+            "ret20": _render_field(core["core.ret20"]),
+            "amount": raw_fields["amount"],
+            "volume": raw_fields["volume"],
+            "close_above_ma20": _render_field(
+                _field_greater_than(raw_close, core["core.ma20"])
+            ),
+            "moving_average_position": {
+                "close_vs_ma5": _render_field(
+                    _field_relation(raw_close, core["core.ma5"])
+                ),
+                "close_vs_ma20": _render_field(
+                    _field_relation(raw_close, core["core.ma20"])
+                ),
+                "close_vs_ma60": _render_field(
+                    _field_relation(raw_close, core["core.ma60"])
+                ),
+                "ma5_vs_ma20": _render_field(_field_relation(core["core.ma5"], core["core.ma20"])),
+                "ma20_vs_ma60": _render_field(_field_relation(core["core.ma20"], core["core.ma60"])),
+            },
+        },
+    }
 
 
 def _source_path(roots: Iterable[str], directory: str, code: str) -> tuple[Path, Path]:
@@ -346,9 +452,10 @@ def research_stock(
     units: UnitContract,
     limits: ReadLimits,
 ) -> dict[str, Any]:
-    """读取一条来源代码序列并在已核验年度日历上调用现有Core。"""
+    """验证目标会话后保留可读Raw；仅在可用前态上调用现有Core。"""
     target = _parse_target(target_session)
     calendar_payload, calendar_metadata, calendar_revision, calendar_sessions = _load_calendar(target)
+    coverage_context = calendar_metadata[-1]["coverage_context"]
     calendar_years = {item["year"] for item in calendar_metadata}
     session_set = set(calendar_sessions)
     normalized, market_directory, board = _normalize_symbol(symbol)
@@ -383,9 +490,19 @@ def research_stock(
     )
     history = tuple(_observation(day, normalized, selected.get(day)) for day in session_slice)
     core = calculate_core(history, official_calendar=bounded_calendar)
+    _apply_calendar_coverage_to_core(core, history, coverage_context)
     target_bar = selected.get(target)
     unknown_core = sum(field.quality != "OBSERVED" for field in core.values())
     raw_fields = _render_raw(target_bar, units)
+    raw_close = target_bar.raw_close if target_bar is not None else unknown("TARGET_BAR_MISSING")
+    observation_summary = _observation_summary(
+        symbol=normalized,
+        target_session=target,
+        source_last_session=file_summary.scan.last_date,
+        raw_fields=raw_fields,
+        raw_close=raw_close,
+        core=core,
+    )
     unknown_raw = sum(raw_fields[name]["quality"] != "OBSERVED" for name in _RAW_FIELDS)
     unit_dependent_core = {
         "core.amount_ratio5": {
@@ -456,6 +573,14 @@ def research_stock(
             "resources": list(calendar_metadata),
             "coverage": [calendar_metadata[0]["coverage"][0], target.isoformat()],
             "evidence_status": _CALENDAR_EVIDENCE_VERIFIED,
+            "resource_continuity_status": coverage_context["resource_continuity_status"],
+            "known_resource_years": list(coverage_context["known_resource_years"]),
+            "calculation_years": list(coverage_context["calculation_years"]),
+            "missing_intermediate_years": list(coverage_context["missing_intermediate_years"]),
+            "core_lookback_complete": coverage_context["core_lookback_complete"],
+            "core_lookback_reason": coverage_context["core_lookback_reason"],
+            "required_actual_sessions": coverage_context["required_actual_sessions"],
+            "available_calendar_sessions_to_target": coverage_context["available_calendar_sessions_to_target"],
             "session_count_in_calculation": len(session_slice),
             "calculation_first_session": session_slice[0].isoformat(),
             "missing_bar_session_count": sum(day not in selected for day in session_slice),
@@ -475,6 +600,7 @@ def research_stock(
         "target_prices_usable": target_prices_usable,
         "target_raw_fields": raw_fields,
         "core_fields": {name: _render_field(value) for name, value in sorted(core.items())},
+        "observation_summary": observation_summary,
         "core_field_disclosures": {
             "price_coordinate": "RAW_UNADJUSTED；身份和公司行为时钟未绑定",
             "unit_assumptions": unit_dependent_core,
@@ -629,6 +755,12 @@ def research_compare(
     failed = sum(item["status"] == "FAILED" for item in results)
     unknown_symbols = sum(item["status"] == "PARTIAL_UNKNOWN" for item in results)
     not_evaluated = sum(item["status"] == "NOT_EVALUATED" for item in results)
+    classified = available + failed + unknown_symbols + not_evaluated
+    if classified != len(requested):
+        raise ResearchEntryError(
+            "COMPARE_CLASSIFICATION_INCOMPLETE",
+            "多标的结果未能按可用、失败、部分未知和未评价完整分区",
+        )
     unknown_identity = sum(
         item.get("status") not in ("FAILED", "NOT_EVALUATED")
         and item.get("identity", {}).get("status") != "RESOLVED"
@@ -667,6 +799,15 @@ def research_compare(
             "unknown_adjustment": unknown_adjustment,
             "unknown_core_fields": unknown_core_fields,
             "unknown_raw_fields": unknown_raw_fields,
+        },
+        "classification": {
+            "available": available,
+            "failed": failed,
+            "partial_unknown": unknown_symbols,
+            "not_evaluated": not_evaluated,
+            "classified": classified,
+            "requested": len(requested),
+            "partition_complete": True,
         },
         "budget": {
             "max_total_bytes": budget.max_total_bytes,
