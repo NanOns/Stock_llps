@@ -20,7 +20,7 @@ A股市场结构研究系统的新项目，唯一业务开发主线。采用旧�
 | 7 | [代码复用与模块边界](docs/design/代码复用与模块边界.md) | 具体旧代码候选、目标职责、改造要求及禁用边界 |
 | 8 | [目录与Git准入](docs/design/目录与Git准入.md)／[需求变更](docs/changes/需求变更.md) | 文件归属与正式规则变化 |
 
-机器依赖以[day-chain.contract.json](config/contracts/day-chain.contract.json)声明；唯一默认路径配置为[runtime.defaults.json](config/runtime.defaults.json)。业务文件配置只从本项目config登记目录加载，私密文件如需只在config/private并忽略Git；测试配置与测试文档不得混入正式目录。阶段实施方案和交接文档在外部交付根过程资料中，不提交Git。
+机器依赖以[day-chain.contract.json入口清单](config/contracts/day-chain.contract.json)声明，并由`stock_a.contracts.load_day_chain_contract`按清单装配[day-chain模块](config/contracts/day-chain/)；子模块清单固定，不扫描目录或动态加载未知文件。唯一默认路径配置为[runtime.defaults.json](config/runtime.defaults.json)。业务文件配置只从本项目config登记目录加载，私密配置如需只在config/private并忽略Git；测试配置与测试文档不得混入正式目录。阶段实施方案和交接文档在外部交付根过程资料中，不提交Git。
 
 | 用途 | 路径 |
 |---|---|

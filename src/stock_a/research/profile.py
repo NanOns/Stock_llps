@@ -1,6 +1,6 @@
 """唯一基础画像有序表达求值器，规则由调用者显式注入。"""
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from fractions import Fraction
 
@@ -48,6 +48,15 @@ class ProfileInput:
 
 
 @dataclass(frozen=True)
+class RuntimeProducerBinding:
+    """调用边界提供的当前producer身份；不来自合同中的历史源码摘要。"""
+
+    symbol: str
+    source_sha256: str
+    algorithm_version: str | None
+
+
+@dataclass(frozen=True)
 class ProfileHandoff:
     """画像纯内核的输入集合及调用方声明的比较期望。
 
@@ -60,6 +69,7 @@ class ProfileHandoff:
     target_coordinate_id: str | None
     expected_windows: Mapping[str, WindowIdentity]
     expected_context: Mapping[str, Mapping[str, object]]
+    runtime_producers: Mapping[str, RuntimeProducerBinding] = field(default_factory=dict)
 
 
 def _rule_for(field_id: str, rules: Mapping) -> Mapping:
@@ -101,15 +111,27 @@ def validate_profile_handoff(field_id: str, handoff: ProfileHandoff,
     values: dict[str, FieldValue] = {}
     target_coordinates: set[str] = set()
     context_values: dict[str, object] = {}
+    expected_producer_symbols = {
+        by_id[name].get("producer_symbol") for name in required
+    }
+    if (any(not isinstance(symbol, str) or not symbol for symbol in expected_producer_symbols)
+            or not isinstance(handoff.runtime_producers, Mapping)
+            or set(handoff.runtime_producers) != expected_producer_symbols):
+        raise ContractError("Core→Profile必须精确绑定所需的当前运行producer集合")
     for name in required:
         supplied = handoff.inputs[name]
         expected = by_id[name]
         if not isinstance(supplied, ProfileInput) or supplied.field_id != name or not isinstance(supplied.field, FieldValue):
             raise ContractError("Core→Profile字段身份或值类型错误：" + name)
-        source_digest = expected.get("producer_source_sha256")
-        if (not expected.get("producer_stage") or not expected.get("producer_symbol")
-                or not isinstance(source_digest, str) or len(source_digest) != 64
-                or any(ch not in "0123456789abcdef" for ch in source_digest)
+        producer_symbol = expected.get("producer_symbol")
+        runtime_producer = handoff.runtime_producers.get(producer_symbol)
+        if (not expected.get("producer_stage") or not isinstance(producer_symbol, str)
+                or not isinstance(runtime_producer, RuntimeProducerBinding)
+                or runtime_producer.symbol != producer_symbol
+                or not isinstance(runtime_producer.source_sha256, str)
+                or len(runtime_producer.source_sha256) != 64
+                or any(ch not in "0123456789abcdef" for ch in runtime_producer.source_sha256)
+                or runtime_producer.algorithm_version != expected.get("algorithm_version")
                 or not expected.get("expression_ref") or not expected.get("parameter_version")):
             raise ContractError("Core→Profile上游producer/算法合同未绑定：" + name)
         if expected.get("requiredness") in {"OPTIONAL", "optional", False}:
@@ -117,8 +139,8 @@ def validate_profile_handoff(field_id: str, handoff: ProfileHandoff,
         exact = {
             "unit": expected.get("unit"),
             "producer_stage": expected.get("producer_stage"),
-            "producer_symbol": expected.get("producer_symbol"),
-            "producer_source_sha256": expected.get("producer_source_sha256"),
+            "producer_symbol": producer_symbol,
+            "producer_source_sha256": runtime_producer.source_sha256,
             "expression_ref": expected.get("expression_ref"),
             "algorithm_version": expected.get("algorithm_version"),
             "parameter_version": expected.get("parameter_version"),

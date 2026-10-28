@@ -1,0 +1,993 @@
+{
+  "top_level": {
+    "page_consumers": [
+      {
+        "name_zh": "今日总览",
+        "route": "/overview",
+        "artifacts": [
+          "market_axes",
+          "risk_rows",
+          "rotation",
+          "priority_rows",
+          "radar_rows",
+          "backend_chain_status"
+        ]
+      },
+      {
+        "name_zh": "板块研究",
+        "route": "/sectors",
+        "artifacts": [
+          "sector_native",
+          "sector_raw",
+          "final_states",
+          "rotation",
+          "overlap",
+          "membership",
+          "risk_rows"
+        ]
+      },
+      {
+        "name_zh": "个股研究",
+        "route": "/stocks",
+        "artifacts": [
+          "complete_profiles",
+          "seed_evaluations",
+          "stock_prewatch_raw",
+          "final_states",
+          "d0_facts",
+          "structure_facts",
+          "anchors",
+          "period_bars",
+          "adjusted_bars",
+          "raw_bars",
+          "loo_context"
+        ]
+      },
+      {
+        "name_zh": "关注跟踪",
+        "route": "/focus",
+        "artifacts": [
+          "focus_plan",
+          "dispatch_accounting",
+          "episodes",
+          "anchors",
+          "observations",
+          "forward_outcomes"
+        ]
+      },
+      {
+        "name_zh": "市场研究",
+        "route": "/market",
+        "artifacts": [
+          "reference_series",
+          "market_axes",
+          "price_limits",
+          "risk_rows"
+        ]
+      },
+      {
+        "name_zh": "数据与诊断",
+        "route": "/data",
+        "artifacts": [
+          "source_capabilities",
+          "owner_seals",
+          "business_manifest",
+          "read_index",
+          "accepted_publication",
+          "research_head",
+          "backend_chain_status",
+          "display_chain_status"
+        ]
+      }
+    ],
+    "read_policy": {
+      "GET_read_only": true,
+      "candidate_context_isolated": true,
+      "no_latest_fallback": true,
+      "full_server_side_pagination": true,
+      "view_ack_method": "POST",
+      "view_ack_is_bounded_diagnostic_not_business_digest": true,
+      "production_import_of_external_tests_forbidden": true
+    },
+    "service_product_contract": {
+      "contract": "SERVICE_PRODUCT_CONTRACT_R1",
+      "design_state": "FROZEN_ADOPTED",
+      "normative_ref": "docs/design/实现详细设计.md#17",
+      "routes": [
+        {
+          "method": "GET",
+          "path": "/api/v1/bootstrap",
+          "resource": "bootstrap",
+          "envelope": "bootstrap",
+          "fields": [
+            "context",
+            "available_trade_dates",
+            "capabilities",
+            "api_schema_version",
+            "ui_build_id"
+          ],
+          "context_required": false,
+          "mutates": false,
+          "modes": [
+            "research",
+            "operational"
+          ],
+          "allowed_context_kinds": [
+            "RESEARCH",
+            "OPERATIONAL"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/overview",
+          "resource": "overview",
+          "envelope": "detail",
+          "fields": [
+            "backend_status",
+            "display_status",
+            "market_axes",
+            "environment",
+            "rotation",
+            "sector_priority",
+            "stock_priority",
+            "radar",
+            "risk_changes"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/stocks",
+          "resource": "stocks",
+          "envelope": "list",
+          "fields": [
+            "entity",
+            "close",
+            "core_profile",
+            "eligibility",
+            "priority",
+            "risk",
+            "quality"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "filters": [
+            "q",
+            "view",
+            "market",
+            "listing_phase",
+            "st",
+            "quality",
+            "maturity",
+            "risk",
+            "scenario",
+            "sector_id",
+            "include_archived"
+          ],
+          "sorts": [
+            "entity_id",
+            "symbol",
+            "name",
+            "close",
+            "profile.trend",
+            "priority",
+            "risk"
+          ],
+          "default_sort": "entity_id ASC",
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/stocks/{entity_id}",
+          "resource": "stock_detail",
+          "envelope": "detail",
+          "fields": [
+            "entity",
+            "profile_components",
+            "raw_scenarios",
+            "formal_events",
+            "anchors",
+            "observations",
+            "episodes",
+            "primary_episode",
+            "predicate_explanations",
+            "industry",
+            "loo_support",
+            "focus"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/sectors",
+          "resource": "sectors",
+          "envelope": "list",
+          "fields": [
+            "entity",
+            "member_count",
+            "quote_coverage",
+            "rs5_pct",
+            "rs20_pct",
+            "dq5",
+            "breadth",
+            "ma20_width",
+            "seed_width",
+            "qualifications",
+            "rotation",
+            "risk"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "filters": [
+            "q",
+            "type",
+            "quality",
+            "maturity",
+            "risk",
+            "rotation_state",
+            "cluster_id"
+          ],
+          "sorts": [
+            "sector_id",
+            "priority",
+            "member_count",
+            "quote_coverage",
+            "rs5_pct",
+            "rs20_pct",
+            "dq5",
+            "breadth",
+            "seed_width"
+          ],
+          "default_sort": "priority THEN sector_id",
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/sectors/{entity_id}",
+          "resource": "sector_detail",
+          "envelope": "detail",
+          "fields": [
+            "entity",
+            "native",
+            "qualifications",
+            "members",
+            "retentions",
+            "rotation_timeline",
+            "overlap",
+            "cluster",
+            "risk",
+            "sources"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/market",
+          "resource": "market",
+          "envelope": "detail",
+          "fields": [
+            "reference_catalog",
+            "axes",
+            "environment_raw",
+            "environment_display",
+            "limit_counts",
+            "limit_streak_ladder",
+            "unknown_streak_lower_bounds",
+            "coverage"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/focus",
+          "resource": "focus",
+          "envelope": "list",
+          "fields": [
+            "entity",
+            "episode",
+            "last_research_event_session",
+            "maturity",
+            "health",
+            "validity",
+            "tracking",
+            "failure_line",
+            "due_schedules",
+            "manual_revision",
+            "archived"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "filters": [
+            "q",
+            "entity_type",
+            "tracking_state",
+            "archived",
+            "pinned",
+            "validity"
+          ],
+          "sorts": [
+            "last_research_event_session",
+            "entity_id",
+            "episode_id"
+          ],
+          "default_sort": "last_research_event_session DESC,entity_id,episode_id",
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/radar",
+          "resource": "radar",
+          "envelope": "list",
+          "fields": [
+            "entity",
+            "episode",
+            "primary_event",
+            "all_events",
+            "annotations",
+            "quality"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "filters": [
+            "entity_type",
+            "event_type",
+            "event_session",
+            "quality"
+          ],
+          "sorts": [
+            "radar_order"
+          ],
+          "default_sort": "radar_order",
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/near-misses",
+          "resource": "near_misses",
+          "envelope": "list",
+          "fields": [
+            "entity",
+            "scenario",
+            "parent",
+            "peak",
+            "path",
+            "failed_predicate",
+            "gap",
+            "tolerance",
+            "waiting_for"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "filters": [
+            "scenario",
+            "sector_id",
+            "quality"
+          ],
+          "sorts": [
+            "near_miss_order"
+          ],
+          "default_sort": "near_miss_order",
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/cohort-evaluations",
+          "resource": "cohort_evaluations",
+          "envelope": "list",
+          "fields": [
+            "rule_id",
+            "entity",
+            "evaluation",
+            "reason_codes",
+            "enrollment",
+            "expected_denominator"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "filters": [
+            "rule_id",
+            "entity_type",
+            "evaluation",
+            "entity_id"
+          ],
+          "sorts": [
+            "rule_id",
+            "entity_id",
+            "evaluation"
+          ],
+          "default_sort": "rule_id ASC",
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/observations",
+          "resource": "observations",
+          "envelope": "list",
+          "fields": [
+            "observation_id",
+            "entity",
+            "rule_id",
+            "variant",
+            "T0",
+            "lane",
+            "capture_revision",
+            "capture_clock",
+            "source_refs",
+            "schedules"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "filters": [
+            "rule_id",
+            "entity_id",
+            "lane",
+            "variant",
+            "T0",
+            "maturity"
+          ],
+          "sorts": [
+            "T0",
+            "entity_id",
+            "observation_id"
+          ],
+          "default_sort": "T0 ASC",
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/observations/{observation_id}",
+          "resource": "observations",
+          "envelope": "detail",
+          "fields": [
+            "observation_id",
+            "entity",
+            "rule_id",
+            "variant",
+            "T0",
+            "lane",
+            "capture_revision",
+            "capture_clock",
+            "source_refs",
+            "schedules"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/forward/{observation_id}",
+          "resource": "forward",
+          "envelope": "list",
+          "fields": [
+            "observation_id",
+            "horizon",
+            "settlement_revision",
+            "absolute_return",
+            "market_excess",
+            "sector_excess",
+            "controls",
+            "mfe",
+            "mae",
+            "mdd_close",
+            "first_exit",
+            "endpoint_quality",
+            "path_quality",
+            "maturity"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "filters": [
+            "horizon",
+            "variant",
+            "endpoint_quality",
+            "path_quality",
+            "maturity"
+          ],
+          "sorts": [
+            "horizon",
+            "settlement_revision"
+          ],
+          "default_sort": "horizon ASC",
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/diagnostics",
+          "resource": "diagnostics",
+          "envelope": "detail",
+          "fields": [
+            "source_capabilities",
+            "field_contracts",
+            "parameters",
+            "job_progress",
+            "first_error",
+            "context_identity",
+            "outbox_backlog",
+            "settlement_backlog"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "allowed_context_kinds": [
+            "RESEARCH",
+            "OPERATIONAL"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/sources",
+          "resource": "sources",
+          "envelope": "list",
+          "fields": [
+            "dataset",
+            "scope",
+            "coverage",
+            "clocks",
+            "validation",
+            "capability"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "filters": [
+            "dataset",
+            "capability",
+            "quality"
+          ],
+          "sorts": [
+            "dataset",
+            "quality"
+          ],
+          "default_sort": "dataset ASC",
+          "allowed_context_kinds": [
+            "RESEARCH",
+            "OPERATIONAL"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/jobs",
+          "resource": "jobs",
+          "envelope": "list",
+          "fields": [
+            "job_id",
+            "operation_id",
+            "stage",
+            "processed",
+            "total",
+            "source_wait",
+            "compute",
+            "pg",
+            "publish",
+            "error",
+            "heartbeat",
+            "status"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "filters": [
+            "job_id",
+            "stage",
+            "status"
+          ],
+          "sorts": [
+            "job_id",
+            "status"
+          ],
+          "default_sort": "job_id ASC",
+          "allowed_context_kinds": [
+            "RESEARCH",
+            "OPERATIONAL"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/jobs/{job_id}",
+          "resource": "jobs",
+          "envelope": "detail",
+          "fields": [
+            "job_id",
+            "operation_id",
+            "stage",
+            "processed",
+            "total",
+            "source_wait",
+            "compute",
+            "pg",
+            "publish",
+            "error",
+            "heartbeat",
+            "status"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "allowed_context_kinds": [
+            "RESEARCH",
+            "OPERATIONAL"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/charts/{entity_id}",
+          "resource": "charts",
+          "envelope": "chart",
+          "fields": [
+            "entity",
+            "period",
+            "mode",
+            "bars",
+            "bar_quality",
+            "calendar_gaps",
+            "coordinate",
+            "ma",
+            "anchors"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "GET",
+          "path": "/api/v1/compare",
+          "resource": "compare",
+          "envelope": "compare",
+          "fields": [
+            "objects",
+            "dates",
+            "fields",
+            "values",
+            "comparison_status",
+            "incomparable_reasons"
+          ],
+          "context_required": true,
+          "mutates": false,
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/focus-actions",
+          "resource": "focus-actions",
+          "envelope": "operation_receipt",
+          "allowed_actions": [
+            "PIN",
+            "UNPIN",
+            "NOTE",
+            "ARCHIVE",
+            "UNARCHIVE"
+          ],
+          "required": [
+            "request_key",
+            "context_token",
+            "data_date"
+          ],
+          "mutates": true,
+          "auth": "LOCAL_SESSION_ORIGIN_HOST_CSRF",
+          "free_command_allowed": false,
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/job-actions",
+          "resource": "job-actions",
+          "envelope": "operation_receipt",
+          "allowed_actions": [
+            "START_DEV_UPDATE",
+            "PAUSE_SCHEDULE",
+            "RESUME_SCHEDULE",
+            "CANCEL_JOB"
+          ],
+          "required": [
+            "request_key",
+            "context_token",
+            "data_date"
+          ],
+          "mutates": true,
+          "auth": "LOCAL_SESSION_ORIGIN_HOST_CSRF",
+          "free_command_allowed": false,
+          "allowed_context_kinds": [
+            "RESEARCH",
+            "OPERATIONAL"
+          ]
+        },
+        {
+          "method": "POST",
+          "path": "/api/v1/display-acks",
+          "resource": "display-acks",
+          "envelope": "operation_receipt",
+          "allowed_actions": [
+            "ACK_CURRENT_RENDER"
+          ],
+          "required": [
+            "request_key",
+            "context_token",
+            "data_date"
+          ],
+          "mutates": true,
+          "auth": "LOCAL_SESSION_ORIGIN_HOST_CSRF",
+          "free_command_allowed": false,
+          "allowed_context_kinds": [
+            "RESEARCH"
+          ]
+        }
+      ],
+      "schemas": {
+        "Field": {
+          "required": [
+            "value",
+            "quality",
+            "reason_codes",
+            "unit",
+            "field_id",
+            "input_ref",
+            "window_ref",
+            "coordinate_ref"
+          ],
+          "quality": [
+            "OBSERVED",
+            "UNKNOWN_DATA",
+            "NOT_APPLICABLE"
+          ],
+          "decimal_encoding": "exact decimal string; count integer"
+        },
+        "Context": {
+          "required": [
+            "context_kind",
+            "context_token",
+            "publication_id",
+            "manifest_id",
+            "scope",
+            "snapshot_date",
+            "data_date",
+            "source_cutoff",
+            "rule_versions",
+            "forward_revision",
+            "model_revision",
+            "api_schema_version",
+            "ui_build_id"
+          ],
+          "model_revision": "nullable NOT_ENABLED when FEP scope disabled",
+          "context_kinds": [
+            "RESEARCH",
+            "OPERATIONAL"
+          ],
+          "nullable_operational_fields": [
+            "publication_id",
+            "manifest_id",
+            "snapshot_date",
+            "data_date",
+            "source_cutoff",
+            "rule_versions",
+            "forward_revision",
+            "model_revision"
+          ]
+        },
+        "List": {
+          "required": [
+            "context",
+            "items",
+            "total_count",
+            "returned_count",
+            "next_cursor",
+            "counts_by_status",
+            "capabilities"
+          ]
+        },
+        "Detail": {
+          "required": [
+            "context",
+            "entity",
+            "components",
+            "capabilities",
+            "explanations"
+          ],
+          "entity": "nullable only aggregate overview/market/diagnostics; otherwise EntityRef"
+        },
+        "Error": {
+          "required": [
+            "code",
+            "message_zh",
+            "request_id",
+            "context",
+            "details",
+            "retryable"
+          ]
+        },
+        "OperationReceipt": {
+          "required": [
+            "request_key",
+            "status",
+            "operation_id",
+            "current_revision",
+            "context",
+            "reason_codes"
+          ],
+          "async_job_status_code": 202
+        },
+        "Chart": {
+          "required": [
+            "context",
+            "entity",
+            "period",
+            "mode",
+            "bars",
+            "calendar_gaps",
+            "coordinate",
+            "ma",
+            "anchors"
+          ]
+        },
+        "Compare": {
+          "required": [
+            "context",
+            "objects",
+            "dates",
+            "fields",
+            "values",
+            "comparison_status",
+            "incomparable_reasons"
+          ]
+        },
+        "Bootstrap": {
+          "required": [
+            "context",
+            "available_trade_dates",
+            "capabilities",
+            "api_schema_version",
+            "ui_build_id"
+          ]
+        }
+      },
+      "pagination": {
+        "default": 50,
+        "maximum": 200,
+        "cursor_binding": [
+          "context",
+          "data_date",
+          "filter",
+          "sort",
+          "last_business_key",
+          "subrevision"
+        ],
+        "true_sql_pagination": true
+      },
+      "search": {
+        "maximum_unicode_chars": 80,
+        "normalization": "NFKC_CASEFOLD",
+        "matching": "symbol/name/date-effective alias prefix",
+        "order": [
+          "exact symbol",
+          "exact name",
+          "symbol prefix",
+          "name_alias prefix",
+          "entity_id"
+        ]
+      },
+      "chart": {
+        "periods": [
+          "D",
+          "W",
+          "M"
+        ],
+        "modes": [
+          "closed",
+          "as_of"
+        ],
+        "default_limit": 250,
+        "maximum_limit": 1000,
+        "coordinate_target": "data_date",
+        "unknown_gap": "explicit no candle",
+        "suspension": "no synthetic candle"
+      },
+      "compare": {
+        "maximum_objects": 8,
+        "maximum_dates": 2,
+        "cross_type": "only registered same semantic/unit fields",
+        "history": "exact owner/date/context; no current snapshot substitution"
+      },
+      "http_errors": {
+        "400": "INVALID_ARGUMENT",
+        "403": "ACCESS_DENIED",
+        "404": "ENTITY_OR_OBSERVATION_NOT_FOUND",
+        "409": "CONTEXT_MISMATCH_OR_STALE_OR_REVISION_CONFLICT",
+        "429": "BUDGET_EXCEEDED",
+        "500": "ENGINEERING_ERROR",
+        "503": "NO_ACCEPTED_PUBLICATION_OR_REQUIRED_CAPABILITY_NOT_READY"
+      },
+      "write_commands": {
+        "focus": {
+          "required": [
+            "entity_id",
+            "episode_id",
+            "action",
+            "expected_revision",
+            "request_key"
+          ],
+          "note_max_chars": 2000
+        },
+        "jobs": {
+          "required": [
+            "action",
+            "request_key",
+            "context_token"
+          ],
+          "free_script_sql_or_source_path": false
+        },
+        "ack": {
+          "required": [
+            "request_key",
+            "publication_id",
+            "context_token",
+            "data_date",
+            "ui_build_id",
+            "view_id",
+            "rendered_required_component_ids"
+          ],
+          "current_required_render_only": true
+        }
+      },
+      "view_defaults": {
+        "stocks": "all; candidates/near_miss explicit tabs",
+        "overview": "per type10 concept known cluster2; full count disclosed",
+        "sectors": "industry/concept separate, priority known first, all statuses accessible",
+        "focus": "automatic/pinned/archived separated; recency",
+        "market": "four independent axes + composite and limit ladder",
+        "diagnostics": "source/contracts/jobs/errors/identity/backlogs"
+      },
+      "frontend_race_policy": "request_generation+context/date/object must match before rendering or ACK",
+      "required_capability_missing": "503_NOT_EMPTY_SUCCESS_OR_UNKNOWN_DATA",
+      "get_side_effects": false,
+      "filter_combination": "OR within repeated field, AND across fields; unknown by quality not fake enum; invalid values400",
+      "sort_request": "field+ASC/DESC whitelist; duplicates/conflicts400; original research key order immutable",
+      "operational_context": {
+        "bootstrap_mode": "explicit mode=operational; no accepted Head required",
+        "only_resources": [
+          "diagnostics",
+          "sources",
+          "jobs",
+          "job-actions"
+        ],
+        "business_routes": "REJECT_OPERATIONAL_CONTEXT",
+        "fake_data_date_allowed": false
+      }
+    }
+  }
+}

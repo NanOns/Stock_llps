@@ -1,0 +1,943 @@
+{
+  "top_level": {
+    "language": "zh-CN",
+    "normative_documents": [
+      "../../docs/design/数据业务完整闭环.md",
+      "../../docs/design/算法合同与升级规则.md",
+      "../../PROJECT_SPEC.md",
+      "../../docs/design/实现详细设计.md"
+    ],
+    "external_inputs": {
+      "ext.accepted_state_catalog": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.approved_reference_captures": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.baostock_policy": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.baostock_responses": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.build_identity": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.calendar_authority": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.contract_registry": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.frontend_view_ack": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.readonly_tdx_roots": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.serving_contract": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.validated_configuration": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      },
+      "ext.validated_ui_contract": {
+        "binding": "EXPLICIT_VERSIONED_DAY_PLAN_BINDING",
+        "missing_policy": "CAPABILITY_LOCAL_BLOCK_UNLESS_EXPLICITLY_OPTIONAL"
+      }
+    },
+    "owner_policy": {
+      "input_identity_fixed_before_chunk_writes": true,
+      "immutable_seal_exactly_once": true,
+      "writes_after_seal_forbidden": true,
+      "ordinary_reader_requires_accepted_manifest": true,
+      "required_role_sets": [
+        "source_and_canonical",
+        "core_and_cross_section",
+        "profiles_and_seed",
+        "sector_native_raw_overlap",
+        "rotation_and_loo",
+        "market_axes",
+        "d0_and_d1",
+        "d2_episodes_events",
+        "risk_and_priority_radar",
+        "focus_cohort_intents"
+      ],
+      "required_validation": [
+        "exact_entity_set",
+        "field_schema_and_units",
+        "data_and_snapshot_date",
+        "input_closure_and_versions",
+        "coordinate_and_window",
+        "content_digest",
+        "quality_partition",
+        "consumer_binding",
+        "independent_numeric_certificate",
+        "source_seal_exact_binding_and_real_clock_policy",
+        "all_scope_owner_artifacts_directly_required_at_P20"
+      ],
+      "writer_fencing": "PG_MONOTONIC_TOKEN_CHECKED_UNDER_LEASE_ROW_LOCK_IN_EVERY_MUTATING_TRANSACTION"
+    },
+    "identity_policy": {
+      "business_manifest": "H(scope,required_owner_vector,contract_versions)",
+      "read_index_version": "H(business_manifest_id,serving_contract,narrow_projection_digest)",
+      "publication": "H(business_manifest_id,read_index_version,dispatch_plan_id)",
+      "token": "SERVER_RESOLVED_PUBLICATION_AND_BOUND_SUBREVISIONS",
+      "read_index_is_thin_rebuildable_projection": true,
+      "dynamic_schema_creation_forbidden": true,
+      "owner_input_identity": "ACTUAL_CONSUMED_FIELD_AND_SOURCE_CONTENT_DEPENDENCY_SUBVECTOR_NOT_WHOLE_RUN_SOURCE_SET",
+      "capture_fact_changes_alone_invalidate_numeric_owner": false,
+      "canonical_semantic_identity": {
+        "contract": "CANONICAL_FIELD_AND_WINDOW_IDENTITY_R1",
+        "field_components": [
+          "entity_id",
+          "session",
+          "field_id",
+          "value",
+          "quality",
+          "reason",
+          "source_authority",
+          "parser_version",
+          "unit_version",
+          "normalization_version"
+        ],
+        "field_excludes": [
+          "source_file_sha",
+          "capture_id",
+          "capture_time",
+          "run_id",
+          "whole_source_set_id",
+          "unrelated_bao",
+          "current_wall_clock_cutoff"
+        ],
+        "separate_required_provenance": [
+          "selected_capture_id",
+          "selected_available_at",
+          "selected_durable_at",
+          "selected_binding_cutoff_eligibility"
+        ],
+        "append": "REUSE_UNCHANGED_FIELD_DIGESTS_AND_ORIGINAL_SELECTED_BINDINGS",
+        "correction": "RECOMPUTE_CHANGED_FIELDS_ACTUAL_WINDOWS_RANK_POPULATIONS_AND_STATE_CLOSURE",
+        "parser_or_unit_change": "INVALIDATE_ONLY_ACTUAL_CONSUMERS_OF_CHANGED_PARSER_OR_UNIT_VERSION",
+        "same_values_different_capture": "NUMERIC_RESULT_MAY_REUSE_BUT_PIT_PROVENANCE_MUST_NOT_BE_SUBSTITUTED",
+        "cutoff": "SELECT_FACTS_AND_VALIDATE_ELIGIBILITY_THEN_HASH_SELECTED_BINDING_NOT_EVERY_RUN_CUTOFF",
+        "pure_symbols": [
+          "stock_a.canonical.identity:field_digest",
+          "stock_a.canonical.identity:window_digest",
+          "stock_a.canonical.identity:availability_digest"
+        ],
+        "version_projection": "PARSER_UNIT_NORMALIZATION_CALENDAR_STATUS_ACTION_REVISIONS_ARE_ACTUAL_CONSUMED_FIELD_WINDOW_PROJECTIONS_NOT_WHOLE_DATASET_LATEST"
+      }
+    },
+    "acceptance_policy": {
+      "single_short_transaction": [
+        "LOCK_HEAD",
+        "CHECK_EXPECTED_GENERATION",
+        "ACCEPT_PUBLICATION_AND_DATE_CATALOG",
+        "CAS_HEAD",
+        "INSERT_RECEIPT_AND_OUTBOX"
+      ],
+      "same_key_different_content": "REJECT",
+      "failed_cas": "KEEP_LAST_GOOD",
+      "post_acceptance_failure": "POST_ACCEPTANCE_PENDING_NOT_COMPLETE",
+      "observer_retry": "EXACT_PUBLICATION_PLAN_IDEMPOTENT",
+      "late_observer": "KEEP_ACTUAL_CAPTURE_TIME_AND_LATE_LANE",
+      "historical_repair_moves_current_head_backward": false,
+      "invalid_publication_outbox": "BLOCK_NEW_SIDE_EFFECTS_PRESERVE_CAPTURED_FACTS_WITH_VALIDITY_REVISION"
+    },
+    "completion_policy": {
+      "eligible_scopes": [
+        "FULL_RESEARCH_EOD",
+        "FULL_CHAIN_DISPLAYED"
+      ],
+      "backend_all_of": [
+        "required_stages_implemented_and_terminal",
+        "required_owners_sealed_and_exactly_bound",
+        "identity_and_field_coverage_policy_satisfied",
+        "no_unexplained_numeric_or_semantic_difference",
+        "read_index_and_candidate_api_verified",
+        "publication_cas_and_receipt_outbox_committed",
+        "accepted_api_readback_verified",
+        "required_post_acceptance_dispatches_accounted",
+        "current_ui_contract_verified"
+      ],
+      "generic_complete_additional_all_of": [
+        "current_frontend_display_ack_verified"
+      ],
+      "hard_reject_statuses": [
+        "NOT_IMPLEMENTED",
+        "CONTRACT_UNDEFINED",
+        "ENGINEERING_ERROR",
+        "INVALID_BINDING"
+      ],
+      "legitimate_unknown_requires_evidence_and_frozen_policy": true,
+      "ui_absent_backend_message_zh": "后台业务链已就绪，前端显示待确认",
+      "pg_commit_or_owner_or_http_status_alone_sufficient": false
+    },
+    "revision_policy": {
+      "normal_mode": "APPEND_NEW_SESSIONS_WITH_REQUIRED_WINDOWS",
+      "changed_source_actions_membership_algorithm": "BOUNDED_RANGE_REPAIR",
+      "semantic_revision_closure": {
+        "binding_schema_version": "1",
+        "binding_digest_algorithm": "SHA-256",
+        "binding_digest_canonicalization": "UTF-8 JSON; sorted object keys; compact separators; required keys sorted lexicographically",
+        "scope_contracts": {
+          "SOURCE_INGRESS": {
+            "contract_id": "STOCK-A-DAY-CHAIN",
+            "contract_version": "R10",
+            "required_semantic_revision_keys": [
+              "source"
+            ],
+            "binding_digest": "f15df7407e8764e64abc40c0cb7ff9c20fc04d3b7857e010b5b56b31936b6a93"
+          },
+          "FOUNDATION_EOD": {
+            "contract_id": "STOCK-A-DAY-CHAIN",
+            "contract_version": "R10",
+            "required_semantic_revision_keys": [
+              "actions",
+              "algorithm",
+              "membership",
+              "source"
+            ],
+            "binding_digest": "195d8e847905946d6845b5d1244ab1b5838cb9ad662021b279449ae6ebb5b2a6"
+          }
+        },
+        "scope_catalog_digest": "3cce5f595d838d988e422199df8346359bebe5910811d98f88c94dcfe013f265",
+        "current_key_set": "EXACT_MATCH_TO_FORMAL_SCOPE_CONTRACT_REQUIRED_KEYS",
+        "accepted_scope_or_contract_mismatch": "RANGE_REPAIR_REQUIRED",
+        "accepted_key_set_mismatch": "RANGE_REPAIR_REQUIRED",
+        "append_requires_complete_and_equal_key_value_mapping": true,
+        "same_target_idempotency_requires_business_input_digest_match": true,
+        "business_input_digest_fields": [
+          "values",
+          "quality",
+          "provenance",
+          "parameters",
+          "producer"
+        ]
+      },
+      "immutable_t0_and_accepted_history": true,
+      "stateful_propagation": "DEPENDENCY_FIXED_POINT_WITH_RECORDED_STOP_REASON"
+    },
+    "storage_policy": {
+      "business_schema": "stock",
+      "database_creation_forbidden": true,
+      "schema_creation_forbidden": true,
+      "typed_families_required": true,
+      "generic_payload_for_all_business_forbidden": true,
+      "duplicate_full_detail_projection_forbidden": true,
+      "new_release_new_schema_forbidden": true,
+      "tests_and_receipts_outside_git": true,
+      "daily_persistent_business_files_allowed": false,
+      "business_checkpoint_backend": "POSTGRESQL_BOUNDED_JOB_CURSORS",
+      "raw_source_or_file_binary_in_pg_allowed": false,
+      "full_object_or_rowset_json_in_pg_allowed": false,
+      "runtime_cache_backend": "BOUNDED_MEMORY_OR_CONTROLLED_PG_TEMP",
+      "configuration_root_only": true,
+      "lifecycle_capacity_gc_restore_binding_required_before_persistence": true,
+      "logical_database": "stock_a",
+      "canonical_partial_quality": {
+        "contract": "CANONICAL_PARTIAL_QUALITY_R1",
+        "physical_relation": "stock.canonical_daily",
+        "independent_groups": [
+          "price",
+          "amount",
+          "volume"
+        ],
+        "price_group": "ALL_FOUR_KNOWN_VALID_OR_ALL_NULL_WITH_REASON",
+        "observed": "VALUE_NOT_NULL_REASON_NULL",
+        "unknown_or_na": "VALUE_NULL_NONEMPTY_REASON",
+        "zero": "VALID_NONNEGATIVE_AMOUNT_OR_VOLUME_NOT_UNKNOWN",
+        "provenance": "SOURCE_CAPTURE_FK_PLUS_PER_GROUP_SEMANTIC_REVISION",
+        "price_invalid": "KEEP_INDEPENDENT_VALID_AMOUNT_AND_VOLUME_NO_ACTUAL_PRICE_BAR",
+        "migration_applied": false
+      }
+    },
+    "document_registry": {
+      "root_spec": "../../PROJECT_SPEC.md",
+      "requirements": "../../docs/requirements/产品需求.md",
+      "engineering": "../../docs/design/工程与存储规范.md",
+      "reuse_boundaries": "../../docs/design/代码复用与模块边界.md",
+      "implementation_design": "../../docs/design/实现详细设计.md"
+    },
+    "external_file_policy": {
+      "contract_version": "PG_ONLY_DAILY_STATE_AND_CONFIG_ROOT_R2",
+      "normative_section": "../../docs/design/工程与存储规范.md#s27",
+      "implementation_binding_required": true,
+      "configuration_root": "G:/codex work/Stock A/config",
+      "configuration_catalog": "../runtime.defaults.json#configuration_policy",
+      "public_configuration_files": [
+        "runtime.defaults.json",
+        "contracts/day-chain.contract.json"
+      ],
+      "outside_configuration_root_allowed": false,
+      "test_configuration_in_production_config_allowed": false,
+      "test_documents_in_normative_docs_allowed": false,
+      "daily_business_storage": "POSTGRESQL_NECESSARY_TYPED_FACTS_AND_REFERENCES",
+      "daily_persistent_business_files_allowed": false,
+      "file_backed_business_storage_exception_allowed": false,
+      "day_plan_checkpoint_receipt_backend": "POSTGRESQL_BOUNDED_TYPED_CONTROL_ROWS",
+      "disk_business_cache_allowed": false,
+      "pg_forbidden_payloads": [
+        "SOURCE_ARCHIVE_BINARY",
+        "RAW_RESPONSE_BODY",
+        "BYTEA_OR_LARGE_OBJECT_FILE_MIRROR",
+        "BASE64_OR_COMPRESSED_FILE",
+        "COMPLETE_BUSINESS_OBJECT_OR_RESPONSE_JSON",
+        "LONG_PRICE_SERIES_OR_ROWSET_JSON"
+      ],
+      "pg_required_facts": [
+        "necessary_canonical_ohlcv_and_amount",
+        "dated_identity_calendar_status_membership_actions",
+        "consumed_factors_and_domain_states",
+        "minimal_frozen_t0_features_and_baskets",
+        "observations_and_settlements",
+        "exact_owner_publication_and_index_references",
+        "bounded_jobs_batch_cursors_receipt_and_outbox"
+      ],
+      "source_ingress": "READONLY_OR_BOUNDED_TRANSIENT_DOWNLOAD_STREAM_PARSE_TO_NECESSARY_PG_FACTS",
+      "default_daily_source_archive_enabled": false,
+      "accepted_pg_reads_resume_and_settlements_require_original_files": false,
+      "new_day_ingress_still_requires_actual_source": true,
+      "allowed_nonbusiness_files": [
+        "declared_current_program_and_static_resources",
+        "registered_configuration_under_project_config",
+        "readonly_original_source_inputs",
+        "bounded_transient_source_downloads",
+        "explicit_user_export_or_backup",
+        "bounded_nonbusiness_logs",
+        "external_development_or_test_evidence_not_runtime_dependencies"
+      ],
+      "source_capture_digest_and_clock_in_pg": true,
+      "business_locator_backend": "PG_PRIMARY_KEYS_AND_VERSIONS_NOT_FILESYSTEM_LOCATORS",
+      "source_input_binding": "FROZEN_SOURCE_SET_OF_NORMALIZED_PG_FACTS",
+      "candidate_result_binding": "SEALED_PG_OWNER_EXPLICIT_CANDIDATE_CONTEXT",
+      "ordinary_result_binding": "ACCEPTED_PUBLICATION_EXACT_PG_OWNER",
+      "hardcoded_increment_output_path_allowed": false,
+      "select_latest_by_mtime_name_or_glob_allowed": false,
+      "stage_pass_report_is_business_authority": false,
+      "production_import_of_external_scripts_or_old_repository_allowed": false,
+      "algorithm_arbitrary_file_io_allowed": false,
+      "path_is_business_primary_key": false,
+      "fallback_to_old_day_token_project_or_same_name_file": false,
+      "configuration_path_checks": [
+        "registered_relative_path",
+        "real_root_within_project_config",
+        "no_links_or_reparse_escape",
+        "no_test_or_process_configuration",
+        "schema_and_allowed_keys"
+      ]
+    },
+    "field_binding_policy": {
+      "group_graph_is_not_concrete_registry": true,
+      "requires_unique_producer_and_actual_consumer": true,
+      "required_before_each_capability_enabled": true,
+      "requires_type_unit_formula_window_time_coordinate_null_policy": true,
+      "field_output_artifact_required": true,
+      "cross_stage_input_must_be_required_artifact": true,
+      "producer_consumer_reverse_check_required": true,
+      "scope_owner_artifacts_must_be_direct_required_seal_inputs": true,
+      "dependency_deletion_or_required_downgrade_to_pass_forbidden": true,
+      "context_and_window_dependencies_in_transitive_business_digest": true
+    },
+    "algorithm_design_gates": {
+      "stock_risk_composition": "ADOPTED_STOCK_A_STOCK_RISK_COMPOSITION_R1_PIPELINE_BINDING_REQUIRED",
+      "dependent_capabilities": [
+        "STOCK_PRIORITY",
+        "FULL_RESEARCH_EOD"
+      ],
+      "independent_batches_not_blocked": [
+        "R00",
+        "R01",
+        "R02",
+        "R03"
+      ],
+      "rotation_clock": "EVALUABLE_SUCCESSOR_SESSIONS_UNKNOWN_PAUSES_AND_BREAKS_CONSECUTIVE",
+      "pullback_contraction": "PULLBACK_MEAN_EXCLUDING_CONFIRMATION_DIV_PEAK_ENDING_PRIOR5_MEAN",
+      "sector_exhaustion": "INHERIT_SECTOR_AXES_V1_ORDERED_HIGH_MEDIUM_LOW",
+      "d2_reducer": "ADOPTED_STOCK_A_D2_REDUCER_R1_PIPELINE_BINDING_REQUIRED",
+      "d0_admission": "ADOPTED_STOCK_A_D0_EVENT_ADMISSION_R1_PIPELINE_BINDING_REQUIRED",
+      "d1_types": "ADOPTED_STOCK_A_D1_STRUCTURE_TYPE_REGISTRY_R1_PIPELINE_BINDING_REQUIRED",
+      "mainline_domain_rules": "FROZEN_ADOPTED_CHG016_NOT_RUNTIME_ACCEPTANCE",
+      "optional_fep_intraday": "DEFERRED_SEPARATE_SCOPE_NOT_MAINLINE_DESIGN_BLOCKER"
+    },
+    "deployment_identity_policy": {
+      "configuration_identity_ref": "runtime.defaults.json#/application_identity",
+      "database": "stock_a",
+      "schema": "stock",
+      "database_creation": false,
+      "schema_creation": false,
+      "must_verify": [
+        "PHYSICAL_G_ROOTS",
+        "CLUSTER_SYSTEM_IDENTIFIER",
+        "DATABASE_SCHEMA",
+        "APPLICATION_PROJECT_UUID",
+        "INSTANCE_UUID",
+        "MIGRATION_LINEAGE_AND_DIGEST",
+        "SESSION_USER_STOCK_A"
+      ],
+      "legacy_market_research_v4_binding": "REJECT",
+      "automatic_bootstrap": false
+    },
+    "scheduling_policy": {
+      "executor_count": 1,
+      "scope_binds_existing_stage_kernels": true,
+      "logical_stage_is_process_or_table": false,
+      "normal_append": "NEW_SESSION_AND_EXPLICIT_HISTORY_ENDPOINTS_ONLY",
+      "same_input_retry": "REUSE_IMMUTABLE_SEALED_RESULTS",
+      "range_repair": "ACTUAL_CHANGED_FIELD_DEPENDENCY_CLOSURE_TO_STATE_FIXED_POINT",
+      "independent_kernels": "BOUNDED_IN_PROCESS_CONCURRENCY_WITH_FENCED_WRITES",
+      "performance_start": "SECOND_REAL_SESSION_FULL_MARKET_INCLUDING_ERRORS_AND_READBACK",
+      "max_parallel_kernels": 2
+    },
+    "source_evidence_policy": {
+      "empty_roots_allowed_in_design": true,
+      "actual_ingress_requires_verified_nonempty_roots": true,
+      "roots_or_clocks_may_be_fabricated": false,
+      "content_digest_alone_proves_prior_observation": false,
+      "pg_capture_audit_fields": [
+        "actual_read_started_at",
+        "validated_complete_at",
+        "durable_capture_at",
+        "source_available_at_or_UNKNOWN",
+        "source_stat_before_after",
+        "byte_count",
+        "content_sha",
+        "canonical_row_digest"
+      ],
+      "live_pit_requires_actual_capture_chain": true,
+      "unprovable_historical_time": "NON_PIT_OR_LATE_NO_BACKSIGNING",
+      "raw_business_binary_archive_required": false
+    },
+    "capacity_policy": {
+      "planning_entities": 10000,
+      "planning_sessions": 500,
+      "data_and_indexes_gib": 48,
+      "candidate_peak_gib": 16,
+      "wal_warn_gib": 16,
+      "wal_emergency_gib": 32,
+      "candidate_unsealed_ttl_hours": 48,
+      "candidate_sealed_unreferenced_ttl_days": 7,
+      "max_unreferenced_sealed_versions": 3,
+      "max_active_runs": 2,
+      "gc_batch_rows": 10000,
+      "gc_round_seconds": 60,
+      "local_logical_failure_backup_rpo_hours": 24,
+      "local_restore_rto_hours": 4,
+      "single_G_volume_failure_covered": false,
+      "engineering_budget_not_measured": true,
+      "gc_must_preserve_reference_closure": true
+    },
+    "source_seal_validation": {
+      "consumer_stage": "P20",
+      "applies_to": [
+        "FOUNDATION_EOD",
+        "FULL_RESEARCH_EOD"
+      ],
+      "required_identity": [
+        "namespace_id",
+        "source_set_id",
+        "dataset_revision",
+        "source_content_digest",
+        "canonical_input_digest",
+        "parser_contract_version",
+        "identity_calendar_revision",
+        "coverage_entity_set_digest",
+        "data_date",
+        "source_cutoff",
+        "clock_quality"
+      ],
+      "identity_field_bindings": {
+        "namespace_id": {
+          "producer": "PROJECT_RUNTIME_IDENTITY",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        },
+        "source_set_id": {
+          "producer": "P03_SOURCE_SET",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        },
+        "dataset_revision": {
+          "producer": "DATASET_REGISTRY_AND_CAPTURE",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        },
+        "source_content_digest": {
+          "producer": "P03_CAPTURED_SOURCE_BYTES_OR_RESPONSE",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        },
+        "canonical_input_digest": {
+          "producer": "P05_CANONICAL_TYPED_ROWS",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        },
+        "parser_contract_version": {
+          "producer": "P03_PARSER_AND_UNIT_CONTRACT",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        },
+        "identity_calendar_revision": {
+          "producer": "P04_VERIFIED_IDENTITY_AND_CALENDAR",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        },
+        "coverage_entity_set_digest": {
+          "producer": "P04_EXPECTED_SET_AND_P05_ACTUAL_COVERAGE",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        },
+        "data_date": {
+          "producer": "DECLARED_SOURCE_QUERY_SCOPE",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        },
+        "source_cutoff": {
+          "producer": "DECLARED_RUN_CUTOFF_AND_OBSERVED_SOURCE_CLOCKS",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        },
+        "clock_quality": {
+          "producer": "OBSERVED_CAPTURE_VALIDATION_AND_DURABILITY_CLOCKS",
+          "consumer": "P20",
+          "state": "NEEDS_DEPENDENCY"
+        }
+      },
+      "required_checks": [
+        "EXACT_REQUIRED_DATASETS_AND_ENTITY_COVERAGE",
+        "SOURCE_BYTES_TO_CANONICAL_ROWS_VERIFIED_TRANSFORMATION",
+        "P05_CANONICAL_ROWS_MATCH_SEALED_INPUT_AND_TRANSFORMATION",
+        "REAL_VALIDATION_AND_DURABILITY_CLOCKS_ORDERED",
+        "NO_MUTATION_AFTER_SOURCE_SEAL",
+        "OWNER_INPUT_DIGEST_INCLUDES_SEAL_ID_CONTENT_AND_CLOCK_QUALITY"
+      ],
+      "missing_or_mismatched_seal": "REJECT_BEFORE_OWNER_SEAL_OR_PUBLICATION",
+      "post_capture_transformation": "P04_SEALS_VALIDATED_SOURCE_INPUT_P05_DERIVATION_VERIFIED_AT_P20_NO_P04_DEPENDS_ON_P05_BACK_EDGE",
+      "processing_sealed_at_after_source_cutoff_alone_is_invalid": false,
+      "live_pit_policy": "REQUIRE_REAL_AVAILABILITY_CAPTURE_DURABILITY_AND_ACCEPTED_DEPENDENCIES_WITHIN_DECLARED_ASOF_NO_BACKSIGNING",
+      "late_or_unproven_input": "REJECT_LIVE_PIT_CLAIM_NON_PIT_RESEARCH_ONLY_IF_PREDECLARED_SCOPE_PERMITS",
+      "proof_model": {
+        "contract": "P20_SOURCE_PROOF_MODEL_R1",
+        "canonical_digest_contract": "SA_SEAL_CANONICAL_JSON_V1",
+        "digest_prefix": "STOCK_A_SEAL|{schema_id}|V1\n",
+        "digest_encoding": "UTF8_NO_BOM_COMPACT_JSON_UNICODE_NFC_OBJECT_KEYS_CODEPOINT_ORDER",
+        "exact_decimal_encoding": "FIXED_POINT_STRING_NO_EXPONENT_TRIM_TRAILING_ZERO_NEGATIVE_ZERO_AS_0",
+        "date_encoding": "YYYY-MM-DD",
+        "clock_encoding": "UTC_MICROSECOND_Z_AFTER_EXPLICIT_OFFSET_VALIDATION",
+        "record_sets": "SORT_BY_DECLARED_COMPOSITE_BUSINESS_KEY_UTF8_ORDER_REJECT_DUPLICATES_PRESERVE_SOURCE_ORDINAL",
+        "coverage": {
+          "source_inventory_digest": "inventory_digest",
+          "entity_session_digest": "coverage_digest",
+          "required_dataset_set": "EXACT_ONE_TO_ONE_SCOPE_IDENTITY_SET_REJECT_MISSING_EXTRA_OR_DUPLICATE",
+          "required_inventory_fields": [
+            "dataset_id",
+            "dataset_version",
+            "source_role",
+            "source_revision",
+            "query_scope",
+            "parser_version",
+            "unit_version",
+            "capture_id",
+            "source_content_sha256",
+            "entries",
+            "required_directories",
+            "completed_directories",
+            "failures",
+            "enumeration_started_at",
+            "enumeration_completed_at",
+            "enumeration_complete",
+            "budget"
+          ],
+          "entity_session_denominator": "P04_INDEPENDENTLY_VERIFIED_EXPECTED_SET",
+          "missing_denominator": "COVERAGE_UNPROVEN",
+          "budget_fields": [
+            "max_entries",
+            "max_bytes",
+            "actual_entries",
+            "actual_bytes",
+            "max_duration_ms",
+            "elapsed_ms"
+          ],
+          "allowed_scope_outcomes": [
+            "COMPLETE_DECLARED_SCOPE",
+            "PARTIAL_DECLARED_SCOPE",
+            "COVERAGE_UNPROVEN"
+          ],
+          "never_claim": "COMPLETE_MARKET_FROM_DECLARED_SCOPE_ONLY"
+        },
+        "inventory_entry_fields": [
+          "source_key",
+          "byte_size",
+          "content_sha256"
+        ],
+        "transformation_digest_chain": [
+          "source_byte_sha256",
+          "parsed_row_set_digest",
+          "mapped_fact_digest",
+          "mapping_disposition_digest",
+          "p05_canonical_digest",
+          "conversion_contract_digest"
+        ],
+        "conversion_contract_fields": [
+          "parser_version",
+          "unit_version",
+          "p04_mapping_version",
+          "p05_conversion_version",
+          "p05_field_projection_version",
+          "source_binding_id",
+          "normalization_version",
+          "field_rules_digest"
+        ],
+        "p05_recomputation": "APPLY_EXPLICIT_FIELD_RULES_AND_RATIONAL_UNIT_FACTORS_TO_PARSED_ROWS_WITH_P04_IDENTITY_CALENDAR_MAPPING_THEN_COMPARE_EXACT_VALUE_QUALITY_REASON_AND_SOURCE_BINDING",
+        "field_rule_fields": [
+          "source_field",
+          "canonical_field",
+          "quality_field",
+          "reason_field",
+          "operation",
+          "factor_numerator",
+          "factor_denominator"
+        ],
+        "p05_row_source_binding": "SOURCE_RECORD_KEYS_MUST_RESOLVE_TO_P04_MAPPING_FOR_SAME_ENTITY_SESSION",
+        "source_mapping_dispositions": {
+          "required_per_parsed_record": true,
+          "fields": [
+            "source_record_key",
+            "status",
+            "reason"
+          ],
+          "statuses": [
+            "MAPPED",
+            "UNMAPPED",
+            "IDENTITY_CONFLICT",
+            "REJECTED_BY_SCOPE"
+          ],
+          "reason_rule": "NON_MAPPED_REQUIRES_NONEMPTY_NAMED_REASON_MAPPED_REASON_MAY_BE_NULL_OR_NONEMPTY_STRING",
+          "partial_canonical_derivation": "INTERNAL_TO_CHAIN_VERIFIER_ONLY_PUBLIC_DERIVATION_FAILS_CLOSED",
+          "unresolved_outcome": "PARTIAL_DECLARED_SCOPE_NOT_CANONICAL_BOUND"
+        },
+        "missing_source_bytes_outcome": "VERIFIED_AT_CAPTURE_NOT_REPLAYABLE_SOURCE_BYTES",
+        "source_bytes_present_outcome": "SOURCE_BYTES_PRESENT_PARSER_REPLAY_PENDING_UNLESS_TRUSTED_PARSER_ACTUALLY_REPLAYED",
+        "clock_order": [
+          "read_started_at<=read_completed_at",
+          "read_completed_at<=validated_complete_at",
+          "validated_complete_at<=durable_commit_observed_at",
+          "durable_commit_observed_at<=source_sealed_at"
+        ],
+        "request_clock_order": "request_started_at<=read_completed_at_WHEN_APPLICABLE",
+        "ready_at": "MAX_OF_ACTUAL_REQUIRED_DOWNLOAD_READ_VALIDATION_AND_VERIFIED_AVAILABILITY_OBSERVATIONS",
+        "late_seal": "NON_PIT_EOD_MAY_SEAL_AFTER_SOURCE_CUTOFF_BUT_NEVER_INHERITS_LIVE_OR_PIT",
+        "seal_revision": "SAME_KEY_SAME_CONTENT_IDEMPOTENT_SAME_KEY_DIFFERENT_CONTENT_CONFLICT_NEW_REVISION_APPEND_ONLY",
+        "sealed_snapshot_readback": "RECOMPARE_SEAL_ID_ROW_COUNT_ROW_DIGEST_REFERENCE_COUNT_AND_REFERENCE_DIGEST",
+        "owner_input_projection": {
+          "schema": "OWNER_INPUT_PROJECTION_V1",
+          "fields": [
+            "owner_scope",
+            "source_seal",
+            "fact_inputs",
+            "derived_inputs",
+            "rule_inputs",
+            "provenance_pit",
+            "result_identity"
+          ],
+          "required_seal_fields": [
+            "seal_id",
+            "content_digest",
+            "clock_quality"
+          ],
+          "owner_scope_fields": [
+            "domain",
+            "partition",
+            "variant",
+            "target_session",
+            "required_roles"
+          ],
+          "fact_row_fields": [
+            "source_binding_id",
+            "source_content_version",
+            "entity_id",
+            "session",
+            "field",
+            "value_digest",
+            "quality",
+            "reason",
+            "identity_revision",
+            "calendar_revision"
+          ],
+          "derived_row_fields": [
+            "producer_id",
+            "producer_version",
+            "target_coordinate_id",
+            "entity_id",
+            "session",
+            "field",
+            "input_digest"
+          ],
+          "rule_row_fields": [
+            "algorithm_id",
+            "algorithm_version",
+            "parameter_version",
+            "parameter_digest"
+          ],
+          "provenance_pit_row_fields": [
+            "source_binding_id",
+            "role",
+            "capture_id",
+            "ready_at",
+            "durable_at",
+            "as_of",
+            "availability_quality"
+          ],
+          "result_row_fields": [
+            "entity_id",
+            "session",
+            "field",
+            "quality",
+            "value_digest"
+          ],
+          "scope": "ONLY_ACTUAL_OWNER_CONSUMED_INPUTS_NO_FUTURE_PUBLICATION_READINDEX_HEAD_FIELDS"
+        },
+        "rule_providers": {
+          "inventory_and_coverage": {
+            "producer": "P03_ENUMERATOR_PLUS_P04_VERIFIED_EXPECTED_SET_AND_P05_SELECTED_ROWS",
+            "consumer": "P20",
+            "pure_rule_defined": true,
+            "production_binding_present": false
+          },
+          "source_to_canonical_chain": {
+            "producer": "P03_CAPTURE_PARSER_PLUS_P04_MAPPING_PLUS_P05_CONVERSION",
+            "consumer": "P20",
+            "pure_rule_defined": true,
+            "production_binding_present": false
+          },
+          "canonical_encoding": {
+            "producer": "SA_SEAL_CANONICAL_JSON_V1_PURE_CODEC",
+            "consumer": "P20",
+            "pure_rule_defined": true,
+            "production_binding_present": false
+          },
+          "clock_and_temporal_eligibility": {
+            "producer": "P03_P04_OBSERVED_CLOCKS_AND_ACCEPTED_REQUIRED_DEPENDENCIES",
+            "consumer": "P20",
+            "pure_rule_defined": true,
+            "production_binding_present": false
+          },
+          "immutable_revision_and_owner_digest": {
+            "producer": "P20_OWNER_SCOPE_AND_PG_SEAL_READBACK",
+            "consumer": "P20_THEN_P21",
+            "pure_rule_defined": true,
+            "production_binding_present": false
+          }
+        },
+        "pure_kernel_outcomes_never_issue": [
+          "OWNER_SEALED",
+          "PIT_PROVEN",
+          "PRODUCTION_RELEASED"
+        ],
+        "production_binding_state": "NEEDS_DEPENDENCY"
+      }
+    }
+  },
+  "scope_fields": {
+    "implementation_binding_required": true,
+    "allowed_environments": [
+      "DEV",
+      "TEST"
+    ],
+    "accepted_readback_identity_assertion": "P24_REQUIRES_ACCEPTED_AND_ORIGINAL_CANDIDATE_PUBLICATION_EXACT_ID_MANIFEST_INDEX_EQUALITY_NO_UNACCEPTED_READBACK",
+    "context_input_registry": {
+      "context.capture_dataset_id": {
+        "value_type": "string",
+        "producer_stage": "P01",
+        "output_artifact": "tdx_capture",
+        "identity_role": "SOURCE_AUDIT_OR_SELECTED_PROVENANCE_NOT_GLOBAL_NUMERIC_DEPENDENCY"
+      },
+      "context.capture_parser_version": {
+        "value_type": "string",
+        "producer_stage": "P01",
+        "output_artifact": "tdx_capture",
+        "identity_role": "SOURCE_AUDIT_OR_SELECTED_PROVENANCE_NOT_GLOBAL_NUMERIC_DEPENDENCY"
+      },
+      "context.capture_unit_version": {
+        "value_type": "string",
+        "producer_stage": "P01",
+        "output_artifact": "tdx_capture",
+        "identity_role": "SOURCE_AUDIT_OR_SELECTED_PROVENANCE_NOT_GLOBAL_NUMERIC_DEPENDENCY"
+      },
+      "context.capture_binding_id": {
+        "value_type": "uuid",
+        "producer_stage": "P01",
+        "output_artifact": "tdx_capture",
+        "identity_role": "SOURCE_AUDIT_OR_SELECTED_PROVENANCE_NOT_GLOBAL_NUMERIC_DEPENDENCY"
+      },
+      "context.selected_raw_open": {
+        "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+        "producer_stage": "P03",
+        "output_artifact": "source_set",
+        "schema": {
+          "source_key": "string",
+          "session": "date",
+          "field_id": "string",
+          "semantic_digest": "sha256",
+          "source_authority": "string",
+          "parser_version": "string",
+          "unit_version": "string",
+          "normalization_version": "string",
+          "selected_capture_id": "uuid",
+          "selected_available_at": "timestamptz",
+          "selected_durable_at": "timestamptz"
+        },
+        "consumer": "raw.open",
+        "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+        "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+        "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+        "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+        "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+      },
+      "context.selected_raw_high": {
+        "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+        "producer_stage": "P03",
+        "output_artifact": "source_set",
+        "schema": {
+          "source_key": "string",
+          "session": "date",
+          "field_id": "string",
+          "semantic_digest": "sha256",
+          "source_authority": "string",
+          "parser_version": "string",
+          "unit_version": "string",
+          "normalization_version": "string",
+          "selected_capture_id": "uuid",
+          "selected_available_at": "timestamptz",
+          "selected_durable_at": "timestamptz"
+        },
+        "consumer": "raw.high",
+        "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+        "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+        "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+        "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+        "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+      },
+      "context.selected_raw_low": {
+        "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+        "producer_stage": "P03",
+        "output_artifact": "source_set",
+        "schema": {
+          "source_key": "string",
+          "session": "date",
+          "field_id": "string",
+          "semantic_digest": "sha256",
+          "source_authority": "string",
+          "parser_version": "string",
+          "unit_version": "string",
+          "normalization_version": "string",
+          "selected_capture_id": "uuid",
+          "selected_available_at": "timestamptz",
+          "selected_durable_at": "timestamptz"
+        },
+        "consumer": "raw.low",
+        "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+        "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+        "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+        "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+        "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+      },
+      "context.selected_raw_close": {
+        "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+        "producer_stage": "P03",
+        "output_artifact": "source_set",
+        "schema": {
+          "source_key": "string",
+          "session": "date",
+          "field_id": "string",
+          "semantic_digest": "sha256",
+          "source_authority": "string",
+          "parser_version": "string",
+          "unit_version": "string",
+          "normalization_version": "string",
+          "selected_capture_id": "uuid",
+          "selected_available_at": "timestamptz",
+          "selected_durable_at": "timestamptz"
+        },
+        "consumer": "raw.close",
+        "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+        "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+        "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+        "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+        "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+      },
+      "context.selected_raw_amount": {
+        "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+        "producer_stage": "P03",
+        "output_artifact": "source_set",
+        "schema": {
+          "source_key": "string",
+          "session": "date",
+          "field_id": "string",
+          "semantic_digest": "sha256",
+          "source_authority": "string",
+          "parser_version": "string",
+          "unit_version": "string",
+          "normalization_version": "string",
+          "selected_capture_id": "uuid",
+          "selected_available_at": "timestamptz",
+          "selected_durable_at": "timestamptz"
+        },
+        "consumer": "raw.amount",
+        "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+        "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+        "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+        "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+        "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+      },
+      "context.selected_raw_volume": {
+        "value_type": "SELECTED_SOURCE_FIELD_BINDING",
+        "producer_stage": "P03",
+        "output_artifact": "source_set",
+        "schema": {
+          "source_key": "string",
+          "session": "date",
+          "field_id": "string",
+          "semantic_digest": "sha256",
+          "source_authority": "string",
+          "parser_version": "string",
+          "unit_version": "string",
+          "normalization_version": "string",
+          "selected_capture_id": "uuid",
+          "selected_available_at": "timestamptz",
+          "selected_durable_at": "timestamptz"
+        },
+        "consumer": "raw.volume",
+        "selection": "EXACT_SEALED_SOURCE_KEY_SESSION_FIELD_JOINED_TO_P04_IDENTITY_AT_P05_NO_LATEST",
+        "numeric_identity": "SOURCE_FIELD_SEMANTIC_DIGEST_THEN_P05_ADDS_STABLE_ENTITY_AND_SESSION",
+        "provenance_identity": "SELECTED_BINDING_CLOCKS_AND_CAPTURE",
+        "append_reuse": "KEEP_ORIGINAL_SELECTED_BINDING_FOR_UNCHANGED_SEMANTIC_FACT",
+        "canonicalization": "P03_DOES_NOT_CREATE_ENTITY_ID_P05_USES_P04_ENTITY_BINDING"
+      }
+    },
+    "context_identity_policy": {
+      "applies_to": "NUMERIC_FIELD_AND_WINDOW_IDENTITIES",
+      "profile_handoff_expectations": "SEPARATE_FROM_INPUT_VALUES; BUILT_BY_FOUNDATION_EXECUTOR_FROM_VERIFIED_SELECTION_RESULT; COMPARE_EXACT_ENDPOINTS_SELECTED_ROWS_DIGEST_CALENDAR_REVISION_STATUS_REVISION_AND_DECLARED_CONTEXT",
+      "profile_handoff_executor_status": "NOT_IMPLEMENTED; PROFILE PURE ENTRY REQUIRES EXPLICIT EXPECTATIONS BUT DOES NOT CLAIM A TRUSTED PRODUCTION SELECTOR",
+      "profile_registry_duplicate_ids": "REJECT_BEFORE_MAP_CONSTRUCTION",
+      "profile_missing_producer": "CONTRACT_ERROR_AT_FORMAL_PROFILE_ENTRY; KEEP_FOUNDATION_EOD_BLOCKED",
+      "context.source_cutoff": "SELECTED_FACT_AND_COORDINATE_ELIGIBILITY_PROJECTION_NOT_GLOBAL_RUN_WALLCLOCK",
+      "context.calendar_ref": "ACTUAL_CONSUMED_SESSION_PROJECTION_NOT_WHOLE_NEW_CALENDAR_VERSION",
+      "selected_provenance": "KEEP_ORIGINAL_SELECTED_BINDING_AND_ITS_REAL_ASOF_CLOCKS_UNLESS_FACT_SELECTION_CHANGES",
+      "audit_and_eligibility_records": "KEEP_ACTUAL_CLOCK_VALUES_AND_EXACT_SOURCE_SET_REFERENCES",
+      "transitive_rule": "PROJECT_EACH_DECLARED_CONTEXT_THEN_UNION_ACTUAL_INPUT_AND_WINDOW_DEPENDENCIES"
+    }
+  }
+}

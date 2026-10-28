@@ -7,12 +7,12 @@ from hashlib import sha256
 import json
 from types import MappingProxyType
 
+from stock_a.contracts import DayChainContractError, LoadedDayChainContract, canonical_contract_bytes
 from stock_a.domain import ContractError
 
 
 # 该摘要固定正式机器合同中的完整scope闭包目录；依赖键仅维护在合同文件。
 _OFFICIAL_SCOPE_CLOSURE_CATALOG_DIGEST = "3cce5f595d838d988e422199df8346359bebe5910811d98f88c94dcfe013f265"
-_OFFICIAL_DAY_CHAIN_CONTRACT_SHA256 = "89e4150e577196f95ef459a121308e191396bb0a991bc0d2e37829cddb4bb3eb"
 _DAY_PLAN_KERNEL_SYMBOL = "stock_a.planning:assemble_day_plan"
 _OMIT_DIGEST_VALUE = object()
 
@@ -314,7 +314,7 @@ class CapabilityEvidence:
 class DayPlanRequest:
     """P00纯计划输入；没有隐式I/O或默认业务身份。"""
 
-    contract: Mapping[str, object]
+    contract: LoadedDayChainContract
     contract_sha256: str
     scope_id: str
     target_session: date
@@ -442,17 +442,17 @@ def _without_digest_exclusions(value: object, excluded_keys: frozenset[str]) -> 
 
 
 def _validated_contract(request: DayPlanRequest) -> tuple[Mapping[str, object], str]:
-    if not isinstance(request.contract, Mapping):
-        raise _plan_error("CONTRACT_INVALID", "必须显式提供正式机器合同映射")
+    if not isinstance(request.contract, LoadedDayChainContract) or not request.contract.loader_verified:
+        raise _plan_error("CONTRACT_NOT_LOADED", "必须使用固定模块清单装配并验证过的正式机器合同")
     try:
-        canonical = json.dumps(
-            request.contract, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-    except (TypeError, ValueError) as exc:
+        canonical = canonical_contract_bytes(request.contract.document)
+    except DayChainContractError as exc:
         raise _plan_error("CONTRACT_INVALID", "机器合同不是稳定JSON结构") from exc
     calculated = sha256(canonical).hexdigest()
-    if request.contract_sha256 != calculated or calculated != _OFFICIAL_DAY_CHAIN_CONTRACT_SHA256:
-        raise _plan_error("CONTRACT_SHA_MISMATCH", "机器合同规范化摘要不是当前正式合同绑定摘要")
+    if (request.contract_sha256 != calculated
+            or request.contract.assembled_sha256 != calculated
+            or request.contract.declared_sha256 != calculated):
+        raise _plan_error("CONTRACT_SHA_MISMATCH", "机器合同规范化摘要与已验证装配声明不一致")
     if (request.contract.get("contract_id") != "STOCK-A-DAY-CHAIN"
             or request.contract.get("version") != "R10"):
         raise _plan_error("CONTRACT_VERSION_MISMATCH", "机器合同身份或版本不匹配")

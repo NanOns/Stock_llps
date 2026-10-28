@@ -1,0 +1,2979 @@
+{
+  "top_level": {
+    "forward_policy": {
+      "horizons_sessions": [
+        1,
+        3,
+        5,
+        10,
+        20
+      ],
+      "schedule_and_outcome_separate": true,
+      "endpoint_and_path_quality_separate": true,
+      "fixed_t0_members_and_original_weights": true,
+      "unknown_terminal_value_is_zero": false,
+      "mfe_mae_include_initial_zero": true,
+      "future_path_starts": "NEXT_MARKET_SESSION_AFTER_T0",
+      "revision_generation": "PARTITION_ROW_LOCK_INCREMENT_IN_SAME_TRANSACTION_AS_FACT_APPEND",
+      "request_snapshot": "READ_ONLY_REPEATABLE_READ",
+      "max_sequence_or_count_is_revision": false,
+      "pending_future_sessions": "NOT_DUE_NOT_A_BUSINESS_ERROR",
+      "engineering_failure_can_be_deferred_source_gap": false,
+      "path_drawdown_metric": "MDD_CLOSE_WITH_P0_AND_SUCCESSOR_CLOSES",
+      "cross_request_stale_generation": "REJECT_CONTEXT_STALE_UNLESS_EXACT_HISTORICAL_GENERATION_IS_RECONSTRUCTABLE"
+    },
+    "research_execution_contracts": {
+      "stock_risk": {
+        "contract": "STOCK_A_STOCK_RISK_COMPOSITION_R1",
+        "stage": "P17",
+        "producer_symbol": "stock_a.research.risk:compose",
+        "adoption": "ADOPTED_RESEARCH_BASELINE_CHG015_NOT_MARKET_VALIDATED",
+        "input_domains": {
+          "P": [
+            false,
+            true
+          ],
+          "E": [
+            "LOW",
+            "MEDIUM",
+            "HIGH",
+            "EXTREME"
+          ],
+          "I": [
+            false,
+            true
+          ],
+          "W": [
+            false,
+            true
+          ]
+        },
+        "ordered_branches": [
+          {
+            "when": {
+              "op": "eq",
+              "args": [
+                {
+                  "ref": "I"
+                },
+                true
+              ]
+            },
+            "value": "EXTREME",
+            "primary_reason": "CURRENT_EPISODE_INVALIDATED"
+          },
+          {
+            "when": {
+              "op": "eq",
+              "args": [
+                {
+                  "ref": "E"
+                },
+                "EXTREME"
+              ]
+            },
+            "value": "EXTREME",
+            "primary_reason": "EXTREME_EXTENSION"
+          },
+          {
+            "when": {
+              "op": "and",
+              "args": [
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "ref": "P"
+                    },
+                    true
+                  ]
+                },
+                {
+                  "op": "or",
+                  "args": [
+                    {
+                      "op": "eq",
+                      "args": [
+                        {
+                          "ref": "E"
+                        },
+                        "HIGH"
+                      ]
+                    },
+                    {
+                      "op": "eq",
+                      "args": [
+                        {
+                          "ref": "W"
+                        },
+                        true
+                      ]
+                    }
+                  ]
+                }
+              ]
+            },
+            "value": "EXTREME",
+            "primary_reason": "DAMAGE_WITH_SECOND_WARNING"
+          },
+          {
+            "when": {
+              "op": "and",
+              "args": [
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "ref": "E"
+                    },
+                    "HIGH"
+                  ]
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "ref": "W"
+                    },
+                    true
+                  ]
+                }
+              ]
+            },
+            "value": "EXTREME",
+            "primary_reason": "EXTENSION_WITH_SOFT_BREACH"
+          },
+          {
+            "when": {
+              "op": "eq",
+              "args": [
+                {
+                  "ref": "P"
+                },
+                true
+              ]
+            },
+            "value": "HIGH",
+            "primary_reason": "CORE_PRICE_DAMAGE"
+          },
+          {
+            "when": {
+              "op": "eq",
+              "args": [
+                {
+                  "ref": "E"
+                },
+                "HIGH"
+              ]
+            },
+            "value": "HIGH",
+            "primary_reason": "HIGH_EXTENSION"
+          },
+          {
+            "when": {
+              "op": "and",
+              "args": [
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "ref": "E"
+                    },
+                    "MEDIUM"
+                  ]
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "ref": "W"
+                    },
+                    true
+                  ]
+                }
+              ]
+            },
+            "value": "HIGH",
+            "primary_reason": "MULTIPLE_MODERATE_WARNINGS"
+          },
+          {
+            "when": {
+              "op": "or",
+              "args": [
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "ref": "E"
+                    },
+                    "MEDIUM"
+                  ]
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "ref": "W"
+                    },
+                    true
+                  ]
+                }
+              ]
+            },
+            "value": "MEDIUM",
+            "primary_reason": "SINGLE_MODERATE_WARNING"
+          },
+          {
+            "when": true,
+            "value": "LOW",
+            "primary_reason": "NO_REGISTERED_WARNING"
+          }
+        ],
+        "unknown": "ENUMERATE_AT_MOST_32_LOGICAL_COMPLETIONS_AFTER_CONTEXT_AND_APPLICABILITY_VALIDATION",
+        "structure_applicability": {
+          "ABSENT": "I_AND_W_EXPLICIT_NA_WITH_NO_SELECTED_EPISODE",
+          "LINKED": "EXACT_SELECTED_EPISODE_I_MUST_BE_BOOLEAN_OR_UNKNOWN_W_HAS_INDEPENDENT_LINKED_SUPPORT_APPLICABILITY",
+          "UNKNOWN": "I_AND_W_UNKNOWN_NOT_NA"
+        },
+        "certainty": "LEVEL_PRIMARY_REASON_ALL_REASONS_AND_COVERAGE_INDEPENDENT",
+        "known_level_if": "ALL_COMPLETIONS_SAME_LEVEL",
+        "primary_reason_if": "ALL_COMPLETIONS_SAME_FIRST_REASON_ELSE_NULL_WITH_CANDIDATES",
+        "scope": "CURRENT_EPISODE_ONLY_MARKET_SECTOR_AND_EXECUTION_RISKS_SEPARATE",
+        "errors": "CONTRACT_OR_IMPLEMENTATION_NOT_READY_BLOCK_CAPABILITY_ENGINEERING_ERROR_PROPAGATES_INVALID_OBSERVED_VALUES_REJECT",
+        "output_schema": {
+          "level": "nullable enum + FieldValue quality/reason",
+          "possible_levels": "finite enum set",
+          "lower_bound": "enum",
+          "upper_bound": "enum",
+          "primary_reason": "nullable reason code",
+          "primary_reason_candidates": "finite reason set",
+          "confirmed_reasons": "reason intersection",
+          "possible_reasons": "reason union",
+          "structure_na": "bool",
+          "known_inputs": "nonnegative int",
+          "applicable_inputs": "2 or 3 or 4",
+          "support_na": "bool independent of episode absence"
+        },
+        "priority_policy": "D2_FALSE_EXCLUDED_BEFORE_RISK_D2_UNKNOWN_OR_RISK_UNKNOWN_OR_OTHER_KEY_MISSING_UNKNOWN_ELSE_RANKABLE",
+        "comparability": [
+          "same_entity",
+          "same_contract_parameters",
+          "same_scope",
+          "same_episode_or_explicit_selection_change"
+        ],
+        "change_labels": [
+          "FIRST_OBSERVED",
+          "RULE_CHANGED",
+          "SELECTION_CHANGED",
+          "BECAME_KNOWN",
+          "IMPROVED",
+          "WORSENED",
+          "UNCHANGED"
+        ],
+        "support_applicability": {
+          "ABSENT": "EXPLICIT_NA_PROVEN_NO_LINKED_SUPPORT_W_FALSE_WITH_NA_LABEL",
+          "LINKED": "EXACT_EPISODE_SUPPORT_OBSERVATION_NO_NA",
+          "UNKNOWN": "UNKNOWN_NOT_NA"
+        }
+      },
+      "d2": {
+        "contract": "STOCK_A_D2_REDUCER_R1",
+        "stage": "P16",
+        "producer_symbol": "stock_a.research.state:reduce_episode",
+        "adoption": "ADOPTED_RESEARCH_BASELINE_CHG015_NOT_MARKET_VALIDATED",
+        "entity_maturities": {
+          "STOCK": [
+            "NONE",
+            "SEED",
+            "PREWATCH",
+            "WARM",
+            "CONFIRMED"
+          ],
+          "SECTOR": [
+            "NONE",
+            "PREWATCH",
+            "WARM",
+            "CONFIRMED"
+          ]
+        },
+        "parameters": {
+          "downgrade_sessions": 2,
+          "expiry_sessions": 10,
+          "improvement_pp": 3,
+          "health_deadband_pp": 3
+        },
+        "raw_stock_warm": {
+          "op": "and",
+          "args": [
+            {
+              "ref": "stock.prewatch_raw"
+            },
+            {
+              "op": "eq",
+              "args": [
+                {
+                  "ref": "profile.relative"
+                },
+                "ACTIVE_EMERGENCE"
+              ]
+            },
+            {
+              "op": "gt",
+              "args": [
+                {
+                  "ref": "adjusted.close"
+                },
+                {
+                  "ref": "core.ma20"
+                }
+              ]
+            },
+            {
+              "op": "gt",
+              "args": [
+                {
+                  "ref": "core.ma_slope20_atr"
+                },
+                0
+              ]
+            }
+          ]
+        },
+        "ordered_steps": [
+          "VALIDATE_CONTEXT_CAPABILITIES_AND_PREVIOUS_MARKET_SESSION",
+          "EXPLICIT_MODEL_BOUNDARY_PRESERVE_OLD_LINEAGE",
+          "PRESERVE_TERMINAL_OR_APPLY_CURRENT_EPISODE_HARD_INVALIDATION",
+          "ACTUAL_REQUIRED_INPUT_AND_RAW_GRADE_BOUNDS",
+          "TODAY_CORE_SAFETY_SEPARATE_FROM_OLD_EPISODE_VALIDITY",
+          "NEW_EVENT_APPLICATION_EXIT_SESSION_GUARD",
+          "IMMEDIATE_UPGRADE_OR_ADJACENT_SAME_OR_LOWER_TARGET_DOWNGRADE",
+          "EARLY_EVALUABLE_EXPIRY_AND_IMPROVEMENT",
+          "INDEPENDENT_HEALTH_TRACKING_EVENTS_AND_PRIMARY_PROJECTION"
+        ],
+        "invalidation": "OWN_EFFECTIVE_FROZEN_LINE_C_LE_LEVEL_OR_LINKED_SUPPORT_HARD_BROKEN_NO_GLOBAL_CORE_DAMAGE_INVALIDATION",
+        "maturity": "MAX_KNOWN_TRUE_LOWER_BOUND_MAX_NOT_FALSE_UPPER_BOUND_EXACT_ONLY_IF_EQUAL",
+        "safety": "DAMAGE_OR_EXTREME_EXTENSION_DENIES_TODAY_QUALIFICATION_NOT_ALL_OLD_EPISODES",
+        "hysteresis": "DISPLAY_HOLD_ONLY_SORT_USES_TODAY_EFFECTIVE_BUCKET_SECOND_ADJACENT_TARGET_SAME_OR_LOWER_APPLIES",
+        "expiry": "BIRTH_AND_PROVEN_IMPROVEMENT_RESET_TO_0_SUBSEQUENT_UNIMPROVED_EVALUABLE_SESSIONS_PLUS1_EXIT_AT10",
+        "improvement": "GRADE_UPGRADE_OR_CURRENT_METRIC_MINUS_LAST_RESET_BASELINE_GTE3_PP_NOT_DAILY_RET3",
+        "unknown_suspension": "KEEP_LAST_KNOWN_RESET_DOWNGRADE_STREAK_PAUSE_EXPIRY_DO_NOT_EXIT_OR_CREATE_NEW_EPISODE",
+        "health": "STOCK_OWN_HARD_INVALIDATED_OR_CORE_DAMAGE_DAMAGED_ELSE_EXTENSION_EXTREME_EXHAUSTED_ELSE_METRIC_GT3_LT_MINUS3_STABLE_COMPLETION_UNKNOWN_SECTOR_ONLY_OWN_HARD_OR_DQ5_NO_STOCK_GATES",
+        "tracking": [
+          "ACTIVE",
+          "PAUSED",
+          "FOLLOWUP",
+          "CLOSED"
+        ],
+        "terminal": "NO_RESURRECTION_OLD_FORWARD_CONTINUES_FOLLOWUP_COMPLETE_TRUE_REQUIRED_TO_CLOSE",
+        "reentry": "AFTER_EXIT_SESSION_NEW_DISTINCT_FORMAL_EVENT_OR_PROVEN_CORE_FALSE_THEN_TRUE_EDGE_CHILD_PARENT_REQUIRED",
+        "exit_session_guard": "P16_TWO_PASS_OLD_PRIMARY_OR_EXPLICIT_PARENT_LINEAGE_EXIT_BLOCKS_NEW_APPLICATION_NO_P14_REWRITE_UNRELATED_OLD_ANCHOR_NOT_GLOBAL_VETO",
+        "model_boundary": "EXPLICIT_NEW_RULE_LINEAGE_RESET_COUNTERS_PRESERVE_PARENT_AND_OLD_FORWARD_NOT_NATURAL_IMPROVEMENT",
+        "primary_selector": [
+          "today_valid_formal",
+          "old_valid_eligible_formal",
+          "eligible_core_early",
+          "scenario_priority",
+          "event_ordinal_desc",
+          "event_id_asc"
+        ],
+        "primary_unknown": "UNKNOWN_HIGHER_CANDIDATE_BLOCKS_LOWER_SELECTION_UNKNOWN_WITHOUT_EPISODE_NOT_PROOF_OF_NA",
+        "same_day_revision": "ALWAYS_FROM_SAME_T_MINUS1_ACCEPTED_BASELINE_NOT_CURRENT_STATE",
+        "forbidden_inputs": [
+          "P17.risk_rows",
+          "P18.priority_rows",
+          "P19.focus",
+          "future_outcomes"
+        ],
+        "output_schema": {
+          "episode": "immutable event/parent/failure_line refs",
+          "maturity": "nullable exact + lower bound + display",
+          "effective_eligibility": "FieldValue bool",
+          "effective_bucket": "nullable bounded int",
+          "validity": "FieldValue enum VALID/INVALIDATED or NA",
+          "health": "FieldValue enum",
+          "freshness": "FRESH/STALE",
+          "tracking": "enum",
+          "downgrade_candidate": "nullable enum",
+          "downgrade_count": "int",
+          "expiry_count": "int",
+          "improvement_baseline": "nullable pp",
+          "exit_ordinal": "nullable official ordinal",
+          "exit_reason": "nullable enum",
+          "reentry_armed": "bool",
+          "preserved_episode_ids": "references only",
+          "input_ref": "exact current sources",
+          "state_id": "semantic digest"
+        },
+        "variant_input_policy": "SECTOR_DAMAGE_EXTENSION_EXPLICIT_NA_STOCK_GATES_NOT_APPLICABLE_SECTOR_HEALTH_USES_DQ5",
+        "new_formal_event": "DISTINCT_ADMITTED_EVENT_FORKS_INDEPENDENT_CHILD_CORE_OR_OLD_FORMAL_NOT_REBOUND_OLD_ADVANCED_SEPARATELY_GRADE_CONFIRMED_REQUIRES_OWN_EVENT"
+      },
+      "d0_admission": {
+        "contract": "STOCK_A_D0_EVENT_ADMISSION_R1",
+        "stage": "P14",
+        "producer_symbol": "stock_a.research.admission:admit",
+        "scenario_priority": [
+          "LAUNCH_CONFIRM",
+          "STRONG_PULLBACK",
+          "RECOVERY_TURN",
+          "TREND_CONTINUE"
+        ],
+        "raw_formal_admission": "SEPARATE_RAW_FALSE_FORMAL_FALSE_NOT_REQUIRED_RAW_UNKNOWN_FORMAL_UNKNOWN_RAW_TRUE_NOT_READY_FORMAL_UNKNOWN",
+        "contract_errors_before_truth": true,
+        "diagnostic": "RAW_RETAINED_FORMAL_NOT_ENABLED_IN_SCOPE",
+        "common_gates": [
+          "actual",
+          "identity_calendar_coordinate",
+          "required_window",
+          "source_seal_and_real_scope_clocks",
+          "input_snapshot",
+          "producer_contract"
+        ],
+        "failure_sources": {
+          "LAUNCH_CONFIRM": "T0_PHC20_NO_PRIOR_ANCHOR_REQUIRED",
+          "RECOVERY_TURN": "R20_PRIORITY_T0_MA20_ELSE_PROVEN_R5_T0_MA5",
+          "STRONG_PULLBACK": "T_MINUS1_VALID_EPISODE_AND_ITS_LEGAL_OLD_SUPPORT_LOWER",
+          "TREND_CONTINUE": "T_MINUS1_VALID_EPISODE_LEGAL_LOO_RAW_AND_OLD_SUPPORT_LOWER_OR_PROVEN_ABSENT_SUPPORT_T0_MA20"
+        },
+        "recovery_unknown": "R20_UNKNOWN_R5_TRUE_CANNOT_FREEZE_MA5",
+        "birth": "C_GT_LINE_EFFECTIVE_NEXT_OFFICIAL_SESSION",
+        "d2_exit_guard": "NOT_AN_INPUT_P16_APPLICATION_ONLY",
+        "source_policy": "LEGAL_NON_PIT_EOD_ALLOWED_ONLY_IF_PREDECLARED_NO_BACKDATED_LIVE",
+        "output_schema": {
+          "raw": "FieldValue bool",
+          "formal": "FieldValue bool or diagnostic state",
+          "admission": "READY/NOT_READY/NOT_REQUIRED/DIAGNOSTIC",
+          "event": "immutable event id/entity/ordinal/scenario/failure_line/coordinate/window/anchor/parent refs"
+        }
+      },
+      "d1_types": {
+        "contract": "STOCK_A_D1_STRUCTURE_TYPE_REGISTRY_R1",
+        "stage": "P15",
+        "producer_symbol": "stock_a.research.structure:generate",
+        "observer_symbol": "stock_a.research.structure:observe_support",
+        "types": {
+          "IMPULSE_BODY": {
+            "relation": "SUPPORT",
+            "expression": "ALG29_IMPULSE_A_PREV_BODY_O_TO_MID",
+            "input_artifacts": [
+              "adjusted_bars",
+              "core_primitives",
+              "cross_section"
+            ],
+            "actual_symbol": "stock_a.research.structure:generate",
+            "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+            "test_from": "NEXT_MARKET_SESSION",
+            "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+          },
+          "IMPULSE_LOW": {
+            "relation": "SUPPORT",
+            "expression": "ALG29_IMPULSE_A_PREV_LOW_POINT",
+            "input_artifacts": [
+              "adjusted_bars",
+              "core_primitives",
+              "cross_section"
+            ],
+            "actual_symbol": "stock_a.research.structure:generate",
+            "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+            "test_from": "NEXT_MARKET_SESSION",
+            "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+          },
+          "BREAKOUT_PLATFORM": {
+            "relation": "SUPPORT",
+            "expression": "C_GT_PRIOR_HIGH20_PLUS0.1_ATR_T_AND_CLV_GTE0.7_POINT_PRIOR_HIGH20",
+            "input_artifacts": [
+              "adjusted_bars",
+              "core_primitives"
+            ],
+            "actual_symbol": "stock_a.research.structure:generate",
+            "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+            "test_from": "NEXT_MARKET_SESSION",
+            "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+          },
+          "PIVOT_LOW": {
+            "relation": "SUPPORT",
+            "expression": "STRICT_LOW_CENTER_OF5_ACTUAL",
+            "input_artifacts": [
+              "adjusted_bars",
+              "bar_status"
+            ],
+            "actual_symbol": "stock_a.research.structure:generate",
+            "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+            "test_from": "NEXT_MARKET_SESSION",
+            "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+          },
+          "PIVOT_HIGH": {
+            "relation": "RESISTANCE",
+            "expression": "STRICT_HIGH_CENTER_OF5_ACTUAL",
+            "input_artifacts": [
+              "adjusted_bars",
+              "bar_status"
+            ],
+            "actual_symbol": "stock_a.research.structure:generate",
+            "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+            "test_from": "NEXT_MARKET_SESSION",
+            "required_consumer": "STOCK_CHART_RESISTANCE_CONTEXT_ONLY"
+          },
+          "RANGE_FLOOR": {
+            "relation": "SUPPORT",
+            "expression": "RANGE_PRIOR20_MIN_LOW",
+            "input_artifacts": [
+              "adjusted_bars",
+              "core_primitives",
+              "bar_status",
+              "prior_context"
+            ],
+            "actual_symbol": "stock_a.research.structure:generate",
+            "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+            "test_from": "NEXT_MARKET_SESSION",
+            "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+          },
+          "RANGE_CEILING": {
+            "relation": "RESISTANCE",
+            "expression": "RANGE_PRIOR20_MAX_HIGH",
+            "input_artifacts": [
+              "adjusted_bars",
+              "core_primitives",
+              "bar_status",
+              "prior_context"
+            ],
+            "actual_symbol": "stock_a.research.structure:generate",
+            "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+            "test_from": "NEXT_MARKET_SESSION",
+            "required_consumer": "STOCK_CHART_RESISTANCE_CONTEXT_ONLY"
+          },
+          "GAP_ZONE": {
+            "relation": "SUPPORT",
+            "expression": "LOW_T_GT_PRIOR_ACTUAL_HIGH_NO_UNKNOWN_GAPS",
+            "input_artifacts": [
+              "adjusted_bars",
+              "bar_status"
+            ],
+            "actual_symbol": "stock_a.research.structure:generate",
+            "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+            "test_from": "NEXT_MARKET_SESSION",
+            "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+          },
+          "DYNAMIC_MA5": {
+            "relation": "SUPPORT",
+            "expression": "ADMITTED_RECOVERY_R5_BIRTH_MA5",
+            "input_artifacts": [
+              "d0_facts",
+              "core_primitives"
+            ],
+            "actual_symbol": "stock_a.research.structure:generate",
+            "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+            "test_from": "NEXT_MARKET_SESSION",
+            "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+          },
+          "DYNAMIC_MA20": {
+            "relation": "SUPPORT",
+            "expression": "ADMITTED_RECOVERY_R20_OR_CONTINUE_FALLBACK_BIRTH_MA20",
+            "input_artifacts": [
+              "d0_facts",
+              "core_primitives"
+            ],
+            "actual_symbol": "stock_a.research.structure:generate",
+            "created": "CURRENT_ACTUAL_CONFIRMATION_SESSION",
+            "test_from": "NEXT_MARKET_SESSION",
+            "required_consumer": "D1_SUPPORT_AND_LINKED_D2_RISK"
+          }
+        },
+        "common": "REAL_ACTUAL_SAME_COORDINATE_BOUND_SOURCE_ALL_NEW_ANCHORS_TEST_FROM_NEXT_MARKET_SESSION",
+        "pivot": "STRICT_CENTER_EXTREME_LEFT2_RIGHT2_ACTUAL_TIES_NO_EVENT_RIGHT2_AVAILABLE_DAY_CREATION",
+        "range": "PRIOR20_ACTUAL_A_PREV_ATR20_T_MINUS1_TARGET_COORD_ABS_PRIOR_CORE_SLOPE_LE0.1_RANGE_LE4_A_PREV",
+        "range_dedup": "UNCHANGED_BOUNDS_AND_CONTINUING_TRUE_REUSE_EXISTING_ANCHOR_NOT_DAILY_NEW_ANCHOR",
+        "dynamic": "ONLY_ACTUAL_RECOVERY_TRIGGER_MA5_OR_MA20_OR_CONTINUE_MA20_FALLBACK_FROZEN_BIRTH_DAILY_VIEW_SEPARATE",
+        "resistance": "CONTEXT_ONLY_NOT_SUPPORT_OBSERVER_STOCK_RISK_OR_SUPPORT_RANK",
+        "gap_fill": "LOW_LE_LO_FILLED_LO_LT_LOW_LT_HI_PARTIAL_MONOTONE_FILLED_NOT_HARD_BREAK",
+        "support": "EXISTING_12_BRANCH_ORDER_A_PREV_BREACH2_DEEP1_SEPARATED_RETEST_ACCEPTANCE2_SEPARATE",
+        "test_count": "DISTINCT_PROVEN_TOUCH_EPISODES_FIRST_OR_AFTER_PROVEN_SEPARATION_NOT_EVERY_CONTIGUOUS_TOUCH_DAY",
+        "unknown": "STALE_RESET_BREACH_ACCEPTANCE_SEPARATION_QUALIFICATION_KEEP_CUMULATIVE_TEST_COUNT",
+        "output_schema": {
+          "anchor": "typed id/type/relation/original bounds/creation/available/coordinate/event/source refs",
+          "observation": "typed anchor/session/state/acceptance/freshness/counters/retest_qualification"
+        },
+        "availability": "CREATION_AND_AVAILABLE_ORDINAL_AT_CURRENT_VISIBLE_CONFIRMATION_TEST_FROM_NEXT_SESSION_NOT_THE_SAME_FIELD"
+      }
+    },
+    "research_field_bindings": {
+      "contract": "STOCK_A_RESEARCH_EXECUTION_BINDINGS_R1",
+      "external_fields": {
+        "core.price_damage": {
+          "producer_stage": "P07",
+          "output_artifact": "core_primitives",
+          "unit": "bool"
+        },
+        "profile.extension": {
+          "producer_stage": "P09",
+          "output_artifact": "core_profiles",
+          "unit": "enum"
+        },
+        "profile.relative": {
+          "producer_stage": "P09",
+          "output_artifact": "core_profiles",
+          "unit": "enum"
+        },
+        "cross.rps5_delta3_pp": {
+          "producer_stage": "P08",
+          "output_artifact": "cross_section",
+          "unit": "pp"
+        },
+        "raw.session_state": {
+          "producer_stage": "P05",
+          "output_artifact": "bar_status",
+          "unit": "enum"
+        },
+        "adjusted.close": {
+          "producer_stage": "P06",
+          "output_artifact": "adjusted_bars",
+          "unit": "CNY"
+        },
+        "core.ma20": {
+          "producer_stage": "P07",
+          "output_artifact": "core_primitives",
+          "unit": "CNY"
+        },
+        "core.ma_slope20_atr": {
+          "producer_stage": "P07",
+          "output_artifact": "core_primitives",
+          "unit": "ATR_scale"
+        },
+        "seed.raw": {
+          "producer_stage": "P09",
+          "output_artifact": "seed_evaluations",
+          "unit": "bool"
+        },
+        "stock.prewatch_raw": {
+          "producer_stage": "P09",
+          "output_artifact": "stock_prewatch_raw",
+          "unit": "bool"
+        },
+        "sector.qualifications": {
+          "producer_stage": "P10",
+          "output_artifact": "sector_raw",
+          "unit": "bool_vector"
+        },
+        "sector.dq5": {
+          "producer_stage": "P10",
+          "output_artifact": "sector_native",
+          "unit": "pp"
+        },
+        "source.seal": {
+          "producer_stage": "P04",
+          "output_artifact": "source_seal",
+          "unit": "reference"
+        },
+        "prior.accepted": {
+          "producer_stage": "P00",
+          "output_artifact": "prior_context",
+          "unit": "reference"
+        },
+        "coordinate.id": {
+          "producer_stage": "P06",
+          "output_artifact": "coordinates",
+          "unit": "reference"
+        },
+        "d0.raw": {
+          "producer_stage": "P14",
+          "output_artifact": "d0_facts",
+          "unit": "bool_vector"
+        },
+        "adjusted.open": {
+          "producer_stage": "P06",
+          "output_artifact": "adjusted_bars",
+          "unit": "CNY"
+        },
+        "adjusted.high": {
+          "producer_stage": "P06",
+          "output_artifact": "adjusted_bars",
+          "unit": "CNY"
+        },
+        "adjusted.low": {
+          "producer_stage": "P06",
+          "output_artifact": "adjusted_bars",
+          "unit": "CNY"
+        },
+        "core.ma5": {
+          "producer_stage": "P07",
+          "output_artifact": "core_primitives",
+          "unit": "CNY"
+        },
+        "core.atr20": {
+          "producer_stage": "P07",
+          "output_artifact": "core_primitives",
+          "unit": "CNY_difference"
+        },
+        "core.prior_high20": {
+          "producer_stage": "P07",
+          "output_artifact": "core_primitives",
+          "unit": "CNY"
+        },
+        "core.clv": {
+          "producer_stage": "P07",
+          "output_artifact": "core_primitives",
+          "unit": "fraction"
+        },
+        "core.amount_ratio20": {
+          "producer_stage": "P07",
+          "output_artifact": "core_primitives",
+          "unit": "ratio"
+        },
+        "cross.rel_market_1": {
+          "producer_stage": "P08",
+          "output_artifact": "cross_section",
+          "unit": "fraction"
+        },
+        "d0.phc20": {
+          "producer_stage": "P07",
+          "output_artifact": "d0_primitives",
+          "unit": "CNY"
+        },
+        "d0.recovery_r5_r20": {
+          "producer_stage": "P14",
+          "output_artifact": "d0_facts",
+          "unit": "bool_vector"
+        }
+      },
+      "fields": [
+        {
+          "field_id": "d0.formal_events",
+          "producer_stage": "P14",
+          "output_artifact": "d0_facts",
+          "unit": "event_reference_set",
+          "input_fields": [
+            "d0.raw",
+            "source.seal",
+            "prior.accepted",
+            "coordinate.id",
+            "core.price_damage",
+            "profile.extension",
+            "raw.session_state",
+            "adjusted.close",
+            "core.ma5",
+            "core.ma20",
+            "d0.phc20",
+            "d0.recovery_r5_r20"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P14",
+            "P15",
+            "P16"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+          "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE"
+        },
+        {
+          "field_id": "d0.failure_lines",
+          "producer_stage": "P14",
+          "output_artifact": "frozen_failure_candidates",
+          "unit": "price_and_reference",
+          "input_fields": [
+            "d0.formal_events",
+            "coordinate.id"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P16"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON"
+        },
+        {
+          "field_id": "d1.anchor",
+          "producer_stage": "P15",
+          "output_artifact": "anchors",
+          "unit": "typed_anchor",
+          "input_fields": [
+            "d0.formal_events",
+            "prior.accepted",
+            "coordinate.id",
+            "adjusted.open",
+            "adjusted.high",
+            "adjusted.low",
+            "adjusted.close",
+            "core.atr20",
+            "core.prior_high20",
+            "core.clv",
+            "core.amount_ratio20",
+            "cross.rel_market_1",
+            "core.ma5",
+            "core.ma20",
+            "core.ma_slope20_atr",
+            "raw.session_state"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P15"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+          "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE",
+          "temporal_input_bindings": {
+            "core.atr20": "T_MINUS1_TO_CURRENT_COORDINATE_EXCEPT_BREAKOUT_CREATION_USES_CURRENT_ATR",
+            "core.ma_slope20_atr": "PRIOR_ACTUAL_ENDPOINT_FOR_RANGE",
+            "adjusted_bars": "TARGET_COORDINATE_ACTUAL_WINDOW_5_OR_PRIOR20_OR_PREV_ACTUAL_AS_TYPE_DEFINED",
+            "prior.accepted": "EXACT_PREVIOUS_MARKET_SESSION_OBSERVATION_AND_EVENT_REFERENCES"
+          }
+        },
+        {
+          "field_id": "d1.hard_breach",
+          "producer_stage": "P15",
+          "output_artifact": "structure_facts",
+          "unit": "bool",
+          "input_fields": [
+            "d1.anchor",
+            "prior.accepted",
+            "raw.session_state",
+            "adjusted.open",
+            "adjusted.high",
+            "adjusted.low",
+            "adjusted.close",
+            "core.atr20",
+            "core.clv"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P16"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+          "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE",
+          "temporal_input_bindings": {
+            "core.atr20": "T_MINUS1_TO_CURRENT_COORDINATE_EXCEPT_BREAKOUT_CREATION_USES_CURRENT_ATR",
+            "core.ma_slope20_atr": "PRIOR_ACTUAL_ENDPOINT_FOR_RANGE",
+            "adjusted_bars": "TARGET_COORDINATE_ACTUAL_WINDOW_5_OR_PRIOR20_OR_PREV_ACTUAL_AS_TYPE_DEFINED",
+            "prior.accepted": "EXACT_PREVIOUS_MARKET_SESSION_OBSERVATION_AND_EVENT_REFERENCES"
+          }
+        },
+        {
+          "field_id": "d1.shallow_breach",
+          "producer_stage": "P15",
+          "output_artifact": "structure_facts",
+          "unit": "bool",
+          "input_fields": [
+            "d1.anchor",
+            "prior.accepted",
+            "raw.session_state",
+            "adjusted.open",
+            "adjusted.high",
+            "adjusted.low",
+            "adjusted.close",
+            "core.atr20",
+            "core.clv"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P17"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+          "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE",
+          "temporal_input_bindings": {
+            "core.atr20": "T_MINUS1_TO_CURRENT_COORDINATE_EXCEPT_BREAKOUT_CREATION_USES_CURRENT_ATR",
+            "core.ma_slope20_atr": "PRIOR_ACTUAL_ENDPOINT_FOR_RANGE",
+            "adjusted_bars": "TARGET_COORDINATE_ACTUAL_WINDOW_5_OR_PRIOR20_OR_PREV_ACTUAL_AS_TYPE_DEFINED",
+            "prior.accepted": "EXACT_PREVIOUS_MARKET_SESSION_OBSERVATION_AND_EVENT_REFERENCES"
+          }
+        },
+        {
+          "field_id": "d2.warm_raw",
+          "producer_stage": "P16",
+          "output_artifact": "final_states",
+          "unit": "bool",
+          "input_fields": [
+            "stock.prewatch_raw",
+            "profile.relative",
+            "adjusted.close",
+            "core.ma20",
+            "core.ma_slope20_atr"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P16"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON"
+        },
+        {
+          "field_id": "d2.episode",
+          "producer_stage": "P16",
+          "output_artifact": "episodes",
+          "unit": "typed_episode",
+          "input_fields": [
+            "seed.raw",
+            "stock.prewatch_raw",
+            "sector.qualifications",
+            "d0.formal_events",
+            "d0.failure_lines",
+            "d2.warm_raw",
+            "d2.current_invalidation",
+            "prior.accepted",
+            "raw.session_state",
+            "core.price_damage",
+            "profile.extension",
+            "cross.rps5_delta3_pp",
+            "sector.dq5"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P16"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+          "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE"
+        },
+        {
+          "field_id": "d2.today_eligibility",
+          "producer_stage": "P16",
+          "output_artifact": "final_states",
+          "unit": "bool",
+          "input_fields": [
+            "d2.episode",
+            "core.price_damage",
+            "profile.extension"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P16"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON"
+        },
+        {
+          "field_id": "d2.grade",
+          "producer_stage": "P16",
+          "output_artifact": "final_states",
+          "unit": "enum_with_bounds",
+          "input_fields": [
+            "d2.episode"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P16"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON"
+        },
+        {
+          "field_id": "d2.validity",
+          "producer_stage": "P16",
+          "output_artifact": "final_states",
+          "unit": "enum",
+          "input_fields": [
+            "d2.episode"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON"
+        },
+        {
+          "field_id": "d2.primary_episode",
+          "producer_stage": "P16",
+          "output_artifact": "final_states",
+          "unit": "reference",
+          "input_fields": [
+            "d2.episode",
+            "d2.grade",
+            "d2.today_eligibility",
+            "prior.accepted"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P17"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+          "variant_input_policy": "ONLY_CONSUMED_ENTITY_AND_STRUCTURE_VARIANT_INPUTS_NO_UNRELATED_GLOBAL_GATE"
+        },
+        {
+          "field_id": "d2.health",
+          "producer_stage": "P16",
+          "output_artifact": "final_states",
+          "unit": "enum",
+          "input_fields": [
+            "core.price_damage",
+            "profile.extension",
+            "cross.rps5_delta3_pp",
+            "sector.dq5",
+            "d2.current_invalidation"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+          "variant_inputs": {
+            "STOCK": [
+              "core.price_damage",
+              "profile.extension",
+              "cross.rps5_delta3_pp",
+              "d2.current_invalidation"
+            ],
+            "SECTOR": [
+              "sector.dq5",
+              "d2.current_invalidation"
+            ]
+          }
+        },
+        {
+          "field_id": "d2.current_invalidation",
+          "producer_stage": "P16",
+          "output_artifact": "episodes",
+          "unit": "bool",
+          "input_fields": [
+            "d1.hard_breach",
+            "prior.accepted",
+            "coordinate.id",
+            "adjusted.close"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P16",
+            "P17"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON"
+        },
+        {
+          "field_id": "risk.stock",
+          "producer_stage": "P17",
+          "output_artifact": "risk_rows",
+          "unit": "enum_with_bounds",
+          "input_fields": [
+            "core.price_damage",
+            "profile.extension",
+            "d2.primary_episode",
+            "d2.current_invalidation",
+            "d1.shallow_breach"
+          ],
+          "temporal_roles": [
+            "CURRENT_EXACT_CONTEXT",
+            "PREVIOUS_ACCEPTED_IF_DECLARED"
+          ],
+          "quality": "FIELD_VALUE_SEPARATE_FROM_CAPABILITY_AND_ENGINEERING_ERROR",
+          "consumers": [
+            "P18"
+          ],
+          "persistence": "NECESSARY_TYPED_VALUES_AND_EXACT_REFERENCES_NOT_WHOLE_OBJECT_JSON",
+          "key_alignment": "ENTITY_SESSION_COORDINATE_EXACT_SELECTED_EPISODE_I_AND_W_NO_ANY_OLD_ANCHOR_AGGREGATE",
+          "applicability_policy": "EPISODE_ABSENCE_AND_LINKED_SUPPORT_ABSENCE_INDEPENDENT_EXPLICIT_EVIDENCE_NO_FORCED_ANCHOR"
+        }
+      ],
+      "namespace": "FULL_RESEARCH_ONLY_FOUNDATION_102_FIELDS_UNCHANGED"
+    },
+    "domain_decision_contracts": {
+      "contract": "STOCK_A_MAINLINE_DOMAIN_DECISIONS_R1",
+      "design_state": "FROZEN_FOR_MAINLINE",
+      "rule_governance": {
+        "six_required": [
+          "inputs_and_source_roles",
+          "deterministic_expression",
+          "adopted_parameters",
+          "unknown_conflict_rules",
+          "outputs_and_consumers",
+          "independent_counterexample_conditions"
+        ],
+        "design_vs_function_vs_effect": "INDEPENDENT_STATUS_AXES",
+        "reopen": "EXPLICIT_COUNTEREXAMPLE_REQUIREMENT_OR_SOURCE_CHANGE_WITH_IMPACT_AND_VERSION_ONLY",
+        "frozen_R1_unchanged": [
+          "STOCK_A_STOCK_RISK_COMPOSITION_R1",
+          "STOCK_A_D2_REDUCER_R1",
+          "STOCK_A_D0_EVENT_ADMISSION_R1",
+          "STOCK_A_D1_STRUCTURE_TYPE_REGISTRY_R1"
+        ],
+        "foundation_unchanged": true,
+        "optional_scopes": [
+          "FEP",
+          "INTRADAY"
+        ],
+        "optional_state": "DEFERRED_NOT_MAINLINE_BLOCKER"
+      },
+      "domains": {
+        "universe": {
+          "contract": "UNIVERSE_ELIGIBILITY_R1",
+          "design_item": "DES-01",
+          "design_state": "FROZEN_ADOPTED_RESEARCH_BASELINE",
+          "source_stages": [
+            "P04",
+            "P05"
+          ],
+          "inputs": {
+            "ordinary_a": "bool; effective security_type; source identity",
+            "listed": "bool; effective lifecycle",
+            "identity_ready": "bool; exact source identity",
+            "trading_allowed": "bool; official state",
+            "actual": "bool; ACTUAL state",
+            "st": "bool; date-effective",
+            "phase": "NORMAL/IPO_SPECIAL/DELISTING/DELISTED",
+            "limit_applicability": "LIMITED/UNLIMITED",
+            "coordinate_ready": "bool; declared target coordinate",
+            "extension": "LOW/MEDIUM/HIGH/EXTREME; P09"
+          },
+          "outputs": {
+            "research": "bool",
+            "tradable": "bool",
+            "candidate_common": "bool",
+            "severe_extension": "bool"
+          },
+          "parameters": {},
+          "expressions": {
+            "research": {
+              "op": "and",
+              "args": [
+                {
+                  "ref": "identity_ready"
+                },
+                {
+                  "ref": "ordinary_a"
+                },
+                {
+                  "ref": "listed"
+                }
+              ]
+            },
+            "tradable": {
+              "op": "and",
+              "args": [
+                {
+                  "ref": "identity_ready"
+                },
+                {
+                  "ref": "ordinary_a"
+                },
+                {
+                  "ref": "listed"
+                },
+                {
+                  "ref": "trading_allowed"
+                }
+              ]
+            },
+            "candidate_common": {
+              "op": "and",
+              "args": [
+                {
+                  "ref": "identity_ready"
+                },
+                {
+                  "ref": "ordinary_a"
+                },
+                {
+                  "ref": "listed"
+                },
+                {
+                  "ref": "actual"
+                },
+                {
+                  "op": "not",
+                  "args": [
+                    {
+                      "ref": "st"
+                    }
+                  ]
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "ref": "phase"
+                    },
+                    "NORMAL"
+                  ]
+                },
+                {
+                  "op": "eq",
+                  "args": [
+                    {
+                      "ref": "limit_applicability"
+                    },
+                    "LIMITED"
+                  ]
+                },
+                {
+                  "ref": "coordinate_ready"
+                }
+              ]
+            },
+            "severe_extension": {
+              "op": "eq",
+              "args": [
+                {
+                  "ref": "extension"
+                },
+                "EXTREME"
+              ]
+            }
+          },
+          "unknown_and_conflict": "KLEENE_FALSE_DOMINATES_UNKNOWN; invalid identity fact quarantined; missing contract/engineering not data unknown",
+          "independent_validation_requirements": [
+            "each lifecycle/status row",
+            "known exclusion vs unknown unrelated field",
+            "short history does not remove Data/Research identity"
+          ],
+          "normative_ref": "docs/design/算法合同与升级规则.md#11",
+          "consumer_stages": [
+            "P09",
+            "P14",
+            "P19",
+            "P21"
+          ],
+          "data_membership": "P04 source-backed facts + explicit provisional/unmapped partition; never candidate-only",
+          "authority_order": [
+            "OFFICIAL_EXCHANGE_OR_ISSUER_EFFECTIVE_EVENT",
+            "STRICT_BOUND_PROVIDER"
+          ],
+          "same_rank_conflict": "REJECT_SAME_REVISION_DIFFERENT_CONTENT; SOFT_NOT_HISTORICAL_AUTHORITY"
+        },
+        "sector": {
+          "contract": "SECTOR_NATIVE_QUALIFICATION_R3",
+          "design_item": "DES-02",
+          "design_state": "FROZEN_ADOPTED_RESEARCH_BASELINE",
+          "source_stages": [
+            "P04",
+            "P07",
+            "P08",
+            "P09"
+          ],
+          "inputs": {
+            "membership_ready": "bool",
+            "n": "count all declared slots incl unmapped",
+            "actual_count": "count valid actual quotes",
+            "quote_coverage": "fraction actual_count/n",
+            "coordinate_ready": "bool",
+            "dq5": "pp",
+            "breadth_delta3": "fraction",
+            "ma20_delta3": "fraction",
+            "seed_width_ge005": "bool from Wilson interval entailment",
+            "rs5_pct": "0..100",
+            "rs20_pct": "0..100",
+            "breadth": "fraction",
+            "ma20_width": "fraction",
+            "top1": "fraction"
+          },
+          "outputs": {
+            "safety": "bool",
+            "prewatch_raw": "bool",
+            "warm_raw": "bool",
+            "confirmed_raw": "bool"
+          },
+          "parameters": {
+            "minimum_members": 5,
+            "minimum_known_per_metric": 5,
+            "minimum_coverage": 0.8,
+            "wilson_z": 1.96
+          },
+          "expressions": {
+            "safety": {
+              "op": "and",
+              "args": [
+                {
+                  "ref": "membership_ready"
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "n"
+                    },
+                    5
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "actual_count"
+                    },
+                    5
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "quote_coverage"
+                    },
+                    0.8
+                  ]
+                },
+                {
+                  "ref": "coordinate_ready"
+                }
+              ]
+            },
+            "prewatch_raw": {
+              "op": "and",
+              "args": [
+                {
+                  "ref": "safety"
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "dq5"
+                    },
+                    3
+                  ]
+                },
+                {
+                  "op": "or",
+                  "args": [
+                    {
+                      "op": "gt",
+                      "args": [
+                        {
+                          "ref": "breadth_delta3"
+                        },
+                        0
+                      ]
+                    },
+                    {
+                      "op": "gt",
+                      "args": [
+                        {
+                          "ref": "ma20_delta3"
+                        },
+                        0
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "ref": "seed_width_ge005"
+                }
+              ]
+            },
+            "warm_raw": {
+              "op": "and",
+              "args": [
+                {
+                  "ref": "safety"
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "rs5_pct"
+                    },
+                    60
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "rs20_pct"
+                    },
+                    50
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "breadth"
+                    },
+                    0.5
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "ma20_width"
+                    },
+                    0.5
+                  ]
+                },
+                {
+                  "ref": "seed_width_ge005"
+                }
+              ]
+            },
+            "confirmed_raw": {
+              "op": "and",
+              "args": [
+                {
+                  "ref": "warm_raw"
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "rs5_pct"
+                    },
+                    70
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "rs20_pct"
+                    },
+                    60
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "breadth"
+                    },
+                    0.55
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "ma20_width"
+                    },
+                    0.55
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "breadth_delta3"
+                    },
+                    0
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "ma20_delta3"
+                    },
+                    0
+                  ]
+                },
+                {
+                  "op": "lte",
+                  "args": [
+                    {
+                      "ref": "top1"
+                    },
+                    0.5
+                  ]
+                }
+              ]
+            }
+          },
+          "unknown_and_conflict": "BRANCH_LOCAL_KLEENE; no AmountA/Bao/Market/D2 gate; per-metric coverage; NA concentration cannot become zero",
+          "independent_validation_requirements": [
+            "coverage and size equality",
+            "unmapped denominator retained",
+            "Wilson bounds unknown entailment",
+            "amount missing isolated from RS"
+          ],
+          "normative_ref": "docs/design/算法合同与升级规则.md#11",
+          "consumer_stages": [
+            "P11",
+            "P12",
+            "P16",
+            "P18"
+          ],
+          "definitions": {
+            "members": "date/type/source complete slots, only proven aliases deduplicate",
+            "metric_E": "known own inputs; count>=5 and E/M>=0.8",
+            "delta": "same common membership and paired-known sample at exact t-1/t-3; count/coverage gates apply",
+            "seed_width": "k TRUE,u UNKNOWN,f FALSE; n=k+u+f; point only if u=0; bounds Wilson(k,n)..Wilson(k+u,n)",
+            "concentration": "sum largest 1/3 known amounts / complete M amount sum; missing any UNKNOWN; zero total NA",
+            "rank_universe": "all same-type admissible sector metrics; n<2 UNKNOWN; midrank ALG09"
+          }
+        },
+        "rotation": {
+          "contract": "ROTATION_EXECUTION_R2",
+          "design_item": "DES-02",
+          "design_state": "FROZEN_ADOPTED_RESEARCH_BASELINE",
+          "source_stages": [
+            "P10",
+            "P09",
+            "P06",
+            "P00"
+          ],
+          "inputs": {
+            "active": "bool",
+            "age": "next evaluable successor count, birth0",
+            "accepted_once": "bool",
+            "formation_r": "fraction vs frozen t0-1",
+            "breadth_delta1": "fraction",
+            "out_count": "adjacent evaluable counter",
+            "prior_d2_eligible": "bool previous accepted WARM/CONFIRMED",
+            "prior_mature": "bool previous accepted Rotation in mature states AND prior mature_retained TRUE",
+            "prior_dq5": "pp",
+            "pulse": "bool",
+            "early": "bool",
+            "mature": "bool or proven NA",
+            "diffusion": "bool",
+            "can_birth": "bool; complete basis and explicit FIRST or rearmed later session",
+            "dq5": "pp",
+            "seed_retained": "bool; NA-aware OR",
+            "breadth_retained": "bool; C_now>=frozen pulse close on U0",
+            "top1_early_ok": "bool top1<=1/3",
+            "strong_retained": "bool; empty H0 NA"
+          },
+          "outputs": {
+            "state": "NONE/PULSE/IN/ACCEPTED/EXPANDING/REACCELERATING/OUT/FAILED + quality",
+            "episode": "frozen references",
+            "formation_r": "fraction",
+            "post_r": "fraction"
+          },
+          "parameters": {
+            "seed_retention_min": {
+              "numerator": 2,
+              "denominator": 3
+            },
+            "breadth_retention_min": 0.6,
+            "early_top1_max": {
+              "numerator": 1,
+              "denominator": 3
+            },
+            "strong_retention_min": 0.75,
+            "diffusion_top1_max": 0.5,
+            "minimum_accept_age": 2,
+            "accept_deadline": 5,
+            "timeout_age": 6,
+            "out_sessions": 2
+          },
+          "expressions": {
+            "pulse": {
+              "op": "and",
+              "args": [
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "dq5"
+                    },
+                    10
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "breadth_delta1"
+                    },
+                    0.05
+                  ]
+                }
+              ]
+            },
+            "early": {
+              "op": "and",
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    {
+                      "ref": "formation_r"
+                    },
+                    0
+                  ]
+                },
+                {
+                  "op": "or",
+                  "args": [
+                    {
+                      "ref": "seed_retained"
+                    },
+                    {
+                      "ref": "breadth_retained"
+                    }
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "breadth_delta1"
+                    },
+                    0
+                  ]
+                },
+                {
+                  "ref": "top1_early_ok"
+                }
+              ]
+            },
+            "mature": {
+              "op": "and",
+              "args": [
+                {
+                  "ref": "early"
+                },
+                {
+                  "ref": "strong_retained"
+                }
+              ]
+            }
+          },
+          "unknown_and_conflict": "ORDERED_KLEENE_HIGHER_UNKNOWN_NEVER_SKIPPED; proven NA mature skips mature-only branches; unknown pauses age/reset out streak; preserve last-known",
+          "independent_validation_requirements": [
+            "formation vs post distinction",
+            "fixed weights after member changes",
+            "deadline before acceptance on sixth successor",
+            "higher unknown before lower true",
+            "terminal rearm false then true",
+            "revision baseline idempotence"
+          ],
+          "normative_ref": "docs/design/算法合同与升级规则.md#11",
+          "ordered_transitions": [
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "ref": "active"
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "age"
+                      },
+                      1
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "age"
+                      },
+                      5
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "formation_r"
+                      },
+                      0
+                    ]
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "breadth_delta1"
+                      },
+                      -0.05
+                    ]
+                  }
+                ]
+              },
+              "value": "FAILED"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "ref": "active"
+                  },
+                  {
+                    "ref": "prior_d2_eligible"
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "out_count"
+                      },
+                      2
+                    ]
+                  }
+                ]
+              },
+              "value": "OUT"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "ref": "active"
+                  },
+                  {
+                    "op": "not",
+                    "args": [
+                      {
+                        "ref": "accepted_once"
+                      }
+                    ]
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "age"
+                      },
+                      6
+                    ]
+                  }
+                ]
+              },
+              "value": "FAILED"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "ref": "active"
+                  },
+                  {
+                    "ref": "prior_mature"
+                  },
+                  {
+                    "op": "lte",
+                    "args": [
+                      {
+                        "ref": "prior_dq5"
+                      },
+                      0
+                    ]
+                  },
+                  {
+                    "ref": "pulse"
+                  },
+                  {
+                    "ref": "mature"
+                  }
+                ]
+              },
+              "value": "REACCELERATING"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "ref": "active"
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "age"
+                      },
+                      2
+                    ]
+                  },
+                  {
+                    "ref": "prior_mature"
+                  },
+                  {
+                    "ref": "mature"
+                  },
+                  {
+                    "ref": "diffusion"
+                  }
+                ]
+              },
+              "value": "EXPANDING"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "ref": "active"
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "age"
+                      },
+                      2
+                    ]
+                  },
+                  {
+                    "ref": "early"
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "breadth_delta1"
+                      },
+                      -0.05
+                    ]
+                  }
+                ]
+              },
+              "value": "ACCEPTED"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "ref": "active"
+                  },
+                  {
+                    "op": "gte",
+                    "args": [
+                      {
+                        "ref": "age"
+                      },
+                      1
+                    ]
+                  },
+                  {
+                    "ref": "early"
+                  }
+                ]
+              },
+              "value": "IN"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "not",
+                    "args": [
+                      {
+                        "ref": "active"
+                      }
+                    ]
+                  },
+                  {
+                    "ref": "pulse"
+                  },
+                  {
+                    "ref": "can_birth"
+                  }
+                ]
+              },
+              "value": "PULSE"
+            },
+            {
+              "when": true,
+              "value": "KEEP_PRIOR_OR_NONE"
+            }
+          ],
+          "basket": {
+            "members": "M[t0-1] complete",
+            "weight": "1/size(B)",
+            "birth_prices": "all actual positive at t0-1 and t0 in target coordinate; missing blocks application",
+            "seed_set": "TRUE at t0; any unknown makes set unknown",
+            "positive_set": "ret1>0 at t0; unknown preserved",
+            "strong_set": "RPS20>=80 at t0-1; unknown preserved",
+            "formation_r": "SUM_j w_j*(P_j[u]/P_j[t0-1]-1)",
+            "post_r": "SUM_j w_j*(P_j[u]/P_j[t0]-1)",
+            "identity": [
+              "contract",
+              "sector_id",
+              "pulse_session",
+              "members_weights_bases",
+              "parameters",
+              "source_coordinate_refs"
+            ]
+          },
+          "state_memory": [
+            "accepted_once",
+            "evaluable_age",
+            "market_age",
+            "out_streak",
+            "last_known",
+            "freshness",
+            "armed_after_exit_false",
+            "parent_episode_id",
+            "frozen_basket_refs"
+          ],
+          "new_pulse": "active does not replace basket; after exit known FALSE arms then later TRUE; unknown not arm; first explicit observation can birth LEFT_CENSORED",
+          "consumer_stages": [
+            "P17",
+            "P18",
+            "P19"
+          ],
+          "counter_algorithm": "candidate_age=previous_age+1; ordered rules evaluate with candidate_age; if any winning-predecessor UNKNOWN affects output, commit no age increment and reset OUT streak; known branch outcome commits once; birth0",
+          "mature_states": [
+            "ACCEPTED",
+            "EXPANDING",
+            "REACCELERATING"
+          ],
+          "mature_input_policy": "empty frozen H0 proven NA skips only mature branches; other unknown may block higher transition"
+        },
+        "market": {
+          "contract": "MARKET_PRESENTATION_R1",
+          "design_item": "DES-03",
+          "design_state": "FROZEN_ADOPTED_RESEARCH_BASELINE",
+          "source_stages": [
+            "P05",
+            "P07",
+            "P08",
+            "P13"
+          ],
+          "inputs": {
+            "trend": [
+              "STRONG",
+              "NEUTRAL",
+              "WEAK"
+            ],
+            "breadth": [
+              "STRONG",
+              "NEUTRAL",
+              "WEAK"
+            ],
+            "participation": [
+              "EXPANDING",
+              "NORMAL",
+              "THIN"
+            ],
+            "pressure": [
+              "HIGH",
+              "ELEVATED",
+              "LOW"
+            ]
+          },
+          "outputs": {
+            "environment_raw": "enum + quality",
+            "environment_display": "enum + stale",
+            "limit_streak": "nullable exact int + lower_bound + quality"
+          },
+          "parameters": {
+            "breadth_positive": 0.05,
+            "breadth_negative": -0.05,
+            "participation_expanding": 1.2,
+            "participation_thin_exclusive": 0.8,
+            "pressure_high": 0.05,
+            "pressure_elevated": 0.01,
+            "display_sessions": 2
+          },
+          "expressions": {},
+          "unknown_and_conflict": "ENUMERATE_FINITE_COMPLETIONS; no axis vote; unknown breaks display streak, does not use stale as current",
+          "independent_validation_requirements": [
+            "all complete/partial axis combinations",
+            "immediate defensive vs adjacent display",
+            "suspension/unlimited reset vs unknown not reset",
+            "unknown prior cannot become first-board"
+          ],
+          "normative_ref": "docs/design/算法合同与升级规则.md#11",
+          "ordered_environment": [
+            {
+              "when": {
+                "op": "or",
+                "args": [
+                  {
+                    "op": "eq",
+                    "args": [
+                      {
+                        "ref": "pressure"
+                      },
+                      "HIGH"
+                    ]
+                  },
+                  {
+                    "op": "and",
+                    "args": [
+                      {
+                        "op": "eq",
+                        "args": [
+                          {
+                            "ref": "trend"
+                          },
+                          "WEAK"
+                        ]
+                      },
+                      {
+                        "op": "eq",
+                        "args": [
+                          {
+                            "ref": "breadth"
+                          },
+                          "WEAK"
+                        ]
+                      }
+                    ]
+                  }
+                ]
+              },
+              "value": "DEFENSIVE"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "eq",
+                    "args": [
+                      {
+                        "ref": "trend"
+                      },
+                      "STRONG"
+                    ]
+                  },
+                  {
+                    "op": "eq",
+                    "args": [
+                      {
+                        "ref": "breadth"
+                      },
+                      "STRONG"
+                    ]
+                  },
+                  {
+                    "op": "eq",
+                    "args": [
+                      {
+                        "ref": "participation"
+                      },
+                      "EXPANDING"
+                    ]
+                  },
+                  {
+                    "op": "eq",
+                    "args": [
+                      {
+                        "ref": "pressure"
+                      },
+                      "LOW"
+                    ]
+                  }
+                ]
+              },
+              "value": "EXPANSIVE"
+            },
+            {
+              "when": {
+                "op": "and",
+                "args": [
+                  {
+                    "op": "not",
+                    "args": [
+                      {
+                        "op": "eq",
+                        "args": [
+                          {
+                            "ref": "trend"
+                          },
+                          "WEAK"
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "eq",
+                    "args": [
+                      {
+                        "ref": "breadth"
+                      },
+                      "STRONG"
+                    ]
+                  },
+                  {
+                    "op": "not",
+                    "args": [
+                      {
+                        "op": "eq",
+                        "args": [
+                          {
+                            "ref": "participation"
+                          },
+                          "THIN"
+                        ]
+                      }
+                    ]
+                  },
+                  {
+                    "op": "eq",
+                    "args": [
+                      {
+                        "ref": "pressure"
+                      },
+                      "LOW"
+                    ]
+                  }
+                ]
+              },
+              "value": "IMPROVING"
+            },
+            {
+              "when": true,
+              "value": "MIXED"
+            }
+          ],
+          "hysteresis": "DEFENSIVE immediate; other changes need 2 adjacent known same raw; first known immediate FIRST_OBSERVED; unknown retains stale/reset pending",
+          "streak": "close==dated legal rounded upper; false=>0; true with known k=>k+1; true after confirmed suspension/unlimited RESET=>1; unknown prior=>unknown exact plus lower bound; rule change alone not reset",
+          "consumer_stages": [
+            "P17",
+            "P21"
+          ],
+          "changes_priority": false
+        },
+        "overlap": {
+          "contract": "SECTOR_OVERLAP_R1",
+          "design_item": "DES-04",
+          "design_state": "FROZEN_ADOPTED_RESEARCH_BASELINE",
+          "source_stages": [
+            "P04",
+            "P10"
+          ],
+          "inputs": {
+            "memberships": "complete date/type/source sets",
+            "priority": "P18 only for representative/display, never P10 grouping"
+          },
+          "outputs": {
+            "jaccard": "fraction",
+            "unique_share": "fraction",
+            "cluster": "member-set hash and parent refs",
+            "representative": "sector id + quality"
+          },
+          "parameters": {
+            "jaccard_edge_min": 0.6,
+            "overview_per_type_max": 10,
+            "concept_per_known_cluster_max": 2
+          },
+          "expressions": {},
+          "unknown_and_conflict": "UNKNOWN_CROSS_COMPONENT_EDGE_BLOCKS_EXACT_GROUP; missing member not zero overlap; uncertain display marked",
+          "independent_validation_requirements": [
+            "transitive chain grouping",
+            "unknown possible merge",
+            "split merge identity",
+            "same component id stability",
+            "no cap on full directory or cohort"
+          ],
+          "normative_ref": "docs/design/算法合同与升级规则.md#11",
+          "definitions": {
+            "jaccard": "size(A & B)/size(A | B); empty union NA",
+            "unique_share": "size(A - union(other same-type admissible memberships))/size(A); no others1; empty A NA",
+            "cluster": "connected components of undirected J>=0.6 graph; chain allowed; type separate",
+            "cluster_id": "hash(type,sorted sector_ids,parameters); parents all prior intersecting components",
+            "representative": "exact sector Priority then stable_id; possible higher unknown=>UNKNOWN",
+            "display": "P18 order then cap; unknown cluster no false diversification guarantee"
+          },
+          "consumer_stages": [
+            "P18",
+            "P21"
+          ],
+          "admissible_scope": "same date/type source, sector safety TRUE, complete membership; independent of candidate/final Priority"
+        },
+        "d0_raw": {
+          "contract": "D0_SCENARIO_FACTS_R3",
+          "design_item": "DES-05",
+          "design_state": "FROZEN_ADOPTED_RESEARCH_BASELINE",
+          "source_stages": [
+            "P00",
+            "P04",
+            "P07",
+            "P08",
+            "P12"
+          ],
+          "inputs": {
+            "parent": "t-1 accepted FORMAL, FRESH, VALID, unexited, source refs complete; current WARM/CONFIRMED bucket not required",
+            "peak": "P15 accepted t-1 parent-bound peak_event; birth OHLC; strict higher H replaces, ties earliest",
+            "price_window": "D0 strict actual market sessions, current target coordinate",
+            "parent_age": "i-b",
+            "pullback_age": "i-h",
+            "today_high": "price",
+            "peak_high": "price",
+            "previous_close": "price",
+            "peak_close": "price",
+            "depth": "fraction 1-C/peak_high",
+            "current_close": "price",
+            "current_ma5": "d0 MA5",
+            "previous_ma5": "d0 previous MA5",
+            "today_low": "price",
+            "previous_ma10": "d0 previous MA10",
+            "prior_high20": "d0 PHH20"
+          },
+          "outputs": {
+            "raw_rows": "all parent/peak/scenario predicates + quality",
+            "raw_id": "semantic identity",
+            "main_explanation": "stable display selection"
+          },
+          "parameters": {
+            "max_parent_age": 20,
+            "min_pullback_age": 2,
+            "max_pullback_age": 10,
+            "depth_min": 0.03,
+            "depth_max": 0.12,
+            "ma10_touch_ratio": 1.01
+          },
+          "expressions": {
+            "age_ok": {
+              "op": "and",
+              "args": [
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "parent_age"
+                    },
+                    1
+                  ]
+                },
+                {
+                  "op": "lte",
+                  "args": [
+                    {
+                      "ref": "parent_age"
+                    },
+                    20
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "pullback_age"
+                    },
+                    2
+                  ]
+                },
+                {
+                  "op": "lte",
+                  "args": [
+                    {
+                      "ref": "pullback_age"
+                    },
+                    10
+                  ]
+                }
+              ]
+            },
+            "not_new_high": {
+              "op": "lte",
+              "args": [
+                {
+                  "ref": "today_high"
+                },
+                {
+                  "ref": "peak_high"
+                }
+              ]
+            },
+            "depth_ok": {
+              "op": "and",
+              "args": [
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "depth"
+                    },
+                    0.03
+                  ]
+                },
+                {
+                  "op": "lte",
+                  "args": [
+                    {
+                      "ref": "depth"
+                    },
+                    0.12
+                  ]
+                }
+              ]
+            },
+            "below_peak_close": {
+              "op": "lt",
+              "args": [
+                {
+                  "ref": "previous_close"
+                },
+                {
+                  "ref": "peak_close"
+                }
+              ]
+            },
+            "reclaim_ma5": {
+              "op": "and",
+              "args": [
+                {
+                  "op": "lte",
+                  "args": [
+                    {
+                      "ref": "previous_close"
+                    },
+                    {
+                      "ref": "previous_ma5"
+                    }
+                  ]
+                },
+                {
+                  "op": "gt",
+                  "args": [
+                    {
+                      "ref": "current_close"
+                    },
+                    {
+                      "ref": "current_ma5"
+                    }
+                  ]
+                }
+              ]
+            },
+            "ma10_test": {
+              "op": "and",
+              "args": [
+                {
+                  "op": "lte",
+                  "args": [
+                    {
+                      "ref": "today_low"
+                    },
+                    {
+                      "op": "multiply",
+                      "args": [
+                        1.01,
+                        {
+                          "ref": "previous_ma10"
+                        }
+                      ]
+                    }
+                  ]
+                },
+                {
+                  "op": "gte",
+                  "args": [
+                    {
+                      "ref": "current_close"
+                    },
+                    {
+                      "ref": "previous_ma10"
+                    }
+                  ]
+                }
+              ]
+            },
+            "failed_high": {
+              "op": "and",
+              "args": [
+                {
+                  "op": "gt",
+                  "args": [
+                    {
+                      "ref": "today_high"
+                    },
+                    {
+                      "ref": "prior_high20"
+                    }
+                  ]
+                },
+                {
+                  "op": "lte",
+                  "args": [
+                    {
+                      "ref": "current_close"
+                    },
+                    {
+                      "ref": "prior_high20"
+                    }
+                  ]
+                }
+              ]
+            }
+          },
+          "unknown_and_conflict": "all legitimate parents evaluated; no parent FALSE only if absence proven; required strict window gap UNKNOWN; no current D2/new peak use",
+          "independent_validation_requirements": [
+            "multi parent independent ids",
+            "equal high earliest",
+            "new high cannot self-pullback",
+            "at least one pre-confirmation bar",
+            "age/depth/MA equality boundaries",
+            "formal R1 evidence binds raw id"
+          ],
+          "normative_ref": "docs/design/算法合同与升级规则.md#11",
+          "raw_identity": [
+            "contract",
+            "entity",
+            "scenario",
+            "confirmation_session",
+            "parent_or_NONE",
+            "peak_or_NONE",
+            "parameters",
+            "input_refs"
+          ],
+          "peak_producer_stage": "P15",
+          "peak_consumer_temporal_role": "P14_PREVIOUS_ACCEPTED_ONLY",
+          "formal_admission_contract": "STOCK_A_D0_EVENT_ADMISSION_R1_UNCHANGED_EVIDENCE_REF_RAW_ID",
+          "consumer_stages": [
+            "P14",
+            "P15",
+            "P16",
+            "P18"
+          ],
+          "main_explanation_sort": [
+            "scenario rank ASC",
+            "peak session DESC",
+            "parent birth DESC",
+            "parent id ASC",
+            "peak id ASC"
+          ]
+        },
+        "order": {
+          "contract": "RESEARCH_ORDER_PROJECTIONS_R1",
+          "design_item": "DES-06",
+          "design_state": "FROZEN_ADOPTED_RESEARCH_BASELINE",
+          "source_stages": [
+            "P14",
+            "P15",
+            "P16",
+            "P17"
+          ],
+          "inputs": {
+            "acceptance": "P15 exact independent enum",
+            "support": "P15 exact support enum",
+            "selected_episode": "P16 exact primary ref",
+            "risk": "P17 exact selected-episode risk",
+            "prior": "t-1 accepted comparable inputs"
+          },
+          "outputs": {
+            "structure_rank": "0..4 + quality",
+            "last_improvement": "ordinal/category + quality",
+            "radar": "all events + primary",
+            "near_miss": "registered path + one failed soft leaf"
+          },
+          "parameters": {
+            "near_miss_max_failed": 1,
+            "near_miss_tolerances": {
+              "clv": 0.05,
+              "amr": 0.1,
+              "rps_or_delta_pp": 1,
+              "breakout_atr_fraction": 0.1,
+              "pullback_depth": 0.01,
+              "contraction": 0.05
+            }
+          },
+          "expressions": {},
+          "unknown_and_conflict": "rank max-completion uniqueness; unknown possible higher4 blocks known lower; no support proven=>0; NearMiss all hard/full data known true only",
+          "independent_validation_requirements": [
+            "acceptance/support independent rank",
+            "known4 dominates unknown candidate",
+            "unrelated broken anchor excluded",
+            "strict equality miss gap0",
+            "unsafe/unknown/multi-miss not NearMiss",
+            "selection change not improvement"
+          ],
+          "normative_ref": "docs/design/算法合同与升级规则.md#11",
+          "ordered_structure_rank": [
+            {
+              "when": {
+                "op": "eq",
+                "args": [
+                  {
+                    "ref": "acceptance"
+                  },
+                  "ACCEPTED"
+                ]
+              },
+              "value": 4
+            },
+            {
+              "when": {
+                "op": "eq",
+                "args": [
+                  {
+                    "ref": "support"
+                  },
+                  "HELD_CONFIRMED"
+                ]
+              },
+              "value": 3
+            },
+            {
+              "when": {
+                "op": "eq",
+                "args": [
+                  {
+                    "ref": "support"
+                  },
+                  "RECLAIMED"
+                ]
+              },
+              "value": 2
+            },
+            {
+              "when": {
+                "op": "in",
+                "args": [
+                  {
+                    "ref": "support"
+                  },
+                  "IDLE",
+                  "APPROACHING",
+                  "TESTING",
+                  "HELD_TENTATIVE",
+                  "RETESTING"
+                ]
+              },
+              "value": 1
+            },
+            {
+              "when": true,
+              "value": 0
+            }
+          ],
+          "anchor_scope": "exact selected episode linked old SUPPORT or source_event own SUPPORT; broken/expired/resistance excluded; creation IDLE only tentative",
+          "improvement_events": [
+            "UPGRADED",
+            "IMPROVEMENT_RESET",
+            "SAME_EXISTING_LINKED_ANCHOR_RANK_INCREASE"
+          ],
+          "improvement_age": "t-last_proven_ordinal; known age before NO_PROVEN_IMPROVEMENT; incomplete history UNKNOWN; creation/selection/rule not improvement",
+          "radar_priority": [
+            "INVALIDATED",
+            "EXPIRED",
+            "EXITED",
+            "WEAKENED",
+            "UPGRADED",
+            "REENTERED",
+            "FIRST_ENROLLED",
+            "RISK_WORSENED",
+            "RISK_IMPROVED"
+          ],
+          "annotations_only": [
+            "RULE_CHANGED",
+            "SELECTION_CHANGED",
+            "FIRST_OBSERVED",
+            "BECAME_KNOWN"
+          ],
+          "radar_sort": [
+            "event_rank ASC",
+            "event_session DESC",
+            "rankable_original_priority_then_excluded_then_unknown",
+            "entity_id ASC",
+            "episode_id ASC",
+            "event_id ASC"
+          ],
+          "near_miss_sort": [
+            "gap/tolerance ASC",
+            "scenario_rank ASC",
+            "emergence DESC",
+            "delta3_pp DESC",
+            "entity_id ASC",
+            "parent_id ASC",
+            "peak_id ASC",
+            "path_id ASC"
+          ],
+          "changes_priority_key_order": false,
+          "consumer_stages": [
+            "P19",
+            "P21"
+          ],
+          "soft_predicate_registry": {
+            "launch.clv": {
+              "op": "gte",
+              "threshold": 0.6,
+              "tolerance": 0.05
+            },
+            "launch.amr": {
+              "op": "gte",
+              "threshold": 1.2,
+              "tolerance": 0.1
+            },
+            "launch.breakout": {
+              "op": "gt",
+              "threshold_ref": "d0.phc20",
+              "tolerance_ref": "0.1*core.atr20"
+            },
+            "recovery.clv": {
+              "op": "gte",
+              "threshold": 0.55,
+              "tolerance": 0.05
+            },
+            "recovery.delta3": {
+              "op": "gt",
+              "threshold": 0,
+              "tolerance": 1
+            },
+            "recovery.amr": {
+              "op": "gte",
+              "threshold": 1.05,
+              "tolerance": 0.1
+            },
+            "pullback.depth_low": {
+              "op": "gte",
+              "threshold": 0.03,
+              "tolerance": 0.01
+            },
+            "pullback.depth_high": {
+              "op": "lte",
+              "threshold": 0.12,
+              "tolerance": 0.01
+            },
+            "pullback.contraction": {
+              "op": "lte",
+              "threshold": 0.85,
+              "tolerance": 0.05
+            },
+            "pullback.clv": {
+              "op": "gte",
+              "threshold": 0.55,
+              "tolerance": 0.05
+            },
+            "continue.rps20": {
+              "op": "gte",
+              "threshold": 70,
+              "tolerance": 1
+            },
+            "continue.clv": {
+              "op": "gte",
+              "threshold": 0.55,
+              "tolerance": 0.05
+            },
+            "continue.amr_low": {
+              "op": "gte",
+              "threshold": 0.8,
+              "tolerance": 0.1
+            },
+            "continue.amr_high": {
+              "op": "lte",
+              "threshold": 2.5,
+              "tolerance": 0.1
+            },
+            "continue.breakout": {
+              "op": "gt",
+              "threshold_ref": "core.prior_high20",
+              "tolerance_ref": "0.1*core.atr20"
+            }
+          },
+          "near_miss_raw_paths": {
+            "LAUNCH_CONFIRM": [
+              "launch"
+            ],
+            "RECOVERY_TURN": [
+              "recovery.R20",
+              "recovery.R5_when_R20_false"
+            ],
+            "STRONG_PULLBACK": [
+              "pullback.reclaim_MA5",
+              "pullback.test_MA10"
+            ],
+            "TREND_CONTINUE": [
+              "continue"
+            ]
+          },
+          "hard_gate_policy": "candidate-common safety TRUE, registered scenario hard leaves known TRUE, exact parent/line source; raw FALSE expected no admitted event; birth-line comparison uses same canonical predicate id as launch.breakout, not duplicate failure"
+        },
+        "tracking": {
+          "contract": "TRACKING_COHORT_R1",
+          "design_item": "DES-07",
+          "design_state": "FROZEN_ADOPTED_RESEARCH_BASELINE",
+          "source_stages": [
+            "P09",
+            "P10",
+            "P11",
+            "P14",
+            "P16",
+            "P18",
+            "P00"
+          ],
+          "inputs": {
+            "evaluations": "full frozen Universe for each enabled registered rule incl unknown/excluded",
+            "events": "exact event/enrollment/episode",
+            "capture": "actual source ready, accepted dependency, durable clock"
+          },
+          "outputs": {
+            "evaluation": "MATCH/NO_MATCH/UNKNOWN + all reasons",
+            "enrollment": "stable rule/entity false->true lineage",
+            "intent": "T0 exact refs",
+            "focus": "operation revision + research event recency"
+          },
+          "parameters": {},
+          "expressions": {},
+          "unknown_and_conflict": "UNKNOWN pauses enrollment not closes/reenters; first seen true only left-censored landmark except proven new formal event birth; no fake LIVE",
+          "independent_validation_requirements": [
+            "false unknown true edges",
+            "first seen true is not natural entry",
+            "two parents not collapsed",
+            "same raw/publish idempotent",
+            "archive does not cancel Forward",
+            "unpin does not remove auto tracking"
+          ],
+          "normative_ref": "docs/design/算法合同与升级规则.md#11",
+          "cohort_rules": [
+            {
+              "rule_id": "STOCK_SEED_R1",
+              "entity_type": "STOCK",
+              "producer_stage": "P09",
+              "artifact": "seed_evaluations",
+              "predicate": "seed_raw TRUE"
+            },
+            {
+              "rule_id": "STOCK_WARM_R1",
+              "entity_type": "STOCK",
+              "producer_stage": "P16",
+              "artifact": "final_states",
+              "predicate": "effective TRUE AND bucket<=1"
+            },
+            {
+              "rule_id": "STOCK_CONFIRMED_R1",
+              "entity_type": "STOCK",
+              "producer_stage": "P16",
+              "artifact": "final_states",
+              "predicate": "effective TRUE AND bucket=0"
+            },
+            {
+              "rule_id": "STOCK_D0_LAUNCH_CONFIRM_R1",
+              "entity_type": "STOCK",
+              "producer_stage": "P14",
+              "artifact": "d0_facts",
+              "predicate": "admitted FORMAL event with exact raw parent/peak"
+            },
+            {
+              "rule_id": "STOCK_D0_STRONG_PULLBACK_R1",
+              "entity_type": "STOCK",
+              "producer_stage": "P14",
+              "artifact": "d0_facts",
+              "predicate": "admitted FORMAL event with exact raw parent/peak"
+            },
+            {
+              "rule_id": "STOCK_D0_RECOVERY_TURN_R1",
+              "entity_type": "STOCK",
+              "producer_stage": "P14",
+              "artifact": "d0_facts",
+              "predicate": "admitted FORMAL event with exact raw parent/peak"
+            },
+            {
+              "rule_id": "STOCK_D0_TREND_CONTINUE_R1",
+              "entity_type": "STOCK",
+              "producer_stage": "P14",
+              "artifact": "d0_facts",
+              "predicate": "admitted FORMAL event with exact raw parent/peak"
+            },
+            {
+              "rule_id": "SECTOR_PREWATCH_RAW_R1",
+              "entity_type": "SECTOR",
+              "producer_stage": "P10",
+              "artifact": "sector_raw",
+              "predicate": "prewatch_raw TRUE"
+            },
+            {
+              "rule_id": "SECTOR_WARM_RAW_R1",
+              "entity_type": "SECTOR",
+              "producer_stage": "P10",
+              "artifact": "sector_raw",
+              "predicate": "warm_raw TRUE"
+            },
+            {
+              "rule_id": "SECTOR_CONFIRMED_RAW_R1",
+              "entity_type": "SECTOR",
+              "producer_stage": "P10",
+              "artifact": "sector_raw",
+              "predicate": "confirmed_raw TRUE"
+            },
+            {
+              "rule_id": "ROTATION_ACCEPTED_R1",
+              "entity_type": "SECTOR",
+              "producer_stage": "P11",
+              "artifact": "rotation",
+              "predicate": "exact fresh state=ACCEPTED"
+            },
+            {
+              "rule_id": "ROTATION_EXPANDING_R1",
+              "entity_type": "SECTOR",
+              "producer_stage": "P11",
+              "artifact": "rotation",
+              "predicate": "exact fresh state=EXPANDING"
+            },
+            {
+              "rule_id": "ROTATION_REACCELERATING_R1",
+              "entity_type": "SECTOR",
+              "producer_stage": "P11",
+              "artifact": "rotation",
+              "predicate": "exact fresh state=REACCELERATING"
+            }
+          ],
+          "entry": {
+            "proven_false_then_true": "NEW_ENROLLMENT",
+            "unknown": "KEEP_PRIOR_NO_ENTRY",
+            "first_true": "LEFT_CENSORED_LANDMARK_ONLY",
+            "new_proven_formal_event_or_episode": "EVENT_ENTRY",
+            "daily_match": "LANDMARK",
+            "no_match": "CLOSE_GENERIC_ENROLLMENT_KEEP_FORWARD"
+          },
+          "observation_key": [
+            "project",
+            "rule_version_variant",
+            "entity",
+            "enrollment_or_event_episode",
+            "T0",
+            "Lane"
+          ],
+          "revision_key": [
+            "observation_key",
+            "capture_revision",
+            "input_digest"
+          ],
+          "focus_event_whitelist": "order.radar_priority + known support/acceptance upgrade; not heartbeat/price noise/user note",
+          "focus_operations": "PIN/UNPIN/NOTE/ARCHIVE/UNARCHIVE CAS expected_revision+request_key; hide only exact episode; no Forward deletion",
+          "consumer_stages": [
+            "P20",
+            "P23",
+            "P24",
+            "P21"
+          ],
+          "evaluation_identity": [
+            "project",
+            "rule_id",
+            "rule_version",
+            "variant",
+            "entity_id",
+            "session",
+            "publication"
+          ],
+          "focus_default_sort": [
+            "last_verified_research_event_session DESC",
+            "entity_id ASC",
+            "episode_id ASC"
+          ],
+          "evaluation_universe": {
+            "STOCK": "complete date-effective Data Universe ordinary A identities + quarantine slots",
+            "SECTOR": "complete date/type effective sector directory",
+            "known_research_or_candidate_exclusion": "NO_MATCH_WITH_REASONS",
+            "unmapped_identity": "UNKNOWN_NO_FAKE_ENROLLMENT",
+            "full_mainline_required_rule_count": 13
+          },
+          "evaluation_children": "one rule/entity/session aggregate OR; D0 parent/peak/event typed child matches preserve each identity"
+        },
+        "forward": {
+          "contract": "FORWARD_COMPARISON_R1",
+          "design_item": "DES-07",
+          "design_state": "FROZEN_ADOPTED_RESEARCH_BASELINE",
+          "source_stages": [
+            "P19",
+            "P23",
+            "P24"
+          ],
+          "inputs": {
+            "T0": "frozen rules, subject, identity, industry, prices, factors, members/weights",
+            "successors": "accepted legal observed/marked/terminal facts",
+            "controls": "T0 same rule known NO_MATCH"
+          },
+          "outputs": {
+            "market_excess": "fixed initial benchmark + quality",
+            "sector_excess": "fixed T0 sector + quality",
+            "controls": "T0 sorted matching refs and fixed weights",
+            "first_exit": "registered event + possible earlier unknown"
+          },
+          "parameters": {
+            "benchmark_coverage_min": 0.8,
+            "market_benchmark_min_members": 2,
+            "quote_age_max_sessions": 20,
+            "controls_target": 5,
+            "controls_minimum": 3,
+            "rps20_caliper_pp": 10,
+            "pos60_caliper": 0.2,
+            "liquidity_ratio_min": 0.5,
+            "liquidity_ratio_max": 2
+          },
+          "expressions": {},
+          "unknown_and_conflict": "missing future member never reweight; no terminal zero without fact; observed/marked separate variants; unknown earlier event blocks first-event claim",
+          "independent_validation_requirements": [
+            "post-entry benchmark fixed",
+            "future missing control retains denominator",
+            "control ties/replacement not scan-order dependent",
+            "minimum support boundaries",
+            "observed endpoint survives missing path",
+            "same-day first-event conflict"
+          ],
+          "normative_ref": "docs/design/算法合同与升级规则.md#11",
+          "benchmark": {
+            "market": "T0 research and candidate-common TRUE, known P0 subset frozen; coverage>=0.8/min2; equal weights",
+            "sector": "full T0 M equal weights; any P0 unknown=>not ready",
+            "industry": "official primary at T0",
+            "concept": "T0 exact LOO support order not future winners",
+            "market_coverage_denominator": "complete known Research Universe incl known candidate-common exclusions; unknown denominator blocks benchmark"
+          },
+          "marking": "confirmed continuous suspension, age<=20, known identity/actions/coordinate; latest actual close transformed; due fixed; no synthetic OHLC",
+          "control_matching": {
+            "same": [
+              "board",
+              "ST",
+              "official_primary_industry"
+            ],
+            "required": [
+              "research TRUE",
+              "candidate_common TRUE",
+              "rule NO_MATCH known",
+              "P0",
+              "rps20",
+              "pos60",
+              "liquidity_mean20"
+            ],
+            "calipers": "abs(delta RPS20)<=10 AND abs(delta pos60)<=0.2 AND 0.5<=a/b<=2",
+            "distance": "abs(delta RPS20)/10 + abs(delta pos60)/0.2 + abs(a-b)/max(a,b)/0.5",
+            "sort": [
+              "exact_distance ASC",
+              "entity_id ASC"
+            ],
+            "within_subject_replacement": false,
+            "across_subject_replacement": true,
+            "initial_weight": "1/actual k; k in variant; minimum3",
+            "later_signal": "KEEP_ITT"
+          },
+          "first_event_priority": [
+            "INVALIDATED",
+            "EXPIRED",
+            "EXITED",
+            "OTHER_REGISTERED_STRUCTURE_EVENT"
+          ],
+          "consumer_stages": [
+            "P21",
+            "P24"
+          ],
+          "first_exit_filter": [
+            "INVALIDATED",
+            "EXPIRED",
+            "EXITED"
+          ],
+          "other_structure_event_policy": "ANY_OR_FIRST_STRUCTURE_EVENT_ONLY_NOT_FIRST_EXIT"
+        }
+      }
+    }
+  }
+}

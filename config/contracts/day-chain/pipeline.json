@@ -1,0 +1,2611 @@
+{
+  "top_level": {
+    "contract_id": "STOCK-A-DAY-CHAIN",
+    "version": "R10",
+    "contract_kind": "BUSINESS_PIPELINE_SPECIFICATION",
+    "requires_implementation_binding": true,
+    "scope_policy": {
+      "excluded_capabilities": [
+        "NEWS_COLLECTION",
+        "EXTERNAL_EVENT_CATALYST",
+        "SOCIAL_EVENT_RESEARCH",
+        "EVENT_COMPANY_OR_THEME_MAPPING"
+      ],
+      "preserved_capabilities": [
+        "TDX_SECTOR_CLASSIFICATION_AND_MEMBERSHIP",
+        "INTERNAL_ALGORITHM_STATE_EVENTS",
+        "TRANSACTION_OUTBOX"
+      ],
+      "optional_separate_scopes": [
+        "FEP",
+        "INTRADAY"
+      ],
+      "scopes": {
+        "SOURCE_INGRESS": {
+          "required_stages": [
+            "P00",
+            "P01",
+            "P02",
+            "P03"
+          ],
+          "generic_complete_eligible": false
+        },
+        "FOUNDATION_EOD": {
+          "contract_role": "NAMED_SCOPE_BINDING_OF_SINGLE_PRODUCTION_EXECUTOR",
+          "requires_separate_validated_narrow_dag_binding": false,
+          "requires_explicit_narrow_owner_and_consumer_roles": true,
+          "generic_complete_eligible": false,
+          "binding_ref": "scope_bindings.FOUNDATION_EOD"
+        },
+        "FULL_RESEARCH_EOD": {
+          "required_stages": [
+            "P00",
+            "P01",
+            "P02",
+            "P03",
+            "P04",
+            "P05",
+            "P06",
+            "P07",
+            "P08",
+            "P09",
+            "P10",
+            "P11",
+            "P12",
+            "P13",
+            "P14",
+            "P15",
+            "P16",
+            "P17",
+            "P18",
+            "P19",
+            "P20",
+            "P21",
+            "P22",
+            "P23",
+            "P24",
+            "P25"
+          ],
+          "frontend_ack_required_for_backend_ready": false,
+          "generic_complete_requires_ack": true
+        },
+        "FULL_CHAIN_DISPLAYED": {
+          "required_stages": [
+            "P00",
+            "P01",
+            "P02",
+            "P03",
+            "P04",
+            "P05",
+            "P06",
+            "P07",
+            "P08",
+            "P09",
+            "P10",
+            "P11",
+            "P12",
+            "P13",
+            "P14",
+            "P15",
+            "P16",
+            "P17",
+            "P18",
+            "P19",
+            "P20",
+            "P21",
+            "P22",
+            "P23",
+            "P24",
+            "P25"
+          ],
+          "frontend_ack_required": true,
+          "generic_complete_requires_ack": true
+        }
+      },
+      "freeze_before_run": [
+        "target_session",
+        "source_cutoff",
+        "universe",
+        "member_revision",
+        "previous_accepted_context",
+        "required_owner_roles",
+        "required_field_contracts",
+        "required_consumers",
+        "source_gap_and_short_history_policy",
+        "algorithm_versions",
+        "parameter_versions",
+        "formal_scenario_roles",
+        "ui_build",
+        "expected_head_generation"
+      ],
+      "optional_baostock_failure_blocks_pure_core": false,
+      "no_runtime_scope_reduction_to_hide_failure": true
+    },
+    "stages": [
+      {
+        "id": "P00",
+        "name_zh": "范围与环境计划",
+        "required_inputs": [
+          "ext.validated_configuration",
+          "ext.calendar_authority",
+          "ext.accepted_state_catalog",
+          "ext.contract_registry",
+          "ext.build_identity"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "accepted_research",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "active_anchors",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "state_episodes",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "rotation",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "focus",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "observations_and_schedules",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "day_plan",
+          "environment_gate",
+          "prior_context"
+        ],
+        "algorithms": [],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P01",
+        "name_zh": "TDX来源捕获",
+        "required_inputs": [
+          "day_plan",
+          "environment_gate",
+          "ext.readonly_tdx_roots"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [],
+        "outputs": [
+          "tdx_capture"
+        ],
+        "algorithms": [
+          "ALG-01"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P02",
+        "name_zh": "BaoStock独立补充捕获",
+        "required_inputs": [
+          "day_plan",
+          "environment_gate",
+          "ext.baostock_policy"
+        ],
+        "optional_inputs": [
+          "ext.baostock_responses"
+        ],
+        "prior_inputs": [],
+        "outputs": [
+          "bao_capability_status",
+          "bao_supplement"
+        ],
+        "algorithms": [
+          "ALG-18"
+        ],
+        "completion_role": "CAPABILITY_ACCOUNTING_REQUIRED_DATA_OPTIONAL"
+      },
+      {
+        "id": "P03",
+        "name_zh": "来源封口",
+        "required_inputs": [
+          "day_plan",
+          "tdx_capture",
+          "bao_capability_status"
+        ],
+        "optional_inputs": [
+          "ext.approved_reference_captures"
+        ],
+        "prior_inputs": [],
+        "outputs": [
+          "source_set",
+          "source_capabilities"
+        ],
+        "algorithms": [],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P04",
+        "name_zh": "日期身份及基础目录",
+        "required_inputs": [
+          "day_plan",
+          "prior_context",
+          "source_set",
+          "source_capabilities"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [],
+        "outputs": [
+          "identity_calendar_universe",
+          "membership",
+          "actions",
+          "reference_catalog",
+          "source_seal"
+        ],
+        "algorithms": [
+          "ALG-01"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P05",
+        "name_zh": "RAW状态及制度",
+        "required_inputs": [
+          "day_plan",
+          "source_set",
+          "identity_calendar_universe",
+          "reference_catalog"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [],
+        "outputs": [
+          "raw_bars",
+          "bar_status",
+          "price_limits"
+        ],
+        "algorithms": [
+          "ALG-04"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P06",
+        "name_zh": "复权坐标与周期",
+        "required_inputs": [
+          "day_plan",
+          "raw_bars",
+          "bar_status",
+          "actions",
+          "identity_calendar_universe",
+          "reference_catalog"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [],
+        "outputs": [
+          "adjusted_bars",
+          "coordinates",
+          "period_bars",
+          "reference_series"
+        ],
+        "algorithms": [
+          "ALG-02",
+          "ALG-03"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P07",
+        "name_zh": "技术与D0原语",
+        "required_inputs": [
+          "day_plan",
+          "adjusted_bars",
+          "coordinates",
+          "raw_bars",
+          "bar_status",
+          "identity_calendar_universe"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [],
+        "outputs": [
+          "core_primitives",
+          "d0_primitives"
+        ],
+        "algorithms": [
+          "ALG-05",
+          "ALG-06",
+          "ALG-07",
+          "ALG-08",
+          "ALG-12",
+          "ALG-13",
+          "ALG-14",
+          "ALG-15",
+          "ALG-16",
+          "ALG-27"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P08",
+        "name_zh": "横截面与端点重排",
+        "required_inputs": [
+          "day_plan",
+          "core_primitives",
+          "adjusted_bars",
+          "coordinates",
+          "identity_calendar_universe",
+          "bar_status"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [],
+        "outputs": [
+          "cross_section"
+        ],
+        "algorithms": [
+          "ALG-09",
+          "ALG-10",
+          "ALG-11"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P09",
+        "name_zh": "Core画像与Seed",
+        "required_inputs": [
+          "day_plan",
+          "core_primitives",
+          "cross_section",
+          "identity_calendar_universe",
+          "adjusted_bars",
+          "period_bars"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [],
+        "outputs": [
+          "core_profiles",
+          "seed_evaluations",
+          "stock_prewatch_raw"
+        ],
+        "algorithms": [
+          "ALG-17",
+          "ALG-19",
+          "ALG-20"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P10",
+        "name_zh": "板块原生与原始资格",
+        "required_inputs": [
+          "day_plan",
+          "membership",
+          "identity_calendar_universe",
+          "coordinates",
+          "core_primitives",
+          "cross_section",
+          "seed_evaluations",
+          "bar_status"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "accepted_sector_history",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "sector_native",
+          "sector_raw",
+          "overlap"
+        ],
+        "algorithms": [
+          "ALG-21",
+          "ALG-22",
+          "ALG-23",
+          "ALG-25"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P11",
+        "name_zh": "Rotation",
+        "required_inputs": [
+          "day_plan",
+          "sector_native",
+          "sector_raw",
+          "seed_evaluations",
+          "adjusted_bars",
+          "coordinates",
+          "prior_context",
+          "identity_calendar_universe",
+          "bar_status"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "rotation",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "frozen_rotation_baskets",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "final_states",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED",
+            "component": "SECTOR_MATURITY"
+          }
+        ],
+        "outputs": [
+          "rotation"
+        ],
+        "algorithms": [
+          "ALG-24"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P12",
+        "name_zh": "LOO和上下文",
+        "required_inputs": [
+          "day_plan",
+          "membership",
+          "identity_calendar_universe",
+          "core_primitives",
+          "cross_section",
+          "seed_evaluations",
+          "sector_native",
+          "sector_raw",
+          "overlap"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "accepted_core_and_membership_history",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "loo_context"
+        ],
+        "algorithms": [
+          "ALG-25"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P13",
+        "name_zh": "市场轴",
+        "required_inputs": [
+          "day_plan",
+          "reference_series",
+          "core_primitives",
+          "cross_section",
+          "price_limits",
+          "identity_calendar_universe",
+          "prior_context"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "market_axes",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "market_axes"
+        ],
+        "algorithms": [
+          "ALG-26"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P14",
+        "name_zh": "D0四场景",
+        "required_inputs": [
+          "day_plan",
+          "d0_primitives",
+          "core_primitives",
+          "cross_section",
+          "loo_context",
+          "source_seal",
+          "prior_context",
+          "coordinates",
+          "core_profiles",
+          "bar_status",
+          "adjusted_bars",
+          "identity_calendar_universe"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "legitimate_episodes",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "support_anchors",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "d0_facts",
+          "frozen_failure_candidates"
+        ],
+        "algorithms": [
+          "ALG-28"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P15",
+        "name_zh": "D1结构",
+        "required_inputs": [
+          "day_plan",
+          "adjusted_bars",
+          "coordinates",
+          "core_primitives",
+          "prior_context",
+          "cross_section",
+          "bar_status",
+          "d0_facts"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "active_anchors",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "structure_events",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "structure_facts",
+          "anchors"
+        ],
+        "algorithms": [
+          "ALG-29"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P16",
+        "name_zh": "D2最终状态与差异",
+        "required_inputs": [
+          "day_plan",
+          "stock_prewatch_raw",
+          "sector_raw",
+          "core_profiles",
+          "d0_facts",
+          "frozen_failure_candidates",
+          "structure_facts",
+          "anchors",
+          "prior_context",
+          "coordinates",
+          "core_primitives",
+          "cross_section",
+          "seed_evaluations",
+          "bar_status",
+          "adjusted_bars",
+          "sector_native"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "final_states",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "episodes",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "frozen_failure_levels",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "final_states",
+          "episodes",
+          "state_events"
+        ],
+        "algorithms": [
+          "ALG-30"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P17",
+        "name_zh": "风险与完整画像",
+        "required_inputs": [
+          "day_plan",
+          "core_profiles",
+          "cross_section",
+          "membership",
+          "sector_native",
+          "sector_raw",
+          "rotation",
+          "loo_context",
+          "market_axes",
+          "d0_facts",
+          "structure_facts",
+          "anchors",
+          "final_states",
+          "episodes",
+          "state_events",
+          "source_capabilities",
+          "core_primitives"
+        ],
+        "optional_inputs": [
+          "bao_supplement"
+        ],
+        "prior_inputs": [
+          {
+            "role": "risk_rows",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "risk_rows",
+          "complete_profiles"
+        ],
+        "algorithms": [
+          "ALG-31",
+          "ALG-39"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P18",
+        "name_zh": "Priority和变化雷达",
+        "required_inputs": [
+          "day_plan",
+          "complete_profiles",
+          "risk_rows",
+          "final_states",
+          "state_events",
+          "sector_native",
+          "d0_facts",
+          "core_primitives",
+          "cross_section",
+          "prior_context",
+          "overlap",
+          "anchors",
+          "structure_facts"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "same_rule_priority_and_event_history",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "priority_rows",
+          "radar_rows",
+          "near_miss_rows"
+        ],
+        "algorithms": [
+          "ALG-32"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P19",
+        "name_zh": "Focus与独立样本意图",
+        "required_inputs": [
+          "day_plan",
+          "identity_calendar_universe",
+          "complete_profiles",
+          "final_states",
+          "episodes",
+          "anchors",
+          "state_events",
+          "priority_rows",
+          "prior_context",
+          "coordinates",
+          "core_primitives",
+          "cross_section",
+          "adjusted_bars",
+          "membership",
+          "loo_context"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "focus",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "observation_identity_catalog",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "focus_plan",
+          "cohort_evaluations",
+          "observation_intents",
+          "schedule_plan",
+          "dispatch_plan"
+        ],
+        "algorithms": [
+          "ALG-33",
+          "ALG-34"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P20",
+        "name_zh": "Owner封存和Manifest",
+        "required_inputs": [
+          "day_plan",
+          "source_set",
+          "identity_calendar_universe",
+          "membership",
+          "actions",
+          "reference_catalog",
+          "raw_bars",
+          "bar_status",
+          "price_limits",
+          "adjusted_bars",
+          "coordinates",
+          "period_bars",
+          "reference_series",
+          "core_primitives",
+          "d0_primitives",
+          "cross_section",
+          "core_profiles",
+          "seed_evaluations",
+          "stock_prewatch_raw",
+          "sector_native",
+          "sector_raw",
+          "overlap",
+          "rotation",
+          "loo_context",
+          "market_axes",
+          "d0_facts",
+          "frozen_failure_candidates",
+          "structure_facts",
+          "anchors",
+          "final_states",
+          "episodes",
+          "state_events",
+          "risk_rows",
+          "complete_profiles",
+          "priority_rows",
+          "radar_rows",
+          "near_miss_rows",
+          "focus_plan",
+          "cohort_evaluations",
+          "observation_intents",
+          "schedule_plan",
+          "dispatch_plan",
+          "source_capabilities",
+          "source_seal"
+        ],
+        "optional_inputs": [
+          "bao_supplement"
+        ],
+        "prior_inputs": [],
+        "outputs": [
+          "owner_seals",
+          "business_manifest"
+        ],
+        "algorithms": [],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P21",
+        "name_zh": "检索索引和候选Publication",
+        "required_inputs": [
+          "day_plan",
+          "owner_seals",
+          "business_manifest",
+          "dispatch_plan",
+          "ext.serving_contract"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [],
+        "outputs": [
+          "read_index",
+          "candidate_publication"
+        ],
+        "algorithms": [],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P22",
+        "name_zh": "候选API与客户端合同",
+        "required_inputs": [
+          "day_plan",
+          "candidate_publication",
+          "read_index",
+          "owner_seals",
+          "ext.build_identity",
+          "ext.validated_ui_contract"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [],
+        "outputs": [
+          "candidate_api_validation",
+          "client_contract_validation"
+        ],
+        "algorithms": [],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P23",
+        "name_zh": "接受事务和Head CAS",
+        "required_inputs": [
+          "day_plan",
+          "candidate_publication",
+          "business_manifest",
+          "read_index",
+          "candidate_api_validation",
+          "client_contract_validation",
+          "dispatch_plan",
+          "prior_context"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [],
+        "outputs": [
+          "accepted_publication",
+          "research_head",
+          "accepted_receipt",
+          "transaction_outbox"
+        ],
+        "algorithms": [],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P24",
+        "name_zh": "接受后捕获结算和读回",
+        "required_inputs": [
+          "day_plan",
+          "accepted_publication",
+          "research_head",
+          "accepted_receipt",
+          "transaction_outbox",
+          "dispatch_plan",
+          "focus_plan",
+          "cohort_evaluations",
+          "observation_intents",
+          "schedule_plan",
+          "prior_context",
+          "candidate_publication",
+          "bar_status",
+          "identity_calendar_universe",
+          "coordinates"
+        ],
+        "optional_inputs": [],
+        "prior_inputs": [
+          {
+            "role": "due_schedules",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "frozen_observations",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          },
+          {
+            "role": "accepted_followup_source_catalog",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_OBSERVATION_OR_LEFT_CENSORED"
+          }
+        ],
+        "outputs": [
+          "dispatch_accounting",
+          "observations",
+          "forward_outcomes",
+          "forward_read_revision",
+          "accepted_api_readback"
+        ],
+        "algorithms": [
+          "ALG-34",
+          "ALG-35",
+          "ALG-36",
+          "ALG-37"
+        ],
+        "completion_role": "REQUIRED"
+      },
+      {
+        "id": "P25",
+        "name_zh": "前端呈现和聚合完成",
+        "required_inputs": [
+          "day_plan",
+          "accepted_publication",
+          "research_head",
+          "accepted_api_readback",
+          "dispatch_accounting",
+          "forward_read_revision",
+          "client_contract_validation"
+        ],
+        "optional_inputs": [
+          "ext.frontend_view_ack"
+        ],
+        "prior_inputs": [],
+        "outputs": [
+          "backend_chain_status",
+          "display_chain_status"
+        ],
+        "algorithms": [],
+        "completion_role": "BACKEND_READINESS_REQUIRED_DISPLAY_ACK_REQUIRED_FOR_GENERIC_COMPLETE"
+      }
+    ],
+    "artifact_groups": {
+      "day_plan": {
+        "producer": "P00",
+        "consumers": [
+          "P01",
+          "P02",
+          "P03",
+          "P04",
+          "P05",
+          "P06",
+          "P07",
+          "P08",
+          "P09",
+          "P10",
+          "P11",
+          "P12",
+          "P13",
+          "P14",
+          "P15",
+          "P16",
+          "P17",
+          "P18",
+          "P19",
+          "P20",
+          "P21",
+          "P22",
+          "P23",
+          "P24",
+          "P25"
+        ],
+        "terminal_consumers": [],
+        "data_role": "CONTROL",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "environment_gate": {
+        "producer": "P00",
+        "consumers": [
+          "P01",
+          "P02"
+        ],
+        "terminal_consumers": [],
+        "data_role": "CONTROL",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "prior_context": {
+        "producer": "P00",
+        "consumers": [
+          "P04",
+          "P11",
+          "P13",
+          "P14",
+          "P15",
+          "P16",
+          "P19",
+          "P23",
+          "P24",
+          "P18"
+        ],
+        "terminal_consumers": [],
+        "data_role": "CONTROL",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "tdx_capture": {
+        "producer": "P01",
+        "consumers": [
+          "P03"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "bao_capability_status": {
+        "producer": "P02",
+        "consumers": [
+          "P03"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "bao_supplement": {
+        "producer": "P02",
+        "consumers": [
+          "P17",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "source_set": {
+        "producer": "P03",
+        "consumers": [
+          "P04",
+          "P05",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "source_capabilities": {
+        "producer": "P03",
+        "consumers": [
+          "P04",
+          "P17",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "identity_calendar_universe": {
+        "producer": "P04",
+        "consumers": [
+          "P05",
+          "P06",
+          "P07",
+          "P08",
+          "P09",
+          "P10",
+          "P12",
+          "P13",
+          "P19",
+          "P20",
+          "P11",
+          "P14",
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "membership": {
+        "producer": "P04",
+        "consumers": [
+          "P10",
+          "P12",
+          "P17",
+          "P20",
+          "P19"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "actions": {
+        "producer": "P04",
+        "consumers": [
+          "P06",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "reference_catalog": {
+        "producer": "P04",
+        "consumers": [
+          "P05",
+          "P06",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "source_seal": {
+        "producer": "P04",
+        "consumers": [
+          "P14",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "raw_bars": {
+        "producer": "P05",
+        "consumers": [
+          "P06",
+          "P07",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "bar_status": {
+        "producer": "P05",
+        "consumers": [
+          "P06",
+          "P07",
+          "P08",
+          "P20",
+          "P14",
+          "P15",
+          "P16",
+          "P10",
+          "P11",
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "price_limits": {
+        "producer": "P05",
+        "consumers": [
+          "P13",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "adjusted_bars": {
+        "producer": "P06",
+        "consumers": [
+          "P07",
+          "P08",
+          "P09",
+          "P11",
+          "P15",
+          "P20",
+          "P16",
+          "P14",
+          "P19"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "coordinates": {
+        "producer": "P06",
+        "consumers": [
+          "P07",
+          "P08",
+          "P10",
+          "P11",
+          "P14",
+          "P15",
+          "P16",
+          "P19",
+          "P20",
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "period_bars": {
+        "producer": "P06",
+        "consumers": [
+          "P09",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "reference_series": {
+        "producer": "P06",
+        "consumers": [
+          "P13",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "core_primitives": {
+        "producer": "P07",
+        "consumers": [
+          "P08",
+          "P09",
+          "P10",
+          "P12",
+          "P13",
+          "P14",
+          "P15",
+          "P20",
+          "P16",
+          "P17",
+          "P18",
+          "P19"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "d0_primitives": {
+        "producer": "P07",
+        "consumers": [
+          "P14",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "cross_section": {
+        "producer": "P08",
+        "consumers": [
+          "P09",
+          "P10",
+          "P12",
+          "P13",
+          "P14",
+          "P17",
+          "P20",
+          "P15",
+          "P16",
+          "P18",
+          "P19"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "core_profiles": {
+        "producer": "P09",
+        "consumers": [
+          "P16",
+          "P17",
+          "P20",
+          "P14"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "seed_evaluations": {
+        "producer": "P09",
+        "consumers": [
+          "P10",
+          "P11",
+          "P12",
+          "P20",
+          "P16"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "stock_prewatch_raw": {
+        "producer": "P09",
+        "consumers": [
+          "P16",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "sector_native": {
+        "producer": "P10",
+        "consumers": [
+          "P11",
+          "P12",
+          "P17",
+          "P18",
+          "P20",
+          "P16"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "sector_raw": {
+        "producer": "P10",
+        "consumers": [
+          "P11",
+          "P12",
+          "P16",
+          "P17",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "overlap": {
+        "producer": "P10",
+        "consumers": [
+          "P12",
+          "P20",
+          "P18"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "rotation": {
+        "producer": "P11",
+        "consumers": [
+          "P17",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "loo_context": {
+        "producer": "P12",
+        "consumers": [
+          "P14",
+          "P17",
+          "P20",
+          "P19"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "market_axes": {
+        "producer": "P13",
+        "consumers": [
+          "P17",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "d0_facts": {
+        "producer": "P14",
+        "consumers": [
+          "P16",
+          "P17",
+          "P20",
+          "P15",
+          "P18"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "frozen_failure_candidates": {
+        "producer": "P14",
+        "consumers": [
+          "P16",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "structure_facts": {
+        "producer": "P15",
+        "consumers": [
+          "P16",
+          "P17",
+          "P20",
+          "P18"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "anchors": {
+        "producer": "P15",
+        "consumers": [
+          "P16",
+          "P17",
+          "P19",
+          "P20",
+          "P18"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "final_states": {
+        "producer": "P16",
+        "consumers": [
+          "P17",
+          "P18",
+          "P19",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "episodes": {
+        "producer": "P16",
+        "consumers": [
+          "P17",
+          "P19",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "state_events": {
+        "producer": "P16",
+        "consumers": [
+          "P17",
+          "P18",
+          "P19",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "risk_rows": {
+        "producer": "P17",
+        "consumers": [
+          "P18",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "complete_profiles": {
+        "producer": "P17",
+        "consumers": [
+          "P18",
+          "P19",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "priority_rows": {
+        "producer": "P18",
+        "consumers": [
+          "P19",
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "radar_rows": {
+        "producer": "P18",
+        "consumers": [
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "near_miss_rows": {
+        "producer": "P18",
+        "consumers": [
+          "P20"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "focus_plan": {
+        "producer": "P19",
+        "consumers": [
+          "P20",
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "cohort_evaluations": {
+        "producer": "P19",
+        "consumers": [
+          "P20",
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "observation_intents": {
+        "producer": "P19",
+        "consumers": [
+          "P20",
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "schedule_plan": {
+        "producer": "P19",
+        "consumers": [
+          "P20",
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "dispatch_plan": {
+        "producer": "P19",
+        "consumers": [
+          "P20",
+          "P21",
+          "P23",
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "owner_seals": {
+        "producer": "P20",
+        "consumers": [
+          "P21",
+          "P22"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "business_manifest": {
+        "producer": "P20",
+        "consumers": [
+          "P21",
+          "P23"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "read_index": {
+        "producer": "P21",
+        "consumers": [
+          "P22",
+          "P23"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "candidate_publication": {
+        "producer": "P21",
+        "consumers": [
+          "P22",
+          "P23",
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "candidate_api_validation": {
+        "producer": "P22",
+        "consumers": [
+          "P23"
+        ],
+        "terminal_consumers": [],
+        "data_role": "CONTROL",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "client_contract_validation": {
+        "producer": "P22",
+        "consumers": [
+          "P23",
+          "P25"
+        ],
+        "terminal_consumers": [],
+        "data_role": "CONTROL",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "accepted_publication": {
+        "producer": "P23",
+        "consumers": [
+          "P24",
+          "P25"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "research_head": {
+        "producer": "P23",
+        "consumers": [
+          "P24",
+          "P25"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "accepted_receipt": {
+        "producer": "P23",
+        "consumers": [
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "CONTROL",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "transaction_outbox": {
+        "producer": "P23",
+        "consumers": [
+          "P24"
+        ],
+        "terminal_consumers": [],
+        "data_role": "CONTROL",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "dispatch_accounting": {
+        "producer": "P24",
+        "consumers": [
+          "P25"
+        ],
+        "terminal_consumers": [],
+        "data_role": "CONTROL",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "observations": {
+        "producer": "P24",
+        "consumers": [],
+        "terminal_consumers": [
+          "status_api",
+          "data_diagnostics"
+        ],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "forward_outcomes": {
+        "producer": "P24",
+        "consumers": [],
+        "terminal_consumers": [
+          "status_api",
+          "data_diagnostics"
+        ],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "forward_read_revision": {
+        "producer": "P24",
+        "consumers": [
+          "P25"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "accepted_api_readback": {
+        "producer": "P24",
+        "consumers": [
+          "P25"
+        ],
+        "terminal_consumers": [],
+        "data_role": "VERSIONED_BUSINESS_ARTIFACT",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "backend_chain_status": {
+        "producer": "P25",
+        "consumers": [],
+        "terminal_consumers": [
+          "status_api",
+          "data_diagnostics"
+        ],
+        "data_role": "CONTROL",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      },
+      "display_chain_status": {
+        "producer": "P25",
+        "consumers": [],
+        "terminal_consumers": [
+          "status_api",
+          "data_diagnostics"
+        ],
+        "data_role": "CONTROL",
+        "persistent_backend": "PG_NECESSARY_TYPED_ROWS_OR_FOREIGN_KEYS",
+        "filesystem_business_sidecar_allowed": false
+      }
+    },
+    "algorithms": [
+      {
+        "id": "ALG-01",
+        "producer_stages": [
+          "P01",
+          "P04"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-02",
+        "producer_stages": [
+          "P06"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-03",
+        "producer_stages": [
+          "P06"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-04",
+        "producer_stages": [
+          "P05"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-05",
+        "producer_stages": [
+          "P07"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true,
+        "missing_value_dependency_policy": {
+          "high_only_fields": [
+            "core.hhv5",
+            "core.hhv20",
+            "core.hhv60",
+            "core.prior_high5",
+            "core.prior_high20",
+            "core.prior_high60",
+            "core.hh_progress"
+          ],
+          "low_only_fields": [
+            "core.llv5",
+            "core.llv20",
+            "core.llv60",
+            "core.prior_low5",
+            "core.prior_low20",
+            "core.prior_low60",
+            "core.ll_progress"
+          ],
+          "known_ohlc_contradiction_rejected": true,
+          "unknown_is_not_known_contradiction": true
+        },
+        "fieldset_change": {
+          "addition": "core.ma10",
+          "version": "CORE_PRIMITIVES_FIELDSET_R2",
+          "old_ma5_20_60_semantics_preserved": true,
+          "dependent_ma_structure_requires_new_fieldset": true,
+          "runtime_verified": false
+        }
+      },
+      {
+        "id": "ALG-06",
+        "producer_stages": [
+          "P07"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true,
+        "true_range_inputs": [
+          "current_actual.high",
+          "current_actual.low",
+          "previous_actual.close"
+        ],
+        "atr_window": "N根连续选中actual产生N个TR值；每项使用当日high/low和前一选中actual的close。最早bar的high/low与最新bar的close不是依赖字段",
+        "coordinate_consistency_required": true,
+        "known_ohlc_contradiction_rejected": true
+      },
+      {
+        "id": "ALG-07",
+        "producer_stages": [
+          "P07"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-08",
+        "producer_stages": [
+          "P07"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-09",
+        "producer_stages": [
+          "P08"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-10",
+        "producer_stages": [
+          "P08"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-11",
+        "producer_stages": [
+          "P08"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-12",
+        "producer_stages": [
+          "P07"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-13",
+        "producer_stages": [
+          "P07"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-14",
+        "producer_stages": [
+          "P07"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-15",
+        "producer_stages": [
+          "P07"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-16",
+        "producer_stages": [
+          "P07"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-17",
+        "producer_stages": [
+          "P09"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-18",
+        "producer_stages": [
+          "P02"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-19",
+        "producer_stages": [
+          "P09"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-20",
+        "producer_stages": [
+          "P09"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-21",
+        "producer_stages": [
+          "P10"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-22",
+        "producer_stages": [
+          "P10"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-23",
+        "producer_stages": [
+          "P10"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-24",
+        "producer_stages": [
+          "P11"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-25",
+        "producer_stages": [
+          "P10",
+          "P12"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-26",
+        "producer_stages": [
+          "P13"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-27",
+        "producer_stages": [
+          "P07"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-28",
+        "producer_stages": [
+          "P14"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-29",
+        "producer_stages": [
+          "P15"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true,
+        "detailed_semantics": "STRUCTURE_EVENT_V1_SUPPORT_STATE_V1_R2_1_COUNTERS_IMPULSE_PRIOR_ATR_RELATIVE_MARKET_SEPARATED_RETEST"
+      },
+      {
+        "id": "ALG-30",
+        "producer_stages": [
+          "P16"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-31",
+        "producer_stages": [
+          "P17"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-32",
+        "producer_stages": [
+          "P18"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-33",
+        "producer_stages": [
+          "P19"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-34",
+        "producer_stages": [
+          "P19",
+          "P24"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-35",
+        "producer_stages": [
+          "P24"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-36",
+        "producer_stages": [
+          "P24"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-37",
+        "producer_stages": [
+          "P24"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      },
+      {
+        "id": "ALG-38",
+        "producer_stages": [],
+        "requirement": "OPTIONAL_SEPARATE_FEP_SCOPE",
+        "binding_required_before_capability_enabled": true,
+        "producer_binding": "INDEPENDENT_OPTIONAL_FEP_SCOPE_NOT_IMPLEMENTED_BY_DAY_CHAIN"
+      },
+      {
+        "id": "ALG-39",
+        "producer_stages": [
+          "P17"
+        ],
+        "requirement": "FULL_RESEARCH_EOD",
+        "binding_required_before_capability_enabled": true
+      }
+    ],
+    "time_roles": {
+      "CURRENT_SESSION": "Only declared same-session DAG producers",
+      "PREVIOUS_ACCEPTED": "Exact frozen accepted context, no current-day reverse edge",
+      "HISTORICAL_WINDOW": "Declared market/actual window and coordinate, no unknown-gap skipping",
+      "FORWARD_DUE": "Frozen observation and calendar; accepted followup sources only",
+      "FIRST_OBSERVATION": "Explicit initial/left-censored state, never fabricate prior episode"
+    },
+    "forbidden_same_session_edges": [
+      {
+        "from": [
+          "P14",
+          "P15",
+          "P16",
+          "P17",
+          "P18",
+          "P19",
+          "P24"
+        ],
+        "to": [
+          "P07",
+          "P08",
+          "P09",
+          "P10",
+          "P11",
+          "P12"
+        ]
+      },
+      {
+        "from": [
+          "P16",
+          "P17",
+          "P18",
+          "P19",
+          "P24"
+        ],
+        "to": [
+          "P14",
+          "P15"
+        ]
+      },
+      {
+        "from": [
+          "P24"
+        ],
+        "to": [
+          "P00",
+          "P04",
+          "P13",
+          "P16",
+          "P17",
+          "P18",
+          "P19"
+        ]
+      }
+    ]
+  },
+  "scope_fields": {
+    "contract": "STOCK_A_FOUNDATION_BINDING_R3",
+    "execution_mode": "SINGLE_EXECUTOR_SCOPE_PROJECTED_KERNELS",
+    "stage_bindings": [
+      {
+        "stage_id": "P00",
+        "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+        "required_inputs": [
+          "ext.validated_configuration",
+          "ext.calendar_authority",
+          "ext.accepted_state_catalog",
+          "ext.contract_registry",
+          "ext.build_identity"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "day_plan",
+          "environment_gate",
+          "prior_context"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": [
+          {
+            "role": "accepted_research",
+            "temporal_role": "PREVIOUS_ACCEPTED",
+            "first_day": "EXPLICIT_FIRST_RUN_NO_PRIOR"
+          }
+        ]
+      },
+      {
+        "stage_id": "P01",
+        "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+        "required_inputs": [
+          "day_plan",
+          "environment_gate",
+          "ext.readonly_tdx_roots"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "tdx_capture"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      },
+      {
+        "stage_id": "P02",
+        "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+        "required_inputs": [
+          "day_plan",
+          "environment_gate",
+          "ext.baostock_policy"
+        ],
+        "optional_inputs": [
+          "ext.baostock_responses"
+        ],
+        "outputs": [
+          "bao_capability_status",
+          "bao_supplement"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      },
+      {
+        "stage_id": "P03",
+        "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+        "required_inputs": [
+          "day_plan",
+          "tdx_capture",
+          "bao_capability_status"
+        ],
+        "optional_inputs": [
+          "ext.approved_reference_captures"
+        ],
+        "outputs": [
+          "source_set",
+          "source_capabilities"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      },
+      {
+        "stage_id": "P04",
+        "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+        "required_inputs": [
+          "day_plan",
+          "prior_context",
+          "source_set",
+          "source_capabilities"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "identity_calendar_universe",
+          "actions",
+          "reference_catalog",
+          "source_seal"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      },
+      {
+        "stage_id": "P05",
+        "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+        "required_inputs": [
+          "day_plan",
+          "source_set",
+          "identity_calendar_universe",
+          "reference_catalog"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "raw_bars",
+          "bar_status"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      },
+      {
+        "stage_id": "P06",
+        "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+        "required_inputs": [
+          "day_plan",
+          "raw_bars",
+          "bar_status",
+          "actions",
+          "identity_calendar_universe",
+          "reference_catalog"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "adjusted_bars",
+          "coordinates",
+          "period_bars"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": [],
+        "history_binding_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+      },
+      {
+        "stage_id": "P07",
+        "kernel_role": "CORE_ONLY",
+        "required_inputs": [
+          "day_plan",
+          "adjusted_bars",
+          "coordinates",
+          "raw_bars",
+          "bar_status",
+          "identity_calendar_universe"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "core_primitives"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": [],
+        "history_binding_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+      },
+      {
+        "stage_id": "P08",
+        "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+        "required_inputs": [
+          "day_plan",
+          "core_primitives",
+          "adjusted_bars",
+          "coordinates",
+          "identity_calendar_universe",
+          "bar_status"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "cross_section"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": [],
+        "history_binding_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+      },
+      {
+        "stage_id": "P09",
+        "kernel_role": "CORE_PROFILE_ONLY",
+        "required_inputs": [
+          "day_plan",
+          "core_primitives",
+          "cross_section",
+          "identity_calendar_universe",
+          "adjusted_bars",
+          "period_bars"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "core_profiles"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": [],
+        "history_binding_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+      },
+      {
+        "stage_id": "P20",
+        "kernel_role": "FOUNDATION_OWNER_SEAL",
+        "required_inputs": [
+          "day_plan",
+          "source_set",
+          "identity_calendar_universe",
+          "actions",
+          "reference_catalog",
+          "raw_bars",
+          "bar_status",
+          "adjusted_bars",
+          "coordinates",
+          "period_bars",
+          "core_primitives",
+          "cross_section",
+          "core_profiles",
+          "source_capabilities",
+          "source_seal"
+        ],
+        "optional_inputs": [
+          "bao_supplement"
+        ],
+        "outputs": [
+          "owner_seals",
+          "business_manifest"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      },
+      {
+        "stage_id": "P21",
+        "kernel_role": "FOUNDATION_SERVING",
+        "required_inputs": [
+          "day_plan",
+          "owner_seals",
+          "business_manifest",
+          "ext.serving_contract"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "read_index",
+          "candidate_publication"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      },
+      {
+        "stage_id": "P22",
+        "kernel_role": "FOUNDATION_REQUIRED_KERNEL",
+        "required_inputs": [
+          "day_plan",
+          "candidate_publication",
+          "read_index",
+          "owner_seals",
+          "ext.build_identity",
+          "ext.validated_ui_contract"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "candidate_api_validation",
+          "client_contract_validation"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      },
+      {
+        "stage_id": "P23",
+        "kernel_role": "SCOPE_COMPATIBLE_DEVELOPMENT_ACCEPT",
+        "required_inputs": [
+          "day_plan",
+          "candidate_publication",
+          "business_manifest",
+          "read_index",
+          "candidate_api_validation",
+          "client_contract_validation",
+          "prior_context"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "accepted_publication",
+          "research_head",
+          "accepted_receipt",
+          "transaction_outbox"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      },
+      {
+        "stage_id": "P24",
+        "kernel_role": "ACCEPTED_READBACK_ONLY",
+        "required_inputs": [
+          "day_plan",
+          "accepted_publication",
+          "research_head",
+          "accepted_receipt",
+          "transaction_outbox",
+          "prior_context",
+          "candidate_publication"
+        ],
+        "optional_inputs": [],
+        "outputs": [
+          "dispatch_accounting",
+          "accepted_api_readback"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      },
+      {
+        "stage_id": "P25",
+        "kernel_role": "FOUNDATION_COMPLETION",
+        "required_inputs": [
+          "day_plan",
+          "accepted_publication",
+          "research_head",
+          "accepted_api_readback",
+          "dispatch_accounting",
+          "client_contract_validation"
+        ],
+        "optional_inputs": [
+          "ext.frontend_view_ack"
+        ],
+        "outputs": [
+          "backend_chain_status",
+          "display_chain_status"
+        ],
+        "implementation_binding_required": true,
+        "prior_inputs": []
+      }
+    ],
+    "day_plan_pure_kernel": {
+      "symbol": "stock_a.planning:assemble_day_plan",
+      "state": "IMPLEMENTED",
+      "implementation_scope": "显式上下文到不可变DayPlan候选、正式scope stage/artifact闭包拓扑、增量分类与上游环境状态聚合",
+      "contract_digest_algorithm": "SHA-256",
+      "contract_digest_canonicalization": "UTF-8 JSON; sorted object keys; compact separators",
+      "required_environment_capabilities": [
+        "validated_configuration",
+        "calendar_authority",
+        "accepted_state_catalog",
+        "contract_registry",
+        "build_identity",
+        "pg_deployment",
+        "source_phase0",
+        "readonly_source_roots"
+      ],
+      "business_digest_fields_ref": "revision_policy.business_input_digest_fields",
+      "business_input_digest_definition": "Canonical JSON SHA-256 over full contract identity, scope revision binding, calendar identity, semantic revisions and exactly the registered values/quality/provenance/parameters/producer fields; unregistered business_identity keys are ignored, excluded metadata keys are recursively omitted with containers emptied solely by those keys, and target/schedule are separate plan identity.",
+      "plan_digest_definition": "Canonical JSON SHA-256 over contract, scope, business input digest, target, complete frozen context, prior context, environment evidence, incremental decision, parent generation and scheduled session/stage closure after recursive omission of excluded metadata keys and containers emptied solely by those keys.",
+      "digest_exclusion_application": "RECURSIVE_OBJECT_KEY_PROJECTION_BOTH_DIGESTS",
+      "digest_excludes": [
+        "wall_clock_duration",
+        "request_id",
+        "cache_hit",
+        "temporary_path"
+      ],
+      "input_authentication": "NOT_PERFORMED_UPSTREAM_ASSERTIONS_ONLY"
+    },
+    "within_stage_field_toposort_required": true,
+    "history_policy": {
+      "source": "CURRENT_RUN_SEALED_CANONICAL_PLUS_PREVIOUS_ACCEPTED_CANONICAL",
+      "selection": "EXACT_DECLARED_FIELD_WINDOWS_AND_ENDPOINT_UNIVERSES",
+      "core_market_session_input": {
+        "required_calendar": "VERSIONED_OFFICIAL_MARKET_SESSION_SET",
+        "required_identity": [
+          "calendar_id",
+          "revision"
+        ],
+        "coverage_validation": "OBSERVATION_DATES_EXACTLY_EQUAL_CALENDAR_SESSIONS_WITHIN_SUPPLIED_HISTORY_RANGE",
+        "missing_or_non_session_row": "REJECT_CONTRACT",
+        "session_state": "EXPLICIT_PER_OFFICIAL_SESSION; UNKNOWN_BLOCKS_DEPENDENT_WINDOW",
+        "pre_listing": "EXPLICIT_PRE_LISTING_STATE_PER_SESSION",
+        "non_trading_days": "EXCLUDED_FROM_CALENDAR_AND_INPUT",
+        "pure_function_io": false
+      },
+      "first_day": "NEW_VERIFIED_SOURCE_HISTORY_OR_LEGITIMATE_SHORT_HISTORY_NO_OLD_V4_DB",
+      "stateful_advanced_prior_required": false,
+      "context_dependencies": "TRANSITIVE_UNION_OF_SELECTED_INPUT_AND_WINDOW_CONTEXT_PROJECTIONS_NO_LATEST",
+      "window_identity_required": [
+        "endpoint_roles",
+        "selected_session_or_actual_ids",
+        "confirmed_suspension_gaps",
+        "unknown_gap_quality",
+        "canonical_row_set_digest",
+        "status_revision",
+        "calendar_revision",
+        "coordinate_id",
+        "action_revision",
+        "rule_and_parameter_digest",
+        "endpoint_universe_and_evaluable_set_digest_if_cross_section"
+      ],
+      "identity_storage": "NECESSARY_TYPED_KEYS_AND_DIGESTS_NO_PER_FIELD_HISTORY_COPY",
+      "business_digest": "VALUES_QUALITY_REAL_PROVENANCE_TRANSITIVE_CONTEXT_WINDOW_IDENTITY",
+      "repair": "RECOMPUTE_ACTUAL_AFFECTED_DEPENDENCY_CLOSURE_PRESERVE_UNAFFECTED_RESULTS",
+      "runtime_enforcement_implemented": false,
+      "identity_projection": {
+        "canonical_row_set_digest": "ONLY_CONSUMED_FIELD_VALUE_QUALITY_REASON_AND_FIELD_SPECIFIC_LINEAGE",
+        "status_revision": "ACTUAL_WINDOW_STATUS_PROJECTION",
+        "calendar_revision": "ACTUAL_WINDOW_SESSIONS_AND_STATUS_BOUNDARIES",
+        "source_cutoff": "SELECTED_FACTS_ACTIONS_MEMBERSHIP_AND_REAL_ELIGIBILITY_BINDINGS_NOT_NEW_RUN_CLOCK"
+      }
+    },
+    "source_seal_validation_ref": "source_seal_validation"
+  }
+}

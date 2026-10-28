@@ -19,6 +19,7 @@ from typing import Any
 import uuid
 
 from stock_a import __version__
+from stock_a.contracts import DAY_CHAIN_MODULES, DayChainContractError, load_day_chain_contract
 from stock_a.domain import ContractError
 from stock_a.sources.tdx.day import UnitContract
 from stock_a.sources.tdx.actions import (
@@ -198,18 +199,35 @@ def _validate_config(config: Any) -> None:
     if policy.get("deployment_connection_environment") != expected_deployment_connection:
         raise DiagnosticError("CONFIG_INVALID", "独立PG部署核验连接必须按唯一安全环境变量合同登记")
     registered = policy.get("public_files")
+    contract_revision = "STOCK-A-DAY-CHAIN/R10"
     expected = {
-        ("runtime.defaults.json", "BUSINESS_RUNTIME_CONFIGURATION", _CONFIG_CONTRACT),
-        ("contracts/day-chain.contract.json", "BUSINESS_PIPELINE_DESIGN_CONTRACT", "STOCK-A-DAY-CHAIN/R10"),
+        ("runtime.defaults.json", "BUSINESS_RUNTIME_CONFIGURATION", _CONFIG_CONTRACT,
+         "application startup / configuration resolver"),
+        ("contracts/day-chain.contract.json", "BUSINESS_PIPELINE_DESIGN_CONTRACT", contract_revision,
+         "stock_a.contracts.load_day_chain_contract（唯一入口清单）"),
     }
+    module_labels = {
+        "pipeline": "pipeline", "fields-source": "source fields", "fields-core": "Core fields",
+        "fields-profile": "cross/Profile rules", "fields-control": "control fields",
+        "research": "research rules", "service": "service contract", "policies": "policies",
+    }
+    expected.update(
+        (
+            f"contracts/{path}",
+            "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
+            contract_revision,
+            f"stock_a.contracts.load_day_chain_contract（{module_labels[module]}）",
+        )
+        for module, path in DAY_CHAIN_MODULES
+    )
     if not isinstance(registered, list):
         raise DiagnosticError("CONFIG_INVALID", "configuration_policy.public_files必须是登记清单")
     actual = set()
     for item in registered:
         if not isinstance(item, dict) or not all(isinstance(item.get(key), str) for key in ("path", "role", "contract", "consumer")):
             raise DiagnosticError("CONFIG_INVALID", "公共配置登记项字段不完整")
-        actual.add((item["path"], item["role"], item["contract"]))
-    if actual != expected:
+        actual.add((item["path"], item["role"], item["contract"], item["consumer"]))
+    if actual != expected or len(actual) != len(registered):
         raise DiagnosticError("CONFIG_INVALID", "公共配置登记清单与已批准配置槽位不一致")
     sources = _require_mapping(root.get("source_policy"), "source_policy")
     roots = sources.get("configured_tdx_source_roots")
@@ -392,6 +410,7 @@ def _parser() -> argparse.ArgumentParser:
     stock = commands.add_parser("research-stock", help="只读查看单只股票的原始行情、Core字段和基础观察")
     stock.add_argument("symbol", help="来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(stock)
+    stock.add_argument("--format", dest="output_format", choices=("summary", "json"), default="json", help="输出可读事实摘要或完整JSON，默认json")
     compare = commands.add_parser("research-compare", help="盘后只读输出有界多标的Core基础观察摘要")
     compare.add_argument("symbols", nargs="+", help="一个或多个来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(compare)
@@ -704,12 +723,30 @@ def _run_doctor(args: argparse.Namespace) -> int:
     package = _module_mode()
     config, config_path = _load_runtime_config(args.config)
     snapshot = _configuration_snapshot(config, config_path)
+    try:
+        loaded_contract = load_day_chain_contract(config["paths"]["configuration_root"])
+    except DayChainContractError as error:
+        raise DiagnosticError(error.code, str(error)) from error
+    contract_document = loaded_contract.document
+    foundation = contract_document["scope_bindings"]["FOUNDATION_EOD"]
     _emit({
         "ok": False,
         "status": "LOCAL_DIAGNOSTIC_ONLY",
         "message": "本地包与配置结构已检查；未核验真实来源或数据库连接，不允许据此启动业务",
         "package": package,
         **snapshot,
+        "day_chain_contract": {
+            "contract_id": contract_document["contract_id"],
+            "version": contract_document["version"],
+            "assembled_sha256": loaded_contract.assembled_sha256,
+            "module_count": len(loaded_contract.module_paths),
+            "module_paths": list(loaded_contract.module_paths),
+            "stage_count": len(contract_document["stages"]),
+            "artifact_count": len(contract_document["artifact_groups"]),
+            "foundation_field_count": len(foundation["field_registry"]),
+            "profile_expression_count": len(foundation["profile_expression_registry"]),
+            "production_readiness_claim": False,
+        },
         "business_start_permitted": False,
         "database_connection_attempted": False,
     })
@@ -880,7 +917,10 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         "database_io_attempted": False,
         "database_write_attempted": False,
     })
-    _emit(result)
+    if not compare and getattr(args, "output_format", "json") == "summary":
+        sys.stdout.write(_render_basic_fact_summary(result) + "\n")
+    else:
+        _emit(result)
     return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
 
 
@@ -894,6 +934,96 @@ def _summary_field(value: Any) -> str:
     if isinstance(rendered, dict):
         rendered = rendered.get("decimal", rendered.get("exact"))
     return f"{rendered} [{quality}]"
+
+
+def _summary_fact(value: Any) -> str:
+    if not isinstance(value, dict):
+        return "—"
+    value_payload = value.get("value", {})
+    unit_trust = value.get("unit_trust")
+    if not isinstance(unit_trust, dict) and isinstance(value_payload, dict):
+        unit_trust = value_payload.get("unit_trust")
+    unit_note = ""
+    if isinstance(unit_trust, dict):
+        interpretation = unit_trust.get("interpretation")
+        if interpretation:
+            unit_note = "；单位假设:" + str(interpretation)
+        elif unit_trust.get("status") == "CALLER_DECLARED_ASSUMPTION":
+            unit_note = "；单位假设:调用方声明"
+    return (
+        f"{value.get('field_id', 'unknown')}={_summary_field(value_payload)}"
+        f" [公式/来源:{value.get('formula_source', '未登记')}"
+        f"；坐标:{value.get('coordinate_role', '未登记')}"
+        f"{'; 身份:' + value['coordinate_id'] if value.get('coordinate_id') else ''}"
+        f"{unit_note}]"
+    )
+
+
+def _powershell_quote(value: Any) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
+def _render_basic_fact_summary(result: dict[str, Any]) -> str:
+    dimensions = result.get("basic_fact_dimensions", {})
+    groups = dimensions.get("dimensions", {})
+    source_quality = dimensions.get("source_quality", {})
+    raw = source_quality.get("raw_availability", {})
+    core = source_quality.get("core_availability", {})
+    lines = [
+        f"基础量价研究解释 | {result.get('requested_symbol', '未知代码')} | 目标日 {result.get('target_session', '未知')} | NON_PIT_RETROSPECTIVE",
+        (
+            f"来源末日 {result.get('source_last_session', '未知')}；本机只读扫描 "
+            f"{result.get('read_time', {}).get('started_at', '未知')} 至 "
+            f"{result.get('read_time', {}).get('completed_at', '未知')}"
+        ),
+        (
+            f"身份 {result.get('identity', {}).get('status', 'SOURCE_SYMBOL_ONLY')}；"
+            f"价格坐标 {result.get('adjustment', {}).get('coordinate', 'RAW_UNADJUSTED')}；"
+            "来源权威/首捕时钟未绑定；这是历史研究预览，不是实时/PIT数据或正式Profile。"
+        ),
+    ]
+    group_labels = (
+        ("price_trend", "价格与趋势"),
+        ("position_volatility", "位置与波动"),
+        ("participation", "量额参与"),
+    )
+    for key, label in group_labels:
+        facts = groups.get(key, {})
+        rendered = "；".join(_summary_fact(item) for item in facts.values()) or "无可显示字段"
+        lines.append(f"{label}：{rendered}")
+    lines.append(
+        f"可用性：兼容状态={result.get('status')}；"
+        f"Raw={raw.get('status')} {raw.get('observed_fields', 0)}/{raw.get('total_fields', 0)}；"
+        f"Core={core.get('status')} {core.get('observed_fields', 0)}/{core.get('total_fields', 0)}"
+    )
+    window = source_quality.get("window_context", {})
+    if window:
+        lines.append(
+            f"回看窗口：日历={window.get('calendar_revision', '未知')}，"
+            f"会话={window.get('calendar_session_count', 0)}，"
+            f"实际bar={window.get('actual_price_bars', 0)}，"
+            f"缺bar会话={window.get('missing_bar_sessions', 0)}，"
+            f"Core回看完整={window.get('lookback_complete')}，"
+            f"原因={window.get('lookback_reason') or '无'}，"
+            f"使用目标日后记录={window.get('future_rows_used')}"
+        )
+    unknowns = source_quality.get("unknown_facts_by_dimension", {})
+    for key, label in group_labels:
+        reasons = unknowns.get(key, {})
+        if reasons:
+            lines.append(f"{label}未知原因：" + "；".join(f"{field_id}={reason}" for field_id, reason in reasons.items()))
+    explanation = result.get("availability_explanation", {})
+    if explanation.get("missing_target_bar_explanation"):
+        lines.append("目标日行情：" + explanation["missing_target_bar_explanation"])
+    source = result.get("source", {})
+    budgets = source.get("budgets", {})
+    if budgets:
+        lines.append(
+            f"读取预算：{source.get('byte_count', 0)}/{budgets.get('max_bytes', 0)}字节，"
+            f"{source.get('record_count', 0)}/{budgets.get('max_records', 0)}条；"
+            "金额/数量单位为调用方声明假设。"
+        )
+    return "\n".join(lines)
 
 
 def _render_universe_summary(result: dict[str, Any]) -> str:
@@ -923,7 +1053,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
             f"发现={budget['discovery_elapsed_seconds']}秒，总耗时={budget['elapsed_seconds']}秒；"
             f"未复权、NON_PIT，不代表全候选池已读取或全部指标已知"
         ),
-        "代码 | 市场/板别 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | 未知原因/错误",
+        "代码 | 市场/板别 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | 未知原因/错误 | 单股回查",
     ]
     for item in result["summary"]:
         raw = item.get("raw_availability") or {}
@@ -936,6 +1066,10 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
         reason_text = ";".join(f"{name}×{count}" for name, count in sorted(reasons.items()))
         if item.get("error_code"):
             reason_text = ";".join(filter(None, (reason_text, item["error_code"])))
+        detail = item.get("detail_query", {})
+        detail_command = "stock-a " + " ".join(
+            _powershell_quote(value) for value in detail.get("arguments", [])
+        ) if detail else "—"
         lines.append(" | ".join((
             item["symbol"],
             f"{item['market']}/{item['board']}",
@@ -952,6 +1086,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
             _summary_field(item.get("volume")),
             f"{raw_text}/{core_text}",
             reason_text or "—",
+            detail_command,
         )))
     return "\n".join(lines)
 

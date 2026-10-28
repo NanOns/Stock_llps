@@ -711,6 +711,172 @@ def _observation_summary(
     }
 
 
+def _annotated_fact(
+    *,
+    field_id: str,
+    value: dict[str, Any],
+    formula_source: str,
+    coordinate_role: str,
+    coordinate_id: str | None,
+) -> dict[str, Any]:
+    """为可读摘要标明值的现役生产者和坐标，不重新计算字段。"""
+    return {
+        "field_id": field_id,
+        "value": value,
+        "formula_source": formula_source,
+        "coordinate_role": coordinate_role,
+        "coordinate_id": coordinate_id,
+    }
+
+
+def _basic_fact_dimensions(
+    *,
+    symbol: str,
+    target_session: date,
+    source_last_session: date,
+    read_time: dict[str, Any],
+    source: dict[str, Any],
+    raw_fields: dict[str, Any],
+    core: dict[str, FieldValue],
+    observation_summary: dict[str, Any],
+    raw_availability: dict[str, Any],
+    core_availability: dict[str, Any],
+    window_context: dict[str, Any],
+    target_bar_present: bool,
+    target_prices_usable: bool,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """把既有Raw/Core字段分组展示；不增加指标或策略阈值。"""
+    raw_coordinate = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
+    raw_specs = {
+        "raw.close": ("close", "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00", "RAW_UNADJUSTED"),
+        "raw.amount": ("amount", "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00", "SOURCE_RAW_ENCODING"),
+        "raw.volume": ("volume", "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00", "SOURCE_RAW_ENCODING"),
+    }
+    core_specs = {
+        "core.ma5": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
+        "core.ma20": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
+        "core.ma60": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
+        "core.ma_slope20_atr": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.ret5": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.ret20": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.atr20": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
+        "core.pos60": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.prior_high20": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
+        "core.prior_low20": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
+        "core.bias20_atr": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.dist_high20_atr": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.price_damage": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.amount_ratio20": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.volume_ratio20": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.liquidity_mean20": ("stock_a.research.core:calculate_core", "SOURCE_AMOUNT_UNIT_ASSUMPTION"),
+    }
+    comparison_specs = {
+        "close_vs_ma20": "core.ma20",
+        "close_vs_ma60": "core.ma60",
+    }
+    old_fields = observation_summary["fields"]
+
+    trend: dict[str, Any] = {}
+    position: dict[str, Any] = {}
+    participation: dict[str, Any] = {}
+    for field_id, (raw_name, formula, coordinate) in raw_specs.items():
+        target = trend if field_id == "raw.close" else participation
+        target[field_id] = _annotated_fact(
+            field_id=field_id,
+            value=raw_fields[raw_name],
+            formula_source=formula,
+            coordinate_role=coordinate,
+            coordinate_id=raw_coordinate if coordinate == "RAW_UNADJUSTED" else None,
+        )
+    for field_id, (formula, coordinate) in core_specs.items():
+        target = trend if field_id in {
+            "core.ma5", "core.ma20", "core.ma60", "core.ma_slope20_atr", "core.ret5", "core.ret20"
+        } else position if field_id in {
+            "core.atr20", "core.pos60", "core.prior_high20", "core.prior_low20",
+            "core.bias20_atr", "core.dist_high20_atr", "core.price_damage",
+        } else participation
+        fact = _annotated_fact(
+            field_id=field_id,
+            value=_render_field(core[field_id]),
+            formula_source=formula,
+            coordinate_role=coordinate,
+            coordinate_id=raw_coordinate if coordinate == "RAW_UNADJUSTED" else None,
+        )
+        if field_id in {"core.amount_ratio20", "core.volume_ratio20", "core.liquidity_mean20"}:
+            fact["unit_trust"] = {
+                "status": "CALLER_DECLARED_ASSUMPTION",
+                "interpretation": (
+                    "金额比率要求窗口内金额倍率一致" if field_id == "core.amount_ratio20"
+                    else "数量比率要求窗口内数量倍率一致" if field_id == "core.volume_ratio20"
+                    else "绝对金额均值依赖调用方声明的金额倍率"
+                ),
+            }
+        target[field_id] = fact
+    for label, core_id in comparison_specs.items():
+        item = old_fields["moving_average_position"][label]
+        trend[label] = _annotated_fact(
+            field_id=f"research.{label}",
+            value=item,
+            formula_source=f"stock_a.research.entry._field_relation(raw.close, {core_id}); 精确比较，不增加阈值",
+            coordinate_role="DIMENSIONLESS_RELATION",
+            coordinate_id=None,
+        )
+
+    all_facts = {**trend, **position, **participation}
+    unknown_facts = {
+        group: {
+            field_id: fact["value"].get("reason") or fact["value"].get("quality")
+            for field_id, fact in fields.items()
+            if fact["value"].get("quality") != "OBSERVED"
+        }
+        for group, fields in (
+            ("price_trend", trend), ("position_volatility", position), ("participation", participation)
+        )
+    }
+    dimensions = {
+        "contract": "STOCK-A-BASIC-FACT-DIMENSIONS/R1",
+        "scope": "只分组呈现本次查询的既有Raw/Core事实；不代表Profile或策略结论",
+        "target_session": target_session.isoformat(),
+        "source_last_session": source_last_session.isoformat(),
+        "research_mode": "NON_PIT_RETROSPECTIVE",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "identity": {"status": "SOURCE_SYMBOL_ONLY", "symbol": symbol},
+        "dimensions": {
+            "price_trend": trend,
+            "position_volatility": position,
+            "participation": participation,
+        },
+        "source_quality": {
+            "target_bar_present": target_bar_present,
+            "target_prices_usable": target_prices_usable,
+            "read_time": read_time,
+            "read_clock_role": "LOCAL_FILE_READ_TIME_ONLY",
+            "source_read_budget": source.get("budgets", {}),
+            "window_context": window_context,
+            "raw_availability": raw_availability,
+            "core_availability": core_availability,
+            "unknown_facts_by_dimension": unknown_facts,
+            "field_count": len(all_facts),
+        },
+    }
+    availability = {
+        "contract": "STOCK-A-BASIC-FACT-AVAILABILITY/R1",
+        "compatibility_status": "AVAILABLE" if target_prices_usable else "PARTIAL_UNKNOWN",
+        "compatibility_status_scope": "仅按目标日原始价格组判断；不代表所有Core字段已知",
+        "target_bar_present": target_bar_present,
+        "raw": raw_availability,
+        "core": core_availability,
+        "unknown_facts_by_dimension": unknown_facts,
+        "missing_target_bar_explanation": (
+            None if target_bar_present else "目标日没有可用bar；不据此推断停牌、上市前或退市。"
+        ),
+        "research_mode": "NON_PIT_RETROSPECTIVE",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+    }
+    return dimensions, availability
+
+
 def _source_path(roots: Iterable[str], directory: str, code: str) -> tuple[Path, Path]:
     resolved_roots: list[Path] = []
     candidates: list[tuple[Path, Path]] = []
@@ -866,6 +1032,38 @@ def research_stock(
         },
     }
     target_prices_usable = target_bar is not None and target_bar.prices.quality == "OBSERVED"
+    basic_fact_dimensions, availability_explanation = _basic_fact_dimensions(
+        symbol=normalized,
+        target_session=target,
+        source_last_session=file_summary.scan.last_date,
+        read_time={
+            "started_at": file_summary.scan.read_started_at.isoformat(),
+            "completed_at": file_summary.scan.read_completed_at.isoformat(),
+            "clock_role": "LOCAL_FILE_READ_TIME_ONLY",
+        },
+        source={"budgets": {
+            "max_bytes": limits.max_bytes,
+            "max_records": limits.max_records,
+            "chunk_records": limits.chunk_records,
+            "max_seconds": limits.max_seconds,
+        }},
+        raw_fields=raw_fields,
+        core=core,
+        observation_summary=observation_summary,
+        raw_availability=raw_availability,
+        core_availability=core_availability,
+        window_context={
+            "calendar_revision": calendar_revision,
+            "calendar_session_count": len(session_slice),
+            "actual_price_bars": sum(row.state == "ACTUAL" for row in history),
+            "missing_bar_sessions": sum(row.state == "UNKNOWN" for row in history),
+            "lookback_complete": coverage_context["core_lookback_complete"],
+            "lookback_reason": coverage_context["core_lookback_reason"],
+            "future_rows_used": False,
+        },
+        target_bar_present=target_bar is not None,
+        target_prices_usable=target_prices_usable,
+    )
     return {
         "status": "AVAILABLE" if target_prices_usable else "PARTIAL_UNKNOWN",
         "status_explanation": "兼容状态仅按目标日原始价格组判定；Raw/Core整体可用性及字段原因分别见raw_availability、core_availability和逐字段quality/reason。",
@@ -943,6 +1141,8 @@ def research_stock(
         "target_raw_fields": raw_fields,
         "core_fields": rendered_core_fields,
         "observation_summary": observation_summary,
+        "basic_fact_dimensions": basic_fact_dimensions,
+        "availability_explanation": availability_explanation,
         "core_field_disclosures": {
             "price_coordinate": "RAW_UNADJUSTED；身份和公司行为时钟未绑定",
             "unit_assumptions": unit_dependent_core,
@@ -1327,6 +1527,23 @@ def research_universe_preview(
             "close_vs_ma20": positions.get("close_vs_ma20"),
             "raw_availability": item.get("raw_availability"),
             "core_availability": item.get("core_availability"),
+            "basic_fact_dimensions": item.get("basic_fact_dimensions"),
+            "availability_explanation": item.get("availability_explanation"),
+            "detail_query": {
+                "arguments": [
+                    "research-stock", candidate["symbol"],
+                    "--target-session", target.isoformat(),
+                    "--unit-version", units.version,
+                    "--amount-to-cny", str(units.amount_to_cny),
+                    "--volume-to-shares", str(units.volume_to_shares),
+                    "--max-bytes", str(limits.max_bytes),
+                    "--max-records", str(limits.max_records),
+                    "--chunk-records", str(limits.chunk_records),
+                    "--max-seconds", str(limits.max_seconds),
+                    "--format", "summary",
+                ],
+                "contract": "同一来源代码与目标日；仅复用当前页明示单位和单文件预算",
+            },
             "error_code": item.get("error_code"),
         })
 
