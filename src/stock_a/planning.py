@@ -470,6 +470,7 @@ def _validated_contract(request: DayPlanRequest) -> tuple[Mapping[str, object], 
 def _validate_field_dependency_closure(
     scope: Mapping[str, object],
     included_stages: set[str],
+    known_stages: set[str],
     binding_by_id: Mapping[str, Mapping[str, object]],
     artifacts: Mapping[str, object],
 ) -> None:
@@ -505,6 +506,25 @@ def _validate_field_dependency_closure(
                 or output_artifact not in stage_binding.get("outputs", [])):
             raise _plan_error("DAG_FIELD_OUTPUT_UNBOUND", "字段输出产物未由其producer stage正式产生: " + field_id)
         fields_by_id[field_id] = field
+
+    for field_id, field in fields_by_id.items():
+        producer_stage = field["producer_stage"]
+        artifact = artifacts[field["output_artifact"]]
+        artifact_consumers = artifact.get("consumers", [])
+        for consumer in field["consumers"]:
+            if consumer not in known_stages:
+                continue
+            if consumer == producer_stage:
+                continue
+            consumer_binding = binding_by_id.get(consumer)
+            if (consumer not in included_stages
+                    or consumer not in artifact_consumers
+                    or not isinstance(consumer_binding, Mapping)
+                    or field["output_artifact"] not in consumer_binding.get("required_inputs", [])):
+                raise _plan_error(
+                    "DAG_FIELD_CONSUMER_MISMATCH",
+                    field_id + "声明的stage消费者未绑定对应required产物输入: " + consumer,
+                )
 
     dependencies: dict[str, set[str]] = {field_id: set() for field_id in fields_by_id}
     for field_id, field in fields_by_id.items():
@@ -612,7 +632,7 @@ def _validate_stage_dag(contract: Mapping[str, object], scope_id: str) -> tuple[
                 raise _plan_error("DAG_CONSUMER_INPUT_MISMATCH", stage_id + "输入未登记为artifact消费者: " + artifact_id)
 
     included = set(binding_by_id)
-    _validate_field_dependency_closure(scope, included, binding_by_id, artifacts)
+    _validate_field_dependency_closure(scope, included, set(stage_by_id), binding_by_id, artifacts)
 
     for stage_id, binding in binding_by_id.items():
         for artifact_id in binding.get("required_inputs", []):
