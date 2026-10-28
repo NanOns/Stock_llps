@@ -384,8 +384,12 @@ def _source_mapping_disposition_digest(
         key, status = item.get("source_record_key"), item.get("status")
         if not isinstance(key, str) or not key or status not in allowed or "reason" not in item:
             _fail("SOURCE_SEAL_MAPPING_DISPOSITION_INVALID", "来源映射处置缺少记录键、允许状态或显式原因")
-        if item["reason"] is not None and (not isinstance(item["reason"], str) or not item["reason"]):
-            _fail("SOURCE_SEAL_MAPPING_DISPOSITION_INVALID", "来源映射处置原因必须为空或非空字符串")
+        reason = item["reason"]
+        if status == "MAPPED":
+            if reason is not None and (not isinstance(reason, str) or not reason):
+                _fail("SOURCE_SEAL_MAPPING_DISPOSITION_INVALID", "MAPPED处置原因仅可为空或非空字符串")
+        elif not isinstance(reason, str) or not reason.strip():
+            _fail("SOURCE_SEAL_MAPPING_DISPOSITION_INVALID", "未映射、身份冲突或范围拒绝必须提供非空原因")
         if key in disposition_by_key:
             _fail("SOURCE_SEAL_DUPLICATE_BUSINESS_KEY", "解析来源记录存在重复映射处置")
         disposition_by_key[key] = item
@@ -408,7 +412,7 @@ def _source_mapping_disposition_digest(
     return digest, unresolved
 
 
-def derive_canonical_rows(
+def _derive_canonical_rows(
     *,
     parsed_rows: Sequence[Mapping[str, object]],
     mapped_rows: Sequence[Mapping[str, object]],
@@ -418,7 +422,7 @@ def derive_canonical_rows(
     p04_mapping_version: str,
     unit_version: str,
     normalization_version: str,
-    allow_partial_mapping: bool = False,
+    allow_partial_mapping: bool,
 ) -> tuple[Mapping[str, object], ...]:
     """按显式字段/单位规则由P03解析行和P04映射独立计算预期P05行。"""
     if not all(isinstance(item, str) and item for item in (source_binding_id, p04_mapping_version, unit_version, normalization_version)):
@@ -495,6 +499,31 @@ def derive_canonical_rows(
     return tuple(expected)
 
 
+def derive_canonical_rows(
+    *,
+    parsed_rows: Sequence[Mapping[str, object]],
+    mapped_rows: Sequence[Mapping[str, object]],
+    mapping_dispositions: Sequence[Mapping[str, object]],
+    field_rules: Sequence[Mapping[str, object]],
+    source_binding_id: str,
+    p04_mapping_version: str,
+    unit_version: str,
+    normalization_version: str,
+) -> tuple[Mapping[str, object], ...]:
+    """仅为完整映射集合派生P05预期行；部分状态只能由总体验证器表达。"""
+    return _derive_canonical_rows(
+        parsed_rows=parsed_rows,
+        mapped_rows=mapped_rows,
+        mapping_dispositions=mapping_dispositions,
+        field_rules=field_rules,
+        source_binding_id=source_binding_id,
+        p04_mapping_version=p04_mapping_version,
+        unit_version=unit_version,
+        normalization_version=normalization_version,
+        allow_partial_mapping=False,
+    )
+
+
 def verify_transformation_chain(
     *,
     source_bytes: bytes | None,
@@ -557,7 +586,7 @@ def verify_transformation_chain(
             _fail("SOURCE_SEAL_DUPLICATE_BUSINESS_KEY", "P05来源记录绑定含非法或重复键")
         if any(key not in mapped_by_entity_session.get((row.get("entity_id"), row.get("session")), set()) for key in keys):
             _fail("SOURCE_SEAL_CANONICAL_BINDING_MISMATCH", "P05规范行未绑定同实体会话的P04映射记录")
-    expected_canonical_rows = derive_canonical_rows(
+    expected_canonical_rows = _derive_canonical_rows(
         parsed_rows=parsed_rows,
         mapped_rows=mapped_rows,
         mapping_dispositions=mapping_dispositions,

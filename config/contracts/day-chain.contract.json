@@ -20595,6 +20595,8 @@
         "required_per_parsed_record": true,
         "fields": ["source_record_key", "status", "reason"],
         "statuses": ["MAPPED", "UNMAPPED", "IDENTITY_CONFLICT", "REJECTED_BY_SCOPE"],
+        "reason_rule": "NON_MAPPED_REQUIRES_NONEMPTY_NAMED_REASON_MAPPED_REASON_MAY_BE_NULL_OR_NONEMPTY_STRING",
+        "partial_canonical_derivation": "INTERNAL_TO_CHAIN_VERIFIER_ONLY_PUBLIC_DERIVATION_FAILS_CLOSED",
         "unresolved_outcome": "PARTIAL_DECLARED_SCOPE_NOT_CANONICAL_BOUND"
       },
       "missing_source_bytes_outcome": "VERIFIED_AT_CAPTURE_NOT_REPLAYABLE_SOURCE_BYTES",
