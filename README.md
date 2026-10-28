@@ -133,6 +133,10 @@ stock-a research-stock SH.600000 --target-session YYYY-MM-DD `
   --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
   --max-bytes 16777216 --max-records 200000 --max-seconds 30
 
+stock-a research-stock SH.600000 --target-session YYYY-MM-DD `
+  --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
+  --format summary --include-profile-preview
+
 stock-a research-compare SH.600000 SZ.000001 SZ.300001 --target-session YYYY-MM-DD `
   --unit-version TDX_RAW_RESEARCH_R1 --amount-to-cny 1 --volume-to-shares 1 `
   --max-bytes 16777216 --max-records 200000 --max-seconds 30 `
@@ -143,9 +147,9 @@ stock-a research-universe-preview --target-session YYYY-MM-DD `
   --offset 0 --limit 20 --market ALL --board ALL
 ```
 
-`research-stock`和`research-compare`输出同一既有Core的盘后基础观察摘要，标记`RESEARCH_PREVIEW_NON_PIT`，包含原始收盘、MA5/20/60、ATR20、ret5/20、金额/数量质量和均线位置；每个值保留质量与未知原因。它只描述客观观察，不生成Profile、Seed、Priority、评分、排序或交易信号。`--amount-to-cny`和`--volume-to-shares`是调用方声明的研究单位假设，不能替代经独立来源合同验收的单位权威。`research-compare`最多接受20个不同证券，并在每只证券的读取上限外共享`--max-total-bytes`、`--max-total-records`、`--max-total-seconds`。超限后保留全部请求分母；`available`、`failed`、`partial_unknown`和`not_evaluated`构成精确分类分区，后续证券不会被静默省略。耗时上限在每个读取块和证券边界检查，文件系统调用本身无法被同步扫描中断时，单个正在执行的系统调用可能延后返回。对比不对证券做身份推断或静默去重。
+`research-stock`和`research-compare`输出同一既有Core的盘后基础观察摘要，标记`RESEARCH_PREVIEW_NON_PIT`，包含原始收盘、MA5/20/60、ATR20、ret5/20、金额/数量质量和均线位置；每个值保留质量与未知原因。`research-stock --include-profile-preview`在同一次Raw/Core读取上追加11项基础画像组件清单，逐项给出结果或缺因、质量、输入来源/窗口和规则引用。该预览把目标日`raw.close`局部映射到规则的价格输入名，只用于`RAW_UNADJUSTED`描述；不表示已执行P06复权、身份/PIT验证或可信FOUNDATION选择。周/月闭合周期和横截面相对能力按实际缺失输入显示`NOT_IMPLEMENTED`或`CONTRACT_UNBOUND`，不会填成正常状态。正式`profile()`仍拒绝缺少可信FOUNDATION选择器的调用。画像预览不生成Seed、Priority、评分、排序或交易信号。`--amount-to-cny`和`--volume-to-shares`是调用方声明的研究单位假设，不能替代经独立来源合同验收的单位权威。`research-compare`最多接受20个不同证券，并在每只证券的读取上限外共享`--max-total-bytes`、`--max-total-records`、`--max-total-seconds`。超限后保留全部请求分母；`available`、`failed`、`partial_unknown`和`not_evaluated`构成精确分类分区，后续证券不会被静默省略。耗时上限在每个读取块和证券边界检查，文件系统调用本身无法被同步扫描中断时，单个正在执行的系统调用可能延后返回。对比不对证券做身份推断或静默去重。
 
-`research-universe-preview`只读枚举已配置来源根内的`vipdoc/sh/lday`和`vipdoc/sz/lday`，按标准化来源代码排序，使用`_normalize_symbol`的范围规则保留沪深主板/创业板候选；不依据ST名称过滤。文件名只代表`TDX_SOURCE_CANDIDATES_NON_PIT`来源候选，不证明证券实体、上市状态、当日可交易或行情更新。默认每页20只、最多100只，支持offset/limit及市场/板别过滤；目录项和发现耗时有独立上限，目录缺失、越界链接、重复代码及超预算明确失败且不报告完整总数。单页跨20只子批查询时仍共享一次字节、记录和耗时预算。默认以短摘要显示总候选分母、本页、剩余和未评价数量；`--format json`提供完整逐对象详情。`raw_availability`与`core_availability`独立列出观察数、未知数和原因；兼容字段`status`/`classification`不意味着Core全部已知。它不生成Research Universe身份、Profile、Seed、Priority或交易信号，不连接PG、不写业务状态。
+`research-universe-preview`只读枚举已配置来源根内的`vipdoc/sh/lday`和`vipdoc/sz/lday`，按标准化来源代码排序，使用`_normalize_symbol`的范围规则保留沪深主板/创业板候选；不依据ST名称过滤。文件名只代表`TDX_SOURCE_CANDIDATES_NON_PIT`来源候选，不证明证券实体、上市状态、当日可交易或行情更新。默认每页20只、最多100只，支持offset/limit及市场/板别过滤；目录项和发现耗时有独立上限，目录缺失、越界链接、重复代码及超预算明确失败且不报告完整总数。单页跨20只子批查询时仍共享一次字节、记录和耗时预算。默认以短摘要显示总候选分母、本页、剩余和未评价数量；`--format json`提供完整逐对象详情。`raw_availability`与`core_availability`独立列出观察数、未知数和原因；兼容字段`status`/`classification`不意味着Core全部已知。页内每行生成的单股详情查询引用携带同一目标日、单位和单文件预算，并显式请求画像组件预览；该摘要不计算全市场Profile分母，不连接PG、不写业务状态。
 
 ## GBBQ字节解析
 

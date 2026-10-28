@@ -3,6 +3,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from fractions import Fraction
+from hashlib import sha256
 
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 
@@ -22,8 +23,8 @@ class ClosedPrices:
 class WindowIdentity:
     """显式窗口身份；不给算法使用latest或隐式端点的机会。"""
     contract: str
-    first_endpoint: date
-    last_endpoint: date
+    first_endpoint: date | None
+    last_endpoint: date | None
     selected_rows_digest: str
     calendar_revision: str
     status_revision: str
@@ -159,9 +160,19 @@ def validate_profile_handoff(field_id: str, handoff: ProfileHandoff,
             window = supplied.window
             if not isinstance(expected_window, WindowIdentity):
                 raise ContractError("Core→Profile缺少独立选择器窗口期望：" + name)
-            if (window.contract != window_contract or type(window.first_endpoint) is not date
-                    or type(window.last_endpoint) is not date or window.first_endpoint > window.last_endpoint
-                    or window.last_endpoint > handoff.target_session
+            empty_window = window.first_endpoint is None and window.last_endpoint is None
+            empty_valid = (
+                empty_window
+                and supplied.field.quality != "OBSERVED"
+                and window.selected_rows_digest == sha256(b"[]").hexdigest()
+            )
+            endpoints_valid = (
+                type(window.first_endpoint) is date
+                and type(window.last_endpoint) is date
+                and window.first_endpoint <= window.last_endpoint
+                and window.last_endpoint <= handoff.target_session
+            )
+            if (window.contract != window_contract or not (empty_valid or endpoints_valid)
                     or len(window.selected_rows_digest) != 64
                     or any(ch not in "0123456789abcdef" for ch in window.selected_rows_digest)
                     or not window.calendar_revision

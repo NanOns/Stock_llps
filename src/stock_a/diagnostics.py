@@ -411,6 +411,7 @@ def _parser() -> argparse.ArgumentParser:
     stock.add_argument("symbol", help="来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(stock)
     stock.add_argument("--format", dest="output_format", choices=("summary", "json"), default="json", help="输出可读事实摘要或完整JSON，默认json")
+    stock.add_argument("--include-profile-preview", action="store_true", help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
     compare = commands.add_parser("research-compare", help="盘后只读输出有界多标的Core基础观察摘要")
     compare.add_argument("symbols", nargs="+", help="一个或多个来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(compare)
@@ -866,6 +867,13 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         )
     except (InvalidOperation, ValueError, ContractError) as error:
         raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或读取预算无效：{error}", _EXIT_ARGUMENT) from error
+    profile_contract = None
+    if not compare and getattr(args, "include_profile_preview", False):
+        try:
+            profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+        except DayChainContractError as error:
+            _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
+            return _EXIT_UNAVAILABLE
     try:
         if compare:
             budget = CompareBudget(
@@ -888,6 +896,7 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 source_roots=roots,
                 units=units,
                 limits=limits,
+                profile_contract=profile_contract,
             )
     except ResearchEntryError as error:
         if error.code == "SOURCE_ACCESS_DENIED":
@@ -1023,6 +1032,31 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
             f"{source.get('record_count', 0)}/{budgets.get('max_records', 0)}条；"
             "金额/数量单位为调用方声明假设。"
         )
+    preview = result.get("profile_preview")
+    if preview:
+        lines.append(
+            f"基础画像组件预览：{preview['counts']['observed']}项有值，"
+            f"{preview['counts']['unknown_data']}项数据未知，"
+            f"{preview['counts']['not_implemented'] + preview['counts']['contract_unbound']}项能力未接通；"
+            "全部仅为RAW_UNADJUSTED/NON_PIT描述预览，正式profile()仍阻断。"
+        )
+        for component in preview["components"]:
+            if component["status"] == "EVALUATED":
+                result_text = component["value"] if component["quality"] == "OBSERVED" else component.get("reason")
+                inputs = "；".join(
+                    f"{item['rule_input_field']}←{item['source_field_id']}({item['value']['quality']})"
+                    for item in component["inputs"]
+                )
+                lines.append(
+                    f"{component['field_id']}：{component['quality']}={result_text}；"
+                    f"规则={component['rule_id']}；输入={inputs or '无'}"
+                )
+            else:
+                missing = "、".join(item["field_id"] for item in component.get("missing_inputs", []))
+                lines.append(
+                    f"{component['field_id']}：{component['status']}；缺少={missing or '未登记生产者'}；"
+                    f"原因={component['reason']}"
+                )
     return "\n".join(lines)
 
 
