@@ -20531,6 +20531,19 @@
       "source_cutoff",
       "clock_quality"
     ],
+    "identity_field_bindings": {
+      "namespace_id": {"producer": "PROJECT_RUNTIME_IDENTITY", "consumer": "P20", "state": "NEEDS_DEPENDENCY"},
+      "source_set_id": {"producer": "P03_SOURCE_SET", "consumer": "P20", "state": "NEEDS_DEPENDENCY"},
+      "dataset_revision": {"producer": "DATASET_REGISTRY_AND_CAPTURE", "consumer": "P20", "state": "NEEDS_DEPENDENCY"},
+      "source_content_digest": {"producer": "P03_CAPTURED_SOURCE_BYTES_OR_RESPONSE", "consumer": "P20", "state": "NEEDS_DEPENDENCY"},
+      "canonical_input_digest": {"producer": "P05_CANONICAL_TYPED_ROWS", "consumer": "P20", "state": "NEEDS_DEPENDENCY"},
+      "parser_contract_version": {"producer": "P03_PARSER_AND_UNIT_CONTRACT", "consumer": "P20", "state": "NEEDS_DEPENDENCY"},
+      "identity_calendar_revision": {"producer": "P04_VERIFIED_IDENTITY_AND_CALENDAR", "consumer": "P20", "state": "NEEDS_DEPENDENCY"},
+      "coverage_entity_set_digest": {"producer": "P04_EXPECTED_SET_AND_P05_ACTUAL_COVERAGE", "consumer": "P20", "state": "NEEDS_DEPENDENCY"},
+      "data_date": {"producer": "DECLARED_SOURCE_QUERY_SCOPE", "consumer": "P20", "state": "NEEDS_DEPENDENCY"},
+      "source_cutoff": {"producer": "DECLARED_RUN_CUTOFF_AND_OBSERVED_SOURCE_CLOCKS", "consumer": "P20", "state": "NEEDS_DEPENDENCY"},
+      "clock_quality": {"producer": "OBSERVED_CAPTURE_VALIDATION_AND_DURABILITY_CLOCKS", "consumer": "P20", "state": "NEEDS_DEPENDENCY"}
+    },
     "required_checks": [
       "EXACT_REQUIRED_DATASETS_AND_ENTITY_COVERAGE",
       "SOURCE_BYTES_TO_CANONICAL_ROWS_VERIFIED_TRANSFORMATION",
@@ -20544,6 +20557,69 @@
     "processing_sealed_at_after_source_cutoff_alone_is_invalid": false,
     "live_pit_policy": "REQUIRE_REAL_AVAILABILITY_CAPTURE_DURABILITY_AND_ACCEPTED_DEPENDENCIES_WITHIN_DECLARED_ASOF_NO_BACKSIGNING",
     "late_or_unproven_input": "REJECT_LIVE_PIT_CLAIM_NON_PIT_RESEARCH_ONLY_IF_PREDECLARED_SCOPE_PERMITS",
+    "proof_model": {
+      "contract": "P20_SOURCE_PROOF_MODEL_R1",
+      "canonical_digest_contract": "SA_SEAL_CANONICAL_JSON_V1",
+      "digest_prefix": "STOCK_A_SEAL|{schema_id}|V1\n",
+      "digest_encoding": "UTF8_NO_BOM_COMPACT_JSON_UNICODE_NFC_OBJECT_KEYS_CODEPOINT_ORDER",
+      "exact_decimal_encoding": "FIXED_POINT_STRING_NO_EXPONENT_TRIM_TRAILING_ZERO_NEGATIVE_ZERO_AS_0",
+      "date_encoding": "YYYY-MM-DD",
+      "clock_encoding": "UTC_MICROSECOND_Z_AFTER_EXPLICIT_OFFSET_VALIDATION",
+      "record_sets": "SORT_BY_DECLARED_COMPOSITE_BUSINESS_KEY_UTF8_ORDER_REJECT_DUPLICATES_PRESERVE_SOURCE_ORDINAL",
+      "coverage": {
+        "source_inventory_digest": "inventory_digest",
+        "entity_session_digest": "coverage_digest",
+        "required_inventory_fields": [
+          "dataset_id", "dataset_version", "source_role", "source_revision", "query_scope",
+          "parser_version", "unit_version", "capture_id", "source_content_sha256", "entries",
+          "required_directories", "completed_directories", "failures", "enumeration_started_at",
+          "enumeration_completed_at", "enumeration_complete", "budget"
+        ],
+        "entity_session_denominator": "P04_INDEPENDENTLY_VERIFIED_EXPECTED_SET",
+        "missing_denominator": "COVERAGE_UNPROVEN",
+        "budget_fields": ["max_entries", "max_bytes", "actual_entries", "actual_bytes", "max_duration_ms", "elapsed_ms"],
+        "allowed_scope_outcomes": ["COMPLETE_DECLARED_SCOPE", "PARTIAL_DECLARED_SCOPE", "COVERAGE_UNPROVEN"],
+        "never_claim": "COMPLETE_MARKET_FROM_DECLARED_SCOPE_ONLY"
+      },
+      "inventory_entry_fields": ["source_key", "byte_size", "content_sha256"],
+      "transformation_digest_chain": [
+        "source_byte_sha256", "parsed_row_set_digest", "mapped_fact_digest",
+        "p05_canonical_digest", "conversion_contract_digest"
+      ],
+      "conversion_contract_fields": ["parser_version", "unit_version", "p04_mapping_version", "p05_conversion_version", "p05_field_projection_version"],
+      "p05_row_source_binding": "SOURCE_RECORD_KEYS_MUST_RESOLVE_TO_P04_MAPPING_FOR_SAME_ENTITY_SESSION",
+      "missing_source_bytes_outcome": "VERIFIED_AT_CAPTURE_NOT_REPLAYABLE_SOURCE_BYTES",
+      "clock_order": [
+        "read_started_at<=read_completed_at", "read_completed_at<=validated_complete_at",
+        "validated_complete_at<=durable_commit_observed_at", "durable_commit_observed_at<=source_sealed_at"
+      ],
+      "request_clock_order": "request_started_at<=read_completed_at_WHEN_APPLICABLE",
+      "ready_at": "MAX_OF_ACTUAL_REQUIRED_DOWNLOAD_READ_VALIDATION_AND_VERIFIED_AVAILABILITY_OBSERVATIONS",
+      "late_seal": "NON_PIT_EOD_MAY_SEAL_AFTER_SOURCE_CUTOFF_BUT_NEVER_INHERITS_LIVE_OR_PIT",
+      "seal_revision": "SAME_KEY_SAME_CONTENT_IDEMPOTENT_SAME_KEY_DIFFERENT_CONTENT_CONFLICT_NEW_REVISION_APPEND_ONLY",
+      "owner_input_projection": {
+        "schema": "OWNER_INPUT_PROJECTION_V1",
+        "fields": ["owner_scope", "source_seal", "fact_inputs", "derived_inputs", "rule_inputs", "provenance_pit", "result_identity"],
+        "required_seal_fields": ["seal_id", "content_digest", "clock_quality"],
+        "owner_scope_fields": ["domain", "partition", "variant", "target_session", "required_roles"],
+        "fact_row_fields": ["source_binding_id", "source_content_version", "entity_id", "session", "field", "value_digest", "quality", "reason", "identity_revision", "calendar_revision"],
+        "derived_row_fields": ["producer_id", "producer_version", "target_coordinate_id", "entity_id", "session", "field", "input_digest"],
+        "rule_row_fields": ["algorithm_id", "algorithm_version", "parameter_version", "parameter_digest"],
+        "provenance_pit_row_fields": ["source_binding_id", "role", "capture_id", "ready_at", "durable_at", "as_of", "availability_quality"],
+        "result_row_fields": ["entity_id", "session", "field", "quality", "value_digest"],
+        "scope": "ONLY_ACTUAL_OWNER_CONSUMED_INPUTS_NO_FUTURE_PUBLICATION_READINDEX_HEAD_FIELDS"
+      },
+      "rule_providers": {
+        "inventory_and_coverage": {"producer": "P03_ENUMERATOR_PLUS_P04_VERIFIED_EXPECTED_SET_AND_P05_SELECTED_ROWS", "consumer": "P20", "pure_rule_defined": true, "production_binding_present": false},
+        "source_to_canonical_chain": {"producer": "P03_CAPTURE_PARSER_PLUS_P04_MAPPING_PLUS_P05_CONVERSION", "consumer": "P20", "pure_rule_defined": true, "production_binding_present": false},
+        "canonical_encoding": {"producer": "SA_SEAL_CANONICAL_JSON_V1_PURE_CODEC", "consumer": "P20", "pure_rule_defined": true, "production_binding_present": false},
+        "clock_and_temporal_eligibility": {"producer": "P03_P04_OBSERVED_CLOCKS_AND_ACCEPTED_REQUIRED_DEPENDENCIES", "consumer": "P20", "pure_rule_defined": true, "production_binding_present": false},
+        "immutable_revision_and_owner_digest": {"producer": "P20_OWNER_SCOPE_AND_PG_SEAL_READBACK", "consumer": "P20_THEN_P21", "pure_rule_defined": true, "production_binding_present": false}
+      },
+      "pure_kernel_outcomes_never_issue": ["OWNER_SEALED", "PIT_PROVEN", "PRODUCTION_RELEASED"],
+      "production_binding_state": "NEEDS_DEPENDENCY"
+    },
+    "pure_validation_kernel_present": true,
     "runtime_implementation_present": false
   },
   "research_execution_contracts": {
