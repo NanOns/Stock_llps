@@ -14,9 +14,10 @@ from stock_a.domain import ContractError
 
 
 _SYMBOL_PATTERN = re.compile(r"^(SH|SZ)\.([0-9]{6})$")
+_PINNED_SDK_VERSION = "0.9.3"
 _QUERY_FIELDS = "date,code,open,high,low,close,volume,amount,adjustflag,turn,tradestatus,isST"
 _MAX_QUERY_ROWS = 8
-_DEFAULT_SOCKET_TIMEOUT_SECONDS = 5.0
+_DEFAULT_SOCKET_TIMEOUT_SECONDS = 30.0
 
 
 def _timestamp() -> str:
@@ -38,6 +39,67 @@ def _error_message(result: object) -> str | None:
     return None if value is None else _message(value)
 
 
+def _load_sdk(transport: object | None) -> tuple[object, str]:
+    if transport is None:
+        sdk = importlib.import_module("baostock")
+        return sdk, metadata.version("baostock")
+    return transport, str(getattr(transport, "version", "TEST_TRANSPORT"))
+
+
+def _endpoint_snapshot(*, timeout_seconds: float, injected_transport: bool) -> dict[str, Any]:
+    endpoint: dict[str, Any] = {
+        "auth_mode": "TEST_TRANSPORT" if injected_transport else "PUBLIC_ANONYMOUS",
+        "configured_host": None, "configured_port": None,
+        "connected_peer_ip": None, "connected_peer_port": None,
+    }
+    if injected_transport:
+        return endpoint
+    try:
+        constants = importlib.import_module("baostock.common.contants")
+        context = importlib.import_module("baostock.common.context")
+        endpoint["configured_host"] = getattr(constants, "BAOSTOCK_SERVER_IP", None)
+        port = getattr(constants, "BAOSTOCK_SERVER_PORT", None)
+        endpoint["configured_port"] = int(port) if port is not None else None
+        sock = getattr(context, "default_socket", None)
+        if sock is not None:
+            try:
+                peer = sock.getpeername()
+                endpoint["connected_peer_ip"] = peer[0]
+                endpoint["connected_peer_port"] = peer[1]
+            except OSError:
+                pass
+            try:
+                sock.settimeout(timeout_seconds)
+            except OSError:
+                pass
+    except (ImportError, AttributeError, OSError, TypeError, ValueError):
+        pass
+    return endpoint
+
+
+def _clear_anonymous_api_key(*, injected_transport: bool) -> None:
+    if injected_transport:
+        return
+    try:
+        context = importlib.import_module("baostock.common.context")
+        if hasattr(context, "apiKey"):
+            delattr(context, "apiKey")
+    except ImportError:
+        pass
+
+
+def _close_sdk_socket(*, injected_transport: bool) -> None:
+    if injected_transport:
+        return
+    try:
+        context = importlib.import_module("baostock.common.context")
+        sock = getattr(context, "default_socket", None)
+        if sock is not None:
+            sock.close()
+    except (ImportError, AttributeError, OSError, TypeError):
+        pass
+
+
 def _unavailable_result(
     *, status: str, symbol: str, target_session: str, started_at: str, sdk_version: str | None,
     message: str, error_type: str | None = None, login_code: str | None = None,
@@ -46,6 +108,7 @@ def _unavailable_result(
     logout_attempted: bool = False, logout_code: str | None = None,
     logout_message: str | None = None, response_fields: tuple[str, ...] = (),
     rows: tuple[dict[str, str], ...] = (), completed_at: str | None = None,
+    endpoint: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     return {
         "status": status,
@@ -64,6 +127,10 @@ def _unavailable_result(
             "retry_count": 0,
         },
         "sdk_version": sdk_version,
+        "endpoint": endpoint or {
+            "auth_mode": "PUBLIC_ANONYMOUS", "configured_host": None, "configured_port": None,
+            "connected_peer_ip": None, "connected_peer_port": None,
+        },
         "request_started_at": started_at,
         "request_completed_at": completed_at or _timestamp(),
         "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
@@ -105,8 +172,8 @@ def query_daily_rows(
         raise ContractError("BaoStock目标交易日必须使用规范YYYY-MM-DD格式")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
         raise ContractError("BaoStock网络超时必须是有限秒数")
-    if not 0.2 <= float(timeout_seconds) <= 15.0:
-        raise ContractError("BaoStock网络超时必须在0.2至15秒之间")
+    if not 0.2 <= float(timeout_seconds) <= 30.0:
+        raise ContractError("BaoStock网络超时必须在0.2至30秒之间")
     if type(max_rows) is not int or not 1 <= max_rows <= _MAX_QUERY_ROWS:
         raise ContractError(f"BaoStock单次响应行数上限必须在1至{_MAX_QUERY_ROWS}之间")
 
@@ -115,17 +182,19 @@ def query_daily_rows(
     started_at = _timestamp()
     sdk_version: str | None = None
     try:
-        if transport is None:
-            sdk = importlib.import_module("baostock")
-            sdk_version = metadata.version("baostock")
-        else:
-            sdk = transport
-            sdk_version = str(getattr(transport, "version", "TEST_TRANSPORT"))
+        sdk, sdk_version = _load_sdk(transport)
     except (ImportError, metadata.PackageNotFoundError) as error:
         return _unavailable_result(
             status="DEPENDENCY_UNAVAILABLE", symbol=symbol, target_session=target_session,
             started_at=started_at, sdk_version=sdk_version,
             message="未安装可选BaoStock客户端；TDX结果保持不变", error_type=type(error).__name__,
+            completed_at=_timestamp(),
+        )
+    if transport is None and sdk_version != _PINNED_SDK_VERSION:
+        return _unavailable_result(
+            status="UNSUPPORTED_SDK_VERSION", symbol=symbol, target_session=target_session,
+            started_at=started_at, sdk_version=sdk_version,
+            message=f"BaoStock运行包版本不符合固定合同{_PINNED_SDK_VERSION}；未发送网络请求",
             completed_at=_timestamp(),
         )
 
@@ -144,13 +213,19 @@ def query_daily_rows(
     reason = "BaoStock查询尚未完成"
     error_type: str | None = None
     output_capture = io.StringIO()
+    endpoint: dict[str, Any] = {"auth_mode": "PUBLIC_ANONYMOUS", "configured_host": None,
+                                "configured_port": None, "connected_peer_ip": None,
+                                "connected_peer_port": None}
 
     try:
         # BaoStock 0.9.3通过标准socket建立连接；默认超时会赋给登录时创建的socket。
         socket.setdefaulttimeout(float(timeout_seconds))
         login_attempted = True
+        _clear_anonymous_api_key(injected_transport=transport is not None)
         with redirect_stdout(output_capture), redirect_stderr(output_capture):
             login_result = sdk.login()
+        endpoint = _endpoint_snapshot(timeout_seconds=float(timeout_seconds),
+                                      injected_transport=transport is not None)
         login_code = _code(login_result)
         login_message = _error_message(login_result)
         if login_code != "0":
@@ -198,7 +273,7 @@ def query_daily_rows(
         reason = _message(error) or "BaoStock客户端发生网络或协议异常"
         error_type = type(error).__name__
     finally:
-        if login_attempted:
+        if login_code == "0":
             logout_attempted = True
             try:
                 with redirect_stdout(output_capture), redirect_stderr(output_capture):
@@ -212,6 +287,8 @@ def query_daily_rows(
                     status = "LOGOUT_FAILED"
                     reason = "BaoStock登出异常；查询结果按来源清理失败披露"
                 error_type = error_type or type(error).__name__
+        if login_attempted:
+            _close_sdk_socket(injected_transport=transport is not None)
         socket.setdefaulttimeout(previous_timeout)
 
     return _unavailable_result(
@@ -220,7 +297,7 @@ def query_daily_rows(
         login_code=login_code, login_message=login_message, login_attempted=login_attempted,
         query_code=query_code, query_message=query_message, logout_attempted=logout_attempted,
         logout_code=logout_code, logout_message=logout_message, response_fields=response_fields,
-        rows=tuple(rows), completed_at=_timestamp(),
+        rows=tuple(rows), completed_at=_timestamp(), endpoint=endpoint,
     ) | {
         "requested_source_code": source_code,
         "request": {
@@ -256,16 +333,15 @@ def query_identity_reference(
     except ValueError as error:
         raise ContractError("BaoStock身份探针日期必须是YYYY-MM-DD") from error
     if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
-            or not 0 < float(timeout_seconds) <= 15):
-        raise ContractError("BaoStock身份探针超时必须大于0且不超过15秒")
+            or not 0 < float(timeout_seconds) <= 30):
+        raise ContractError("BaoStock身份探针超时必须大于0且不超过30秒")
     if type(max_rows_per_query) is not int or not 1 <= max_rows_per_query <= 10000:
         raise ContractError("BaoStock身份探针每次响应行数上限必须在1至10000之间")
 
     started_at = _timestamp()
     output_capture = io.StringIO()
     try:
-        sdk = transport if transport is not None else importlib.import_module("baostock")
-        sdk_version = getattr(sdk, "__version__", None)
+        sdk, sdk_version = _load_sdk(transport)
     except Exception as error:
         return {
             "contract": "STOCK-A-BAOSTOCK-IDENTITY-READ/R1",
@@ -278,6 +354,19 @@ def query_identity_reference(
             "query_calls": 0, "max_rows_per_query": max_rows_per_query,
             "retry_count": 0, "error_type": type(error).__name__,
             "reason": "BaoStock客户端不可导入；未发送网络请求",
+        }
+    if transport is None and sdk_version != _PINNED_SDK_VERSION:
+        return {
+            "contract": "STOCK-A-BAOSTOCK-IDENTITY-READ/R1",
+            "status": "UNSUPPORTED_SDK_VERSION", "source": "BAOSTOCK",
+            "target_sessions": list(target_sessions), "request_started_at": started_at,
+            "request_completed_at": _timestamp(),
+            "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+            "available_at": None, "published_at": None, "sdk_version": sdk_version,
+            "login_attempted": False, "login_error_code": None,
+            "query_calls": 0, "max_rows_per_query": max_rows_per_query,
+            "retry_count": 0, "calls": {}, "error_type": None,
+            "reason": f"BaoStock运行包版本不符合固定合同{_PINNED_SDK_VERSION}；未发送网络请求",
         }
 
     previous_timeout = socket.getdefaulttimeout()
@@ -292,6 +381,9 @@ def query_identity_reference(
     error_type = None
     status = "RESPONSE_RECEIVED"
     reason = "BaoStock只读身份接口探针完成"
+    endpoint: dict[str, Any] = {"auth_mode": "PUBLIC_ANONYMOUS", "configured_host": None,
+                                "configured_port": None, "connected_peer_ip": None,
+                                "connected_peer_port": None}
 
     def read_result(
         result: object, *, label: str, query_started: str, target_session: str | None = None,
@@ -336,11 +428,14 @@ def query_identity_reference(
 
     try:
         socket.setdefaulttimeout(float(timeout_seconds))
+        _clear_anonymous_api_key(injected_transport=transport is not None)
         login_attempted = True
         with redirect_stdout(output_capture), redirect_stderr(output_capture):
             login = sdk.login()
             login_code = _code(login)
             login_message = _error_message(login)
+            endpoint = _endpoint_snapshot(timeout_seconds=float(timeout_seconds),
+                                          injected_transport=transport is not None)
             if login_code != "0":
                 status = "LOGIN_FAILED"
                 reason = "BaoStock登录失败；未发起身份查询"
@@ -392,6 +487,8 @@ def query_identity_reference(
                 if status == "RESPONSE_RECEIVED":
                     status = "LOGOUT_FAILED"
                     reason = "BaoStock查询完成但登出异常；异常文本已省略"
+        if login_attempted:
+            _close_sdk_socket(injected_transport=transport is not None)
         socket.setdefaulttimeout(previous_timeout)
 
     return {
@@ -402,6 +499,8 @@ def query_identity_reference(
         "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
         "available_at": None, "published_at": None,
         "sdk_version": sdk_version,
+        "endpoint": endpoint,
+        "socket_timeout_seconds": float(timeout_seconds),
         "login_attempted": login_attempted,
         "login_error_code": login_code, "login_error_message": login_message,
         "logout_attempted": logout_attempted,
@@ -439,14 +538,13 @@ def query_daily_range_rows(
     if end_day < start_day or (end_day - start_day).days > 14:
         raise ContractError("BaoStock日线范围必须正序且跨度不超过14天")
     if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
-            or not 0 < float(timeout_seconds) <= 15):
-        raise ContractError("BaoStock日线查询超时必须大于0且不超过15秒")
+            or not 0 < float(timeout_seconds) <= 30):
+        raise ContractError("BaoStock日线查询超时必须大于0且不超过30秒")
     if type(max_rows_per_symbol) is not int or not 1 <= max_rows_per_symbol <= 20:
         raise ContractError("BaoStock每证券响应行数上限必须在1至20之间")
     started_at = _timestamp()
     try:
-        sdk = transport if transport is not None else importlib.import_module("baostock")
-        sdk_version = getattr(sdk, "__version__", None)
+        sdk, sdk_version = _load_sdk(transport)
     except Exception as error:
         return {
             "contract": "STOCK-A-BAOSTOCK-DAILY-RANGE-READ/R1",
@@ -457,6 +555,17 @@ def query_daily_range_rows(
             "available_at": None, "published_at": None, "sdk_version": None,
             "login_attempted": False, "query_calls": 0, "retry_count": 0,
             "error_type": type(error).__name__, "reason": "BaoStock客户端不可导入；未发送网络请求",
+        }
+    if transport is None and sdk_version != _PINNED_SDK_VERSION:
+        return {
+            "contract": "STOCK-A-BAOSTOCK-DAILY-RANGE-READ/R1",
+            "status": "UNSUPPORTED_SDK_VERSION", "source": "BAOSTOCK", "symbols": list(symbols),
+            "start_date": start_date, "end_date": end_date,
+            "request_started_at": started_at, "request_completed_at": _timestamp(),
+            "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+            "available_at": None, "published_at": None, "sdk_version": sdk_version,
+            "login_attempted": False, "query_calls": 0, "retry_count": 0,
+            "error_type": None, "reason": f"BaoStock运行包版本不符合固定合同{_PINNED_SDK_VERSION}；未发送网络请求",
         }
     previous_timeout = socket.getdefaulttimeout()
     output_capture = io.StringIO()
@@ -471,62 +580,68 @@ def query_daily_range_rows(
     status = "RESPONSE_RECEIVED"
     reason = "BaoStock未复权日线范围查询完成"
     error_type = None
+    endpoint: dict[str, Any] = {"auth_mode": "PUBLIC_ANONYMOUS", "configured_host": None,
+                                "configured_port": None, "connected_peer_ip": None,
+                                "connected_peer_port": None}
     try:
         socket.setdefaulttimeout(float(timeout_seconds))
         login_attempted = True
+        _clear_anonymous_api_key(injected_transport=transport is not None)
         with redirect_stdout(output_capture), redirect_stderr(output_capture):
             login = sdk.login()
             login_code = _code(login)
             login_message = _error_message(login)
-            if login_code != "0":
-                status = "LOGIN_FAILED"
-                reason = "BaoStock登录失败；未发起日线查询"
-            else:
-                for symbol in symbols:
-                    query_calls += 1
-                    query_started = _timestamp()
-                    source_code = f"{symbol[:2].lower()}.{symbol[3:]}"
-                    try:
-                        result = sdk.query_history_k_data_plus(
-                            source_code, _QUERY_FIELDS, start_date=start_date,
-                            end_date=end_date, frequency="d", adjustflag="3",
-                        )
-                        fields = tuple(str(value) for value in (getattr(result, "fields", None) or ()))
-                        code = _code(result)
-                        message = _error_message(result)
-                        rows: list[dict[str, str]] = []
-                        complete = code == "0"
-                        local_error = None
-                        if complete:
-                            while result.next():
-                                if len(rows) >= max_rows_per_symbol:
-                                    complete = False
-                                    local_error = "ROW_BUDGET_EXHAUSTED"
-                                    break
-                                values = result.get_row_data()
-                                if not isinstance(values, (list, tuple)) or len(values) != len(fields):
-                                    complete = False
-                                    local_error = "ROW_SCHEMA_LENGTH_MISMATCH"
-                                    break
-                                rows.append({name: str(value) for name, value in zip(fields, values, strict=True)})
-                        rows_by_symbol[symbol] = {
-                            "status": "RESPONSE_RECEIVED" if complete else "QUERY_FAILED",
-                            "query_error_code": code, "query_error_message": message,
-                            "response_fields": list(fields), "rows_seen": len(rows), "rows": rows,
-                            "complete": complete, "adjustflag": "3", "coordinate": "RAW_UNADJUSTED",
-                            "request_started_at": query_started, "request_completed_at": _timestamp(),
-                            "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
-                            "local_error": local_error,
-                        }
-                        if not complete:
-                            status = "QUERY_FAILED"
-                            reason = "BaoStock未复权日线未完整返回"
-                            break
-                    except Exception as error:
+        endpoint = _endpoint_snapshot(timeout_seconds=float(timeout_seconds),
+                                      injected_transport=transport is not None)
+        if login_code != "0":
+            status = "LOGIN_FAILED"
+            reason = "BaoStock登录失败；未发起日线查询"
+        else:
+            for symbol in symbols:
+                query_calls += 1
+                query_started = _timestamp()
+                source_code = f"{symbol[:2].lower()}.{symbol[3:]}"
+                try:
+                    result = sdk.query_history_k_data_plus(
+                        source_code, _QUERY_FIELDS, start_date=start_date,
+                        end_date=end_date, frequency="d", adjustflag="3",
+                    )
+                    fields = tuple(str(value) for value in (getattr(result, "fields", None) or ()))
+                    code = _code(result)
+                    message = _error_message(result)
+                    rows: list[dict[str, str]] = []
+                    complete = code == "0"
+                    local_error = None
+                    if complete:
+                        while result.next():
+                            if len(rows) >= max_rows_per_symbol:
+                                complete = False
+                                local_error = "ROW_BUDGET_EXHAUSTED"
+                                break
+                            values = result.get_row_data()
+                            if not isinstance(values, (list, tuple)) or len(values) != len(fields):
+                                complete = False
+                                local_error = "ROW_SCHEMA_LENGTH_MISMATCH"
+                                break
+                            rows.append({name: str(value) for name, value in zip(fields, values, strict=True)})
+                    rows_by_symbol[symbol] = {
+                        "status": "RESPONSE_RECEIVED" if complete else "QUERY_FAILED",
+                        "query_error_code": code, "query_error_message": message,
+                        "response_fields": list(fields), "rows_seen": len(rows), "rows": rows,
+                        "complete": complete, "adjustflag": "3", "coordinate": "RAW_UNADJUSTED",
+                        "request_started_at": query_started, "request_completed_at": _timestamp(),
+                        "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+                        "local_error": local_error,
+                    }
+                    if not complete:
                         status = "QUERY_FAILED"
-                        error_type = type(error).__name__
-                        reason = "BaoStock未复权日线查询异常；异常文本已省略"
+                        reason = "BaoStock未复权日线未完整返回"
                         break
+                except Exception as error:
+                    status = "QUERY_FAILED"
+                    error_type = type(error).__name__
+                    reason = "BaoStock未复权日线查询异常；异常文本已省略"
+                    break
     except Exception as error:
         status = "SOURCE_UNAVAILABLE"
         error_type = type(error).__name__
@@ -548,6 +663,8 @@ def query_daily_range_rows(
                 if status == "RESPONSE_RECEIVED":
                     status = "LOGOUT_FAILED"
                     reason = "BaoStock日线读取完成但登出异常；异常文本已省略"
+        if login_attempted:
+            _close_sdk_socket(injected_transport=transport is not None)
         socket.setdefaulttimeout(previous_timeout)
     return {
         "contract": "STOCK-A-BAOSTOCK-DAILY-RANGE-READ/R1",
@@ -556,6 +673,8 @@ def query_daily_range_rows(
         "request_started_at": started_at, "request_completed_at": _timestamp(),
         "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
         "available_at": None, "published_at": None, "sdk_version": sdk_version,
+        "endpoint": endpoint,
+        "socket_timeout_seconds": float(timeout_seconds),
         "fields": _QUERY_FIELDS.split(","),
         "adjustflag": "3", "coordinate": "RAW_UNADJUSTED",
         "max_rows_per_symbol": max_rows_per_symbol,
