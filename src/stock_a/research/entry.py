@@ -2638,6 +2638,18 @@ def research_universe_preview(
     }
     if source_target_quality_report is not None:
         report = source_target_quality_report
+        fast_page_only = any(
+            item.status == "NOT_EVALUATED" and item.reason == "NOT_EVALUATED_FOR_FAST_PAGE"
+            for item in report.candidates
+        )
+        reported_quality_candidates = (
+            tuple(item for item in report.candidates if item.symbol in candidate_by_symbol)
+            if fast_page_only else tuple(report.candidates)
+        )
+        not_evaluated_reason_counts: dict[str, int] = {}
+        for item in report.candidates:
+            if item.status == "NOT_EVALUATED" and item.reason is not None:
+                not_evaluated_reason_counts[item.reason] = not_evaluated_reason_counts.get(item.reason, 0) + 1
         result["source_target_quality"] = {
             "contract": "TDX_VIPDATA_TARGET_SESSION_SOURCE_QUALITY_NON_PIT_R1",
             "target_session": report.target_session.isoformat(),
@@ -2652,16 +2664,23 @@ def research_universe_preview(
             "candidate_partition_complete": report.candidate_total == report.evaluated + report.not_evaluated,
             "evaluation_partition_complete": report.evaluated
             == report.target_present + report.target_missing + report.read_failed,
+            "evaluation_mode": "FAST_PAGE_ONLY" if fast_page_only else "FULL_TARGET_QUALITY",
+            "candidate_rows_scope": "REQUESTED_PAGE" if fast_page_only else "FULL_CANDIDATE_POOL",
+            "candidate_rows_returned": len(reported_quality_candidates),
+            "candidate_rows_omitted": report.candidate_total - len(reported_quality_candidates),
+            "not_evaluated_reason_counts": dict(sorted(not_evaluated_reason_counts.items())),
             "official_valid_listing_denominator": "UNKNOWN_NOT_PROVED_BY_ZIP_FILENAMES",
             "by_market": {key: dict(value) for key, value in report.by_market.items()},
             "by_board": {key: dict(value) for key, value in report.by_board.items()},
             "field_quality": {key: dict(value) for key, value in report.field_quality.items()},
             "pages": [asdict(item) for item in report.pages],
-            "candidates": [asdict(item) for item in report.candidates],
+            "candidates": [asdict(item) for item in reported_quality_candidates],
             "read_usage": {
                 "bytes": report.bytes_read,
                 "records": report.records_read,
                 "elapsed_seconds": report.elapsed_seconds,
+                "entry_read_elapsed_seconds": report.entry_read_elapsed_seconds,
+                "consumer_capture_read_elapsed_seconds": report.consumer_capture_read_elapsed_seconds,
                 "budget": asdict(report.budget),
                 "zip_sha_recalculated_per_candidate": False,
             },

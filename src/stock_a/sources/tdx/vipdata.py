@@ -313,6 +313,8 @@ class VipdataTargetQualityReport:
     candidates: tuple[VipdataCandidateQuality, ...]
     budget: VipdataTargetScanBudget
     consumer_captures: Mapping[str, VipdataEntryCapture] = field(default_factory=dict)
+    entry_read_elapsed_seconds: float = 0.0
+    consumer_capture_read_elapsed_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -1278,10 +1280,11 @@ def scan_vipdata_target_quality(
     budget: VipdataTargetScanBudget = VipdataTargetScanBudget(),
     market: str = "ALL",
     board: str = "ALL",
+    evaluation_symbols: Iterable[str] | None = None,
     capture_symbols: Iterable[str] = (),
     on_page: Callable[[VipdataTargetQualityPage], None] | None = None,
 ) -> VipdataTargetQualityReport:
-    """在同一已校验ZIP句柄上逐页评价全来源候选，不写文件或业务存储。"""
+    """在同一已校验ZIP句柄上评价全来源或明确指定的候选，不写文件或业务存储。"""
     from stock_a.sources.tdx.day import UnitContract
     from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
 
@@ -1309,6 +1312,24 @@ def scan_vipdata_target_quality(
     candidate_by_symbol = {item["symbol"]: item for item in candidates}
     if any(symbol not in candidate_by_symbol for symbol in capture_symbol_list):
         raise VipdataError("TARGET_SCAN_CAPTURE_INVALID", "消费者捕获代码不属于本次过滤后的候选集合")
+    if evaluation_symbols is None:
+        evaluation_symbol_set: set[str] | None = None
+    else:
+        if isinstance(evaluation_symbols, (str, bytes)):
+            raise VipdataError("TARGET_SCAN_SCOPE_INVALID", "目标评价范围必须是有限代码序列")
+        try:
+            evaluation_symbol_list = tuple(islice(iter(evaluation_symbols), 101))
+        except TypeError as error:
+            raise VipdataError("TARGET_SCAN_SCOPE_INVALID", "目标评价范围必须是有限代码序列") from error
+        if (len(evaluation_symbol_list) > 100
+                or any(not isinstance(symbol, str) for symbol in evaluation_symbol_list)
+                or len(evaluation_symbol_list) != len(set(evaluation_symbol_list))):
+            raise VipdataError("TARGET_SCAN_SCOPE_INVALID", "单次目标评价范围最多包含100个互异来源代码")
+        if any(symbol not in candidate_by_symbol for symbol in evaluation_symbol_list):
+            raise VipdataError("TARGET_SCAN_SCOPE_INVALID", "目标评价代码不属于本次过滤后的候选集合")
+        evaluation_symbol_set = set(evaluation_symbol_list)
+        if not set(capture_symbol_list).issubset(evaluation_symbol_set):
+            raise VipdataError("TARGET_SCAN_SCOPE_INVALID", "消费者Capture必须属于本次实际评价范围")
     capture_symbol_set = set(capture_symbol_list)
     capture_bytes_bound = sum(
         int(candidate_by_symbol[symbol]["zip_entry_bytes"])
@@ -1330,6 +1351,8 @@ def scan_vipdata_target_quality(
     started = time.monotonic()
     bytes_read = 0
     records_read = 0
+    entry_read_elapsed = 0.0
+    consumer_capture_read_elapsed = 0.0
     budget_exhausted_reason: str | None = None
     limits = ReadLimits(
         max_bytes=budget.max_candidate_bytes,
@@ -1346,7 +1369,14 @@ def scan_vipdata_target_quality(
                 page_begin = len(evaluations)
                 for within_page, candidate in enumerate(page):
                     global_index = page_index * budget.page_size + within_page
-                    if budget_exhausted_reason is None:
+                    if evaluation_symbol_set is not None and candidate["symbol"] not in evaluation_symbol_set:
+                        row = _target_quality_row(
+                            candidate, package_sha256=package.sha256, target_session=target_session,
+                            source_index=global_index, page_offset=global_index,
+                            capture=None, status="NOT_EVALUATED", reason="NOT_EVALUATED_FOR_FAST_PAGE",
+                            bytes_read=0,
+                        )
+                    elif budget_exhausted_reason is None:
                         elapsed = time.monotonic() - started
                         remaining_bytes = budget.max_total_bytes - bytes_read
                         remaining_records = budget.max_total_records - records_read
@@ -1359,7 +1389,10 @@ def scan_vipdata_target_quality(
                         elif candidate_records > remaining_records:
                             budget_exhausted_reason = "TOTAL_RECORD_BUDGET_EXHAUSTED"
 
-                    if budget_exhausted_reason is not None:
+                    if (evaluation_symbol_set is not None
+                            and candidate["symbol"] not in evaluation_symbol_set):
+                        pass
+                    elif budget_exhausted_reason is not None:
                         row = _target_quality_row(
                             candidate, package_sha256=package.sha256, target_session=target_session,
                             source_index=global_index, page_offset=global_index,
@@ -1374,6 +1407,7 @@ def scan_vipdata_target_quality(
                             bytes_read=0,
                         )
                     else:
+                        entry_started = time.monotonic()
                         try:
                             capture = _read_vipdata_candidate(
                                 package, candidate, target_session=target_session, units=units,
@@ -1425,6 +1459,7 @@ def scan_vipdata_target_quality(
                                 status="TARGET_PRESENT" if capture.target_bar is not None else "TARGET_MISSING",
                                 reason=None if capture.target_bar is not None else "TARGET_SESSION_BAR_MISSING",
                                 bytes_read=capture.scan_summary.byte_count,
+                                record_count=capture.scan_summary.record_count,
                             )
                             bytes_read += capture.scan_summary.byte_count
                             records_read += capture.scan_summary.record_count
@@ -1436,6 +1471,11 @@ def scan_vipdata_target_quality(
                                 ):
                                     field_quality[name]["denominator"] += 1
                                     field_quality[name][quality] += 1
+                        finally:
+                            read_elapsed = time.monotonic() - entry_started
+                            entry_read_elapsed += read_elapsed
+                            if candidate["symbol"] in capture_symbol_set:
+                                consumer_capture_read_elapsed += read_elapsed
                     evaluations.append(row)
                     for counts in (by_market.setdefault(row.market, {}), by_board.setdefault(row.board, {})):
                         counts[row.status] = counts.get(row.status, 0) + 1
@@ -1494,6 +1534,8 @@ def scan_vipdata_target_quality(
         candidates=tuple(evaluations),
         budget=budget,
         consumer_captures=dict(consumer_captures),
+        entry_read_elapsed_seconds=round(entry_read_elapsed, 6),
+        consumer_capture_read_elapsed_seconds=round(consumer_capture_read_elapsed, 6),
     )
 
 

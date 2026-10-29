@@ -456,6 +456,10 @@ def _parser() -> argparse.ArgumentParser:
     universe.add_argument("--limit", type=int, default=20, help="本页证券数，默认20，最多100")
     universe.add_argument("--market", choices=("ALL", "SH", "SZ"), default="ALL", help="市场过滤，默认ALL")
     universe.add_argument("--board", choices=("ALL", "MAIN_BOARD", "GEM"), default="ALL", help="板别过滤，默认ALL")
+    universe.add_argument("--full-target-quality", action="store_true", help="显式扫描全部来源候选目标日质量；默认只评价当前页")
+    universe.add_argument("--max-source-quality-bytes", type=int, default=4294967296, help="显式目标日质量扫描总字节上限，默认4GiB")
+    universe.add_argument("--max-source-quality-records", type=int, default=125000000, help="显式目标日质量扫描总记录上限，默认125000000")
+    universe.add_argument("--max-source-quality-seconds", type=float, default=1800.0, help="显式目标日质量扫描总耗时上限，默认1800秒")
     universe.add_argument("--format", dest="output_format", choices=("summary", "json"), default="summary", help="输出短摘要或完整JSON，默认summary")
     universe.add_argument("--include-profile-preview", action="store_true", help="在本页已评价Raw/Core结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
     universe.add_argument("--max-directory-entries", type=int, default=50000, help="来源目录累计枚举上限，默认50000")
@@ -1051,7 +1055,10 @@ def _verify_explicit_vipdata_package(args: argparse.Namespace):
 
 
 def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
+    command_started = time.monotonic()
+    package_verification_started = time.monotonic()
     package = _verify_explicit_vipdata_package(args)
+    package_verification_seconds = time.monotonic() - package_verification_started
     target = _parse_target(args.target_session)
     _calendar_payload, _calendar_metadata, _calendar_revision, sessions = _load_calendar(target)
     if target not in sessions:
@@ -1075,10 +1082,14 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
         sys.stderr.write(json.dumps({"page_progress": asdict(page)}, ensure_ascii=False, default=_json_default) + "\n")
 
     try:
+        candidate_index_started = time.monotonic()
         pool = vipdata_research_candidate_pool(package)
+        candidate_index_seconds = time.monotonic() - candidate_index_started
+        quality_scan_started = time.monotonic()
         report = scan_vipdata_target_quality(
             package, pool, target_session=target, units=units, budget=budget, on_page=show_page,
         )
+        quality_scan_wall_seconds = time.monotonic() - quality_scan_started
     except VipdataError as error:
         _emit({
             "ok": False,
@@ -1125,11 +1136,24 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
             "bytes": report.bytes_read,
             "records": report.records_read,
             "elapsed_seconds": report.elapsed_seconds,
+            "entry_read_elapsed_seconds": report.entry_read_elapsed_seconds,
             "budget": asdict(report.budget),
             "package_sha_recalculated_per_candidate": False,
             "official_network_requested": False,
             "database_io_attempted": False,
             "business_write_attempted": False,
+        },
+        "performance": {
+            "timing_contract": "STOCK_A_RESEARCH_UNIVERSE_SEGMENTS_R1",
+            "evaluation_mode": "FULL_TARGET_QUALITY",
+            "zip_sha_crc_validation_seconds": round(package_verification_seconds, 6),
+            "candidate_pool_metadata_seconds": round(candidate_index_seconds, 6),
+            "full_pool_entry_decode_seconds": report.entry_read_elapsed_seconds,
+            "full_pool_target_scan_wall_seconds": round(quality_scan_wall_seconds, 6),
+            "full_pool_target_scan_report_seconds": report.elapsed_seconds,
+            "full_pool_source_bytes": report.bytes_read,
+            "full_pool_source_records": report.records_read,
+            "total_command_seconds": round(time.monotonic() - command_started, 6),
         },
         "identity_and_clock_disclosure": {
             "source_symbol_is_stable_security_id": False,
@@ -1252,7 +1276,7 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 units=units,
                 limits=limits,
                 profile_contract=profile_contract,
-                include_baostock_evidence=False,
+                include_baostock_evidence=getattr(args, "include_baostock_evidence", False),
                 vipdata_capture=vipdata_capture,
                 timing_sink=core_timings,
             )
@@ -1628,6 +1652,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
     budget = result["budget"]
     profile_denominators = result.get("profile_preview_denominators")
     source_quality = result.get("source_target_quality")
+    performance = result.get("performance")
     lines = [
         f"TDX来源候选盘后观察 | {result['target_session']} | {result['candidate_contract']} | {result['price_coordinate']}",
         (
@@ -1667,8 +1692,23 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
                 f"缺Bar={source_quality['target_missing']}，读取失败={source_quality['read_failed']}，"
                 f"未评价={source_quality['not_evaluated']}；分区闭合="
                 f"{source_quality['candidate_partition_complete'] and source_quality['evaluation_partition_complete']}；"
+                f"评价范围={source_quality.get('evaluation_mode', 'UNKNOWN')}；"
                 f"有效上市分母仍为UNKNOWN；来源扫描={source_quality['read_usage']['bytes']}字节/"
                 f"{source_quality['read_usage']['records']}条/{source_quality['read_usage']['elapsed_seconds']}秒"
+            ),
+        )
+    if isinstance(performance, dict):
+        full_scan = performance.get("full_pool_target_scan_seconds")
+        lines.insert(
+            3,
+            (
+                "分段耗时：ZIP SHA/CRC="
+                f"{performance['zip_sha_crc_validation_seconds']}秒，候选目录="
+                f"{performance['candidate_pool_metadata_seconds']}秒，页条目解码="
+                f"{performance['page_entry_decode_seconds']}秒，Core+Profile="
+                f"{performance['page_core_profile_seconds']}秒，全池质量扫描="
+                f"{full_scan if full_scan is not None else '未执行'}秒，总命令="
+                f"{performance['total_command_seconds']}秒"
             ),
         )
     if profile_denominators is not None:
@@ -1745,8 +1785,13 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
 
 
 def _run_research_universe(args: argparse.Namespace) -> int:
+    command_started = time.monotonic()
     config, config_path = _load_runtime_config()
+    package_verification_seconds = 0.0
+    package_verification_started = time.monotonic()
     package = _verify_explicit_vipdata_package(args)
+    if package is not None:
+        package_verification_seconds = time.monotonic() - package_verification_started
     roots = () if package is not None else config["source_policy"]["configured_tdx_source_roots"]
     if package is None and not roots:
         raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX只读来源根，拒绝发现来源候选")
@@ -1767,7 +1812,12 @@ def _run_research_universe(args: argparse.Namespace) -> int:
             args.max_total_records,
             args.max_total_seconds,
         )
-    except (InvalidOperation, ValueError, ContractError, ResearchEntryError) as error:
+        source_quality_budget = VipdataTargetScanBudget(
+            max_total_bytes=args.max_source_quality_bytes,
+            max_total_records=args.max_source_quality_records,
+            max_total_seconds=args.max_source_quality_seconds,
+        )
+    except (InvalidOperation, ValueError, ContractError, ResearchEntryError, VipdataError) as error:
         raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或预算合同无效：{error}", _EXIT_ARGUMENT) from error
     profile_contract = None
     if args.include_profile_preview:
@@ -1792,7 +1842,9 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 profile_contract=profile_contract,
             )
         else:
+            candidate_index_started = time.monotonic()
             pool = vipdata_research_candidate_pool(package)
+            candidate_index_seconds = time.monotonic() - candidate_index_started
             if (type(args.offset) is not int or args.offset < 0
                     or type(args.limit) is not int or not 1 <= args.limit <= 100
                     or args.market not in {"ALL", "SH", "SZ"}
@@ -1808,17 +1860,24 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 and (args.board == "ALL" or item["board"] == args.board)
             )
             page_candidates = filtered[args.offset:args.offset + args.limit]
+            quality_scan_started = time.monotonic()
             target_quality_report = scan_vipdata_target_quality(
                 package,
                 pool,
                 target_session=target,
                 units=units,
-                budget=VipdataTargetScanBudget(),
+                budget=source_quality_budget,
+                evaluation_symbols=(
+                    None if args.full_target_quality
+                    else tuple(item["symbol"] for item in page_candidates)
+                ),
                 capture_symbols=tuple(
                     item["symbol"] for item in page_candidates
                     if item.get("empty_placeholder") is not True
                 ),
             )
+            quality_scan_wall_seconds = time.monotonic() - quality_scan_started
+            page_research_started = time.monotonic()
             result = research_universe_preview(
                 target_session=args.target_session,
                 source_roots=(),
@@ -1835,6 +1894,48 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 source_candidate_catalog=pool.catalog,
                 source_target_quality_report=target_quality_report,
             )
+            page_research_seconds = time.monotonic() - page_research_started
+            source_quality = result.get("source_target_quality")
+            if isinstance(source_quality, dict):
+                source_quality["evaluation_mode"] = (
+                    "FULL_TARGET_QUALITY" if args.full_target_quality else "FAST_PAGE_ONLY"
+                )
+                source_quality["full_pool_evaluation_complete"] = target_quality_report.not_evaluated == 0
+                source_quality["read_failures_present"] = target_quality_report.read_failed > 0
+                source_quality["not_evaluated_reason_counts"] = {
+                    reason: sum(
+                        item.status == "NOT_EVALUATED" and item.reason == reason
+                        for item in target_quality_report.candidates
+                    )
+                    for reason in sorted({
+                        item.reason for item in target_quality_report.candidates
+                        if item.status == "NOT_EVALUATED" and item.reason is not None
+                    })
+                }
+            page_symbols = {item["symbol"] for item in page_candidates}
+            page_quality_rows = tuple(
+                item for item in target_quality_report.candidates if item.symbol in page_symbols
+            )
+            result["performance"] = {
+                "timing_contract": "STOCK_A_RESEARCH_UNIVERSE_SEGMENTS_R1",
+                "zip_sha_crc_validation_seconds": round(package_verification_seconds, 6),
+                "candidate_pool_metadata_seconds": round(candidate_index_seconds, 6),
+                "target_quality_scan_wall_seconds": round(quality_scan_wall_seconds, 6),
+                "target_quality_scan_report_seconds": target_quality_report.elapsed_seconds,
+                "page_entry_decode_seconds": target_quality_report.consumer_capture_read_elapsed_seconds,
+                "full_pool_entry_decode_seconds": (
+                    target_quality_report.entry_read_elapsed_seconds if args.full_target_quality else None
+                ),
+                "full_pool_target_scan_seconds": (
+                    target_quality_report.elapsed_seconds if args.full_target_quality else None
+                ),
+                "page_core_profile_seconds": round(page_research_seconds, 6),
+                "page_source_bytes": sum(item.bytes_read for item in page_quality_rows),
+                "page_source_records": sum(item.record_count for item in page_quality_rows),
+                "quality_scan_bytes": target_quality_report.bytes_read,
+                "quality_scan_records": target_quality_report.records_read,
+                "quality_scan_candidate_total": target_quality_report.candidate_total,
+            }
             result["source_package"] = {
                 "package_id": f"TDX-HSJDAY-SHA256:{package.sha256}",
                 "sha256": package.sha256,
@@ -1892,6 +1993,9 @@ def _run_research_universe(args: argparse.Namespace) -> int:
         "database_io_attempted": False,
         "database_write_attempted": False,
     })
+    performance = result.get("performance")
+    if isinstance(performance, dict):
+        performance["total_command_seconds"] = round(time.monotonic() - command_started, 6)
     if args.output_format == "summary":
         summary = _render_universe_summary(result)
         source_package = result.get("source_package")
