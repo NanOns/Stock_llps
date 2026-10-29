@@ -14,7 +14,7 @@ from stock_a.domain import ContractError
 
 
 _SYMBOL_PATTERN = re.compile(r"^(SH|SZ)\.([0-9]{6})$")
-_QUERY_FIELDS = "date,code,close,volume,amount,adjustflag,turn,tradestatus,isST"
+_QUERY_FIELDS = "date,code,open,high,low,close,volume,amount,adjustflag,turn,tradestatus,isST"
 _MAX_QUERY_ROWS = 8
 _DEFAULT_SOCKET_TIMEOUT_SECONDS = 5.0
 

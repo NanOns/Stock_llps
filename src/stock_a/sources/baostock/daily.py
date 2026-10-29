@@ -11,9 +11,12 @@ from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 
 
 _SEMANTIC_FIELDS = frozenset(
-    {"session_date", "source_code", "close", "volume", "amount", "turn", "tradestatus", "isST"}
+    {"session_date", "source_code", "open", "high", "low", "close", "volume", "amount", "turn", "tradestatus", "isST"}
 )
 _INVALID_FIELD_REASONS = {
+    "open": "开盘价数据非法",
+    "high": "最高价数据非法",
+    "low": "最低价数据非法",
     "close": "收盘价数据非法",
     "volume": "成交量数据非法",
     "amount": "成交金额数据非法",
@@ -57,6 +60,9 @@ class BaoDailyObservation:
     session_date: date
     source_code: str
     unit_contract_version: str
+    open: FieldValue
+    high: FieldValue
+    low: FieldValue
     close: FieldValue
     volume: FieldValue
     amount: FieldValue
@@ -141,7 +147,7 @@ def normalize_daily_row(
     if not isinstance(row, Mapping):
         raise ContractError("BaoStock日线行必须是字段映射")
     if not isinstance(field_map, Mapping) or set(field_map) != _SEMANTIC_FIELDS:
-        raise ContractError("BaoStock字段映射必须完整包含八个规范字段")
+        raise ContractError("BaoStock字段映射必须完整包含规范日期、证券、OHLCV、金额、换手及状态字段")
     if any(not isinstance(column, str) or not column.strip() or column != column.strip()
            for column in field_map.values()):
         raise ContractError("BaoStock字段映射中的来源列名必须是非空字符串")
@@ -176,9 +182,12 @@ def normalize_daily_row(
     except ValueError as error:
         raise ContractError("BaoStock价格、金额和数量倍率必须是精确有限数") from error
 
-    close = _field_value(row, columns, field_map["close"], "close", close_scale, minimum=Fraction(0))
-    if close.quality == "OBSERVED" and close.value == 0:
-        close = unknown(_INVALID_FIELD_REASONS["close"])
+    prices: dict[str, FieldValue] = {}
+    for price_name in ("open", "high", "low", "close"):
+        value = _field_value(row, columns, field_map[price_name], price_name, close_scale, minimum=Fraction(0))
+        if value.quality == "OBSERVED" and value.value == 0:
+            value = unknown(_INVALID_FIELD_REASONS[price_name])
+        prices[price_name] = value
     volume = _field_value(row, columns, field_map["volume"], "volume", volume_scale,
                           minimum=Fraction(0), integer=True)
     amount = _field_value(row, columns, field_map["amount"], "amount", amount_scale,
@@ -189,7 +198,10 @@ def normalize_daily_row(
         session_date=session_date,
         source_code=source_code,
         unit_contract_version=units.version,
-        close=close,
+        open=prices["open"],
+        high=prices["high"],
+        low=prices["low"],
+        close=prices["close"],
         volume=volume,
         amount=amount,
         turn=turn,

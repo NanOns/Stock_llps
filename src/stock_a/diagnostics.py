@@ -1069,7 +1069,15 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
             f"请求时钟={bao.get('request_started_at')}至{bao.get('request_completed_at')}；"
             "NON_PIT_RETROSPECTIVE/RAW_UNADJUSTED/SOURCE_SYMBOL_ONLY；TDX主结果未替换。"
         )
-        for key, label in (("close", "收盘"), ("volume", "成交量"), ("amount", "成交金额"), ("turn", "换手")):
+        for key, label in (("open", "开盘"), ("high", "最高"), ("low", "最低"), ("close", "收盘")):
+            field = fields.get(key, {})
+            comparison = bao.get("price_comparisons", {}).get(key, {})
+            lines.append(
+                f"Bao {label}：{_summary_field(field)}；未复权对照={comparison.get('status', '—')}；"
+                f"差(Bao−TDX)={comparison.get('difference_baostock_minus_tdx')}；"
+                f"adjustflag={comparison.get('observed_adjustflag') or '未核实'}"
+            )
+        for key, label in (("volume", "成交量"), ("amount", "成交金额"), ("turn", "换手")):
             field = fields.get(key, {})
             lines.append(f"Bao {label}：{_summary_field(field)}；对照={comparisons.get(key, {}).get('status', '—')}"
                          f"/{comparisons.get(key, {}).get('observed_relation_under_declared_units', '—')}")
@@ -1077,10 +1085,20 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
             field = fields.get(key, {})
             lines.append(f"Bao {label}：{field.get('status', 'UNKNOWN')}；原值={field.get('raw_value')}；"
                          f"质量={field.get('quality')}；原因={field.get('reason') or '无'}")
+        amount_explanation = bao.get("amount_precision_explanation", {})
+        volume_difference = bao.get("volume_difference", {})
         lines.append(
-            f"Bao金额差(Bao−TDX)={comparisons.get('amount', {}).get('difference_baostock_minus_tdx')}；"
-            f"成交量差(Bao−TDX)={comparisons.get('volume', {}).get('difference_baostock_minus_tdx')}；"
-            "差值基于调用方TDX倍率假设，不构成单位权威或TDX错误判定。"
+            f"金额精度解释={amount_explanation.get('status', 'NOT_COMPARABLE')}；"
+            f"金额精确差(Bao−TDX CNY)={amount_explanation.get('difference_bao_minus_tdx_cny')}；"
+            f"float32 ULP(CNY)={amount_explanation.get('tdx_float32_ulp_cny')}；"
+            f"差值/ULP={amount_explanation.get('difference_in_tdx_float32_ulps')}；"
+            f"投影={amount_explanation.get('bao_amount_float32_projection_in_tdx_storage_units')}。"
+        )
+        lines.append(
+            f"成交量差状态={volume_difference.get('status', 'NOT_COMPARABLE')}；"
+            f"精确差(Bao−TDX股)={volume_difference.get('difference_bao_minus_tdx_shares')}；"
+            f"原因={volume_difference.get('reason') or '数值相同'}。金额精度仅在声明单位下解释金额，不解释整数成交量；"
+            "差值不构成来源单位权威或TDX错误判定。"
         )
         lines.append("正式profile()生产准入仍阻断；本查询不计算换手历史分位、不写来源或数据库。")
     return "\n".join(lines)

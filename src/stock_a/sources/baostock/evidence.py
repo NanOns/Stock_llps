@@ -4,6 +4,8 @@ from __future__ import annotations
 from datetime import date
 from decimal import Decimal, localcontext
 from fractions import Fraction
+import math
+import struct
 from typing import Any
 
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
@@ -13,6 +15,9 @@ from stock_a.sources.baostock.daily import BaoUnitContract, normalize_daily_row
 _FIELD_MAP = {
     "session_date": "date",
     "source_code": "code",
+    "open": "open",
+    "high": "high",
+    "low": "low",
     "close": "close",
     "volume": "volume",
     "amount": "amount",
@@ -99,10 +104,159 @@ def _comparison(bao: FieldValue, tdx: FieldValue, *, units_unverified: bool = Fa
     return payload
 
 
-def _unknown_daily(reason: str, fields: tuple[str, ...] = ()) -> dict[str, FieldValue]:
+def _float32_fraction(value: Fraction) -> Fraction | None:
+    try:
+        encoded = struct.pack("<f", float(value))
+        decoded = struct.unpack("<f", encoded)[0]
+    except (OverflowError, struct.error, ValueError):
+        return None
+    if not math.isfinite(decoded):
+        return None
+    return Fraction.from_float(decoded)
+
+
+def _float32_ulp(value: Fraction) -> Fraction | None:
+    """返回非负float32数值处的相邻正向量化间距。"""
+    encoded = _float32_fraction(value)
+    if encoded is None or value < 0:
+        return None
+    try:
+        bits = struct.unpack("<I", struct.pack("<f", float(value)))[0]
+        if bits >= 0x7F7FFFFF:
+            return None
+        following = struct.unpack("<f", struct.pack("<I", bits + 1))[0]
+    except (OverflowError, struct.error, ValueError):
+        return None
+    if not math.isfinite(following):
+        return None
+    return Fraction.from_float(following) - encoded
+
+
+def _price_comparison(bao: FieldValue, tdx: FieldValue, *, raw_response_confirmed: bool) -> dict[str, Any]:
+    comparison = _comparison(bao, tdx)
+    relation = comparison["observed_relation_under_declared_units"]
+    status = "NOT_COMPARABLE" if relation is None else "EXACT_MATCH" if relation == "MATCH" else "PRICE_DIFFERENCE_UNEXPLAINED"
     return {
-        key: unknown(reason if key not in fields else "来源未返回该字段")
-        for key in ("close", "volume", "amount", "turn", "tradestatus", "isST")
+        "status": status,
+        "coordinate": "RAW_UNADJUSTED" if raw_response_confirmed else None,
+        "requested_adjustflag": "3",
+        "observed_adjustflag": "3" if raw_response_confirmed else None,
+        "unit_basis": "BAOSTOCK_DOCUMENTED_CNY_PER_SHARE_NOT_INDEPENDENTLY_BOUND",
+        "baostock_value": comparison["baostock_value"],
+        "tdx_value": comparison["tdx_value"],
+        "difference_baostock_minus_tdx": comparison["difference_baostock_minus_tdx"],
+        "reason": comparison["reason"],
+    }
+
+
+def _amount_precision_explanation(
+    bao_amount: FieldValue,
+    tdx_amount: FieldValue,
+    amount_scale: Fraction | None,
+) -> dict[str, Any]:
+    known_difference = None
+    known_relative_difference = None
+    if bao_amount.quality == "OBSERVED" and tdx_amount.quality == "OBSERVED":
+        bao_cny = exact_number(bao_amount.value)
+        tdx_cny = exact_number(tdx_amount.value)
+        known_difference = bao_cny - tdx_cny
+        known_relative_difference = known_difference / tdx_cny if tdx_cny != 0 else None
+    if (bao_amount.quality != "OBSERVED" or tdx_amount.quality != "OBSERVED"
+            or amount_scale is None or amount_scale <= 0):
+        reason = bao_amount.reason if bao_amount.quality != "OBSERVED" else tdx_amount.reason
+        return {
+            "status": "NOT_COMPARABLE/UNIT_UNVERIFIED",
+            "unit_basis": "CALLER_DECLARED_TDX_AMOUNT_TO_CNY; NOT_INDEPENDENTLY_BOUND",
+            "tdx_amount_to_cny": _render_value(amount_scale) if amount_scale is not None else None,
+            "bao_amount_cny": _field(bao_amount),
+            "tdx_amount_cny": _field(tdx_amount),
+            "difference_bao_minus_tdx_cny": (
+                _render_value(known_difference) if known_difference is not None else None
+            ),
+            "relative_difference_over_tdx": (
+                _render_value(known_relative_difference) if known_relative_difference is not None else None
+            ),
+            "reason": reason or "金额或单位倍率未知，不能作float32量化判断",
+        }
+
+    bao_cny = exact_number(bao_amount.value)
+    tdx_cny = exact_number(tdx_amount.value)
+    bao_storage_unit = bao_cny / amount_scale
+    tdx_storage_unit = tdx_cny / amount_scale
+    projected = _float32_fraction(bao_storage_unit)
+    encoded_tdx = _float32_fraction(tdx_storage_unit)
+    if projected is None or encoded_tdx is None or encoded_tdx != tdx_storage_unit:
+        return {
+            "status": "NOT_COMPARABLE/UNIT_UNVERIFIED",
+            "unit_basis": "CALLER_DECLARED_TDX_AMOUNT_TO_CNY",
+            "tdx_amount_to_cny": _render_value(amount_scale),
+            "bao_amount_cny": _field(bao_amount),
+            "tdx_amount_cny": _field(tdx_amount),
+            "difference_bao_minus_tdx_cny": _render_value(known_difference),
+            "relative_difference_over_tdx": (
+                _render_value(known_relative_difference) if known_relative_difference is not None else None
+            ),
+            "bao_amount_in_tdx_storage_units": _render_value(bao_storage_unit),
+            "tdx_float32_stored_value_in_tdx_storage_units": _render_value(tdx_storage_unit),
+            "reason": "金额不是有限float32范围内的可比较值，或TDX值不能还原为其float32存储坐标",
+        }
+
+    difference = bao_cny - tdx_cny
+    if difference == 0:
+        status = "EXACT_MATCH"
+    elif projected == tdx_storage_unit:
+        status = "FLOAT32_QUANTIZATION_EQUIVALENT_UNDER_DECLARED_UNITS"
+    else:
+        status = "DIFFERENT_UNEXPLAINED"
+    ulp_storage = _float32_ulp(tdx_storage_unit)
+    ulp_cny = ulp_storage * amount_scale if ulp_storage is not None else None
+    return {
+        "status": status,
+        "unit_basis": "CALLER_DECLARED_TDX_AMOUNT_TO_CNY; NOT_INDEPENDENTLY_BOUND",
+        "tdx_amount_to_cny": _render_value(amount_scale),
+        "bao_amount_cny": _field(bao_amount),
+        "tdx_amount_cny": _field(tdx_amount),
+        "difference_bao_minus_tdx_cny": _render_value(difference),
+        "relative_difference_over_tdx": _render_value(difference / tdx_cny) if tdx_cny != 0 else None,
+        "bao_amount_in_tdx_storage_units": _render_value(bao_storage_unit),
+        "tdx_float32_stored_value_in_tdx_storage_units": _render_value(tdx_storage_unit),
+        "bao_amount_float32_projection_in_tdx_storage_units": _render_value(projected),
+        "tdx_float32_ulp_cny": _render_value(ulp_cny) if ulp_cny is not None else None,
+        "difference_in_tdx_float32_ulps": _render_value(difference / ulp_cny) if ulp_cny not in (None, 0) else None,
+        "explanation": (
+            "Bao金额在相同调用方单位假设下编码为TDX float32后与TDX存储值相等；这是格式量化解释，不证明来源单位权威。"
+            if status == "FLOAT32_QUANTIZATION_EQUIVALENT_UNDER_DECLARED_UNITS"
+            else "Bao与TDX金额的精确值相同。" if status == "EXACT_MATCH"
+            else "float32投影仍不能解释该金额差异；保留为未解释差异。"
+        ),
+    }
+
+
+def _volume_difference(bao_volume: FieldValue, tdx_volume: FieldValue, tdx_volume_raw: FieldValue) -> dict[str, Any]:
+    if bao_volume.quality != "OBSERVED" or tdx_volume.quality != "OBSERVED":
+        return {
+            "status": "NOT_COMPARABLE",
+            "baostock_value_shares": _field(bao_volume),
+            "tdx_value_shares": _field(tdx_volume),
+            "difference_bao_minus_tdx_shares": None,
+            "reason": bao_volume.reason if bao_volume.quality != "OBSERVED" else tdx_volume.reason,
+        }
+    difference = exact_number(bao_volume.value) - exact_number(tdx_volume.value)
+    return {
+        "status": "EXACT_MATCH" if difference == 0 else "SOURCE_DIFFERENCE_UNRESOLVED",
+        "baostock_value_shares": _field(bao_volume),
+        "tdx_value_shares": _field(tdx_volume),
+        "tdx_stored_integer_before_declared_multiplier": _field(tdx_volume_raw),
+        "difference_bao_minus_tdx_shares": _render_value(difference),
+        "unit_basis": "TDX_VOLUME_TO_SHARES_CALLER_DECLARED_NOT_INDEPENDENTLY_BOUND",
+        "reason": None if difference == 0 else "成交量是独立整数来源字段；差值原因未证实，不归因于float32金额精度或复权。",
+    }
+
+
+def _unknown_daily(reason: str) -> dict[str, FieldValue]:
+    return {
+        key: unknown(reason)
+        for key in ("open", "high", "low", "close", "volume", "amount", "turn", "tradestatus", "isST")
     }
 
 
@@ -169,6 +323,9 @@ def project_baostock_evidence(
         fields = _unknown_daily(row_validation_reason)
     else:
         fields = {
+            "open": observation.open,
+            "high": observation.high,
+            "low": observation.low,
             "close": observation.close,
             "volume": observation.volume,
             "amount": observation.amount,
@@ -178,12 +335,12 @@ def project_baostock_evidence(
         }
 
     tdx_fields = tdx_result.get("target_raw_fields", {})
+    tdx_prices = {name: _quality_field(tdx_fields, name) for name in ("open", "high", "low", "close")}
     tdx_amount = _quality_field(tdx_fields, "amount")
     tdx_volume = _quality_field(tdx_fields, "volume")
-    tdx_close = _quality_field(tdx_fields, "close")
     tdx_units = tdx_result.get("unit_contract", {})
-    amount_scale = _as_fraction(tdx_units.get("amount_to_cny", ""))
-    volume_scale = _as_fraction(tdx_units.get("volume_to_shares", ""))
+    amount_scale = _as_fraction(tdx_units.get("amount_to_cny", "")) if isinstance(tdx_units, dict) else None
+    volume_scale = _as_fraction(tdx_units.get("volume_to_shares", "")) if isinstance(tdx_units, dict) else None
     if tdx_amount.quality == "OBSERVED" and amount_scale and amount_scale > 0:
         tdx_amount_raw = FieldValue(exact_number(tdx_amount.value) / amount_scale)
     else:
@@ -197,7 +354,8 @@ def project_baostock_evidence(
     raw_values = {
         key: (accepted_row.get(column) if accepted_row is not None and column in response_fields else None)
         for key, column in (
-            ("session_date", "date"), ("source_code", "code"), ("close", "close"),
+            ("session_date", "date"), ("source_code", "code"),
+            ("open", "open"), ("high", "high"), ("low", "low"), ("close", "close"),
             ("volume", "volume"), ("amount", "amount"), ("adjustflag", "adjustflag"),
             ("turn", "turn"), ("tradestatus", "tradestatus"), ("isST", "isST"),
         )
@@ -245,6 +403,9 @@ def project_baostock_evidence(
             "independent_authority_bound": False,
         },
         "fields": {
+            "open": _field(fields["open"]),
+            "high": _field(fields["high"]),
+            "low": _field(fields["low"]),
             "close": _field(fields["close"]),
             "volume": _field(fields["volume"]),
             "amount": _field(fields["amount"]),
@@ -255,8 +416,15 @@ def project_baostock_evidence(
             "isST": _semantic_status(fields["isST"], true_label="BAOSTOCK_REPORTED_ST",
                                       false_label="BAOSTOCK_REPORTED_NOT_ST"),
         },
+        "price_comparisons": {
+            name: _price_comparison(fields[name], tdx_prices[name], raw_response_confirmed=row_is_target)
+            for name in ("open", "high", "low", "close")
+        },
         "comparisons": {
-            "close": _comparison(fields["close"], tdx_close),
+            "open": _comparison(fields["open"], tdx_prices["open"]),
+            "high": _comparison(fields["high"], tdx_prices["high"]),
+            "low": _comparison(fields["low"], tdx_prices["low"]),
+            "close": _comparison(fields["close"], tdx_prices["close"]),
             "volume": _comparison(fields["volume"], tdx_volume, units_unverified=True),
             "amount": _comparison(fields["amount"], tdx_amount, units_unverified=True),
             "volume_raw_as_returned": _comparison(
@@ -268,6 +436,8 @@ def project_baostock_evidence(
                 tdx_amount_raw, units_unverified=True,
             ),
         },
+        "amount_precision_explanation": _amount_precision_explanation(fields["amount"], tdx_amount, amount_scale),
+        "volume_difference": _volume_difference(fields["volume"], tdx_volume, tdx_volume_raw),
         "turnover_percentile": {
             "status": "NOT_EVALUATED",
             "reason": "仅查询目标日一行，未验证同一身份前60个有效交易日，不能计算历史分位",
