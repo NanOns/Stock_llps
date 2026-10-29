@@ -632,7 +632,10 @@ def query_identity_reference(
                         complete = False
                         local_error = "TIME_BUDGET_EXHAUSTED"
                         break
-                    limit_socket_to_remaining()
+                    if not limit_socket_to_remaining():
+                        complete = False
+                        local_error = "TIME_BUDGET_EXHAUSTED"
+                        break
                     if not result.next():
                         break
                     if len(rows) >= max_rows:
@@ -692,23 +695,33 @@ def query_identity_reference(
         else:
             query_started = _timestamp()
             basic_stage_started = perf_counter()
-            query_calls += 1
             try:
-                limit_socket_to_remaining()
-                api_started = perf_counter()
-                with redirect_stdout(output_capture), redirect_stderr(output_capture):
-                    basic_result = (sdk.query_stock_basic(code=basic_query_code)
-                                    if basic_query_code is not None else sdk.query_stock_basic())
-                api_elapsed_ms = round((perf_counter() - api_started) * 1000, 3)
-                calls["stock_basic"] = read_result(
-                    basic_result, label="query_stock_basic", query_started=query_started,
-                    max_rows=1 if basic_query_code is not None else max_rows_per_query,
-                )
-                calls["stock_basic"].update({
-                    "requested_code": basic_query_code,
-                    "api_call_elapsed_ms": api_elapsed_ms,
-                    "elapsed_ms": round((perf_counter() - basic_stage_started) * 1000, 3),
-                })
+                if not limit_socket_to_remaining():
+                    calls["stock_basic"] = {
+                        "query": "query_stock_basic", "requested_code": basic_query_code,
+                        "status": "QUERY_FAILED", "complete": False,
+                        "local_error": "TIME_BUDGET_EXHAUSTED_BEFORE_API",
+                        "request_started_at": query_started, "request_completed_at": _timestamp(),
+                        "api_call_elapsed_ms": 0.0, "row_read_elapsed_ms": 0.0,
+                    }
+                    status = "TIME_BUDGET_EXHAUSTED"
+                    reason = "BaoStock会话总预算在query_stock_basic前耗尽；未发起Basic或后续查询"
+                else:
+                    query_calls += 1
+                    api_started = perf_counter()
+                    with redirect_stdout(output_capture), redirect_stderr(output_capture):
+                        basic_result = (sdk.query_stock_basic(code=basic_query_code)
+                                        if basic_query_code is not None else sdk.query_stock_basic())
+                    api_elapsed_ms = round((perf_counter() - api_started) * 1000, 3)
+                    calls["stock_basic"] = read_result(
+                        basic_result, label="query_stock_basic", query_started=query_started,
+                        max_rows=1 if basic_query_code is not None else max_rows_per_query,
+                    )
+                    calls["stock_basic"].update({
+                        "requested_code": basic_query_code,
+                        "api_call_elapsed_ms": api_elapsed_ms,
+                        "elapsed_ms": round((perf_counter() - basic_stage_started) * 1000, 3),
+                    })
             except (socket.timeout, TimeoutError) as error:
                 calls["stock_basic"] = {
                     "query": "query_stock_basic", "requested_code": basic_query_code,
@@ -731,8 +744,9 @@ def query_identity_reference(
                 status = "QUERY_FAILED"
                 error_type = type(error).__name__
                 reason = f"BaoStock证券基本资料接口异常：{type(error).__name__}；未重试"
+            basic_local_error = calls.get("stock_basic", {}).get("local_error")
             if status == "RESPONSE_RECEIVED" and calls["stock_basic"]["status"] != "RESPONSE_RECEIVED":
-                local_error = calls["stock_basic"].get("local_error")
+                local_error = basic_local_error
                 status = ("TIME_BUDGET_EXHAUSTED" if local_error == "TIME_BUDGET_EXHAUSTED"
                           else "NETWORK_TIMEOUT" if local_error == "SOCKET_TIMEOUT"
                           else "QUERY_FAILED")
@@ -742,9 +756,12 @@ def query_identity_reference(
                           f"；local_error={calls['stock_basic'].get('local_error')}" if code == "0"
                           else f"BaoStock证券基本资料查询失败：{code or 'UNKNOWN'} {message or ''}").strip()
             elif status in {"TIME_BUDGET_EXHAUSTED", "NETWORK_TIMEOUT"}:
-                reason = ("BaoStock证券基本资料逐行读取耗尽单次总预算；未发起日名录查询或重试"
-                          if status == "TIME_BUDGET_EXHAUSTED"
-                          else "BaoStock证券基本资料逐行读取socket超时；未发起日名录查询或重试")
+                if basic_local_error == "TIME_BUDGET_EXHAUSTED_BEFORE_API":
+                    reason = "BaoStock会话总预算在query_stock_basic前耗尽；未发起Basic或后续查询"
+                elif status == "TIME_BUDGET_EXHAUSTED":
+                    reason = "BaoStock证券基本资料逐行读取耗尽单次总预算；未发起日名录查询或重试"
+                else:
+                    reason = "BaoStock证券基本资料逐行读取socket超时；未发起日名录查询或重试"
             if status == "RESPONSE_RECEIVED":
                 for target_session in target_sessions:
                     if remaining_seconds() <= 0:
@@ -753,20 +770,30 @@ def query_identity_reference(
                         break
                     query_started = _timestamp()
                     list_stage_started = perf_counter()
-                    query_calls += 1
                     try:
-                        limit_socket_to_remaining()
-                        api_started = perf_counter()
-                        with redirect_stdout(output_capture), redirect_stderr(output_capture):
-                            result = sdk.query_all_stock(day=target_session)
-                        api_elapsed_ms = round((perf_counter() - api_started) * 1000, 3)
-                        daily = read_result(
-                            result, label="query_all_stock", query_started=query_started,
-                            max_rows=max_rows_per_query, target_session=target_session,
-                        )
-                        daily["api_call_elapsed_ms"] = api_elapsed_ms
-                        daily["elapsed_ms"] = round((perf_counter() - list_stage_started) * 1000, 3)
-                        calls.setdefault("all_stock", {})[target_session] = daily
+                        if not limit_socket_to_remaining():
+                            calls.setdefault("all_stock", {})[target_session] = {
+                                "query": "query_all_stock", "target_session": target_session,
+                                "status": "QUERY_FAILED", "complete": False,
+                                "local_error": "TIME_BUDGET_EXHAUSTED_BEFORE_API",
+                                "request_started_at": query_started, "request_completed_at": _timestamp(),
+                                "api_call_elapsed_ms": 0.0, "row_read_elapsed_ms": 0.0,
+                            }
+                            status = "TIME_BUDGET_EXHAUSTED"
+                            reason = f"BaoStock总预算在{target_session}日名录查询前耗尽；未发起该查询或重试"
+                        else:
+                            query_calls += 1
+                            api_started = perf_counter()
+                            with redirect_stdout(output_capture), redirect_stderr(output_capture):
+                                result = sdk.query_all_stock(day=target_session)
+                            api_elapsed_ms = round((perf_counter() - api_started) * 1000, 3)
+                            daily = read_result(
+                                result, label="query_all_stock", query_started=query_started,
+                                max_rows=max_rows_per_query, target_session=target_session,
+                            )
+                            daily["api_call_elapsed_ms"] = api_elapsed_ms
+                            daily["elapsed_ms"] = round((perf_counter() - list_stage_started) * 1000, 3)
+                            calls.setdefault("all_stock", {})[target_session] = daily
                     except (socket.timeout, TimeoutError) as error:
                         calls.setdefault("all_stock", {})[target_session] = {
                             "query": "query_all_stock", "target_session": target_session,
@@ -802,9 +829,13 @@ def query_identity_reference(
                                   else f"BaoStock指定日{target_session}名录查询失败：{code or 'UNKNOWN'} {message or ''}").strip()
                         break
                     elif status in {"TIME_BUDGET_EXHAUSTED", "NETWORK_TIMEOUT"}:
-                        reason = (f"BaoStock指定日{target_session}名录逐行读取耗尽单次总预算；未重试"
-                                  if status == "TIME_BUDGET_EXHAUSTED"
-                                  else f"BaoStock指定日{target_session}名录逐行读取socket超时；未重试")
+                        local_error = calls.get("all_stock", {}).get(target_session, {}).get("local_error")
+                        if local_error == "TIME_BUDGET_EXHAUSTED_BEFORE_API":
+                            reason = f"BaoStock总预算在{target_session}日名录查询前耗尽；未发起该查询或重试"
+                        elif status == "TIME_BUDGET_EXHAUSTED":
+                            reason = f"BaoStock指定日{target_session}名录逐行读取耗尽单次总预算；未重试"
+                        else:
+                            reason = f"BaoStock指定日{target_session}名录逐行读取socket超时；未重试"
     except (socket.timeout, TimeoutError) as error:
         status = "NETWORK_TIMEOUT"
         error_type = type(error).__name__
@@ -820,11 +851,10 @@ def query_identity_reference(
     finally:
         if login_code == "0":
             remaining = remaining_seconds()
-            if remaining > 0:
+            if remaining > 0 and limit_socket_to_remaining():
                 logout_attempted = True
                 logout_started = perf_counter()
                 try:
-                    limit_socket_to_remaining()
                     with redirect_stdout(output_capture), redirect_stderr(output_capture):
                         logout = sdk.logout()
                     logout_code = _code(logout)
