@@ -33,6 +33,7 @@ from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
 from stock_a.sources.tdx.vipdata import (
     VipdataBudgets,
     VipdataError,
+    VipdataSourceConfig,
     download_vipdata_package,
     extract_vipdata_day_entry,
     inspect_vipdata_page,
@@ -55,7 +56,7 @@ from stock_a.research.entry import (
 _WORKSPACE = Path("G:/codex work/Stock A")
 _CONFIG_ROOT = _WORKSPACE / "config"
 _CONFIG_FILE = _CONFIG_ROOT / "runtime.defaults.json"
-_CONFIG_CONTRACT = "STOCK-A-RUNTIME-DEFAULTS/R8"
+_CONFIG_CONTRACT = "STOCK-A-RUNTIME-DEFAULTS/R9"
 _EXIT_OK = 0
 _EXIT_ARGUMENT = 2
 _EXIT_UNAVAILABLE = 3
@@ -212,7 +213,7 @@ def _validate_config(config: Any) -> None:
     contract_revision = "STOCK-A-DAY-CHAIN/R10"
     expected = {
         ("runtime.defaults.json", "BUSINESS_RUNTIME_CONFIGURATION", _CONFIG_CONTRACT,
-         "application startup / configuration resolver"),
+         "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official"),
         ("contracts/day-chain.contract.json", "BUSINESS_PIPELINE_DESIGN_CONTRACT", contract_revision,
          "stock_a.contracts.load_day_chain_contract（唯一入口清单）"),
     }
@@ -248,6 +249,10 @@ def _validate_config(config: Any) -> None:
         or sources.get("require_phase0_before_dependent_operations") is not True
     ):
         raise DiagnosticError("CONFIG_INVALID", "TDX来源根必须是绝对路径字符串列表")
+    try:
+        VipdataSourceConfig.from_mapping(sources.get("vipdata_official"))
+    except VipdataError as error:
+        raise DiagnosticError("CONFIG_INVALID", f"通达信官网端点配置无效：{error}") from error
     app = _require_mapping(root.get("application_identity"), "application_identity")
     project_uuid = app.get("project_uuid")
     try:
@@ -1435,8 +1440,10 @@ def _run_research_universe(args: argparse.Namespace) -> int:
 
 
 def _run_source_vipdata(args: argparse.Namespace) -> int:
-    _load_runtime_config()
+    runtime_config, _config_path = _load_runtime_config()
     try:
+        source_policy = runtime_config["source_policy"]
+        source_config = VipdataSourceConfig.from_mapping(source_policy["vipdata_official"])
         budgets = VipdataBudgets(
             max_page_bytes=args.max_page_bytes,
             max_package_bytes=args.max_package_bytes,
@@ -1449,7 +1456,9 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
             max_redirects=args.max_redirects,
             reserve_free_bytes=args.reserve_free_bytes,
         )
-        observation = inspect_vipdata_page(args.target_session, budgets=budgets)
+        observation = inspect_vipdata_page(
+            args.target_session, budgets=budgets, source_config=source_config,
+        )
     except VipdataError as error:
         _emit({
             "ok": False,
@@ -1525,7 +1534,7 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
             result["core_consumer"] = {
                 "status": "CORE_CONSUMED" if entry_scan.target_bar_present else "CORE_CONSUMED_TARGET_BAR_MISSING",
                 "sample_symbol": symbol,
-                "archive_entry": f"vipdoc/{parts[0].lower()}/lday/{parts[0].lower()}{parts[1]}.day",
+                "archive_entry": entry_scan.entry.path,
                 "extracted_path": str(extracted_path),
                 "source_sha256": consumer["source"]["raw_byte_sha256"],
                 "zip_entry_first_date": entry_scan.first_date.isoformat(),

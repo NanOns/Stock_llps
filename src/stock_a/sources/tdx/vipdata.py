@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 import hashlib
 import io
@@ -23,10 +23,13 @@ import zipfile
 
 
 OFFICIAL_PAGE_URL = "https://www.tdx.com.cn/article/vipdata.html"
+OFFICIAL_PACKAGE_URL = "https://data.tdx.com.cn/vipdoc/hsjday.zip"
+OFFICIAL_METADATA_URL = "https://data.tdx.com.cn/vipdoc/_hsjdayinfo.js"
 _OFFICIAL_HOST = "tdx.com.cn"
+_CHINA_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Shanghai")
 _G_TEMP_ROOT = Path("G:/codex_tmp")
 _REDIRECT_STATUSES = {301, 302, 303, 307, 308}
-_DAY_ENTRY = re.compile(r"^vipdoc/(sh|sz|bj)/lday/(sh|sz|bj)([0-9]{6})\.day$", re.IGNORECASE)
+_DAY_ENTRY = re.compile(r"^(?:vipdoc/)?(sh|sz|bj)/lday/(sh|sz|bj)([0-9A-Z]{6})\.day$", re.IGNORECASE)
 _DATE = re.compile(
     r"(?P<year>20[0-9]{2})\s*(?:[-/.]|年)\s*(?P<month>0?[1-9]|1[0-2])"
     r"\s*(?:[-/.]|月)\s*(?P<day>0?[1-9]|[12][0-9]|3[01])(?![0-9])\s*日?"
@@ -76,6 +79,37 @@ class VipdataBudgets:
 
 
 @dataclass(frozen=True)
+class VipdataSourceConfig:
+    """登记在唯一runtime.defaults.json中的官网端点。"""
+
+    page_url: str = OFFICIAL_PAGE_URL
+    package_url: str = OFFICIAL_PACKAGE_URL
+    metadata_url: str = OFFICIAL_METADATA_URL
+
+    def __post_init__(self) -> None:
+        values = (
+            ("page_url", self.page_url, ".html"),
+            ("package_url", self.package_url, ".zip"),
+            ("metadata_url", self.metadata_url, ".js"),
+        )
+        for label, value, expected_suffix in values:
+            if not isinstance(value, str) or not _is_official_https_url(value):
+                raise VipdataError("SOURCE_CONFIG_INVALID", f"{label}必须是通达信官网HTTPS地址")
+            parsed = urlsplit(value)
+            if not parsed.path.lower().endswith(expected_suffix) or parsed.query or parsed.fragment:
+                raise VipdataError("SOURCE_CONFIG_INVALID", f"{label}与官网端点合同不匹配")
+
+    @classmethod
+    def from_mapping(cls, value: Mapping[str, Any]) -> "VipdataSourceConfig":
+        if not isinstance(value, Mapping):
+            raise VipdataError("SOURCE_CONFIG_INVALID", "source_policy.vipdata_official必须是配置对象")
+        required = {"page_url", "package_url", "metadata_url"}
+        if set(value) != required:
+            raise VipdataError("SOURCE_CONFIG_INVALID", "官网端点配置必须精确包含page_url、package_url、metadata_url")
+        return cls(**{key: value[key] for key in required})
+
+
+@dataclass(frozen=True)
 class VipdataPageObservation:
     source_page_url: str
     page_final_url: str
@@ -86,6 +120,13 @@ class VipdataPageObservation:
     status: str
     reason: str | None
     evidence: tuple[str, ...]
+    metadata_url: str | None = None
+    metadata_observed_at: datetime | None = None
+    official_update_at: datetime | None = None
+    metadata_sha256: str | None = None
+    page_html_status: str | None = None
+    page_html_reason: str | None = None
+    download_url_source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -111,6 +152,8 @@ class VipdataPackage:
     download_final_url: str
     request_started_at: datetime
     download_finished_at: datetime
+    download_attempt_count: int = 1
+    official_cookie_challenge_solved: bool = False
 
 
 @dataclass(frozen=True)
@@ -161,9 +204,25 @@ def _header(headers: Mapping[str, str], key: str) -> str | None:
     return None
 
 
-def _default_transport(url: str, timeout: float) -> Any:
+def _default_transport(
+    url: str,
+    timeout: float,
+    *,
+    challenge_cookie: str | None = None,
+    referer_url: str = OFFICIAL_PAGE_URL,
+) -> Any:
     opener = build_opener(_NoRedirect)
-    request = Request(url, headers={"User-Agent": "Stock-A-VIPDATA/1.0"}, method="GET")
+    request = Request(url, headers={
+        "User-Agent": (
+            "Mozilla/5.0" if challenge_cookie else
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0 Safari/537.36"
+        ),
+        "Referer": referer_url,
+        "Accept": "text/html,application/javascript,application/zip,application/octet-stream;q=0.9,*/*;q=0.5",
+        "Cache-Control": "no-cache, max-age=0",
+        "Pragma": "no-cache",
+        **({"Cookie": challenge_cookie} if challenge_cookie else {}),
+    }, method="GET")
     try:
         return opener.open(request, timeout=timeout)
     except HTTPError as error:
@@ -177,6 +236,8 @@ def _open_get(
     *,
     budgets: VipdataBudgets,
     transport: Callable[[str, float], Any] | None,
+    challenge_cookie: str | None = None,
+    referer_url: str = OFFICIAL_PAGE_URL,
 ) -> _HttpOpened:
     if not _is_official_https_url(url):
         raise VipdataError("DOWNLOAD_URL_UNTRUSTED", "只允许通达信官网域名上的HTTPS资源")
@@ -184,7 +245,13 @@ def _open_get(
     get = transport or _default_transport
     for _redirect_index in range(budgets.max_redirects + 1):
         try:
-            response = get(current, float(budgets.timeout_seconds))
+            response = (
+                _default_transport(
+                    current, float(budgets.timeout_seconds), challenge_cookie=challenge_cookie,
+                    referer_url=referer_url,
+                )
+                if transport is None else get(current, float(budgets.timeout_seconds))
+            )
         except VipdataError:
             raise
         except Exception as error:
@@ -261,6 +328,24 @@ def _content_length(headers: Mapping[str, str]) -> int | None:
     if value < 0:
         raise VipdataError("CONTENT_LENGTH_INVALID", "响应Content-Length不是非负整数")
     return value
+
+
+def _official_download_challenge_cookie(body: bytes) -> str | None:
+    """识别官网已观测的静态Cookie挑战；不执行或求值响应中的JavaScript。"""
+    if not isinstance(body, bytes) or not body or len(body) > 64 * 1024:
+        return None
+    text = body.decode("ascii", "ignore")
+    values: list[int] = []
+    for key in ("WTKkN", "bOYDu", "wyeCN"):
+        matches = re.findall(r"\b" + re.escape(key) + r":([0-9]{1,12})", text)
+        if len(matches) != 1:
+            return None
+        values.append(int(matches[0]))
+    ssid_matches = re.findall(r"\]\(t,([0-9]{1,12})\)", text)
+    if len(ssid_matches) != 1:
+        return None
+    status = sum(values)
+    return f"__tst_status={status}#; EO_Bot_Ssid={ssid_matches[0]}"
 
 
 class _PageParser(HTMLParser):
@@ -340,6 +425,29 @@ def _validate_target_session(
     return target
 
 
+def _parse_official_update_time(body: bytes) -> datetime:
+    try:
+        text = body.decode("ascii")
+    except UnicodeDecodeError as error:
+        raise VipdataError("SOURCE_METADATA_ENCODING_INVALID", "官方更新元数据不是ASCII JavaScript") from error
+    assignments = re.findall(
+        r"(?m)^\s*(?:window\.)?HSJDAY_SOFT_TIME\s*=\s*['\"]"
+        r"(20[0-9]{2}-[0-9]{2}-[0-9]{2}(?:\s+[0-9]{2}:[0-9]{2}:[0-9]{2})?)['\"]\s*;?\s*$",
+        text,
+    )
+    if len(assignments) != 1:
+        raise VipdataError("SOURCE_METADATA_DATE_INVALID", "官方元数据必须唯一声明HSJDAY_SOFT_TIME")
+    value = assignments[0]
+    formats = ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d")
+    for format_string in formats:
+        try:
+            parsed = datetime.strptime(value, format_string)
+            return parsed.replace(tzinfo=_CHINA_TIMEZONE)
+        except ValueError:
+            continue
+    raise VipdataError("SOURCE_METADATA_DATE_INVALID", "官方HSJDAY_SOFT_TIME不是有效日期时间")
+
+
 def parse_vipdata_page(
     html: str,
     *,
@@ -391,17 +499,23 @@ def inspect_vipdata_page(
     target_session: str,
     *,
     budgets: VipdataBudgets = VipdataBudgets(),
+    source_config: VipdataSourceConfig = VipdataSourceConfig(),
     session_checker: Callable[[date], bool] | None = None,
     transport: Callable[[str, float], Any] | None = None,
     observed_at: datetime | None = None,
 ) -> VipdataPageObservation:
-    _validate_target_session(target_session, session_checker)
-    opened = _open_get(OFFICIAL_PAGE_URL, budgets=budgets, transport=transport)
+    target = _validate_target_session(target_session, session_checker)
+    opened = _open_get(
+        source_config.page_url, budgets=budgets, transport=transport,
+        referer_url=source_config.page_url,
+    )
+    page_observed_at = observed_at or datetime.now(timezone.utc)
     try:
         if opened.status != 200:
-            return VipdataPageObservation(OFFICIAL_PAGE_URL, opened.final_url,
-                                          observed_at or datetime.now(timezone.utc), opened.status, None, None,
-                                          "SOURCE_HTTP_ERROR", f"官网页面返回HTTP {opened.status}", ())
+            return VipdataPageObservation(source_config.page_url, opened.final_url,
+                                          page_observed_at, opened.status, None, None,
+                                          "SOURCE_HTTP_ERROR", f"官网页面返回HTTP {opened.status}", (),
+                                          page_html_status="SOURCE_HTTP_ERROR")
         length = _content_length(opened.headers)
         if length is not None and length > budgets.max_page_bytes:
             raise VipdataError("PAGE_SIZE_LIMIT", "官网页面超过读取预算")
@@ -422,13 +536,67 @@ def inspect_vipdata_page(
                 html = content.decode("gb18030")
             except UnicodeDecodeError as error:
                 raise VipdataError("PAGE_ENCODING_INVALID", "官网页面编码无法安全解析") from error
-        return parse_vipdata_page(html, source_page_url=OFFICIAL_PAGE_URL,
-                                  page_final_url=opened.final_url,
-                                  page_observed_at=observed_at or datetime.now(timezone.utc),
-                                  http_status=opened.status, target_session=target_session,
-                                  session_checker=session_checker)
+        page_observation = parse_vipdata_page(
+            html, source_page_url=source_config.page_url, page_final_url=opened.final_url,
+            page_observed_at=page_observed_at, http_status=opened.status,
+            target_session=target_session, session_checker=session_checker,
+        )
     finally:
         opened.response.close()
+
+    metadata_observed_at = datetime.now(timezone.utc)
+    metadata_opened = _open_get(
+        source_config.metadata_url, budgets=budgets, transport=transport,
+        referer_url=source_config.page_url,
+    )
+    try:
+        if metadata_opened.status != 200:
+            return VipdataPageObservation(
+                source_config.page_url, page_observation.page_final_url, page_observed_at, 200,
+                page_observation.page_declared_update_date, None, "SOURCE_METADATA_HTTP_ERROR",
+                f"官方更新元数据返回HTTP {metadata_opened.status}", page_observation.evidence,
+                source_config.metadata_url, metadata_observed_at, None, None,
+                page_observation.status, page_observation.reason,
+            )
+        metadata_length = _content_length(metadata_opened.headers)
+        metadata_body, metadata_bytes = _read_limited(
+            metadata_opened.response,
+            limit=min(budgets.max_page_bytes, 256 * 1024),
+            total_seconds=budgets.max_total_seconds,
+            started=time.monotonic(),
+        )
+        if metadata_length is not None and metadata_bytes != metadata_length:
+            raise VipdataError("CONTENT_LENGTH_MISMATCH", "官方更新元数据实际长度与Content-Length不一致")
+        official_update_at = _parse_official_update_time(metadata_body or b"")
+    finally:
+        metadata_opened.response.close()
+
+    evidence = list(page_observation.evidence)
+    evidence.append(f"官方日期来自{source_config.metadata_url}中的HSJDAY_SOFT_TIME")
+    evidence.append(f"ZIP对象取自runtime.defaults.json配置：{source_config.package_url}")
+    if page_observation.status in {"SOURCE_DOWNLOAD_OBJECT_UNAVAILABLE", "SOURCE_METADATA_UNAVAILABLE"}:
+        evidence.append("官网页面HTML未提供完整ZIP链接或更新日期；按登记端点及官方脚本元数据继续核验")
+    package_url = source_config.package_url
+    common = {
+        "metadata_url": source_config.metadata_url,
+        "metadata_observed_at": metadata_observed_at,
+        "official_update_at": official_update_at,
+        "metadata_sha256": hashlib.sha256(metadata_body or b"").hexdigest(),
+        "page_html_status": page_observation.status,
+        "page_html_reason": page_observation.reason,
+        "download_url_source": "CONFIGURED_OFFICIAL_ENDPOINT",
+    }
+    if official_update_at.date() < target:
+        return VipdataPageObservation(
+            source_config.page_url, page_observation.page_final_url, page_observed_at, 200,
+            page_observation.page_declared_update_date, package_url, "SOURCE_NOT_READY",
+            "官方HSJDAY_SOFT_TIME早于目标交易会话", tuple(evidence), **common,
+        )
+    return VipdataPageObservation(
+        source_config.page_url, page_observation.page_final_url, page_observed_at, 200,
+        page_observation.page_declared_update_date, package_url, "PACKAGE_CANDIDATE_READY",
+        None, tuple(evidence), **common,
+    )
 
 
 def _safe_temp_directory(path: str | Path) -> Path:
@@ -543,15 +711,15 @@ def validate_vipdata_zip(
                     raise VipdataError("ZIP_COMPRESSION_RATIO_LIMIT", "ZIP条目压缩比超过预算")
                 match = _DAY_ENTRY.fullmatch("/".join(parts))
                 if not match:
-                    raise VipdataError("ZIP_ENTRY_FAMILY_UNEXPECTED", "VIPDATA ZIP包含未登记的文件族")
+                    raise VipdataError("ZIP_ENTRY_FAMILY_UNEXPECTED", f"VIPDATA ZIP包含未登记的文件族：{info.filename}")
                 folder_market, file_market, symbol = match.groups()
                 market = folder_market.lower()
                 if file_market.lower() != market:
                     raise VipdataError("ZIP_MARKET_PATH_MISMATCH", "ZIP日线文件市场与目录不一致")
-                if info.file_size == 0 or info.file_size % 32 != 0:
-                    raise VipdataError("ZIP_DAY_LENGTH_INVALID", "TDX .day文件必须由非空32字节记录组成")
+                if info.file_size % 32 != 0:
+                    raise VipdataError("ZIP_DAY_LENGTH_INVALID", f"TDX .day文件必须为空或由32字节记录组成：{info.filename}")
                 counts[market] += 1
-                entries.append(VipdataDayEntry("/".join(parts), market.upper(), symbol,
+                entries.append(VipdataDayEntry("/".join(parts), market.upper(), symbol.upper(),
                                                info.compress_size, info.file_size))
             if not entries:
                 raise VipdataError("ZIP_NO_DAY_ENTRIES", "ZIP没有可用的TDX日线文件")
@@ -568,22 +736,50 @@ def validate_vipdata_zip(
 def download_vipdata_package(
     observation: VipdataPageObservation,
     *,
-    destination_root: str | Path = Path("G:/codex_tmp/stock_a_vipdata"),
+    destination_root: str | Path | None = None,
     budgets: VipdataBudgets = VipdataBudgets(),
     transport: Callable[[str, float], Any] | None = None,
 ) -> VipdataPackage:
     if observation.status != "PACKAGE_CANDIDATE_READY" or not observation.resolved_download_url:
-        raise VipdataError("SOURCE_NOT_READY", "官网日期或ZIP下载对象尚未通过候选资格检查")
+        raise VipdataError("SOURCE_NOT_READY", "官方HSJDAY_SOFT_TIME或已配置ZIP对象尚未通过候选资格检查")
     if not _is_official_https_url(observation.resolved_download_url):
         raise VipdataError("DOWNLOAD_URL_UNTRUSTED", "候选下载对象不是通达信官网HTTPS资源")
+    if destination_root is None:
+        destination_root = Path("G:/codex_tmp/stock_a_vipdata") / f"run-{uuid.uuid4().hex}"
     root = _safe_temp_directory(destination_root)
     request_started_at = datetime.now(timezone.utc)
-    opened = _open_get(observation.resolved_download_url, budgets=budgets, transport=transport)
+    opened = _open_get(
+        observation.resolved_download_url, budgets=budgets, transport=transport,
+        referer_url=observation.source_page_url,
+    )
+    download_attempt_count = 1
+    challenge_cookie_used = False
+    first_content_type = (_header(opened.headers, "Content-Type") or "").lower()
+    if opened.status == 200 and "text/html" in first_content_type:
+        try:
+            challenge_body, _challenge_size = _read_limited(
+                opened.response, limit=64 * 1024, total_seconds=budgets.max_total_seconds,
+                started=time.monotonic(),
+            )
+        finally:
+            opened.response.close()
+        challenge_cookie = _official_download_challenge_cookie(challenge_body or b"")
+        if challenge_cookie is None:
+            raise VipdataError("DOWNLOAD_RESPONSE_HTML", "ZIP地址返回非预期HTML，未识别为通达信官方静态挑战")
+        opened = _open_get(
+            observation.resolved_download_url, budgets=budgets, transport=transport,
+            challenge_cookie=challenge_cookie, referer_url=observation.source_page_url,
+        )
+        download_attempt_count = 2
+        challenge_cookie_used = True
     monotonic_started = time.monotonic()
     partial = root / f"vipdata-{uuid.uuid4().hex}.zip.partial"
     try:
         if opened.status != 200:
             raise VipdataError("DOWNLOAD_HTTP_ERROR", f"官网数据包返回HTTP {opened.status}")
+        content_type = (_header(opened.headers, "Content-Type") or "").lower()
+        if "text/html" in content_type:
+            raise VipdataError("DOWNLOAD_RESPONSE_HTML", "ZIP地址返回HTML响应，拒绝将其当作数据包下载")
         content_length = _content_length(opened.headers)
         if content_length is not None and content_length > budgets.max_package_bytes:
             raise VipdataError("DOWNLOAD_SIZE_LIMIT", "官网数据包Content-Length超过预算")
@@ -606,20 +802,33 @@ def download_vipdata_package(
         if content_length is not None and written != content_length:
             raise VipdataError("CONTENT_LENGTH_MISMATCH", "数据包实际字节数与Content-Length不一致")
         sha256 = digest.hexdigest()
-        zip_count, expanded, day_entries, by_market = validate_vipdata_zip(partial, budgets=budgets)
         final = root / f"vipdata-{sha256}.zip"
         if final.exists():
             raise VipdataError("PACKAGE_ALREADY_EXISTS", "同SHA数据包已存在；拒绝覆盖或复用旧临时文件")
         os.rename(partial, final)
+        try:
+            zip_count, expanded, day_entries, by_market = validate_vipdata_zip(final, budgets=budgets)
+        except VipdataError as error:
+            rejected = root / f"rejected-vipdata-{sha256}.zip"
+            if rejected.exists():
+                raise VipdataError("PACKAGE_ALREADY_EXISTS", "同SHA拒绝包已存在；拒绝覆盖") from error
+            os.rename(final, rejected)
+            raise VipdataError(
+                error.code, f"{error}；完整原始ZIP保留于G盘临时目录，SHA-256={sha256}，文件={rejected}",
+            ) from error
         return VipdataPackage(
             file_path=final, file_name=final.name, file_size=written, sha256=sha256,
             zip_entry_count=zip_count, zip_crc="PASS", total_uncompressed_bytes=expanded,
             entry_count_by_market=by_market, day_entries=day_entries,
             download_final_url=opened.final_url, request_started_at=request_started_at,
             download_finished_at=datetime.now(timezone.utc),
+            download_attempt_count=download_attempt_count,
+            official_cookie_challenge_solved=challenge_cookie_used,
         )
     finally:
         opened.response.close()
+        if partial.exists():
+            partial.unlink()
 
 
 def _verify_package_file(package: VipdataPackage, *, max_total_seconds: float = 300.0) -> Path:
@@ -665,6 +874,8 @@ def scan_vipdata_day_entry(
                   if item.market == market_value and item.symbol == code), None)
     if entry is None:
         raise VipdataError("ZIP_DAY_ENTRY_NOT_FOUND", "已核验数据包中没有请求的证券日线条目")
+    if entry.uncompressed_bytes == 0:
+        raise VipdataError("ZIP_DAY_ENTRY_EMPTY", "官方ZIP中的证券日线条目为空，不能作为行情记录读取")
     package_path = _verify_package_file(package, max_total_seconds=max_total_seconds)
     found_target = False
     try:
@@ -705,6 +916,8 @@ def extract_vipdata_day_entry(
                   if item.market == market_value and item.symbol == code), None)
     if entry is None:
         raise VipdataError("ZIP_DAY_ENTRY_NOT_FOUND", "已核验数据包中没有请求的证券日线条目")
+    if entry.uncompressed_bytes == 0:
+        raise VipdataError("ZIP_DAY_ENTRY_EMPTY", "官方ZIP中的证券日线条目为空，不能解压为行情来源")
     package_path = _verify_package_file(package)
     parent = _safe_temp_directory(destination_parent)
     extraction_root = parent / f"extract-{uuid.uuid4().hex}"
@@ -712,7 +925,8 @@ def extract_vipdata_day_entry(
     extraction_root = extraction_root.resolve(strict=True)
     extraction_root.relative_to(parent)
     parts = _safe_entry_path(entry.path)
-    output_path = extraction_root.joinpath(*parts)
+    normalized_parts = parts if parts[0].casefold() == "vipdoc" else ("vipdoc", *parts)
+    output_path = extraction_root.joinpath(*normalized_parts)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     output_path.parent.resolve(strict=True).relative_to(extraction_root)
     partial = output_path.with_name(output_path.name + ".partial")
@@ -752,6 +966,15 @@ def observation_dict(observation: VipdataPageObservation) -> dict[str, Any]:
         "page_declared_update_date": observation.page_declared_update_date.isoformat()
         if observation.page_declared_update_date else None,
         "resolved_download_url": observation.resolved_download_url,
+        "download_url_source": observation.download_url_source,
+        "metadata_url": observation.metadata_url,
+        "metadata_observed_at": observation.metadata_observed_at.isoformat()
+        if observation.metadata_observed_at else None,
+        "official_update_at": observation.official_update_at.isoformat()
+        if observation.official_update_at else None,
+        "metadata_sha256": observation.metadata_sha256,
+        "page_html_status": observation.page_html_status,
+        "page_html_reason": observation.page_html_reason,
         "status": observation.status,
         "reason": observation.reason,
         "evidence": list(observation.evidence),
@@ -769,6 +992,8 @@ def package_dict(package: VipdataPackage) -> dict[str, Any]:
         "total_uncompressed_bytes": package.total_uncompressed_bytes,
         "entry_count_by_market": dict(package.entry_count_by_market),
         "download_final_url": package.download_final_url,
+        "download_attempt_count": package.download_attempt_count,
+        "official_cookie_challenge_solved": package.official_cookie_challenge_solved,
         "request_started_at": package.request_started_at.isoformat(),
         "download_finished_at": package.download_finished_at.isoformat(),
     }

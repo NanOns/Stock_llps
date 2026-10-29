@@ -75,7 +75,7 @@ stock-a source-vipdata --target-session YYYY-MM-DD --mode download-verify `
   --amount-to-cny 0.5 --volume-to-shares 100
 ```
 
-`inspect`只核对官网实际更新日期和ZIP链接；`download-verify`仅在页面日期及URL通过检查后下载一次完整包到`G:/codex_tmp`，并核验SHA-256、ZIP CRC、entry范围与安全预算。`--consume-symbol`为可选的单证券NON_PIT研究预览，必须显式给出单位合同；它复用现有TDX读取、Canonical选择和Core，不写PG或持久业务文件。网页未公布可核验日期/下载对象时会返回具体不可用状态，不推测下载地址。
+`inspect`有界读取官网页面及配置登记的`_hsjdayinfo.js`，以其中`HSJDAY_SOFT_TIME`作为官方更新时点，并使用`runtime.defaults.json`登记的ZIP地址`https://data.tdx.com.cn/vipdoc/hsjday.zip`；网页HTML未嵌入ZIP链接或日期时仍按上述独立端点核验。`download-verify`仅在官方日期覆盖目标会话后下载完整包到`G:/codex_tmp`，并核验SHA-256、ZIP CRC、entry范围与安全预算。若官网返回已知静态Cookie挑战，只解析固定字段生成同域Cookie并重试一次，不执行网页JavaScript；未识别的HTML响应直接拒绝。每次运行使用独立临时子目录，避免覆盖先前包。端点集中在`source_policy.vipdata_official`配置，后续官网路径变更时可受控更新。`--consume-symbol`为可选的单证券NON_PIT研究预览，必须显式给出单位合同；它复用现有TDX读取、Canonical选择和Core，不写PG或持久业务文件。
 
 当前可安装包只包含 `src/stock_a` 业务模块；运行依赖为`psycopg[binary]`，并在Windows上安装`tzdata`以提供`Asia/Shanghai`时区数据库。构建使用固定版本`flit_core==4.1.0`。支持Python 3.10及以上，当前已核验的解释器版本以外不据此声称逐版本实测。
 

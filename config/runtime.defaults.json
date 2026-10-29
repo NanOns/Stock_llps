@@ -1,5 +1,5 @@
 {
-  "contract": "STOCK-A-RUNTIME-DEFAULTS/R8",
+  "contract": "STOCK-A-RUNTIME-DEFAULTS/R9",
   "paths": {
     "workspace_root": "G:/codex work/Stock A",
     "delivery_root": "G:/codex work/Stock A 交付",
@@ -35,7 +35,12 @@
       "D:/new_tdx"
     ],
     "all_source_roots_read_only": true,
-    "require_phase0_before_dependent_operations": true
+    "require_phase0_before_dependent_operations": true,
+    "vipdata_official": {
+      "page_url": "https://www.tdx.com.cn/article/vipdata.html",
+      "package_url": "https://data.tdx.com.cn/vipdoc/hsjday.zip",
+      "metadata_url": "https://data.tdx.com.cn/vipdoc/_hsjdayinfo.js"
+    }
   },
   "startup_policy": {
     "require_explicit_validated_configuration": true,
@@ -64,8 +69,8 @@
       {
         "path": "runtime.defaults.json",
         "role": "BUSINESS_RUNTIME_CONFIGURATION",
-        "contract": "STOCK-A-RUNTIME-DEFAULTS/R8",
-        "consumer": "application startup / configuration resolver"
+        "contract": "STOCK-A-RUNTIME-DEFAULTS/R9",
+        "consumer": "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official"
       },
       {
         "path": "contracts/day-chain.contract.json",
