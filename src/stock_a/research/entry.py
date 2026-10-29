@@ -1,7 +1,7 @@
 """只读TDX研究入口；复用日线解码和Core，不写数据库或业务文件。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date, timedelta
 from decimal import Decimal, localcontext
 from fractions import Fraction
@@ -41,7 +41,7 @@ from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
 from stock_a.sources.tdx.capture import TdxCaptureRequest, build_tdx_capture_envelope
 from stock_a.sources.tdx.day_source import open_day_file
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
-from stock_a.sources.tdx.vipdata import VipdataEntryCapture
+from stock_a.sources.tdx.vipdata import VipdataEntryCapture, VipdataTargetQualityReport
 
 
 _CALENDAR_RESOURCE_PATTERN = re.compile(r"^cn_equity_sessions_([0-9]{4})\.json$")
@@ -2184,6 +2184,7 @@ def research_universe_preview(
     source_candidate_pool: Sequence[Mapping[str, Any]] | None = None,
     source_candidate_catalog: Mapping[str, Any] | None = None,
     source_captures: Mapping[str, VipdataEntryCapture] | None = None,
+    source_target_quality_report: VipdataTargetQualityReport | None = None,
 ) -> dict[str, Any]:
     """只读发现TDX来源代码候选并对单页复用既有Core和累计预算。"""
     started = time.monotonic()
@@ -2210,13 +2211,17 @@ def research_universe_preview(
         roots = tuple(source_roots)
     except TypeError as error:
         raise ResearchEntryError("SOURCE_PATH_INVALID", "source_roots必须是根路径序列") from error
+    if source_target_quality_report is not None:
+        if not isinstance(source_target_quality_report, VipdataTargetQualityReport):
+            raise ResearchEntryError("VIPDATA_QUALITY_REPORT_INVALID", "目标日来源质量报告类型无效")
+
     if source_candidate_pool is None:
-        if source_candidate_catalog is not None or source_captures is not None:
+        if source_candidate_catalog is not None or source_captures is not None or source_target_quality_report is not None:
             raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "候选目录摘要必须与候选池同时提供")
         candidates, catalog = _discover_source_candidates(roots, discovery_budget)
     else:
         if (not isinstance(source_candidate_catalog, Mapping)
-                or (not roots and source_captures is None)):
+                or (not roots and source_captures is None and source_target_quality_report is None)):
             raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "显式候选池必须绑定来源根和目录摘要")
         try:
             candidates = tuple(dict(item) for item in source_candidate_pool)
@@ -2240,7 +2245,58 @@ def research_universe_preview(
     candidate_total = len(selected)
     page_candidates = selected[offset:offset + limit]
     candidate_by_symbol = {item["symbol"]: item for item in page_candidates}
-    scannable_candidates = tuple(item for item in page_candidates if item.get("empty_placeholder") is not True)
+    quality_by_symbol: dict[str, Any] = {}
+    if source_target_quality_report is not None:
+        report = source_target_quality_report
+        report_rows = tuple(report.candidates)
+        report_symbols = [item.symbol for item in report_rows]
+        source_symbols = {item["symbol"] for item in candidates}
+        report_counts = {
+            status: sum(item.status == status for item in report_rows)
+            for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED", "NOT_EVALUATED")
+        }
+        if (report.target_session != target
+                or report.package_sha256 != catalog.get("source_package_sha256")
+                or report.package_id != catalog.get("source_package_id")
+                or report.candidate_total != len(candidates)
+                or len(report_rows) != len(candidates)
+                or set(report_symbols) != source_symbols
+                or len(report_symbols) != len(set(report_symbols))
+                or report_counts["TARGET_PRESENT"] != report.target_present
+                or report_counts["TARGET_MISSING"] != report.target_missing
+                or report_counts["READ_FAILED"] != report.read_failed
+                or report_counts["NOT_EVALUATED"] != report.not_evaluated
+                or report.evaluated != report.target_present + report.target_missing + report.read_failed
+                or report.candidate_total != report.evaluated + report.not_evaluated):
+            raise ResearchEntryError("VIPDATA_QUALITY_REPORT_MISMATCH", "目标日来源质量报告与候选池/目标日/分母不一致")
+        quality_by_symbol = {item.symbol: item for item in report_rows}
+        source_candidate_by_symbol = {item["symbol"]: item for item in candidates}
+        if any(
+            symbol not in source_symbols
+            or quality_by_symbol[symbol].status not in {"TARGET_PRESENT", "TARGET_MISSING"}
+            or source_candidate_by_symbol[symbol].get("empty_placeholder") is True
+            for symbol in report.consumer_captures
+        ):
+            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "来源质量报告保留了不属于可读取候选的Capture")
+        if source_captures is None:
+            page_symbols = {item["symbol"] for item in page_candidates}
+            source_captures = {
+                symbol: capture for symbol, capture in report.consumer_captures.items()
+                if symbol in page_symbols
+            }
+        expected_captures = {
+            item["symbol"] for item in page_candidates
+            if item.get("empty_placeholder") is not True
+            and quality_by_symbol[item["symbol"]].status in {"TARGET_PRESENT", "TARGET_MISSING"}
+        }
+        if set(source_captures) != expected_captures:
+            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "同一扫描交给分页消费者的Capture未精确覆盖可读取本页候选")
+
+    scannable_candidates = tuple(
+        item for item in page_candidates
+        if item.get("empty_placeholder") is not True
+        and (not quality_by_symbol or quality_by_symbol[item["symbol"]].status in {"TARGET_PRESENT", "TARGET_MISSING"})
+    )
     if source_captures is not None:
         if not isinstance(source_captures, Mapping):
             raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获必须是按代码索引的映射")
@@ -2272,6 +2328,24 @@ def research_universe_preview(
                 "read_usage": {"bytes": 0, "records": 0},
                 "source_candidate": {**candidate, "contract": "TDX_SOURCE_CANDIDATES_NON_PIT"},
             })
+        elif quality_by_symbol:
+            quality = quality_by_symbol[candidate["symbol"]]
+            if quality.status in {"READ_FAILED", "NOT_EVALUATED"}:
+                page_results.append({
+                    "status": "FAILED" if quality.status == "READ_FAILED" else "NOT_EVALUATED",
+                    "requested_symbol": candidate["symbol"],
+                    "target_bar_present": None,
+                    "source_bar_status": quality.status,
+                    "source_bar_reason": quality.reason,
+                    "error_code": quality.reason,
+                    "message": (
+                        "VIPDATA条目读取失败；未向Core提供行情"
+                        if quality.status == "READ_FAILED"
+                        else "来源候选保留在全市场分母中，但本次目标日预算未评价"
+                    ),
+                    "read_usage": {"bytes": quality.bytes_read, "records": quality.record_count},
+                    "source_candidate": {**candidate, "contract": "TDX_SOURCE_CANDIDATES_NON_PIT"},
+                })
 
     def mark_page_not_evaluated(symbols: Iterable[str], code: str) -> None:
         for symbol in symbols:
@@ -2339,6 +2413,13 @@ def research_universe_preview(
             )
             break
 
+    for item in page_results:
+        quality = quality_by_symbol.get(item.get("requested_symbol"))
+        if quality is not None:
+            item["source_bar_status"] = quality.status
+            item["source_bar_reason"] = quality.reason
+            item["source_bar_quality"] = asdict(quality)
+
     page_order = {item["symbol"]: index for index, item in enumerate(page_candidates)}
     page_results.sort(key=lambda item: page_order[item["requested_symbol"]])
 
@@ -2394,6 +2475,8 @@ def research_universe_preview(
             "target_session": target.isoformat(),
             "status": item["status"],
             "target_bar_present": item.get("target_bar_present"),
+            "source_bar_status": item.get("source_bar_status"),
+            "source_bar_reason": item.get("source_bar_reason"),
             "source_last_session": item.get("source_last_session"),
             "raw_close": fields.get("raw_close"),
             "ma5": fields.get("ma5"),
@@ -2490,6 +2573,19 @@ def research_universe_preview(
         "filtered_pool_complete": offset == 0 and page_remaining == 0 and not_evaluated == 0,
         "pool_completion_note": "本入口只知道当前页；只有offset=0且单页覆盖完整过滤池时才标true。多页汇总须由调用方确认每一计划页均已实际完成；不代表官方上市总体",
     }
+    if quality_by_symbol:
+        page_quality_counts = {
+            status: sum(
+                quality_by_symbol[item["symbol"]].status == status for item in page_candidates
+            )
+            for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED", "NOT_EVALUATED")
+        }
+        coverage_summary["source_target_quality"] = {
+            "candidate_total": source_target_quality_report.candidate_total,
+            "candidate_partition_complete": source_target_quality_report.candidate_total
+            == source_target_quality_report.evaluated + source_target_quality_report.not_evaluated,
+            "page_status_counts": page_quality_counts,
+        }
     result = {
         "status": status,
         "status_explanation": "COMPLETE_WITH_DISCLOSURES仅表示当前页请求已处理并附带数据披露；不表示全候选池已读取，也不表示所有Raw/Core字段已知。请检查本页、未评价分母和逐字段quality/reason。",
@@ -2540,6 +2636,36 @@ def research_universe_preview(
         "summary": short_summary,
         "results": page_results,
     }
+    if source_target_quality_report is not None:
+        report = source_target_quality_report
+        result["source_target_quality"] = {
+            "contract": "TDX_VIPDATA_TARGET_SESSION_SOURCE_QUALITY_NON_PIT_R1",
+            "target_session": report.target_session.isoformat(),
+            "package_id": report.package_id,
+            "package_sha256": report.package_sha256,
+            "candidate_total": report.candidate_total,
+            "evaluated": report.evaluated,
+            "target_present": report.target_present,
+            "target_missing": report.target_missing,
+            "read_failed": report.read_failed,
+            "not_evaluated": report.not_evaluated,
+            "candidate_partition_complete": report.candidate_total == report.evaluated + report.not_evaluated,
+            "evaluation_partition_complete": report.evaluated
+            == report.target_present + report.target_missing + report.read_failed,
+            "official_valid_listing_denominator": "UNKNOWN_NOT_PROVED_BY_ZIP_FILENAMES",
+            "by_market": {key: dict(value) for key, value in report.by_market.items()},
+            "by_board": {key: dict(value) for key, value in report.by_board.items()},
+            "field_quality": {key: dict(value) for key, value in report.field_quality.items()},
+            "pages": [asdict(item) for item in report.pages],
+            "candidates": [asdict(item) for item in report.candidates],
+            "read_usage": {
+                "bytes": report.bytes_read,
+                "records": report.records_read,
+                "elapsed_seconds": report.elapsed_seconds,
+                "budget": asdict(report.budget),
+                "zip_sha_recalculated_per_candidate": False,
+            },
+        }
     if profile_preview_denominators is not None:
         result["profile_preview_denominators"] = profile_preview_denominators
     return result

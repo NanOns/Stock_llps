@@ -1627,6 +1627,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
     page = result["page"]
     budget = result["budget"]
     profile_denominators = result.get("profile_preview_denominators")
+    source_quality = result.get("source_target_quality")
     lines = [
         f"TDX来源候选盘后观察 | {result['target_session']} | {result['candidate_contract']} | {result['price_coordinate']}",
         (
@@ -1656,8 +1657,20 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
             f"发现={budget['discovery_elapsed_seconds']}秒，总耗时={budget['elapsed_seconds']}秒；"
             f"未复权、NON_PIT，不代表全候选池已读取或全部指标已知"
         ),
-        "代码 | 市场/板别 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | 未知原因/错误 | 单股回查",
+        "代码 | 市场/板别 | 目标Bar状态 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | 未知原因/错误 | 单股回查",
     ]
+    if isinstance(source_quality, dict):
+        lines.insert(
+            2,
+            (
+                f"同包全候选目标Bar：总数={source_quality['candidate_total']}，有Bar={source_quality['target_present']}，"
+                f"缺Bar={source_quality['target_missing']}，读取失败={source_quality['read_failed']}，"
+                f"未评价={source_quality['not_evaluated']}；分区闭合="
+                f"{source_quality['candidate_partition_complete'] and source_quality['evaluation_partition_complete']}；"
+                f"有效上市分母仍为UNKNOWN；来源扫描={source_quality['read_usage']['bytes']}字节/"
+                f"{source_quality['read_usage']['records']}条/{source_quality['read_usage']['elapsed_seconds']}秒"
+            ),
+        )
     if profile_denominators is not None:
         components = profile_denominators["components"]
         lines.insert(
@@ -1690,6 +1703,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
         row = [
             item["symbol"],
             f"{item['market']}/{item['board']}",
+            f"{item.get('source_bar_status') or '页内未评价'}:{item.get('source_bar_reason') or '—'}",
             item.get("source_last_session") or "—",
             _summary_field(item.get("raw_close")),
             _summary_field(item.get("ma5")),
@@ -1784,19 +1798,27 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                     or args.market not in {"ALL", "SH", "SZ"}
                     or args.board not in {"ALL", "MAIN_BOARD", "GEM"}):
                 raise ResearchEntryError("UNIVERSE_PAGE_INVALID", "ZIP来源分页或过滤条件无效")
+            target = _parse_target(args.target_session)
+            _calendar, _metadata, _revision, sessions = _load_calendar(target)
+            if target not in sessions:
+                raise ResearchEntryError("TARGET_DATE_INVALID", "目标日期不在已核验的官方交易日历内")
             filtered = tuple(
                 item for item in pool.candidates
                 if (args.market == "ALL" or item["market"] == args.market)
                 and (args.board == "ALL" or item["board"] == args.board)
             )
             page_candidates = filtered[args.offset:args.offset + args.limit]
-            source_captures = {
-                item["symbol"]: read_vipdata_candidate(
-                    package, item, target_session=_parse_target(args.target_session),
-                    units=units, limits=limits,
-                )
-                for item in page_candidates if item.get("empty_placeholder") is not True
-            }
+            target_quality_report = scan_vipdata_target_quality(
+                package,
+                pool,
+                target_session=target,
+                units=units,
+                budget=VipdataTargetScanBudget(),
+                capture_symbols=tuple(
+                    item["symbol"] for item in page_candidates
+                    if item.get("empty_placeholder") is not True
+                ),
+            )
             result = research_universe_preview(
                 target_session=args.target_session,
                 source_roots=(),
@@ -1811,7 +1833,7 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 profile_contract=profile_contract,
                 source_candidate_pool=pool.candidates,
                 source_candidate_catalog=pool.catalog,
-                source_captures=source_captures,
+                source_target_quality_report=target_quality_report,
             )
             result["source_package"] = {
                 "package_id": f"TDX-HSJDAY-SHA256:{package.sha256}",

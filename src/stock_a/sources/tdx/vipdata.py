@@ -1,11 +1,12 @@
 """通达信官网盘后完整包的有界发现、下载和ZIP校验。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 import hashlib
 import io
+from itertools import islice
 import math
 import os
 from pathlib import Path, PurePosixPath
@@ -13,7 +14,7 @@ import re
 import shutil
 import stat
 import time
-from typing import Any, BinaryIO, Callable, Mapping
+from typing import Any, BinaryIO, Callable, Iterable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urljoin, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -222,11 +223,13 @@ class VipdataTargetScanBudget:
     max_candidate_records: int = 1_000_000
     max_candidate_seconds: float = 30.0
     chunk_records: int = 1024
+    max_capture_bytes: int = 512 * 1024 * 1024
 
     def __post_init__(self) -> None:
         for name in (
             "page_size", "max_total_bytes", "max_total_records",
             "max_candidate_bytes", "max_candidate_records", "chunk_records",
+            "max_capture_bytes",
         ):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
@@ -309,6 +312,7 @@ class VipdataTargetQualityReport:
     pages: tuple[VipdataTargetQualityPage, ...]
     candidates: tuple[VipdataCandidateQuality, ...]
     budget: VipdataTargetScanBudget
+    consumer_captures: Mapping[str, VipdataEntryCapture] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -1274,6 +1278,7 @@ def scan_vipdata_target_quality(
     budget: VipdataTargetScanBudget = VipdataTargetScanBudget(),
     market: str = "ALL",
     board: str = "ALL",
+    capture_symbols: Iterable[str] = (),
     on_page: Callable[[VipdataTargetQualityPage], None] | None = None,
 ) -> VipdataTargetQualityReport:
     """在同一已校验ZIP句柄上逐页评价全来源候选，不写文件或业务存储。"""
@@ -1291,9 +1296,31 @@ def scan_vipdata_target_quality(
         if (market == "ALL" or item["market"] == market)
         and (board == "ALL" or item["board"] == board)
     )
+    if isinstance(capture_symbols, (str, bytes)):
+        raise VipdataError("TARGET_SCAN_CAPTURE_INVALID", "消费者捕获代码必须是有限代码序列")
+    try:
+        capture_symbol_list = tuple(islice(iter(capture_symbols), 101))
+    except TypeError as error:
+        raise VipdataError("TARGET_SCAN_CAPTURE_INVALID", "消费者捕获代码必须是有限代码序列") from error
+    if (len(capture_symbol_list) > 100
+            or any(not isinstance(symbol, str) for symbol in capture_symbol_list)
+            or len(capture_symbol_list) != len(set(capture_symbol_list))):
+        raise VipdataError("TARGET_SCAN_CAPTURE_INVALID", "消费者捕获最多100个互异来源代码")
+    candidate_by_symbol = {item["symbol"]: item for item in candidates}
+    if any(symbol not in candidate_by_symbol for symbol in capture_symbol_list):
+        raise VipdataError("TARGET_SCAN_CAPTURE_INVALID", "消费者捕获代码不属于本次过滤后的候选集合")
+    capture_symbol_set = set(capture_symbol_list)
+    capture_bytes_bound = sum(
+        int(candidate_by_symbol[symbol]["zip_entry_bytes"])
+        for symbol in capture_symbol_set
+        if candidate_by_symbol[symbol].get("empty_placeholder") is not True
+    )
+    if capture_bytes_bound > budget.max_capture_bytes:
+        raise VipdataError("TARGET_SCAN_CAPTURE_BUDGET_EXCEEDED", "分页消费者所需原始行超过内存捕获预算")
     pages = vipdata_candidate_pages(candidates, page_size=budget.page_size)
     evaluations: list[VipdataCandidateQuality] = []
     page_summaries: list[VipdataTargetQualityPage] = []
+    consumer_captures: dict[str, VipdataEntryCapture] = {}
     by_market: dict[str, dict[str, int]] = {}
     by_board: dict[str, dict[str, int]] = {}
     field_quality = {
@@ -1350,7 +1377,8 @@ def scan_vipdata_target_quality(
                         try:
                             capture = _read_vipdata_candidate(
                                 package, candidate, target_session=target_session, units=units,
-                                limits=limits, archive=archive, retain_rows=False,
+                                limits=limits, archive=archive,
+                                retain_rows=candidate["symbol"] in capture_symbol_set,
                             )
                         except DayReadError as error:
                             actual_bytes = int(error.context.get("bytes_read_actual", error.context.get("byte_count", 0)))
@@ -1388,6 +1416,8 @@ def scan_vipdata_target_quality(
                             if is_budget:
                                 budget_exhausted_reason = error.code
                         else:
+                            if candidate["symbol"] in capture_symbol_set:
+                                consumer_captures[candidate["symbol"]] = capture
                             row = _target_quality_row(
                                 candidate, package_sha256=package.sha256, target_session=target_session,
                                 source_index=global_index, page_offset=global_index,
@@ -1463,6 +1493,7 @@ def scan_vipdata_target_quality(
         pages=tuple(page_summaries),
         candidates=tuple(evaluations),
         budget=budget,
+        consumer_captures=dict(consumer_captures),
     )
 
 
