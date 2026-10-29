@@ -235,3 +235,334 @@ def query_daily_rows(
         },
         "captured_sdk_output_chars": len(output_capture.getvalue()),
     }
+
+
+def query_identity_reference(
+    target_sessions: tuple[str, ...],
+    *,
+    timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
+    max_rows_per_query: int = 10000,
+    transport: object | None = None,
+) -> dict[str, Any]:
+    """一次登录内有限读取证券基本资料与最多两个明确日期名录，不写文件或推断历史PIT。"""
+    if (not isinstance(target_sessions, tuple) or not 1 <= len(target_sessions) <= 2
+            or any(not isinstance(value, str) for value in target_sessions)
+            or len(set(target_sessions)) != len(target_sessions)):
+        raise ContractError("BaoStock身份探针必须显式提供一至两个不同目标日")
+    try:
+        for value in target_sessions:
+            if date.fromisoformat(value).isoformat() != value:
+                raise ValueError("non-canonical date")
+    except ValueError as error:
+        raise ContractError("BaoStock身份探针日期必须是YYYY-MM-DD") from error
+    if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+            or not 0 < float(timeout_seconds) <= 15):
+        raise ContractError("BaoStock身份探针超时必须大于0且不超过15秒")
+    if type(max_rows_per_query) is not int or not 1 <= max_rows_per_query <= 10000:
+        raise ContractError("BaoStock身份探针每次响应行数上限必须在1至10000之间")
+
+    started_at = _timestamp()
+    output_capture = io.StringIO()
+    try:
+        sdk = transport if transport is not None else importlib.import_module("baostock")
+        sdk_version = getattr(sdk, "__version__", None)
+    except Exception as error:
+        return {
+            "contract": "STOCK-A-BAOSTOCK-IDENTITY-READ/R1",
+            "status": "SOURCE_UNAVAILABLE", "source": "BAOSTOCK",
+            "target_sessions": list(target_sessions), "request_started_at": started_at,
+            "request_completed_at": _timestamp(),
+            "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+            "available_at": None, "published_at": None, "sdk_version": None,
+            "login_attempted": False, "login_error_code": None,
+            "query_calls": 0, "max_rows_per_query": max_rows_per_query,
+            "retry_count": 0, "error_type": type(error).__name__,
+            "reason": "BaoStock客户端不可导入；未发送网络请求",
+        }
+
+    previous_timeout = socket.getdefaulttimeout()
+    login_attempted = False
+    login_code = None
+    login_message = None
+    logout_attempted = False
+    logout_code = None
+    logout_message = None
+    calls: dict[str, Any] = {}
+    query_calls = 0
+    error_type = None
+    status = "RESPONSE_RECEIVED"
+    reason = "BaoStock只读身份接口探针完成"
+
+    def read_result(
+        result: object, *, label: str, query_started: str, target_session: str | None = None,
+    ) -> dict[str, Any]:
+        fields = tuple(str(value) for value in (getattr(result, "fields", None) or ()))
+        code = _code(result)
+        message = _error_message(result)
+        rows: list[dict[str, str]] = []
+        complete = code == "0"
+        local_error = None
+        if code == "0":
+            try:
+                while result.next():
+                    if len(rows) >= max_rows_per_query:
+                        complete = False
+                        break
+                    values = result.get_row_data()
+                    if not isinstance(values, (list, tuple)) or len(values) != len(fields):
+                        complete = False
+                        local_error = "ROW_SCHEMA_LENGTH_MISMATCH"
+                        break
+                    rows.append({name: str(value) for name, value in zip(fields, values, strict=True)})
+            except Exception as error:
+                complete = False
+                local_error = type(error).__name__
+        if not complete and local_error is None and code == "0":
+            local_error = "ROW_BUDGET_EXHAUSTED"
+        return {
+            "query": label,
+            "target_session": target_session,
+            "status": "RESPONSE_RECEIVED" if complete else "QUERY_FAILED",
+            "query_error_code": code,
+            "query_error_message": message,
+            "response_fields": list(fields),
+            "rows_seen": len(rows), "rows": rows,
+            "complete": complete,
+            "request_started_at": query_started,
+            "request_completed_at": _timestamp(),
+            "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+            "local_error": local_error,
+        }
+
+    try:
+        socket.setdefaulttimeout(float(timeout_seconds))
+        login_attempted = True
+        with redirect_stdout(output_capture), redirect_stderr(output_capture):
+            login = sdk.login()
+            login_code = _code(login)
+            login_message = _error_message(login)
+            if login_code != "0":
+                status = "LOGIN_FAILED"
+                reason = "BaoStock登录失败；未发起身份查询"
+            else:
+                try:
+                    query_calls += 1
+                    query_started = _timestamp()
+                    calls["stock_basic"] = read_result(
+                        sdk.query_stock_basic(), label="query_stock_basic", query_started=query_started,
+                    )
+                    if calls["stock_basic"]["status"] != "RESPONSE_RECEIVED":
+                        status = "QUERY_FAILED"
+                        reason = "BaoStock证券基本资料查询未完整返回"
+                    else:
+                        for target_session in target_sessions:
+                            query_calls += 1
+                            query_started = _timestamp()
+                            result = sdk.query_all_stock(day=target_session)
+                            calls.setdefault("all_stock", {})[target_session] = read_result(
+                                result, label="query_all_stock", query_started=query_started,
+                                target_session=target_session,
+                            )
+                            if calls["all_stock"][target_session]["status"] != "RESPONSE_RECEIVED":
+                                status = "QUERY_FAILED"
+                                reason = "BaoStock指定日证券列表未完整返回"
+                                break
+                except Exception as error:
+                    status = "QUERY_FAILED"
+                    error_type = type(error).__name__
+                    reason = "BaoStock身份接口调用失败；异常文本已省略"
+    except Exception as error:
+        status = "SOURCE_UNAVAILABLE"
+        error_type = type(error).__name__
+        reason = "BaoStock身份探针未能完成登录或网络响应；异常文本已省略"
+    finally:
+        if login_code == "0":
+            logout_attempted = True
+            try:
+                with redirect_stdout(output_capture), redirect_stderr(output_capture):
+                    logout = sdk.logout()
+                logout_code = _code(logout)
+                logout_message = _error_message(logout)
+                if logout_code != "0" and status == "RESPONSE_RECEIVED":
+                    status = "LOGOUT_FAILED"
+                    reason = "BaoStock查询完成但登出返回失败"
+            except Exception as error:
+                logout_code = "EXCEPTION"
+                error_type = error_type or type(error).__name__
+                if status == "RESPONSE_RECEIVED":
+                    status = "LOGOUT_FAILED"
+                    reason = "BaoStock查询完成但登出异常；异常文本已省略"
+        socket.setdefaulttimeout(previous_timeout)
+
+    return {
+        "contract": "STOCK-A-BAOSTOCK-IDENTITY-READ/R1",
+        "status": status, "source": "BAOSTOCK",
+        "target_sessions": list(target_sessions),
+        "request_started_at": started_at, "request_completed_at": _timestamp(),
+        "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+        "available_at": None, "published_at": None,
+        "sdk_version": sdk_version,
+        "login_attempted": login_attempted,
+        "login_error_code": login_code, "login_error_message": login_message,
+        "logout_attempted": logout_attempted,
+        "logout_error_code": logout_code, "logout_error_message": logout_message,
+        "query_calls": query_calls, "max_rows_per_query": max_rows_per_query,
+        "retry_count": 0, "calls": calls,
+        "captured_sdk_output_chars": len(output_capture.getvalue()),
+        "error_type": error_type, "reason": reason,
+    }
+
+
+def query_daily_range_rows(
+    symbols: tuple[str, ...],
+    start_date: str,
+    end_date: str,
+    *,
+    timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
+    max_rows_per_symbol: int = 20,
+    transport: object | None = None,
+) -> dict[str, Any]:
+    """一次登录有界查询少量显式证券的未复权日线，不重试或写入来源数据。"""
+    if (not isinstance(symbols, tuple) or not 1 <= len(symbols) <= 20
+            or len(set(symbols)) != len(symbols)
+            or any(not isinstance(symbol, str) or _SYMBOL_PATTERN.fullmatch(symbol) is None
+                   for symbol in symbols)):
+        raise ContractError("BaoStock日线范围查询必须显式提供1至20个不重复沪深代码")
+    if not isinstance(start_date, str) or not isinstance(end_date, str):
+        raise ContractError("BaoStock日线范围必须提供YYYY-MM-DD起止日期")
+    try:
+        start_day, end_day = date.fromisoformat(start_date), date.fromisoformat(end_date)
+    except ValueError as error:
+        raise ContractError("BaoStock日线范围日期必须为YYYY-MM-DD") from error
+    if start_day.isoformat() != start_date or end_day.isoformat() != end_date:
+        raise ContractError("BaoStock日线范围日期必须使用规范YYYY-MM-DD格式")
+    if end_day < start_day or (end_day - start_day).days > 14:
+        raise ContractError("BaoStock日线范围必须正序且跨度不超过14天")
+    if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+            or not 0 < float(timeout_seconds) <= 15):
+        raise ContractError("BaoStock日线查询超时必须大于0且不超过15秒")
+    if type(max_rows_per_symbol) is not int or not 1 <= max_rows_per_symbol <= 20:
+        raise ContractError("BaoStock每证券响应行数上限必须在1至20之间")
+    started_at = _timestamp()
+    try:
+        sdk = transport if transport is not None else importlib.import_module("baostock")
+        sdk_version = getattr(sdk, "__version__", None)
+    except Exception as error:
+        return {
+            "contract": "STOCK-A-BAOSTOCK-DAILY-RANGE-READ/R1",
+            "status": "SOURCE_UNAVAILABLE", "source": "BAOSTOCK", "symbols": list(symbols),
+            "start_date": start_date, "end_date": end_date,
+            "request_started_at": started_at, "request_completed_at": _timestamp(),
+            "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+            "available_at": None, "published_at": None, "sdk_version": None,
+            "login_attempted": False, "query_calls": 0, "retry_count": 0,
+            "error_type": type(error).__name__, "reason": "BaoStock客户端不可导入；未发送网络请求",
+        }
+    previous_timeout = socket.getdefaulttimeout()
+    output_capture = io.StringIO()
+    login_attempted = False
+    login_code = None
+    login_message = None
+    logout_attempted = False
+    logout_code = None
+    logout_message = None
+    rows_by_symbol: dict[str, Any] = {}
+    query_calls = 0
+    status = "RESPONSE_RECEIVED"
+    reason = "BaoStock未复权日线范围查询完成"
+    error_type = None
+    try:
+        socket.setdefaulttimeout(float(timeout_seconds))
+        login_attempted = True
+        with redirect_stdout(output_capture), redirect_stderr(output_capture):
+            login = sdk.login()
+            login_code = _code(login)
+            login_message = _error_message(login)
+            if login_code != "0":
+                status = "LOGIN_FAILED"
+                reason = "BaoStock登录失败；未发起日线查询"
+            else:
+                for symbol in symbols:
+                    query_calls += 1
+                    query_started = _timestamp()
+                    source_code = f"{symbol[:2].lower()}.{symbol[3:]}"
+                    try:
+                        result = sdk.query_history_k_data_plus(
+                            source_code, _QUERY_FIELDS, start_date=start_date,
+                            end_date=end_date, frequency="d", adjustflag="3",
+                        )
+                        fields = tuple(str(value) for value in (getattr(result, "fields", None) or ()))
+                        code = _code(result)
+                        message = _error_message(result)
+                        rows: list[dict[str, str]] = []
+                        complete = code == "0"
+                        local_error = None
+                        if complete:
+                            while result.next():
+                                if len(rows) >= max_rows_per_symbol:
+                                    complete = False
+                                    local_error = "ROW_BUDGET_EXHAUSTED"
+                                    break
+                                values = result.get_row_data()
+                                if not isinstance(values, (list, tuple)) or len(values) != len(fields):
+                                    complete = False
+                                    local_error = "ROW_SCHEMA_LENGTH_MISMATCH"
+                                    break
+                                rows.append({name: str(value) for name, value in zip(fields, values, strict=True)})
+                        rows_by_symbol[symbol] = {
+                            "status": "RESPONSE_RECEIVED" if complete else "QUERY_FAILED",
+                            "query_error_code": code, "query_error_message": message,
+                            "response_fields": list(fields), "rows_seen": len(rows), "rows": rows,
+                            "complete": complete, "adjustflag": "3", "coordinate": "RAW_UNADJUSTED",
+                            "request_started_at": query_started, "request_completed_at": _timestamp(),
+                            "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+                            "local_error": local_error,
+                        }
+                        if not complete:
+                            status = "QUERY_FAILED"
+                            reason = "BaoStock未复权日线未完整返回"
+                            break
+                    except Exception as error:
+                        status = "QUERY_FAILED"
+                        error_type = type(error).__name__
+                        reason = "BaoStock未复权日线查询异常；异常文本已省略"
+                        break
+    except Exception as error:
+        status = "SOURCE_UNAVAILABLE"
+        error_type = type(error).__name__
+        reason = "BaoStock日线来源未能完成登录或响应；异常文本已省略"
+    finally:
+        if login_code == "0":
+            logout_attempted = True
+            try:
+                with redirect_stdout(output_capture), redirect_stderr(output_capture):
+                    logout = sdk.logout()
+                logout_code = _code(logout)
+                logout_message = _error_message(logout)
+                if logout_code != "0" and status == "RESPONSE_RECEIVED":
+                    status = "LOGOUT_FAILED"
+                    reason = "BaoStock日线读取完成但登出返回失败"
+            except Exception as error:
+                logout_code = "EXCEPTION"
+                error_type = error_type or type(error).__name__
+                if status == "RESPONSE_RECEIVED":
+                    status = "LOGOUT_FAILED"
+                    reason = "BaoStock日线读取完成但登出异常；异常文本已省略"
+        socket.setdefaulttimeout(previous_timeout)
+    return {
+        "contract": "STOCK-A-BAOSTOCK-DAILY-RANGE-READ/R1",
+        "status": status, "source": "BAOSTOCK", "symbols": list(symbols),
+        "start_date": start_date, "end_date": end_date,
+        "request_started_at": started_at, "request_completed_at": _timestamp(),
+        "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+        "available_at": None, "published_at": None, "sdk_version": sdk_version,
+        "fields": _QUERY_FIELDS.split(","),
+        "adjustflag": "3", "coordinate": "RAW_UNADJUSTED",
+        "max_rows_per_symbol": max_rows_per_symbol,
+        "login_attempted": login_attempted, "login_error_code": login_code,
+        "login_error_message": login_message, "logout_attempted": logout_attempted,
+        "logout_error_code": logout_code, "logout_error_message": logout_message,
+        "query_calls": query_calls, "retry_count": 0, "responses": rows_by_symbol,
+        "captured_sdk_output_chars": len(output_capture.getvalue()),
+        "error_type": error_type, "reason": reason,
+    }

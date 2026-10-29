@@ -33,6 +33,7 @@ from stock_a.research.profile import (
     WindowIdentity,
     evaluate_profile_kernel,
 )
+from stock_a.sources.baostock.identity import IdentityLifecycleProjection
 from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
 from stock_a.sources.tdx.capture import TdxCaptureRequest, build_tdx_capture_envelope
 from stock_a.sources.tdx.day_source import open_day_file
@@ -656,9 +657,15 @@ def _render_field(value: FieldValue) -> dict[str, Any]:
     return {"value": None, "quality": value.quality, "reason": value.reason}
 
 
+def _unit_trust_status(scale: object) -> str:
+    return "CALLER_DECLARED_ASSUMPTION" if scale is not None else "UNKNOWN_UNIT_AUTHORITY"
+
+
 def _render_raw(decoded: DecodedDay | None, units: UnitContract) -> dict[str, Any]:
     if decoded is None:
         fields = {name: _render_field(unknown("TARGET_BAR_MISSING")) for name in _RAW_FIELDS}
+        raw_amount = unknown("TARGET_BAR_MISSING")
+        raw_volume = unknown("TARGET_BAR_MISSING")
     else:
         fields = {
             "open": _render_field(decoded.raw_open),
@@ -668,13 +675,25 @@ def _render_raw(decoded: DecodedDay | None, units: UnitContract) -> dict[str, An
             "amount": _render_field(decoded.amount),
             "volume": _render_field(decoded.volume),
         }
+        raw_amount = decoded.raw_amount or unknown("RAW_AMOUNT_NOT_RETAINED")
+        raw_volume = decoded.raw_volume or unknown("RAW_VOLUME_NOT_RETAINED")
+    fields["amount"]["raw_stored_value"] = {
+        **_render_field(raw_amount),
+        "storage_type": "TDX_FLOAT32",
+        "unit": "UNVERIFIED_RAW_STORAGE_COORDINATE",
+    }
+    fields["volume"]["raw_stored_value"] = {
+        **_render_field(raw_volume),
+        "storage_type": "TDX_UINT32",
+        "unit": "UNVERIFIED_RAW_STORAGE_COORDINATE",
+    }
     fields["amount"]["unit_trust"] = {
-        "status": "CALLER_DECLARED_ASSUMPTION",
+        "status": "CALLER_DECLARED_ASSUMPTION" if units.amount_to_cny is not None else "UNKNOWN",
         "unit_version": units.version,
-        "amount_to_cny": str(units.amount_to_cny),
+        "amount_to_cny": str(units.amount_to_cny) if units.amount_to_cny is not None else None,
     }
     fields["volume"]["unit_trust"] = {
-        "status": "CALLER_DECLARED_ASSUMPTION",
+        "status": "CALLER_DECLARED_ASSUMPTION" if units.volume_to_shares is not None else "UNKNOWN",
         "unit_version": units.version,
         "volume_to_shares": units.volume_to_shares,
     }
@@ -781,13 +800,20 @@ def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, 
             "first_available_at": "UNKNOWN",
             "published_at": "UNKNOWN",
         },
-        "identity": {
-            "source_symbol": selection.source_symbol,
-            "status": "SOURCE_SYMBOL_ONLY",
-            "security_entity_id": None,
-            "membership_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
-            "listing_lifecycle_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
-        },
+        "identity": (
+            {**selection.identity_projection.as_dict(),
+             "status": selection.identity_projection.identity_status,
+             "security_entity_id": selection.identity_projection.entity_id,
+             "membership_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
+             "listing_lifecycle_status": selection.identity_projection.classification}
+            if selection.identity_projection is not None else {
+                "source_symbol": selection.source_symbol,
+                "status": "SOURCE_SYMBOL_ONLY",
+                "security_entity_id": None,
+                "membership_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
+                "listing_lifecycle_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
+            }
+        ),
         "calendar": {
             "calendar_id": selection.calendar_id,
             "revision": selection.calendar_revision,
@@ -824,9 +850,14 @@ def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, 
         },
         "unit_contract": {
             "version": selection.units.version,
-            "amount_to_cny": str(selection.units.amount_to_cny),
+            "amount_to_cny": str(selection.units.amount_to_cny)
+            if selection.units.amount_to_cny is not None else None,
             "volume_to_shares": selection.units.volume_to_shares,
-            "binding_status": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
+            "amount_authority": _unit_trust_status(selection.units.amount_to_cny),
+            "volume_authority": _unit_trust_status(selection.units.volume_to_shares),
+            "binding_status": "CALLER_DECLARED_RESEARCH_ASSUMPTION"
+            if selection.units.amount_to_cny is not None or selection.units.volume_to_shares is not None
+            else "UNKNOWN_UNIT_AUTHORITY",
         },
         "fields": target_fields,
         "production_admission": "DENY_SOURCE_AUTHORITY_IDENTITY_AND_PIT_UNBOUND",
@@ -1482,6 +1513,7 @@ def research_stock(
     profile_contract: dict[str, Any] | None = None,
     include_baostock_evidence: bool = False,
     vipdata_capture: VipdataEntryCapture | None = None,
+    identity_projection: IdentityLifecycleProjection | None = None,
 ) -> dict[str, Any]:
     """验证目标会话后保留可读Raw；仅在可用前态上调用现有Core。"""
     target = _parse_target(target_session)
@@ -1490,6 +1522,11 @@ def research_stock(
     calendar_years = {item["year"] for item in calendar_metadata}
     session_set = set(calendar_sessions)
     normalized, market_directory, board = _normalize_symbol(symbol)
+    if identity_projection is not None and (
+            not isinstance(identity_projection, IdentityLifecycleProjection)
+            or identity_projection.source_symbol != normalized
+            or identity_projection.target_session != target):
+        raise ResearchEntryError("IDENTITY_PROJECTION_MISMATCH", "BaoStock身份投影与研究代码或目标日期不匹配")
     code = normalized.split(".")[1]
     selected: dict[date, DecodedDay] = {}
     future_source_rows_excluded = 0
@@ -1573,6 +1610,7 @@ def research_stock(
         calendar_evidence_status=_CALENDAR_EVIDENCE_VERIFIED,
         units=units,
         future_source_rows_excluded=future_source_rows_excluded,
+        identity_projection=identity_projection,
     )
     bounded_calendar = MarketSessionCalendar(
         calendar_id=calendar_payload["calendar_id"],
@@ -1600,23 +1638,23 @@ def research_stock(
     unknown_raw = sum(raw_fields[name]["quality"] != "OBSERVED" for name in _RAW_FIELDS)
     unit_dependent_core = {
         "core.amount_ratio5": {
-            "unit_trust": "CALLER_DECLARED_ASSUMPTION",
+            "unit_trust": _unit_trust_status(units.amount_to_cny),
             "interpretation": "同一窗口内的金额比率；金额单位倍率需在窗口内保持一致",
         },
         "core.amount_ratio20": {
-            "unit_trust": "CALLER_DECLARED_ASSUMPTION",
+            "unit_trust": _unit_trust_status(units.amount_to_cny),
             "interpretation": "同一窗口内的金额比率；金额单位倍率需在窗口内保持一致",
         },
         "core.liquidity_mean20": {
-            "unit_trust": "CALLER_DECLARED_ASSUMPTION",
+            "unit_trust": _unit_trust_status(units.amount_to_cny),
             "interpretation": "绝对金额均值使用调用方声明的amount_to_cny倍率",
         },
         "core.volume_ratio5": {
-            "unit_trust": "CALLER_DECLARED_ASSUMPTION",
+            "unit_trust": _unit_trust_status(units.volume_to_shares),
             "interpretation": "同一窗口内的数量比率；数量单位倍率需在窗口内保持一致",
         },
         "core.volume_ratio20": {
-            "unit_trust": "CALLER_DECLARED_ASSUMPTION",
+            "unit_trust": _unit_trust_status(units.volume_to_shares),
             "interpretation": "同一窗口内的数量比率；数量单位倍率需在窗口内保持一致",
         },
     }
@@ -1722,9 +1760,13 @@ def research_stock(
         }),
         "unit_contract": {
             "version": units.version,
-            "amount_to_cny": str(units.amount_to_cny),
+            "amount_to_cny": str(units.amount_to_cny) if units.amount_to_cny is not None else None,
             "volume_to_shares": units.volume_to_shares,
-            "binding_status": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
+            "amount_authority": _unit_trust_status(units.amount_to_cny),
+            "volume_authority": _unit_trust_status(units.volume_to_shares),
+            "binding_status": "CALLER_DECLARED_RESEARCH_ASSUMPTION"
+            if units.amount_to_cny is not None or units.volume_to_shares is not None
+            else "UNKNOWN_UNIT_AUTHORITY",
             "amount_quality_is_unit_authority": False,
             "volume_quality_is_unit_authority": False,
         },
@@ -1810,8 +1852,8 @@ def research_stock(
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "membership_and_listing_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
             "price_coordinate": "RAW_UNADJUSTED",
-            "amount_unit_authority": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
-            "volume_unit_authority": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
+            "amount_unit_authority": _unit_trust_status(units.amount_to_cny),
+            "volume_unit_authority": _unit_trust_status(units.volume_to_shares),
             "acceptance_status": "NOT_ACCEPTED_NOT_PERSISTED",
             "profile_admission": "DENY_TRUSTED_FOUNDATION_SELECTOR_REQUIRED",
         }

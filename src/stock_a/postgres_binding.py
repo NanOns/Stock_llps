@@ -13,6 +13,7 @@ from . import postgres_identity as identity
 _MIGRATIONS = (
     (1, "STOCK_A_INITIAL_R1", ("migrations", "0001_stock_identity.sql")),
     (2, "STOCK_A_INITIAL_R1", ("migrations", "0002_stock_a_business_login.sql")),
+    (3, "STOCK_A_INITIAL_R1", ("migrations", "0003_r01_source_identity_canonical.sql")),
 )
 
 

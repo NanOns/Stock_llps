@@ -6,6 +6,7 @@ from datetime import date
 from typing import Mapping
 
 from stock_a.domain import FieldValue, unknown
+from stock_a.sources.baostock.identity import IdentityLifecycleProjection
 from stock_a.sources.tdx.capture import TdxCaptureEnvelope
 from stock_a.sources.tdx.day import DecodedDay, UnitContract
 
@@ -55,6 +56,7 @@ class CanonicalReadSelection:
     rows: tuple[CanonicalSelectedRow, ...]
     target_fields: tuple[CanonicalFieldFact, ...]
     future_source_rows_excluded: int
+    identity_projection: IdentityLifecycleProjection | None = None
 
 
 def _row_fields(decoded: DecodedDay | None) -> dict[str, FieldValue]:
@@ -82,6 +84,7 @@ def build_tdx_read_selection(
     calendar_evidence_status: str,
     units: UnitContract,
     future_source_rows_excluded: int,
+    identity_projection: IdentityLifecycleProjection | None = None,
 ) -> CanonicalReadSelection:
     """从现有完整扫描和已选行构造选择结果；此函数不执行任何IO。"""
     if not isinstance(capture, TdxCaptureEnvelope) or type(target_session) is not date:
@@ -116,6 +119,11 @@ def build_tdx_read_selection(
         raise ValueError("规范选择拒绝不完整或未核验的TDX来源扫描")
     if type(future_source_rows_excluded) is not int or future_source_rows_excluded < 0:
         raise ValueError("未来来源记录排除数必须是非负整数")
+    if identity_projection is not None and (
+            not isinstance(identity_projection, IdentityLifecycleProjection)
+            or identity_projection.source_symbol != source_symbol
+            or identity_projection.target_session != target_session):
+        raise ValueError("身份投影必须绑定相同来源代码与目标日期")
     if (not official_sessions or official_sessions != tuple(sorted(set(official_sessions)))
             or official_sessions[-1] != target_session
             or any(type(session) is not date for session in official_sessions)):
@@ -141,8 +149,14 @@ def build_tdx_read_selection(
     target = selected_rows.get(target_session)
     target_values = _row_fields(target)
     source_sha256 = capture.content_sha256
-    amount_basis = f"CALLER_DECLARED_SCALE:{units.amount_to_cny}"
-    volume_basis = f"CALLER_DECLARED_SCALE:{units.volume_to_shares}"
+    amount_basis = (
+        f"CALLER_DECLARED_SCALE:{units.amount_to_cny}"
+        if units.amount_to_cny is not None else "UNIT_AUTHORITY_NOT_VERIFIED"
+    )
+    volume_basis = (
+        f"CALLER_DECLARED_SCALE:{units.volume_to_shares}"
+        if units.volume_to_shares is not None else "UNIT_AUTHORITY_NOT_VERIFIED"
+    )
     field_units = {
         "open": ("CNY_PER_SHARE", "TDX_RAW_PRICE_INTEGER_DIV_100"),
         "high": ("CNY_PER_SHARE", "TDX_RAW_PRICE_INTEGER_DIV_100"),
@@ -174,4 +188,5 @@ def build_tdx_read_selection(
         rows=tuple(rows),
         target_fields=target_fields,
         future_source_rows_excluded=future_source_rows_excluded,
+        identity_projection=identity_projection,
     )
