@@ -69,6 +69,8 @@ class UnitAuthority:
     target_session: date | None = None
     tdx_source_sha256: str | None = None
     baostock_source_sha256: str | None = None
+    tdx_amount_raw: Fraction | None = None
+    tdx_volume_raw: int | None = None
     evidence_scope: str = "REAL_SOURCE"
     _authority_proof: object | None = field(default=None, repr=False, compare=False)
 
@@ -107,6 +109,7 @@ class UnitVerificationEvidence:
     adjustflag: str
     coordinate: str
     observed_at: datetime
+    baostock_capture_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -256,7 +259,10 @@ def verify_stable_identity_evidence(evidence: StableIdentityEvidence) -> StableI
             raise TypedBridgeError("IDENTITY_EVIDENCE_INVALID", "合成身份必须使用隔离的SYNTHETIC命名空间")
         evidence_scope = "SYNTHETIC_ONLY"
     elif evidence.source_authority == "EXCHANGE_STABLE_SECURITY_ID":
-        evidence_scope = "REAL_SOURCE"
+        raise TypedBridgeError(
+            "IDENTITY_AUTHORITY_UNVERIFIED",
+            "当前项目没有与交易所真实响应绑定的稳定security_id验证路径；拒绝正式身份签发",
+        )
     else:
         raise TypedBridgeError("IDENTITY_AUTHORITY_UNSUPPORTED", "当前来源未提供可验证的官方稳定security_id")
     try:
@@ -315,6 +321,27 @@ def verify_unit_evidence(evidence: UnitVerificationEvidence) -> UnitAuthority:
             or not _aware_datetime(evidence.observed_at)):
         raise TypedBridgeError("UNIT_EVIDENCE_INVALID", "单位核对缺少同日未复权坐标、来源摘要或观测时钟")
 
+    if not synthetic:
+        from stock_a.sources.baostock.client import resolve_verified_baostock_capture
+
+        capture = resolve_verified_baostock_capture(evidence.baostock_capture_id)
+        try:
+            raw_amount = Decimal(capture.amount_raw) if capture is not None else None
+            raw_volume = int(capture.volume_raw) if capture is not None else None
+        except (ValueError, ArithmeticError):
+            raw_amount, raw_volume = None, None
+        if (capture is None or capture.source_symbol != source_symbol
+                or capture.target_session != evidence.target_session
+                or capture.adjustflag != evidence.adjustflag
+                or capture.source_sha256 != evidence.baostock_source_sha256
+                or capture.captured_at != evidence.observed_at
+                or raw_amount != evidence.baostock_amount_cny
+                or raw_volume != evidence.baostock_volume_shares):
+            raise TypedBridgeError(
+                "UNIT_SOURCE_CAPTURE_UNBOUND",
+                "真实单位核验必须绑定本进程已完成的BaoStock SDK响应、代码、日期、原始字段、捕获时钟和内容摘要",
+            )
+
     amount_scale: Decimal | None = None
     amount_status = "UNKNOWN"
     bao_amount = evidence.baostock_amount_cny
@@ -354,6 +381,7 @@ def verify_unit_evidence(evidence: UnitVerificationEvidence) -> UnitAuthority:
         "source_symbol": source_symbol, "target_session": evidence.target_session,
         "tdx_source_sha256": evidence.tdx_source_sha256,
         "baostock_source_sha256": evidence.baostock_source_sha256,
+        "tdx_amount_raw": tdx_amount, "tdx_volume_raw": tdx_volume,
         "evidence_scope": evidence_scope,
     }
     return _remember_authority(
@@ -550,7 +578,7 @@ def prepare_baostock_source_reference_candidates(
     *,
     capture_id: str | None = None,
 ) -> tuple[SourceContentCandidate, SourceCaptureCandidate]:
-    """把Bao只读响应摘要转为PG来源候选；规范化文本仅在内存计算摘要，不保存payload。"""
+    """仅将本进程真实SDK已完成的Bao响应转为PG来源候选，不保存响应payload。"""
     if (not isinstance(snapshot, Mapping)
             or snapshot.get("status") != "RESPONSE_RECEIVED"
             or snapshot.get("source") != "BAOSTOCK"):
@@ -591,7 +619,6 @@ def prepare_baostock_source_reference_candidates(
     canonical_digest = _digest(content_projection)
     try:
         namespace = str(uuid.UUID(namespace_id))
-        normalized_capture_id = str(uuid.UUID(capture_id)) if capture_id else str(uuid.uuid4())
         started = min(datetime.fromisoformat(item["request_started_at"]) for item in flat_calls)
         completed = max(datetime.fromisoformat(item["request_completed_at"]) for item in flat_calls)
     except (ValueError, TypeError, KeyError, AttributeError) as error:
@@ -599,6 +626,23 @@ def prepare_baostock_source_reference_candidates(
     if (not _aware_datetime(started) or not _aware_datetime(completed) or started > completed
             or snapshot.get("capture_clock_role") != "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE"):
         raise TypedBridgeError("SOURCE_CAPTURE_INVALID", "BaoStock只读捕获时钟角色或顺序非法")
+    from stock_a.sources.baostock.client import resolve_verified_baostock_identity_capture
+
+    attestation = resolve_verified_baostock_identity_capture(snapshot.get("verified_source_capture_id"))
+    if (attestation is None or attestation.source_sha256 != source_sha
+            or attestation.canonical_digest != canonical_digest
+            or attestation.normalized_count != rows_count
+            or attestation.request_started_at != started or attestation.request_completed_at != completed):
+        raise TypedBridgeError(
+            "SOURCE_CAPTURE_UNBOUND",
+            "BaoStock正式来源候选必须绑定本进程真实SDK成功响应的内容、行数和观测时钟",
+        )
+    try:
+        normalized_capture_id = str(uuid.UUID(attestation.capture_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise TypedBridgeError("SOURCE_CAPTURE_INVALID", "BaoStock真实来源捕获引用非法") from error
+    if capture_id is not None and capture_id != normalized_capture_id:
+        raise TypedBridgeError("SOURCE_CAPTURE_UNBOUND", "数据库capture_id必须使用真实SDK响应对应的捕获身份")
     dataset_id = "BAOSTOCK_IDENTITY_REFERENCE"
     content_id = _digest({"dataset_id": dataset_id, "byte_sha256": source_sha})
     content = SourceContentCandidate(namespace, content_id, dataset_id, source_sha, len(evidence_text))
@@ -976,7 +1020,7 @@ def prepare_canonical_daily_candidate(
     unit_fields = (
         "status", "version", "amount_unit", "volume_unit", "amount_status", "volume_status",
         "amount_scale", "volume_scale", "source_symbol", "target_session", "tdx_source_sha256",
-        "baostock_source_sha256", "evidence_scope",
+        "baostock_source_sha256", "tdx_amount_raw", "tdx_volume_raw", "evidence_scope",
     )
     if (not isinstance(units, UnitAuthority)
             or not _authority_is_issued(units, "UNIT", unit_fields)):
@@ -998,6 +1042,20 @@ def prepare_canonical_daily_candidate(
             units.volume_unit != "SHARES" or units.volume_scale != selection.units.volume_to_shares
             or selection.units.volume_to_shares is None):
         raise TypedBridgeError("UNIT_CONTRACT_MISMATCH", "成交量单位证据与实际解码倍率不一致")
+    if units.amount_status == "VERIFIED":
+        normalized_amount = groups["amount"].values[0]
+        raw_amount = (Fraction(normalized_amount) / Fraction(selection.units.amount_to_cny)
+                      if normalized_amount is not None else None)
+        if units.tdx_amount_raw != raw_amount:
+            raise TypedBridgeError("UNIT_SOURCE_VALUE_MISMATCH", "单位证据中的TDX成交额与当前Canonical原始行不一致")
+    if units.volume_status == "VERIFIED":
+        normalized_volume = groups["volume"].values[0]
+        raw_volume = (normalized_volume // selection.units.volume_to_shares
+                      if normalized_volume is not None else None)
+        if (normalized_volume is None
+                or normalized_volume % selection.units.volume_to_shares
+                or units.tdx_volume_raw != raw_volume):
+            raise TypedBridgeError("UNIT_SOURCE_VALUE_MISMATCH", "单位证据中的TDX成交量与当前Canonical原始行不一致")
     if units.amount_status == "UNKNOWN" and units.amount_unit != "UNKNOWN":
         raise TypedBridgeError("UNIT_CONTRACT_MISMATCH", "未验证成交额必须保持未知单位")
     if units.volume_status == "UNKNOWN" and units.volume_unit != "UNKNOWN":

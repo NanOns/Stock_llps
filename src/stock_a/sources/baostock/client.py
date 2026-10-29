@@ -5,10 +5,14 @@ from contextlib import redirect_stderr, redirect_stdout
 from datetime import date, datetime, timezone
 import importlib
 from importlib import metadata
+from dataclasses import dataclass
+from hashlib import sha256
 import io
+import json
 import re
 import socket
 from typing import Any
+from uuid import uuid4
 
 from stock_a.domain import ContractError
 
@@ -18,6 +22,131 @@ _PINNED_SDK_VERSION = "0.9.3"
 _QUERY_FIELDS = "date,code,open,high,low,close,volume,amount,adjustflag,turn,tradestatus,isST"
 _MAX_QUERY_ROWS = 8
 _DEFAULT_SOCKET_TIMEOUT_SECONDS = 30.0
+_VERIFIED_DAILY_CAPTURES: dict[str, "BaoStockDailySourceCapture"] = {}
+_VERIFIED_IDENTITY_CAPTURES: dict[str, "BaoStockIdentitySourceCapture"] = {}
+
+
+@dataclass(frozen=True)
+class BaoStockDailySourceCapture:
+    """本进程内由真实SDK成功响应签发的单代码/单日原始行绑定。"""
+
+    capture_id: str
+    source_symbol: str
+    target_session: date
+    adjustflag: str
+    amount_raw: str
+    volume_raw: str
+    source_sha256: str
+    captured_at: datetime
+
+
+@dataclass(frozen=True)
+class BaoStockIdentitySourceCapture:
+    """本进程内由真实SDK成功身份接口响应签发的内容摘要绑定。"""
+
+    capture_id: str
+    source_sha256: str
+    canonical_digest: str
+    normalized_count: int
+    request_started_at: datetime
+    request_completed_at: datetime
+
+
+def resolve_verified_baostock_capture(capture_id: str) -> BaoStockDailySourceCapture | None:
+    """解析本进程内真实SDK签发的来源引用；合成transport不会进入注册表。"""
+    if not isinstance(capture_id, str):
+        return None
+    return _VERIFIED_DAILY_CAPTURES.get(capture_id)
+
+
+def resolve_verified_baostock_identity_capture(capture_id: str) -> BaoStockIdentitySourceCapture | None:
+    """解析真实SDK完成的身份查询封套；伪造Mapping与测试transport不签发。"""
+    if not isinstance(capture_id, str):
+        return None
+    return _VERIFIED_IDENTITY_CAPTURES.get(capture_id)
+
+
+def _issue_verified_identity_capture(snapshot: dict[str, Any], *, injected_transport: bool) -> str | None:
+    if injected_transport or snapshot.get("status") != "RESPONSE_RECEIVED":
+        return None
+    calls = snapshot.get("calls")
+    if not isinstance(calls, dict) or not calls:
+        return None
+    flat_calls: list[dict[str, Any]] = []
+    for value in calls.values():
+        if isinstance(value, dict) and "query" in value:
+            flat_calls.append(value)
+        elif isinstance(value, dict):
+            flat_calls.extend(item for item in value.values() if isinstance(item, dict))
+    if (not flat_calls or any(item.get("status") != "RESPONSE_RECEIVED" or item.get("complete") is not True
+                              for item in flat_calls)):
+        return None
+    rows_count = 0
+    for item in flat_calls:
+        rows, fields = item.get("rows"), item.get("response_fields")
+        if not isinstance(rows, list) or not isinstance(fields, list) or item.get("rows_seen") != len(rows):
+            return None
+        rows_count += len(rows)
+    if rows_count <= 0:
+        return None
+    projection = {
+        "contract": snapshot.get("contract"), "source": snapshot.get("source"),
+        "calls": [{"query": item.get("query"), "target_session": item.get("target_session"),
+                   "response_fields": item.get("response_fields"), "rows": item.get("rows")}
+                  for item in flat_calls],
+    }
+    try:
+        evidence = json.dumps(projection, sort_keys=True, separators=(",", ":"),
+                             ensure_ascii=False, allow_nan=False).encode("utf-8")
+        started = min(datetime.fromisoformat(item["request_started_at"]) for item in flat_calls)
+        completed = max(datetime.fromisoformat(item["request_completed_at"]) for item in flat_calls)
+        if (started.tzinfo is None or completed.tzinfo is None or started > completed
+                or snapshot.get("capture_clock_role") != "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE"):
+            return None
+    except (TypeError, ValueError, KeyError, OverflowError):
+        return None
+    source_digest = sha256(evidence).hexdigest()
+    canonical_digest = sha256(json.dumps(projection, sort_keys=True, separators=(",", ":"),
+                                         ensure_ascii=False, allow_nan=False).encode("utf-8")).hexdigest()
+    capture = BaoStockIdentitySourceCapture(str(uuid4()), source_digest, canonical_digest,
+                                            rows_count, started, completed)
+    _VERIFIED_IDENTITY_CAPTURES[capture.capture_id] = capture
+    while len(_VERIFIED_IDENTITY_CAPTURES) > 64:
+        _VERIFIED_IDENTITY_CAPTURES.pop(next(iter(_VERIFIED_IDENTITY_CAPTURES)))
+    return capture.capture_id
+
+
+def _issue_verified_daily_capture(
+    *, symbol: str, target_session: str, fields: tuple[str, ...], rows: list[dict[str, str]],
+    completed_at: str, injected_transport: bool,
+) -> BaoStockDailySourceCapture | None:
+    if injected_transport or len(rows) != 1:
+        return None
+    row = rows[0]
+    required = {"date", "code", "open", "high", "low", "close", "volume", "amount", "adjustflag"}
+    if (not required.issubset(fields) or row.get("code", "").lower() != symbol.lower()
+            or row.get("date") != target_session or row.get("adjustflag") != "3"):
+        return None
+    try:
+        captured_at = datetime.fromisoformat(completed_at)
+        if captured_at.tzinfo is None or captured_at.utcoffset() is None:
+            return None
+        payload = {"fields": fields, "row": row, "source_symbol": symbol.lower(),
+                   "target_session": target_session, "adjustflag": "3", "captured_at": completed_at}
+        digest = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                                   separators=(",", ":")).encode("utf-8")).hexdigest()
+        capture = BaoStockDailySourceCapture(
+            capture_id=str(uuid4()), source_symbol=symbol.upper(),
+            target_session=date.fromisoformat(target_session), adjustflag="3",
+            amount_raw=row["amount"], volume_raw=row["volume"], source_sha256=digest,
+            captured_at=captured_at,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    _VERIFIED_DAILY_CAPTURES[capture.capture_id] = capture
+    while len(_VERIFIED_DAILY_CAPTURES) > 256:
+        _VERIFIED_DAILY_CAPTURES.pop(next(iter(_VERIFIED_DAILY_CAPTURES)))
+    return capture
 
 
 def _timestamp() -> str:
@@ -291,13 +420,20 @@ def query_daily_rows(
             _close_sdk_socket(injected_transport=transport is not None)
         socket.setdefaulttimeout(previous_timeout)
 
+    completed_at = _timestamp()
+    verified_capture = None
+    if status == "RESPONSE_RECEIVED" and login_code == "0" and query_code == "0":
+        verified_capture = _issue_verified_daily_capture(
+            symbol=source_code, target_session=target_session, fields=response_fields, rows=rows,
+            completed_at=completed_at, injected_transport=transport is not None,
+        )
     return _unavailable_result(
         status=status, symbol=symbol, target_session=target_session, started_at=started_at,
         sdk_version=sdk_version, message=reason, error_type=error_type,
         login_code=login_code, login_message=login_message, login_attempted=login_attempted,
         query_code=query_code, query_message=query_message, logout_attempted=logout_attempted,
         logout_code=logout_code, logout_message=logout_message, response_fields=response_fields,
-        rows=tuple(rows), completed_at=_timestamp(), endpoint=endpoint,
+        rows=tuple(rows), completed_at=completed_at, endpoint=endpoint,
     ) | {
         "requested_source_code": source_code,
         "request": {
@@ -311,6 +447,8 @@ def query_daily_rows(
             "retry_count": 0,
         },
         "captured_sdk_output_chars": len(output_capture.getvalue()),
+        "verified_source_capture_id": verified_capture.capture_id if verified_capture else None,
+        "verified_source_sha256": verified_capture.source_sha256 if verified_capture else None,
     }
 
 
@@ -491,7 +629,7 @@ def query_identity_reference(
             _close_sdk_socket(injected_transport=transport is not None)
         socket.setdefaulttimeout(previous_timeout)
 
-    return {
+    snapshot = {
         "contract": "STOCK-A-BAOSTOCK-IDENTITY-READ/R1",
         "status": status, "source": "BAOSTOCK",
         "target_sessions": list(target_sessions),
@@ -510,6 +648,10 @@ def query_identity_reference(
         "captured_sdk_output_chars": len(output_capture.getvalue()),
         "error_type": error_type, "reason": reason,
     }
+    snapshot["verified_source_capture_id"] = _issue_verified_identity_capture(
+        snapshot, injected_transport=transport is not None,
+    )
+    return snapshot
 
 
 def query_daily_range_rows(
