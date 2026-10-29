@@ -1271,6 +1271,13 @@ def _target_quality_row(
     )
 
 
+class _VipdataConsumerCallbackError(Exception):
+    """把消费者错误与ZIP/来源读取错误区分开，避免错误归类为来源故障。"""
+
+    def __init__(self, original: Exception) -> None:
+        self.original = original
+
+
 def scan_vipdata_target_quality(
     package: VerifiedVipdataPackage,
     pool: VipdataCandidatePool,
@@ -1282,6 +1289,7 @@ def scan_vipdata_target_quality(
     board: str = "ALL",
     evaluation_symbols: Iterable[str] | None = None,
     capture_symbols: Iterable[str] = (),
+    on_candidate: Callable[[VipdataCandidateQuality, VipdataEntryCapture | None], None] | None = None,
     on_page: Callable[[VipdataTargetQualityPage], None] | None = None,
 ) -> VipdataTargetQualityReport:
     """在同一已校验ZIP句柄上评价全来源或明确指定的候选，不写文件或业务存储。"""
@@ -1369,6 +1377,7 @@ def scan_vipdata_target_quality(
                 page_begin = len(evaluations)
                 for within_page, candidate in enumerate(page):
                     global_index = page_index * budget.page_size + within_page
+                    consumer_capture: VipdataEntryCapture | None = None
                     if evaluation_symbol_set is not None and candidate["symbol"] not in evaluation_symbol_set:
                         row = _target_quality_row(
                             candidate, package_sha256=package.sha256, target_session=target_session,
@@ -1412,7 +1421,7 @@ def scan_vipdata_target_quality(
                             capture = _read_vipdata_candidate(
                                 package, candidate, target_session=target_session, units=units,
                                 limits=limits, archive=archive,
-                                retain_rows=candidate["symbol"] in capture_symbol_set,
+                                retain_rows=(candidate["symbol"] in capture_symbol_set or on_candidate is not None),
                             )
                         except DayReadError as error:
                             actual_bytes = int(error.context.get("bytes_read_actual", error.context.get("byte_count", 0)))
@@ -1450,6 +1459,7 @@ def scan_vipdata_target_quality(
                             if is_budget:
                                 budget_exhausted_reason = error.code
                         else:
+                            consumer_capture = capture
                             if candidate["symbol"] in capture_symbol_set:
                                 consumer_captures[candidate["symbol"]] = capture
                             row = _target_quality_row(
@@ -1479,6 +1489,11 @@ def scan_vipdata_target_quality(
                     evaluations.append(row)
                     for counts in (by_market.setdefault(row.market, {}), by_board.setdefault(row.board, {})):
                         counts[row.status] = counts.get(row.status, 0) + 1
+                    if on_candidate is not None:
+                        try:
+                            on_candidate(row, consumer_capture)
+                        except Exception as error:
+                            raise _VipdataConsumerCallbackError(error) from error
 
                 subset = evaluations[page_begin:]
                 page_summary = VipdataTargetQualityPage(
@@ -1498,6 +1513,8 @@ def scan_vipdata_target_quality(
                 page_summaries.append(page_summary)
                 if on_page is not None:
                     on_page(page_summary)
+    except _VipdataConsumerCallbackError as error:
+        raise error.original
     except (OSError, zipfile.BadZipFile, RuntimeError) as error:
         raise VipdataError("ZIP_TARGET_SCAN_FAILED", "VIPDATA目标日全范围扫描遇到包级读取错误") from error
 
