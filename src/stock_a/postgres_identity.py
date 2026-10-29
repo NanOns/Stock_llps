@@ -495,7 +495,11 @@ def _load_private_credentials(path: Path | None = None) -> dict[str, Any]:
         raise FileNotFoundError("登记的PG凭据文件不存在") from error
     except PermissionError as error:
         raise PermissionError("操作系统拒绝读取登记的PG凭据文件") from error
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    except UnicodeError as error:
+        raise _CredentialContractError("TEXT_ENCODING_INVALID") from error
+    except json.JSONDecodeError as error:
+        raise _CredentialContractError("JSON_INVALID") from error
+    except OSError as error:
         raise RuntimeError("登记的PG凭据文件读取失败") from error
     allowed_fields = {"schema", "host", "port", "database", "username", "password"}
     if not isinstance(data, dict):

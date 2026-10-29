@@ -981,6 +981,10 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
     source_quality = dimensions.get("source_quality", {})
     raw = source_quality.get("raw_availability", {})
     core = source_quality.get("core_availability", {})
+    canonical = result.get("canonical_selection", {})
+    canonical_source = canonical.get("source", {})
+    canonical_fields = canonical.get("fields", {})
+    canonical_observed = sum(item.get("quality") == "OBSERVED" for item in canonical_fields.values())
     lines = [
         f"基础量价研究解释 | {result.get('requested_symbol', '未知代码')} | 目标日 {result.get('target_session', '未知')} | NON_PIT_RETROSPECTIVE",
         (
@@ -994,6 +998,12 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
             "来源权威/首捕时钟未绑定；这是历史研究预览，不是实时/PIT数据或正式Profile。"
         ),
     ]
+    lines.append(
+        f"Canonical只读选择：{canonical.get('selection_status', '未生成')}；"
+        f"目标字段OBSERVED={canonical_observed}/{len(canonical_fields)}；"
+        f"source SHA-256={str(canonical_source.get('raw_byte_sha256', '未知'))[:12]}…；"
+        f"准入={canonical.get('production_admission', 'UNKNOWN')}；未持久接受。"
+    )
     group_labels = (
         ("price_trend", "价格与趋势"),
         ("position_volatility", "位置与波动"),

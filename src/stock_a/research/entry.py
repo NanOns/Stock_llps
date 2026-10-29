@@ -16,7 +16,9 @@ import re
 import stat
 import time
 from typing import Any, Iterable
+from uuid import uuid4
 
+from stock_a.canonical.selection import CanonicalReadSelection, build_tdx_read_selection
 from stock_a.domain import FieldValue, exact_number, unknown
 from stock_a.research.core import (
     CORE_MAX_ACTUAL_LOOKBACK,
@@ -32,6 +34,7 @@ from stock_a.research.profile import (
     evaluate_profile_kernel,
 )
 from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
+from stock_a.sources.tdx.capture import TdxCaptureRequest, build_tdx_capture_envelope
 from stock_a.sources.tdx.day_source import open_day_file
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
 
@@ -675,6 +678,134 @@ def _render_raw(decoded: DecodedDay | None, units: UnitContract) -> dict[str, An
         "volume_to_shares": units.volume_to_shares,
     }
     return fields
+
+
+def _core_history_from_selection(selection: CanonicalReadSelection) -> tuple[CoreObservation, ...]:
+    """让既有Core直接消费本次规范选择的typed字段行。"""
+    return tuple(
+        CoreObservation(
+            session=row.session,
+            state=row.state,
+            coordinate_id=row.coordinate_id,
+            open=row.open,
+            high=row.high,
+            low=row.low,
+            close=row.close,
+            amount=row.amount,
+            volume=row.volume,
+        )
+        for row in selection.rows
+    )
+
+
+def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, Any]:
+    capture = selection.capture
+    target_fields: dict[str, Any] = {}
+    for fact in selection.target_fields:
+        payload = _render_field(fact.value)
+        payload.update({
+            "field_id": fact.field_id,
+            "target_session": fact.target_session.isoformat(),
+            "source_session": fact.source_session.isoformat() if fact.source_session else None,
+            "unit": fact.unit,
+            "unit_basis": fact.unit_basis,
+            "source_sha256": fact.source_sha256,
+            "field_digest": None,
+            "field_digest_status": "BLOCKED_STABLE_SECURITY_ID_UNBOUND",
+        })
+        target_fields[fact.field_id.removeprefix("raw.")] = payload
+    actual_rows = sum(row.state == "ACTUAL" for row in selection.rows)
+    missing_rows = len(selection.rows) - actual_rows
+    target_present = any(fact.source_session == selection.target_session for fact in selection.target_fields)
+    return {
+        "contract": "STOCK-A-TDX-CANONICAL-READ-SELECTION/R1",
+        "selection_status": "EPHEMERAL_READ_ONLY_SELECTION_COMPLETE",
+        "acceptance_status": "NOT_ACCEPTED_NOT_PERSISTED",
+        "target_session": selection.target_session.isoformat(),
+        "target_bar_status": "PRESENT" if target_present else "UNKNOWN_NO_TDX_BAR",
+        "source_candidate_scope": {
+            "kind": "ONE_EXPLICIT_SOURCE_SYMBOL_QUERY",
+            "candidate_count": 1,
+            "selected_count": 1,
+            "official_universe_denominator": "UNKNOWN",
+            "exclusion_reason": "来源代码不是官方成员或稳定证券身份证明",
+        },
+        "source": {
+            "dataset_id": capture.dataset_id,
+            "dataset_version": capture.dataset_version,
+            "capture_id": capture.capture_id,
+            "capture_id_role": "EPHEMERAL_CURRENT_READ_ONLY_INVOCATION",
+            "capture_business_digest_sha256": capture.business_digest_sha256,
+            "raw_byte_sha256": capture.content_sha256,
+            "record_count": capture.record_count,
+            "byte_count": capture.byte_count,
+            "record_date_range": [capture.first_date.isoformat(), capture.last_date.isoformat()],
+            "complete_read": True,
+            "source_authority": "UNVERIFIED_LOCAL_TDX_INSTALLATION",
+            "source_identity": {
+                "requested_access": capture.source_identity.requested_access,
+                "path_binding_verified": capture.source_identity.path_binding_verified,
+                "handle_path_verified": capture.source_identity.handle_path_verified,
+                "size_stable_during_read": capture.source_identity.size_before == capture.source_identity.size_after,
+                "mtime_stable_during_read": capture.source_identity.mtime_ns_before == capture.source_identity.mtime_ns_after,
+            },
+            "observed_started_at": capture.observed_started_at.isoformat(),
+            "observed_completed_at": capture.observed_completed_at.isoformat(),
+            "observation_clock_role": "LOCAL_FILE_READ_TIME_ONLY",
+            "first_available_at": "UNKNOWN",
+            "published_at": "UNKNOWN",
+        },
+        "identity": {
+            "source_symbol": selection.source_symbol,
+            "status": "SOURCE_SYMBOL_ONLY",
+            "security_entity_id": None,
+            "membership_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
+            "listing_lifecycle_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
+        },
+        "calendar": {
+            "calendar_id": selection.calendar_id,
+            "revision": selection.calendar_revision,
+            "evidence_status": selection.calendar_evidence_status,
+            "target_session_verified": True,
+            "missing_bar_semantics": "UNKNOWN; 不推断停牌、退市或上市前",
+        },
+        "coordinate": {
+            "price": "RAW_UNADJUSTED",
+            "adjustment_status": "NOT_APPLIED_IDENTITY_AND_EVENT_AVAILABILITY_UNRESOLVED",
+        },
+        "time_availability": {
+            "mode": "NON_PIT_RETROSPECTIVE",
+            "observed_at_role": "LOCAL_FILE_READ_TIME_ONLY",
+            "available_at": "UNKNOWN",
+            "first_available_at": "UNKNOWN",
+            "durable_at": "NOT_CREATED",
+            "accepted_at": "NOT_CREATED",
+            "availability_digest_status": "NOT_COMPUTED_NO_DURABLE_ACCEPTANCE_OR_SOURCE_AVAILABILITY_CLOCK",
+        },
+        "history_selection": {
+            "calendar_session_count": len(selection.rows),
+            "actual_source_rows_selected": actual_rows,
+            "missing_bar_sessions_unknown": missing_rows,
+            "maximum_selected_session": selection.rows[-1].session.isoformat() if selection.rows else None,
+            "future_source_rows_excluded": selection.future_source_rows_excluded,
+            "future_rows_used_by_core": False,
+            "field_window_digest_status": "BLOCKED_STABLE_SECURITY_ID_UNBOUND",
+        },
+        "field_identity": {
+            "field_digest_status": "BLOCKED_STABLE_SECURITY_ID_UNBOUND",
+            "window_digest_status": "BLOCKED_STABLE_SECURITY_ID_UNBOUND",
+            "reason": "不得以来源代码冒充稳定security_entity_id",
+        },
+        "unit_contract": {
+            "version": selection.units.version,
+            "amount_to_cny": str(selection.units.amount_to_cny),
+            "volume_to_shares": selection.units.volume_to_shares,
+            "binding_status": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
+        },
+        "fields": target_fields,
+        "production_admission": "DENY_SOURCE_AUTHORITY_IDENTITY_AND_PIT_UNBOUND",
+        "profile_admission": "DENY_TRUSTED_FOUNDATION_SELECTOR_REQUIRED",
+    }
 
 
 def _field_relation(left: FieldValue, right: FieldValue) -> FieldValue:
@@ -1335,6 +1466,7 @@ def research_stock(
     code = normalized.split(".")[1]
     root, path = _source_path(source_roots, market_directory, code)
     selected: dict[date, DecodedDay] = {}
+    future_source_rows_excluded = 0
     try:
         with open_day_file(path, (root,), units, limits) as scan:
             for located in scan:
@@ -1345,7 +1477,9 @@ def research_stock(
                         f"TDX来源在已核验年度包含非交易会话记录：{day.isoformat()}",
                         context={"byte_count": scan.progress[0], "record_count": scan.progress[1]},
                     )
-                if day in session_set and day <= target:
+                if day > target:
+                    future_source_rows_excluded += 1
+                elif day in session_set:
                     selected[day] = located.decoded
             file_summary = scan.summary
     except DayReadError:
@@ -1356,12 +1490,40 @@ def research_stock(
         raise ResearchEntryError("SOURCE_IO_ERROR", "只读TDX扫描遇到操作系统I/O错误") from error
 
     session_slice = tuple(day for day in calendar_sessions if day <= target)
+    capture_request = TdxCaptureRequest(
+        capture_id=str(uuid4()),
+        dataset_id="TDX_DAILY_BARS",
+        dataset_version="TDX_DAY_RECORD_32B_CANDIDATE",
+        query_scope={
+            "source_symbol": normalized,
+            "target_session": target.isoformat(),
+            "selection_mode": "OFFICIAL_SESSIONS_NOT_AFTER_TARGET",
+            "research_mode": "NON_PIT_RETROSPECTIVE",
+        },
+        query_start=min(file_summary.scan.first_date, target),
+        query_end=max(file_summary.scan.last_date, target),
+        parser_version="stock_a.sources.tdx.day.decode_day_record",
+        validation_contract="TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00",
+    )
+    capture_envelope = build_tdx_capture_envelope(file_summary, capture_request)
+    canonical_selection = build_tdx_read_selection(
+        source_symbol=normalized,
+        target_session=target,
+        official_sessions=session_slice,
+        selected_rows=selected,
+        capture=capture_envelope,
+        calendar_id=calendar_payload["calendar_id"],
+        calendar_revision=calendar_revision,
+        calendar_evidence_status=_CALENDAR_EVIDENCE_VERIFIED,
+        units=units,
+        future_source_rows_excluded=future_source_rows_excluded,
+    )
     bounded_calendar = MarketSessionCalendar(
         calendar_id=calendar_payload["calendar_id"],
         revision=calendar_revision,
         sessions=session_slice,
     )
-    history = tuple(_observation(day, normalized, selected.get(day)) for day in session_slice)
+    history = _core_history_from_selection(canonical_selection)
     core = calculate_core(history, official_calendar=bounded_calendar)
     _apply_calendar_coverage_to_core(core, history, coverage_context)
     target_bar = selected.get(target)
@@ -1502,6 +1664,7 @@ def research_stock(
             "security_id": None,
             "reason": "OFFICIAL_STABLE_SECURITY_ID_SOURCE_NOT_BOUND",
         },
+        "canonical_selection": _render_canonical_selection(canonical_selection),
         "adjustment": {
             "coordinate": "RAW_UNADJUSTED",
             "status": "NOT_APPLIED_IDENTITY_AND_EVENT_TIMING_UNRESOLVED",
