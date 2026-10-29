@@ -59,6 +59,7 @@ from stock_a.research.entry import (
     research_stock,
     research_universe_preview,
 )
+from stock_a.sources.baostock.identity import project_identity_lifecycle
 
 
 _WORKSPACE = Path("G:/codex work/Stock A")
@@ -436,6 +437,7 @@ def _parser() -> argparse.ArgumentParser:
     stock.add_argument("--format", dest="output_format", choices=("summary", "json"), default="json", help="输出可读事实摘要或完整JSON，默认json")
     stock.add_argument("--include-profile-preview", action="store_true", help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
     stock.add_argument("--include-baostock-evidence", action="store_true", help="显式查询目标日单条BaoStock只读补充字段；可能联网，单位与身份仍需独立核验")
+    stock.add_argument("--include-baostock-identity", action="store_true", help="显式一次登录读取Bao身份资料及目标日名录，并在同一研究结果中说明与TDX Bar状态的关系；NON_PIT，可能联网")
     compare = commands.add_parser("research-compare", help="盘后只读输出有界多标的Core基础观察摘要")
     compare.add_argument("symbols", nargs="+", help="一个或多个来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(compare)
@@ -1162,6 +1164,42 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         except DayChainContractError as error:
             _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
             return _EXIT_UNAVAILABLE
+    identity_projection = None
+    identity_snapshot: dict[str, Any] | None = None
+    identity_query_status = "NOT_REQUESTED"
+    include_identity = not compare and getattr(args, "include_baostock_identity", False)
+    if include_identity and getattr(args, "include_baostock_evidence", False):
+        _emit({
+            "ok": False,
+            "code": "BAOSTOCK_OPTIONS_EXCLUSIVE",
+            "message": "身份与日线证据请求会各自建立Bao会话；为保持本次单次登录预算，请分开执行。",
+            "database_io_attempted": False,
+        }, error=True)
+        return _EXIT_ARGUMENT
+    if include_identity:
+        try:
+            target_text = _parse_target(args.target_session).isoformat()
+        except ResearchEntryError as error:
+            _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
+            return _EXIT_ARGUMENT
+        from stock_a.sources.baostock.client import query_identity_reference
+
+        identity_snapshot = query_identity_reference((target_text,))
+        identity_query_status = str(identity_snapshot.get("status", "SOURCE_UNAVAILABLE"))
+        calls = identity_snapshot.get("calls")
+        if identity_query_status == "RESPONSE_RECEIVED" and isinstance(calls, dict):
+            basic = calls.get("stock_basic")
+            daily_by_date = calls.get("all_stock")
+            session = daily_by_date.get(target_text) if isinstance(daily_by_date, dict) else None
+            if isinstance(basic, dict) and isinstance(session, dict):
+                identity_projection = project_identity_lifecycle(
+                    source_symbol=args.symbol,
+                    target_session=_parse_target(target_text),
+                    basic_snapshot=basic,
+                    session_snapshot=session,
+                )
+            else:
+                identity_query_status = "QUERY_FAILED"
     try:
         if compare:
             budget = CompareBudget(
@@ -1200,6 +1238,8 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 profile_contract=profile_contract,
                 include_baostock_evidence=False,
                 vipdata_capture=vipdata_capture,
+                identity_projection=identity_projection,
+                identity_query_status=identity_query_status,
             )
         else:
             result = research_stock(
@@ -1210,6 +1250,8 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 limits=limits,
                 profile_contract=profile_contract,
                 include_baostock_evidence=getattr(args, "include_baostock_evidence", False),
+                identity_projection=identity_projection,
+                identity_query_status=identity_query_status,
             )
     except ResearchEntryError as error:
         if error.code == "SOURCE_ACCESS_DENIED":
@@ -1249,6 +1291,19 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         "database_io_attempted": False,
         "database_write_attempted": False,
     })
+    if identity_snapshot is not None:
+        result["bao_identity_capture"] = {
+            "source": "BAOSTOCK",
+            "status": identity_snapshot.get("status"),
+            "sdk_version": identity_snapshot.get("sdk_version"),
+            "login_attempted": identity_snapshot.get("login_attempted"),
+            "query_calls": identity_snapshot.get("query_calls"),
+            "request_started_at": identity_snapshot.get("request_started_at"),
+            "request_completed_at": identity_snapshot.get("request_completed_at"),
+            "capture_clock_role": identity_snapshot.get("capture_clock_role"),
+            "verified_source_capture_id": identity_snapshot.get("verified_source_capture_id"),
+            "reason": identity_snapshot.get("reason"),
+        }
     if not compare and getattr(args, "output_format", "json") == "summary":
         summary = _render_basic_fact_summary(result)
         source_package = result.get("source_package")
@@ -1325,6 +1380,21 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
             "来源权威/首捕时钟未绑定；这是历史研究预览，不是实时/PIT数据或正式Profile。"
         ),
     ]
+    reconciliation = result.get("identity_reconciliation")
+    identity = result.get("identity", {})
+    if reconciliation:
+        lines.append(
+            f"Bao身份={identity.get('security_name') or '未知'} / {reconciliation.get('bao_trade_status')}；"
+            f"归并={reconciliation.get('status')}；TDX目标Bar={reconciliation.get('tdx_target_bar_status')}；"
+            f"身份观察时钟={identity.get('observed_at') or '不可用'}；"
+            f"角色={identity.get('time_role') or 'NON_PIT_RETROSPECTIVE'}。"
+        )
+        capture = result.get("bao_identity_capture", {})
+        if capture:
+            lines.append(
+                f"Bao查询={capture.get('status')}；捕获区间={capture.get('request_started_at')} 至 "
+                f"{capture.get('request_completed_at')}；采集时钟不代表历史首可用时钟。"
+            )
     lines.append(
         f"Canonical只读选择：{canonical.get('selection_status', '未生成')}；"
         f"目标字段OBSERVED={canonical_observed}/{len(canonical_fields)}；"

@@ -167,10 +167,9 @@ def project_identity_lifecycle(
     if basic is None:
         return IdentityLifecycleProjection(
             normalized, target_session, eligible_research_board(normalized), "UNMAPPED", None,
-            None, None, None, None, None, "UNKNOWN_NO_BAR", observed_at,
+            None, None, None, None, None, None, "UNKNOWN_NO_BAR", observed_at,
             reason="BAOSTOCK_BASIC_ROW_NOT_FOUND",
         )
-
     date_error = False
     try:
         ipo_date = _parse_optional_date(basic.get("ipoDate"))
@@ -178,13 +177,20 @@ def project_identity_lifecycle(
     except ValueError:
         ipo_date = out_date = None
         date_error = True
+    interval_conflict = ipo_date is not None and out_date is not None and ipo_date > out_date
     security_type = _parse_enum(basic.get("type"), {1, 2, 3, 4, 5})
     listing_status = _parse_enum(basic.get("status"), {0, 1})
     trade_status = _parse_enum(day.get("tradeStatus"), {0, 1}) if day is not None else None
     name = basic.get("code_name") if isinstance(basic.get("code_name"), str) else None
 
-    if eligible_research_board(normalized) is None:
+    if date_error:
+        classification = "UNKNOWN_BAOSTOCK_LISTING_DATE_INVALID"
+    elif interval_conflict:
+        classification = "UNKNOWN_BAOSTOCK_LISTING_INTERVAL_CONFLICT"
+    elif eligible_research_board(normalized) is None:
         classification = "OUT_OF_FORMAL_RESEARCH_MARKET_OR_BOARD"
+    elif security_type is None:
+        classification = "UNKNOWN_BAOSTOCK_SECURITY_TYPE"
     elif security_type is not None and security_type != 1:
         classification = "NON_STOCK_SECURITY_TYPE"
     elif ipo_date is not None and target_session < ipo_date:
@@ -194,13 +200,15 @@ def project_identity_lifecycle(
     elif trade_status == 0:
         classification = "SUSPENDED_AT_TARGET_NON_PIT_RETROSPECTIVE"
     elif trade_status == 1:
-        classification = "BAO_REPORTED_TRADING_TDX_BAR_MISSING"
+        classification = "BAO_REPORTED_TRADING_NON_PIT_RETROSPECTIVE"
     else:
-        classification = "UNKNOWN_NO_BAR"
+        classification = "UNKNOWN_BAO_TARGET_STATUS"
 
-    reason = "BAOSTOCK_HAS_NO_STABLE_SECURITY_ID"
+    reason = "BAOSTOCK_TARGET_DAY_ROW_NOT_FOUND" if day is None else "BAOSTOCK_HAS_NO_STABLE_SECURITY_ID"
     if date_error:
         reason = "BAOSTOCK_LISTING_DATE_INVALID"
+    elif interval_conflict:
+        reason = "BAOSTOCK_LISTING_INTERVAL_CONFLICT"
     elif basic_rows and security_type is None:
         reason = "BAOSTOCK_SECURITY_TYPE_INVALID_OR_UNKNOWN"
     return IdentityLifecycleProjection(
@@ -208,6 +216,49 @@ def project_identity_lifecycle(
         name, security_type, listing_status, ipo_date, out_date, trade_status,
         classification, observed_at, reason=reason,
     )
+
+
+def reconcile_identity_bar_status(
+    projection: IdentityLifecycleProjection | None,
+    *,
+    target_bar_status: str,
+    source_status: str = "RESPONSE_RECEIVED",
+) -> dict[str, str | None]:
+    """将Bao报告状态与TDX读取结果并列解释；任一来源都不覆盖另一来源事实。"""
+    allowed_bar = {"PRESENT", "TARGET_MISSING", "READ_FAILED", "NOT_EVALUATED"}
+    if target_bar_status not in allowed_bar:
+        raise ValueError("TDX目标Bar状态不在允许枚举内")
+    if source_status != "RESPONSE_RECEIVED" or projection is None:
+        bao_status = "UNAVAILABLE"
+        bao_trade_status = None
+    else:
+        bao_trade_status = projection.target_trade_status
+        bao_status = {1: "REPORTED_TRADING", 0: "REPORTED_SUSPENDED"}.get(
+            bao_trade_status, "UNKNOWN"
+        )
+
+    if source_status != "RESPONSE_RECEIVED" or projection is None:
+        result = f"BAO_UNAVAILABLE_TDX_BAR_{'PRESENT' if target_bar_status == 'PRESENT' else 'MISSING'}" \
+            if target_bar_status in {"PRESENT", "TARGET_MISSING"} else \
+            f"BAO_UNAVAILABLE_TDX_{target_bar_status}"
+    elif target_bar_status == "PRESENT":
+        result = ("BAO_TRADING_TDX_BAR_PRESENT" if bao_trade_status == 1 else
+                  "BAO_SUSPENDED_TDX_BAR_PRESENT_CONFLICT" if bao_trade_status == 0 else
+                  "BAO_UNKNOWN_TDX_BAR_PRESENT")
+    elif target_bar_status == "TARGET_MISSING":
+        result = ("BAO_TRADING_TDX_BAR_MISSING" if bao_trade_status == 1 else
+                  "BAO_SUSPENDED_TDX_BAR_MISSING" if bao_trade_status == 0 else
+                  "BAO_UNKNOWN_TDX_BAR_MISSING")
+    elif target_bar_status == "READ_FAILED":
+        result = f"BAO_{'UNKNOWN' if bao_trade_status is None else bao_status}_TDX_READ_FAILED"
+    else:
+        result = f"BAO_{'UNKNOWN' if bao_trade_status is None else bao_status}_TDX_NOT_EVALUATED"
+    return {
+        "status": result,
+        "bao_trade_status": bao_status,
+        "bao_source_status": source_status,
+        "tdx_target_bar_status": target_bar_status,
+    }
 
 
 def classify_missing_bar_candidates(
@@ -239,6 +290,11 @@ def classify_missing_bar_candidates(
         by_class[projection.classification] = by_class.get(projection.classification, 0) + 1
     if sum(by_class.values()) != len(normalized):
         raise AssertionError("缺Bar分类计数未闭合")
+    unknown_count = sum(
+        projection.identity_status != "PROVISIONAL"
+        or projection.classification.startswith("UNKNOWN")
+        for projection in projections
+    ) if basic_ok and session_ok else 0
     return {
         "target_session": target_session.isoformat(),
         "source_symbol_denominator": len(normalized),
@@ -250,9 +306,8 @@ def classify_missing_bar_candidates(
         "stable_security_id_issued": False,
         "classification_counts": (dict(sorted(by_class.items())) if basic_ok and session_ok
                                    else ({"NOT_EVALUATED": len(normalized)} if normalized else {})),
-        "classified_with_evidence": (len(normalized) - by_class.get("UNKNOWN_NO_BAR", 0))
-        if basic_ok and session_ok else 0,
-        "unknown": by_class.get("UNKNOWN_NO_BAR", 0) if basic_ok and session_ok else 0,
+        "classified_with_evidence": len(normalized) - unknown_count if basic_ok and session_ok else 0,
+        "unknown": unknown_count,
         "not_evaluated": 0 if basic_ok and session_ok else len(normalized),
         "rows": [projection.as_dict() for projection in projections],
     }

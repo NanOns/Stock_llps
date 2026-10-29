@@ -33,7 +33,10 @@ from stock_a.research.profile import (
     WindowIdentity,
     evaluate_profile_kernel,
 )
-from stock_a.sources.baostock.identity import IdentityLifecycleProjection
+from stock_a.sources.baostock.identity import (
+    IdentityLifecycleProjection,
+    reconcile_identity_bar_status,
+)
 from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
 from stock_a.sources.tdx.capture import TdxCaptureRequest, build_tdx_capture_envelope
 from stock_a.sources.tdx.day_source import open_day_file
@@ -1514,6 +1517,7 @@ def research_stock(
     include_baostock_evidence: bool = False,
     vipdata_capture: VipdataEntryCapture | None = None,
     identity_projection: IdentityLifecycleProjection | None = None,
+    identity_query_status: str = "NOT_REQUESTED",
 ) -> dict[str, Any]:
     """验证目标会话后保留可读Raw；仅在可用前态上调用现有Core。"""
     target = _parse_target(target_session)
@@ -1527,6 +1531,8 @@ def research_stock(
             or identity_projection.source_symbol != normalized
             or identity_projection.target_session != target):
         raise ResearchEntryError("IDENTITY_PROJECTION_MISMATCH", "BaoStock身份投影与研究代码或目标日期不匹配")
+    if not isinstance(identity_query_status, str) or not identity_query_status:
+        raise ResearchEntryError("IDENTITY_QUERY_STATUS_INVALID", "Bao身份查询状态必须为非空文本")
     code = normalized.split(".")[1]
     selected: dict[date, DecodedDay] = {}
     future_source_rows_excluded = 0
@@ -1823,6 +1829,18 @@ def research_stock(
             "unknown_target_raw_fields": unknown_raw,
         },
     }
+    if identity_projection is not None or identity_query_status != "NOT_REQUESTED":
+        if identity_projection is None:
+            result["identity"].update({
+                "status": "UNAVAILABLE",
+                "reason": f"BAOSTOCK_IDENTITY_SOURCE_{identity_query_status}",
+            })
+        result["identity_reconciliation"] = reconcile_identity_bar_status(
+            identity_projection,
+            target_bar_status="PRESENT" if target_bar is not None else "TARGET_MISSING",
+            source_status=("RESPONSE_RECEIVED" if identity_projection is not None
+                           else identity_query_status),
+        )
     if profile_contract is not None:
         result["profile_preview"] = _build_profile_preview(
             symbol=normalized,
