@@ -9,6 +9,7 @@ import hashlib
 import json
 import re
 import uuid
+from collections.abc import Iterable, Mapping, Sequence
 from typing import Any
 
 from stock_a.canonical.selection import CanonicalReadSelection
@@ -111,8 +112,8 @@ def _typed_group(
     quality: str,
     reason: str | None,
     unit: str,
-    source_sha256: str,
     unit_version: str,
+    semantic_context: Mapping[str, str],
     integer_only: bool = False,
 ) -> TypedFieldGroup:
     if quality not in _QUALITIES:
@@ -137,7 +138,7 @@ def _typed_group(
     revision = _digest({
         "unit": unit,
         "unit_version": unit_version,
-        "source_sha256": source_sha256,
+        "semantic_context": dict(sorted(semantic_context.items())),
         "quality": quality,
         "reason": reason,
         "values": [str(value) if isinstance(value, Decimal) else value for value in normalized],
@@ -159,6 +160,18 @@ def map_canonical_selection_fields(selection: CanonicalReadSelection) -> dict[st
     if any(item.target_session != selection.target_session for item in by_name.values()):
         raise TypedBridgeError("SESSION_MISMATCH", "Canonical字段目标日期与选择日期不一致")
     unit_version = selection.units.version
+    capture = selection.capture
+    semantic_context = {
+        "dataset_id": capture.dataset_id,
+        "dataset_version": capture.dataset_version,
+        "parser_version": capture.parser_version,
+        "validation_contract": capture.validation_contract,
+    }
+    target_row = next((row for row in selection.rows if row.session == selection.target_session), None)
+    if target_row is not None and target_row.coordinate_id is not None:
+        if not isinstance(target_row.coordinate_id, str) or not target_row.coordinate_id.strip():
+            raise TypedBridgeError("COORDINATE_BINDING_INVALID", "Canonical目标价格坐标绑定无效")
+        semantic_context["price_coordinate_id"] = target_row.coordinate_id
     price_facts = tuple(by_name[name] for name in _PRICE_FIELDS)
     price_qualities = {(item.value.quality, item.value.reason) for item in price_facts}
     if len(price_qualities) != 1:
@@ -174,23 +187,23 @@ def map_canonical_selection_fields(selection: CanonicalReadSelection) -> dict[st
         prices = tuple(None for _ in _PRICE_FIELDS)
     price_group = _typed_group(
         values=prices, quality=price_quality, reason=price_reason,
-        unit="CNY_PER_SHARE", source_sha256=source_sha256,
-        unit_version=unit_version,
+        unit="CNY_PER_SHARE", unit_version=unit_version,
+        semantic_context=semantic_context,
     )
     amount_fact = by_name["amount"]
     amount_value = amount_fact.value.value
     amount_group = _typed_group(
         values=(None if amount_value is None else _finite_decimal(amount_value),),
         quality=amount_fact.value.quality, reason=amount_fact.value.reason,
-        unit=amount_fact.unit, source_sha256=source_sha256,
-        unit_version=unit_version,
+        unit=amount_fact.unit, unit_version=unit_version,
+        semantic_context=semantic_context,
     )
     volume_fact = by_name["volume"]
     volume_value = volume_fact.value.value
     volume_group = _typed_group(
         values=(volume_value,), quality=volume_fact.value.quality,
         reason=volume_fact.value.reason, unit=volume_fact.unit,
-        source_sha256=source_sha256, unit_version=unit_version,
+        unit_version=unit_version, semantic_context=semantic_context,
         integer_only=True,
     )
     if amount_group.quality == "OBSERVED" and amount_group.values[0] < 0:
@@ -238,7 +251,6 @@ def prepare_canonical_daily_candidate(
         "identity_revision": identity.identity_revision,
         "session_date": selection.target_session.isoformat(),
         "calendar_version": calendar_version,
-        "source_sha256": selection.capture.content_sha256,
         "unit_version": units.version,
         "field_revisions": {name: group.revision for name, group in groups.items()},
     }
@@ -288,7 +300,9 @@ def canonical_daily_readback_plan(candidate: CanonicalDailyCandidate) -> tuple[s
     """返回同一typed业务键/版本的参数化读回计划；本函数不执行SQL。"""
     if not isinstance(candidate, CanonicalDailyCandidate):
         raise TypedBridgeError("CANDIDATE_INVALID", "读回计划必须来自已验证的typed候选")
-    sql = """SELECT source_capture_id, open, high, low, close, amount, volume,
+    sql = """SELECT namespace_id, entity_id, identity_revision, session_date,
+  calendar_version, canonical_revision, source_capture_id,
+  open, high, low, close, amount, volume,
   price_quality, price_reason, price_revision,
   amount_quality, amount_reason, amount_revision,
   volume_quality, volume_reason, volume_revision
@@ -299,3 +313,80 @@ WHERE namespace_id = %s AND entity_id = %s AND session_date = %s
         candidate.namespace_id, candidate.entity_id, candidate.session_date,
         candidate.canonical_revision,
     )
+
+
+_READBACK_COLUMNS = (
+    "namespace_id", "entity_id", "identity_revision", "session_date",
+    "calendar_version", "canonical_revision", "source_capture_id",
+    "open", "high", "low", "close", "amount", "volume",
+    "price_quality", "price_reason", "price_revision",
+    "amount_quality", "amount_reason", "amount_revision",
+    "volume_quality", "volume_reason", "volume_revision",
+)
+
+
+def _readback_expected(candidate: CanonicalDailyCandidate) -> dict[str, Any]:
+    return {
+        "namespace_id": candidate.namespace_id,
+        "entity_id": candidate.entity_id,
+        "identity_revision": candidate.identity_revision,
+        "session_date": candidate.session_date,
+        "calendar_version": candidate.calendar_version,
+        "canonical_revision": candidate.canonical_revision,
+        "source_capture_id": candidate.source_capture_id,
+        "open": candidate.prices.values[0],
+        "high": candidate.prices.values[1],
+        "low": candidate.prices.values[2],
+        "close": candidate.prices.values[3],
+        "amount": candidate.amount.values[0],
+        "volume": candidate.volume.values[0],
+        "price_quality": candidate.prices.quality,
+        "price_reason": candidate.prices.reason,
+        "price_revision": candidate.prices.revision,
+        "amount_quality": candidate.amount.quality,
+        "amount_reason": candidate.amount.reason,
+        "amount_revision": candidate.amount.revision,
+        "volume_quality": candidate.volume.quality,
+        "volume_reason": candidate.volume.reason,
+        "volume_revision": candidate.volume.revision,
+    }
+
+
+def _rows_equal(expected: Any, actual: Any) -> bool:
+    if isinstance(expected, Decimal):
+        try:
+            return _finite_decimal(actual) == expected
+        except TypedBridgeError:
+            return False
+    if type(expected) is int:
+        return type(actual) is int and actual == expected
+    return type(actual) is type(expected) and actual == expected
+
+
+def validate_canonical_daily_readback(
+    candidate: CanonicalDailyCandidate,
+    rows: Iterable[Mapping[str, Any] | Sequence[Any]],
+) -> bool:
+    """精确比对写后读回，防止DO NOTHING掩盖同修订异payload/来源冲突。"""
+    if not isinstance(candidate, CanonicalDailyCandidate):
+        raise TypedBridgeError("CANDIDATE_INVALID", "读回核验必须来自typed候选")
+    materialized = tuple(rows)
+    if not materialized:
+        raise TypedBridgeError("CANONICAL_READBACK_MISSING", "写后精确读回未返回候选业务键")
+    if len(materialized) != 1:
+        raise TypedBridgeError("CANONICAL_READBACK_CARDINALITY", "同一Canonical业务键读回行数不是1")
+    actual_row = materialized[0]
+    if isinstance(actual_row, Mapping):
+        if set(actual_row) != set(_READBACK_COLUMNS):
+            raise TypedBridgeError("CANONICAL_READBACK_SHAPE", "读回字段集合与精确合同不一致")
+        actual = dict(actual_row)
+    elif isinstance(actual_row, Sequence) and not isinstance(actual_row, (str, bytes, bytearray)):
+        if len(actual_row) != len(_READBACK_COLUMNS):
+            raise TypedBridgeError("CANONICAL_READBACK_SHAPE", "读回列数与精确合同不一致")
+        actual = dict(zip(_READBACK_COLUMNS, actual_row))
+    else:
+        raise TypedBridgeError("CANONICAL_READBACK_SHAPE", "读回行必须是具名映射或有序列")
+    expected = _readback_expected(candidate)
+    if any(not _rows_equal(value, actual[name]) for name, value in expected.items()):
+        raise TypedBridgeError("CANONICAL_REVISION_CONFLICT", "同业务键和修订读回到不同payload或来源引用")
+    return True

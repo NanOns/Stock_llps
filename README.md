@@ -65,6 +65,18 @@ stock-a source-inspect 'G:\已绑定来源根\日线文件.day' `
 
 来源根只从已验证运行配置读取，不能以命令行临时根替代。当前配置登记了`D:/new_tdx`；实际文件可读性、来源权威及数据能力须由阶段0核验，配置存在不代表来源准入。成功摘要采用JSON写stdout，错误JSON写stderr；退出码0为命令完成、2为参数/合同错误、3为配置或来源不可用、4为系统拒绝访问、5为工程错误。所有消息为中文，稳定错误码保留原生标识。
 
+通达信官网盘后完整ZIP只由显式来源命令触发，其他诊断和研究命令不隐式联网或下载：
+
+```powershell
+stock-a source-vipdata --target-session YYYY-MM-DD --mode inspect
+stock-a source-vipdata --target-session YYYY-MM-DD --mode download-verify
+stock-a source-vipdata --target-session YYYY-MM-DD --mode download-verify `
+  --consume-symbol SH.六位代码 --unit-version SOURCE-UNIT-R1 `
+  --amount-to-cny 0.5 --volume-to-shares 100
+```
+
+`inspect`只核对官网实际更新日期和ZIP链接；`download-verify`仅在页面日期及URL通过检查后下载一次完整包到`G:/codex_tmp`，并核验SHA-256、ZIP CRC、entry范围与安全预算。`--consume-symbol`为可选的单证券NON_PIT研究预览，必须显式给出单位合同；它复用现有TDX读取、Canonical选择和Core，不写PG或持久业务文件。网页未公布可核验日期/下载对象时会返回具体不可用状态，不推测下载地址。
+
 当前可安装包只包含 `src/stock_a` 业务模块；运行依赖为`psycopg[binary]`，并在Windows上安装`tzdata`以提供`Asia/Shanghai`时区数据库。构建使用固定版本`flit_core==4.1.0`。支持Python 3.10及以上，当前已核验的解释器版本以外不据此声称逐版本实测。
 
 在Windows PowerShell中构建wheel并安装到独立环境。构建输出、缓存、虚拟环境和临时文件都放在G盘临时根：

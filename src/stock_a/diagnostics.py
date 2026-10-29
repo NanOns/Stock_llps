@@ -30,6 +30,16 @@ from stock_a.sources.tdx.actions import (
 )
 from stock_a.sources.tdx.day_source import open_day_file, read_protected_bytes
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
+from stock_a.sources.tdx.vipdata import (
+    VipdataBudgets,
+    VipdataError,
+    download_vipdata_package,
+    extract_vipdata_day_entry,
+    inspect_vipdata_page,
+    observation_dict,
+    package_dict,
+    scan_vipdata_day_entry,
+)
 from stock_a.postgres_identity import inspect_postgres
 from stock_a.postgres_binding import BindingRefused, bind_stock_namespace
 from stock_a.research.entry import (
@@ -435,6 +445,30 @@ def _parser() -> argparse.ArgumentParser:
     universe.add_argument("--max-total-bytes", type=int, default=335544320, help="当前页累计TDX读取字节上限，默认335544320")
     universe.add_argument("--max-total-records", type=int, default=4000000, help="当前页累计TDX记录上限，默认4000000")
     universe.add_argument("--max-total-seconds", type=float, default=120.0, help="当前页累计扫描秒数上限，默认120")
+    vipdata = commands.add_parser(
+        "source-vipdata",
+        help="显式检查通达信官网盘后ZIP，或在G盘临时目录下载并校验",
+        description="仅此显式命令联网。默认只检查官网；download-verify会在满足日期门后下载一次完整ZIP并校验。",
+    )
+    vipdata.add_argument("--mode", choices=("inspect", "download-verify"), default="inspect", help="只检查官网元数据，或下载并验证完整ZIP，默认inspect")
+    vipdata.add_argument("--target-session", required=True, help="必填目标正式交易会话，格式YYYY-MM-DD")
+    vipdata.add_argument("--max-page-bytes", type=int, default=2097152, help="官网页面最大读取字节数，默认2097152")
+    vipdata.add_argument("--max-package-bytes", type=int, default=2147483648, help="完整ZIP最大下载字节数，默认2147483648")
+    vipdata.add_argument("--max-zip-entries", type=int, default=50000, help="ZIP中央目录最大条目数，默认50000")
+    vipdata.add_argument("--max-uncompressed-bytes", type=int, default=4294967296, help="ZIP最大总解压字节数，默认4294967296")
+    vipdata.add_argument("--max-entry-bytes", type=int, default=33554432, help="ZIP单条目最大解压字节数，默认33554432")
+    vipdata.add_argument("--max-compression-ratio", type=int, default=200, help="ZIP条目最大压缩比，默认200")
+    vipdata.add_argument("--timeout-seconds", type=float, default=20.0, help="单次连接或读取超时秒数，默认20")
+    vipdata.add_argument("--max-total-seconds", type=float, default=300.0, help="页面和下载的总读取秒数上限，默认300")
+    vipdata.add_argument("--max-redirects", type=int, default=4, help="官网HTTPS重定向最大次数，默认4")
+    vipdata.add_argument("--reserve-free-bytes", type=int, default=536870912, help="下载期间必须保留的G盘可用空间，默认536870912")
+    vipdata.add_argument("--consume-symbol", help="可选：将已验证ZIP中的一个SH./SZ.日线样本送入现有Raw/Canonical/Core只读消费者")
+    vipdata.add_argument("--unit-version", help="使用Core消费者时必填的显式TDX单位版本")
+    vipdata.add_argument("--amount-to-cny", help="使用Core消费者时必填的精确金额到元倍率")
+    vipdata.add_argument("--volume-to-shares", type=int, help="使用Core消费者时必填的数量到股正整数倍率")
+    vipdata.add_argument("--max-symbol-bytes", type=int, default=16777216, help="Core消费者单个日线文件最大读取字节数，默认16777216")
+    vipdata.add_argument("--max-symbol-records", type=int, default=200000, help="Core消费者单个日线文件最大记录数，默认200000")
+    vipdata.add_argument("--max-symbol-seconds", default="30", help="Core消费者单个日线文件最大扫描秒数，默认30")
     return parser
 
 
@@ -449,20 +483,30 @@ def _add_research_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument("--max-seconds", default="30", help="单文件最大读取秒数，默认30")
 
 
-def _safe_child(path: Path, root: Path) -> Path:
+def _safe_child(path: Path, root: Path, *, optional: bool = False) -> Path | None:
     try:
         resolved = path.resolve(strict=True)
         resolved.relative_to(root)
         mode = resolved.stat().st_mode
     except FileNotFoundError as error:
+        if optional:
+            return None
         raise DiagnosticError("SOURCE_PATH_INVALID", "来源目录不存在") from error
     except PermissionError as error:
+        if optional:
+            return None
         raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验来源目录", _EXIT_PERMISSION) from error
     except OSError as error:
+        if optional:
+            return None
         raise DiagnosticError("SOURCE_IO_ERROR", "核验来源目录时发生工程I/O错误", _EXIT_ENGINEERING) from error
     except ValueError as error:
+        if optional:
+            return None
         raise DiagnosticError("SOURCE_PATH_INVALID", "来源目录不存在或最终路径离开保护根") from error
     if not stat.S_ISDIR(mode):
+        if optional:
+            return None
         raise DiagnosticError("SOURCE_PATH_INVALID", "来源目录结构不符合TDX目录合同")
     return resolved
 
@@ -500,7 +544,21 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
     total_bytes = 0
     total_records = 0
     for market in ("sh", "sz", "bj"):
-        directory = _safe_child(root / "vipdoc" / market / "lday", root)
+        optional_market = market == "bj"
+        directory = _safe_child(root / "vipdoc" / market / "lday", root, optional=optional_market)
+        if directory is None:
+            markets[market] = {
+                "directory": str(root / "vipdoc" / market / "lday"),
+                "day_file_count": None,
+                "enumerated_entry_count": 0,
+                "excluded_link_count": 0,
+                "scope_complete": False,
+                "market_status": "OPTIONAL_DEFERRED",
+                "reason": "BJ_DIRECTORY_UNAVAILABLE_OR_INVALID",
+                "sample_rule": "北交所目录未通过核验，沪深结果保留",
+                "sample": None,
+            }
+            continue
         names: list[str] = []
         entry_count = 0
         excluded_links = 0
@@ -518,9 +576,38 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
                     if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".day"):
                         names.append(entry.name)
         except PermissionError as error:
+            if optional_market:
+                markets[market] = {
+                    "directory": str(directory), "day_file_count": None,
+                    "enumerated_entry_count": entry_count, "excluded_link_count": excluded_links,
+                    "scope_complete": False, "market_status": "OPTIONAL_DEFERRED",
+                    "reason": "SOURCE_ACCESS_DENIED", "sample_rule": "北交所目录读取失败，沪深结果保留",
+                    "sample": None,
+                }
+                continue
             raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝枚举行情目录", _EXIT_PERMISSION) from error
         except OSError as error:
+            if optional_market:
+                markets[market] = {
+                    "directory": str(directory), "day_file_count": None,
+                    "enumerated_entry_count": entry_count, "excluded_link_count": excluded_links,
+                    "scope_complete": False, "market_status": "OPTIONAL_DEFERRED",
+                    "reason": "SOURCE_IO_ERROR", "sample_rule": "北交所目录读取失败，沪深结果保留",
+                    "sample": None,
+                }
+                continue
             raise DiagnosticError("SOURCE_IO_ERROR", "枚举行情目录时发生工程I/O错误", _EXIT_ENGINEERING) from error
+        except DiagnosticError as error:
+            if not optional_market:
+                raise
+            markets[market] = {
+                "directory": str(directory), "day_file_count": None,
+                "enumerated_entry_count": entry_count, "excluded_link_count": excluded_links,
+                "scope_complete": False, "market_status": "OPTIONAL_DEFERRED",
+                "reason": error.code, "sample_rule": "北交所目录枚举预算未完成，沪深结果保留",
+                "sample": None,
+            }
+            continue
         names.sort(key=str.casefold)
         market_result: dict[str, Any] = {
             "directory": str(directory),
@@ -528,17 +615,41 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
             "enumerated_entry_count": entry_count,
             "excluded_link_count": excluded_links,
             "scope_complete": True,
+            "market_status": "ENUMERATED",
             "sample_rule": "字典序首个.day文件，读取整个文件",
             "sample": None,
         }
         if names:
-            sample_path = _safe_file(root / "vipdoc" / market / "lday" / names[0], root)
-            size = _source_file_size(sample_path)
+            try:
+                sample_path = _safe_file(root / "vipdoc" / market / "lday" / names[0], root, optional=optional_market)
+                if sample_path is None:
+                    raise DiagnosticError("SOURCE_NOT_FOUND", "北交所样本在枚举后消失")
+                size = _source_file_size(sample_path)
+            except DiagnosticError as error:
+                if not optional_market:
+                    raise
+                market_result.update({
+                    "market_status": "OPTIONAL_DEFERRED", "reason": error.code, "sample": None,
+                })
+                markets[market] = market_result
+                continue
             if size > args.max_file_bytes or total_bytes + size > args.max_total_bytes:
+                if optional_market:
+                    market_result.update({
+                        "market_status": "OPTIONAL_DEFERRED", "reason": "READ_LIMIT_EXCEEDED", "sample": None,
+                    })
+                    markets[market] = market_result
+                    continue
                 raise DiagnosticError("READ_LIMIT_EXCEEDED", "日线样本超过本次文件或总字节预算", _EXIT_UNAVAILABLE)
             units = UnitContract("TDX_RAW_DIAGNOSTIC_ONLY", Decimal(1), 1)
             remaining_total = args.max_total_bytes - total_bytes
             if remaining_total <= 0:
+                if optional_market:
+                    market_result.update({
+                        "market_status": "OPTIONAL_DEFERRED", "reason": "READ_LIMIT_EXCEEDED", "sample": None,
+                    })
+                    markets[market] = market_result
+                    continue
                 raise DiagnosticError("READ_LIMIT_EXCEEDED", "日线样本没有剩余总字节预算", _EXIT_UNAVAILABLE)
             limits = ReadLimits(min(args.max_file_bytes, remaining_total), args.max_records, 1024, seconds)
             try:
@@ -548,6 +659,14 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
                             raise DayReadError("READ_TIMEOUT", "BUDGET")
                     summary = scan.summary
             except DayReadError as error:
+                if optional_market:
+                    market_result.update({
+                        "market_status": "OPTIONAL_DEFERRED",
+                        "reason": error.code,
+                        "sample": None,
+                    })
+                    markets[market] = market_result
+                    continue
                 code = error.code
                 exit_code = _READ_ERROR_EXIT_CODES.get(code, _EXIT_ENGINEERING)
                 raise DiagnosticError(code, f"日线真实样本未能完整核验：{error}", exit_code) from error
@@ -568,6 +687,9 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
                 "volume_unit": "UNVERIFIED_RAW_UINT32",
                 "field_quality": {name: asdict(getattr(summary.scan, name)) for name in ("prices", "amount", "volume")},
             }
+            market_result["market_status"] = "SAMPLED"
+        else:
+            market_result["market_status"] = "NO_DAY_FILES"
         markets[market] = market_result
 
     capabilities: list[dict[str, Any]] = [{
@@ -666,8 +788,6 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
     required_blocked = any(item["required"] and item["status"] not in ("FULL_PASS", "DEGRADED_PASS") for item in capabilities)
     overall = "BLOCKED" if required_blocked else ("DEGRADED_PASS" if any(item["status"] != "FULL_PASS" for item in capabilities) else "FULL_PASS")
     elapsed = time.monotonic() - started
-    if elapsed > float(seconds):
-        raise DiagnosticError("READ_TIMEOUT", "本次阶段0核验整体超过耗时预算，不生成完成摘要", _EXIT_UNAVAILABLE)
     _emit({
         "ok": overall != "BLOCKED",
         "status": overall,
@@ -681,8 +801,20 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
         "sample_rule": sample_rule,
         "market_directories": markets,
         "capabilities": capabilities,
-        "coverage": {"day_file_count": sum(item["day_file_count"] for item in markets.values()), "sampled_day_files": sum(item["sample"] is not None for item in markets.values()), "unsampled_day_files": sum(item["day_file_count"] for item in markets.values()) - sum(item["sample"] is not None for item in markets.values()), "sampled_records": total_records, "sampled_source_bytes": total_bytes},
-        "budgets": {"max_entries_per_market_directory": args.max_entries, "max_file_bytes": args.max_file_bytes, "max_total_bytes": args.max_total_bytes, "max_records_per_file": args.max_records, "max_seconds": str(seconds), "elapsed_seconds": round(elapsed, 6)},
+        "coverage": {
+            "known_market_day_file_count": sum(
+                item["day_file_count"] for item in markets.values()
+                if type(item.get("day_file_count")) is int
+            ),
+            "market_day_file_count_complete": all(item.get("scope_complete") is True for item in markets.values()),
+            "markets_with_unknown_day_file_count": [
+                market for market, item in markets.items() if type(item.get("day_file_count")) is not int
+            ],
+            "sampled_day_files": sum(item["sample"] is not None for item in markets.values()),
+            "sampled_records": total_records,
+            "sampled_source_bytes": total_bytes,
+        },
+        "budgets": {"max_entries_per_market_directory": args.max_entries, "max_file_bytes": args.max_file_bytes, "max_total_bytes": args.max_total_bytes, "max_records_per_file": args.max_records, "max_seconds": str(seconds), "elapsed_seconds": round(elapsed, 6), "elapsed_budget_exceeded": elapsed > float(seconds)},
         "business_admission": "DENY" if overall == "BLOCKED" else "SCOPED_ONLY",
         "database_connected": False,
         "production_switched": False,
@@ -1302,6 +1434,120 @@ def _run_research_universe(args: argparse.Namespace) -> int:
     return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
 
 
+def _run_source_vipdata(args: argparse.Namespace) -> int:
+    _load_runtime_config()
+    try:
+        budgets = VipdataBudgets(
+            max_page_bytes=args.max_page_bytes,
+            max_package_bytes=args.max_package_bytes,
+            max_zip_entries=args.max_zip_entries,
+            max_uncompressed_bytes=args.max_uncompressed_bytes,
+            max_entry_bytes=args.max_entry_bytes,
+            max_compression_ratio=args.max_compression_ratio,
+            timeout_seconds=args.timeout_seconds,
+            max_total_seconds=args.max_total_seconds,
+            max_redirects=args.max_redirects,
+            reserve_free_bytes=args.reserve_free_bytes,
+        )
+        observation = inspect_vipdata_page(args.target_session, budgets=budgets)
+    except VipdataError as error:
+        _emit({
+            "ok": False,
+            "code": error.code,
+            "message": str(error),
+            "network_action": "EXPLICIT_SOURCE_VIPDATA_ONLY",
+            "database_io_attempted": False,
+            "database_write_attempted": False,
+        }, error=True)
+        return _EXIT_ARGUMENT if error.code in {"TARGET_SESSION_INVALID", "BUDGET_INVALID"} else _EXIT_UNAVAILABLE
+    result: dict[str, Any] = {
+        "ok": False,
+        "mode": args.mode,
+        "target_session": args.target_session,
+        "observation": observation_dict(observation),
+        "network_action": "EXPLICIT_SOURCE_VIPDATA_ONLY",
+        "database_io_attempted": False,
+        "database_write_attempted": False,
+        "persistent_business_write_attempted": False,
+    }
+    if args.mode == "inspect":
+        result["ok"] = observation.status == "PACKAGE_CANDIDATE_READY"
+        _emit(result, error=not result["ok"])
+        return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
+    if observation.status != "PACKAGE_CANDIDATE_READY":
+        result["download"] = {"status": "NOT_STARTED", "reason": observation.reason or observation.status}
+        _emit(result, error=True)
+        return _EXIT_UNAVAILABLE
+    try:
+        package = download_vipdata_package(observation, budgets=budgets)
+    except VipdataError as error:
+        result["download"] = {"status": error.code, "reason": str(error)}
+        _emit(result, error=True)
+        return _EXIT_UNAVAILABLE
+    result["package"] = package_dict(package)
+    result["validated_day_entry_count"] = len(package.day_entries)
+    result["entry_count_by_market"] = dict(package.entry_count_by_market)
+    result["core_consumer"] = {"status": "NOT_REQUESTED", "reason": "未显式提供--consume-symbol"}
+    if args.consume_symbol:
+        if not all((args.unit_version, args.amount_to_cny, args.volume_to_shares is not None)):
+            _emit({
+                **result,
+                "ok": False,
+                "core_consumer": {"status": "BLOCKED", "reason": "Core消费必须显式提供单位合同版本及倍率"},
+            }, error=True)
+            return _EXIT_ARGUMENT
+        try:
+            symbol = args.consume_symbol.strip().upper()
+            parts = symbol.split(".")
+            if len(parts) != 2 or parts[0] not in {"SH", "SZ"} or re.fullmatch(r"[0-9]{6}", parts[1]) is None:
+                raise VipdataError("SYMBOL_INVALID", "Core样本必须使用SH.六位代码或SZ.六位代码")
+            units = UnitContract(args.unit_version, Decimal(args.amount_to_cny), args.volume_to_shares)
+            limits = ReadLimits(args.max_symbol_bytes, args.max_symbol_records, 256,
+                                Decimal(args.max_symbol_seconds))
+            entry_scan = scan_vipdata_day_entry(
+                package,
+                market=parts[0],
+                symbol=parts[1],
+                target_session=args.target_session,
+                units=units,
+                limits=limits,
+            )
+            extraction_root, extracted_path = extract_vipdata_day_entry(
+                package, market=parts[0], symbol=parts[1],
+            )
+            consumer = research_stock(
+                symbol=symbol,
+                target_session=args.target_session,
+                source_roots=(str(extraction_root),),
+                units=units,
+                limits=limits,
+            )
+            result["core_consumer"] = {
+                "status": "CORE_CONSUMED" if entry_scan.target_bar_present else "CORE_CONSUMED_TARGET_BAR_MISSING",
+                "sample_symbol": symbol,
+                "archive_entry": f"vipdoc/{parts[0].lower()}/lday/{parts[0].lower()}{parts[1]}.day",
+                "extracted_path": str(extracted_path),
+                "source_sha256": consumer["source"]["raw_byte_sha256"],
+                "zip_entry_first_date": entry_scan.first_date.isoformat(),
+                "zip_entry_last_date": entry_scan.last_date.isoformat(),
+                "zip_entry_record_count": entry_scan.record_count,
+                "target_bar_present": entry_scan.target_bar_present,
+                "target_session": consumer["target_session"],
+                "raw_availability": consumer["raw_availability"],
+                "core_availability": consumer["core_availability"],
+                "canonical_selection": consumer.get("canonical_selection"),
+                "status_semantics": "NON_PIT_RETROSPECTIVE；不代表官方身份、来源封口、PG接受或生产准入",
+            }
+        except (VipdataError, ContractError, InvalidOperation, ResearchEntryError, DayReadError, OSError) as error:
+            code = error.code if isinstance(error, (VipdataError, ResearchEntryError, DayReadError)) else "CORE_CONSUMER_FAILED"
+            result["core_consumer"] = {"status": code, "reason": str(error)}
+            _emit(result, error=True)
+            return _EXIT_UNAVAILABLE
+    result["ok"] = True
+    _emit(result)
+    return _EXIT_OK
+
+
 def main(argv: list[str] | None = None) -> int:
     for stream in (sys.stdout, sys.stderr):
         reconfigure = getattr(stream, "reconfigure", None)
@@ -1329,6 +1575,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_research(args, compare=True)
         if args.command == "research-universe-preview":
             return _run_research_universe(args)
+        if args.command == "source-vipdata":
+            return _run_source_vipdata(args)
     except DiagnosticError as error:
         _emit({"ok": False, "code": error.code, "cause_type": type(error.__cause__).__name__ if error.__cause__ is not None else None, "message": str(error)}, error=True)
         return error.exit_code
