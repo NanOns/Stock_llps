@@ -34,12 +34,16 @@ from stock_a.sources.tdx.vipdata import (
     VipdataBudgets,
     VipdataError,
     VipdataSourceConfig,
+    cleanup_vipdata_extraction,
     download_vipdata_package,
+    extract_vipdata_candidate_page,
     extract_vipdata_day_entry,
     inspect_vipdata_page,
     observation_dict,
     package_dict,
     scan_vipdata_day_entry,
+    verify_existing_vipdata_package,
+    vipdata_research_candidate_pool,
 )
 from stock_a.postgres_identity import inspect_postgres
 from stock_a.postgres_binding import BindingRefused, bind_stock_namespace
@@ -47,6 +51,7 @@ from stock_a.research.entry import (
     CompareBudget,
     ResearchEntryError,
     UniverseDiscoveryBudget,
+    _normalize_symbol,
     research_compare,
     research_stock,
     research_universe_preview,
@@ -424,7 +429,7 @@ def _parser() -> argparse.ArgumentParser:
     inspect.add_argument("--max-seconds", default="30", help="本次最大读取秒数，默认30")
     stock = commands.add_parser("research-stock", help="只读查看单只股票的原始行情、Core字段和基础观察")
     stock.add_argument("symbol", help="来源代码，格式SH.六位代码或SZ.六位代码")
-    _add_research_arguments(stock)
+    _add_research_arguments(stock, include_vipdata=True)
     stock.add_argument("--format", dest="output_format", choices=("summary", "json"), default="json", help="输出可读事实摘要或完整JSON，默认json")
     stock.add_argument("--include-profile-preview", action="store_true", help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
     stock.add_argument("--include-baostock-evidence", action="store_true", help="显式查询目标日单条BaoStock只读补充字段；可能联网，单位与身份仍需独立核验")
@@ -438,7 +443,7 @@ def _parser() -> argparse.ArgumentParser:
         "research-universe-preview",
         help="发现沪深主板/创业板TDX来源候选并分页查看盘后基础观察",
     )
-    _add_research_arguments(universe)
+    _add_research_arguments(universe, include_vipdata=True)
     universe.add_argument("--offset", type=int, default=0, help="来源候选分页起点，默认0")
     universe.add_argument("--limit", type=int, default=20, help="本页证券数，默认20，最多100")
     universe.add_argument("--market", choices=("ALL", "SH", "SZ"), default="ALL", help="市场过滤，默认ALL")
@@ -477,7 +482,7 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _add_research_arguments(command: argparse.ArgumentParser) -> None:
+def _add_research_arguments(command: argparse.ArgumentParser, *, include_vipdata: bool = False) -> None:
     command.add_argument("--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD")
     command.add_argument("--unit-version", required=True, help="本次研究使用的显式TDX单位合同版本")
     command.add_argument("--amount-to-cny", required=True, help="金额到人民币元的精确十进制倍率")
@@ -486,6 +491,11 @@ def _add_research_arguments(command: argparse.ArgumentParser) -> None:
     command.add_argument("--max-records", type=int, default=200000, help="单文件最多读取记录数，默认200000")
     command.add_argument("--chunk-records", type=int, default=256, help="单次读取块记录数，默认256")
     command.add_argument("--max-seconds", default="30", help="单文件最大读取秒数，默认30")
+    if include_vipdata:
+        command.add_argument("--vipdata-package", help="显式选择G:/codex_tmp内已下载的VIPDATA ZIP；只读并逐次核验SHA/CRC")
+        command.add_argument("--vipdata-package-sha256", help="显式VIPDATA包的预期SHA-256；与--vipdata-package配套必填")
+        command.add_argument("--max-vipdata-validation-seconds", type=float, default=300.0, help="本次ZIP SHA/CRC完整校验总秒数上限，默认300")
+        command.add_argument("--max-vipdata-extract-bytes", type=int, default=536870912, help="当前单页临时解压字节上限，默认536870912")
 
 
 def _safe_child(path: Path, root: Path, *, optional: bool = False) -> Path | None:
@@ -991,10 +1001,81 @@ def _run_source_inspect(args: argparse.Namespace) -> int:
     return _EXIT_OK
 
 
+def _verify_explicit_vipdata_package(args: argparse.Namespace):
+    package_path = getattr(args, "vipdata_package", None)
+    expected_sha256 = getattr(args, "vipdata_package_sha256", None)
+    if (package_path is None) != (expected_sha256 is None):
+        raise DiagnosticError(
+            "VIPDATA_PACKAGE_BINDING_REQUIRED",
+            "必须同时提供--vipdata-package和--vipdata-package-sha256",
+            _EXIT_ARGUMENT,
+        )
+    if package_path is None:
+        return None
+    try:
+        budgets = VipdataBudgets(max_total_seconds=args.max_vipdata_validation_seconds)
+        return verify_existing_vipdata_package(
+            package_path,
+            expected_sha256=expected_sha256,
+            budgets=budgets,
+        )
+    except VipdataError as error:
+        raise DiagnosticError(error.code, str(error), _EXIT_UNAVAILABLE) from error
+
+
+def _attach_vipdata_provenance(result: dict[str, Any], package, candidate: dict[str, Any]) -> None:
+    source = result.get("source")
+    entry_sha256 = source.get("raw_byte_sha256") if isinstance(source, dict) else None
+    package_id = f"TDX-HSJDAY-SHA256:{package.sha256}"
+    provenance = {
+        "package_id": package_id,
+        "sha256": package.sha256,
+        "file_name": package.file_name,
+        "file_size": package.file_size,
+        "zip_entry_count": package.zip_entry_count,
+        "zip_crc": package.zip_crc,
+        "total_uncompressed_bytes": package.total_uncompressed_bytes,
+        "entry_count_by_market": dict(package.entry_count_by_market),
+        "file_path": str(package.file_path),
+        "official_package_url": "https://data.tdx.com.cn/vipdoc/hsjday.zip",
+        "origin_evidence_status": "PREVIOUS_OFFICIAL_INGRESS_REPORTED; THIS_CALL_RECONFIRMED_LOCAL_SHA_AND_CRC",
+        "verified_at": package.verified_at.isoformat(),
+        "zip_entry_path": candidate["zip_entry_path"],
+        "zip_entry_bytes": candidate["zip_entry_bytes"],
+        "zip_entry_sha256": entry_sha256,
+        "published_at": "UNKNOWN",
+        "first_available_at": "UNKNOWN",
+        "availability_clock": "LOCAL_FILE_READ_TIME_ONLY; NOT_PIT",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "membership_and_listing_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "amount_unit_authority": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
+        "volume_unit_authority": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
+        "acceptance_status": "NOT_ACCEPTED_NOT_PERSISTED",
+        "profile_admission": "DENY_TRUSTED_FOUNDATION_SELECTOR_REQUIRED",
+    }
+    result["source_package"] = provenance
+    if isinstance(source, dict):
+        source["package_id"] = package_id
+        source["package_sha256"] = package.sha256
+        source["package_crc"] = package.zip_crc
+        source["zip_entry_path"] = candidate["zip_entry_path"]
+        source["zip_entry_sha256"] = entry_sha256
+        source["source_authority"] = "VIPDATA_LOCAL_BYTES_REVALIDATED; OFFICIAL_MEMBERSHIP_AND_PIT_UNBOUND"
+    canonical = result.get("canonical_selection")
+    canonical_source = canonical.get("source") if isinstance(canonical, dict) else None
+    if isinstance(canonical_source, dict):
+        canonical_source["package_id"] = package_id
+        canonical_source["package_sha256"] = package.sha256
+        canonical_source["zip_entry_path"] = candidate["zip_entry_path"]
+        canonical_source["zip_entry_sha256"] = entry_sha256
+
+
 def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
     config, config_path = _load_runtime_config()
-    roots = config["source_policy"]["configured_tdx_source_roots"]
-    if not roots:
+    package = _verify_explicit_vipdata_package(args)
+    roots = () if package is not None else config["source_policy"]["configured_tdx_source_roots"]
+    if package is None and not roots:
         raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX来源保护根，拒绝读取行情")
     try:
         units = UnitContract(args.unit_version, Decimal(args.amount_to_cny), args.volume_to_shares)
@@ -1028,6 +1109,32 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 limits=limits,
                 budget=budget,
             )
+        elif package is not None:
+            if compare:
+                raise DiagnosticError("VIPDATA_COMPARE_UNSUPPORTED", "当前显式ZIP入口只接research-stock和research-universe-preview")
+            pool = vipdata_research_candidate_pool(package)
+            normalized, _directory, _board = _normalize_symbol(args.symbol)
+            candidate = next((item for item in pool.candidates if item["symbol"] == normalized), None)
+            if candidate is None:
+                raise VipdataError("ZIP_DAY_ENTRY_NOT_FOUND", "已校验VIPDATA包中没有该沪深主板/创业板证券条目")
+            if candidate["empty_placeholder"]:
+                raise VipdataError("ZIP_DAY_ENTRY_EMPTY", "官方ZIP将此证券作为零字节占位；未送入Raw/Core")
+            extraction_root, _extracted = extract_vipdata_candidate_page(
+                package, (candidate,), max_extract_bytes=args.max_vipdata_extract_bytes,
+            )
+            try:
+                result = research_stock(
+                    symbol=normalized,
+                    target_session=args.target_session,
+                    source_roots=(str(extraction_root),),
+                    units=units,
+                    limits=limits,
+                    profile_contract=profile_contract,
+                    include_baostock_evidence=False,
+                )
+                _attach_vipdata_provenance(result, package, candidate)
+            finally:
+                cleanup_vipdata_extraction(extraction_root)
         else:
             result = research_stock(
                 symbol=args.symbol,
@@ -1060,6 +1167,16 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
             "database_io_attempted": False,
         }, error=True)
         return exit_code
+    except VipdataError as error:
+        _emit({
+            "ok": False,
+            "code": error.code,
+            "message": str(error),
+            "database_io_attempted": False,
+            "database_write_attempted": False,
+            "source_fallback_attempted": False,
+        }, error=True)
+        return _EXIT_UNAVAILABLE
     result.update({
         "ok": result.get("status") in ("AVAILABLE", "COMPLETE_WITH_DISCLOSURES"),
         "configuration_path": str(config_path),
@@ -1067,7 +1184,14 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         "database_write_attempted": False,
     })
     if not compare and getattr(args, "output_format", "json") == "summary":
-        sys.stdout.write(_render_basic_fact_summary(result) + "\n")
+        summary = _render_basic_fact_summary(result)
+        source_package = result.get("source_package")
+        if isinstance(source_package, dict):
+            summary = (
+                f"显式VIPDATA来源包 {source_package['package_id']}；ZIP SHA-256={source_package['sha256']}；"
+                f"条目={source_package['zip_entry_path']}；CRC={source_package['zip_crc']}\n" + summary
+            )
+        sys.stdout.write(summary + "\n")
     else:
         _emit(result)
     return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
@@ -1362,8 +1486,9 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
 
 def _run_research_universe(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config()
-    roots = config["source_policy"]["configured_tdx_source_roots"]
-    if not roots:
+    package = _verify_explicit_vipdata_package(args)
+    roots = () if package is not None else config["source_policy"]["configured_tdx_source_roots"]
+    if package is None and not roots:
         raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX只读来源根，拒绝发现来源候选")
     try:
         units = UnitContract(args.unit_version, Decimal(args.amount_to_cny), args.volume_to_shares)
@@ -1391,20 +1516,95 @@ def _run_research_universe(args: argparse.Namespace) -> int:
         except DayChainContractError as error:
             _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
             return _EXIT_UNAVAILABLE
+    extraction_root: Path | None = None
     try:
-        result = research_universe_preview(
-            target_session=args.target_session,
-            source_roots=roots,
-            units=units,
-            limits=limits,
-            offset=args.offset,
-            limit=args.limit,
-            market_filter=args.market,
-            board_filter=args.board,
-            discovery_budget=discovery_budget,
-            budget=budget,
-            profile_contract=profile_contract,
-        )
+        if package is None:
+            result = research_universe_preview(
+                target_session=args.target_session,
+                source_roots=roots,
+                units=units,
+                limits=limits,
+                offset=args.offset,
+                limit=args.limit,
+                market_filter=args.market,
+                board_filter=args.board,
+                discovery_budget=discovery_budget,
+                budget=budget,
+                profile_contract=profile_contract,
+            )
+        else:
+            pool = vipdata_research_candidate_pool(package)
+            if (type(args.offset) is not int or args.offset < 0
+                    or type(args.limit) is not int or not 1 <= args.limit <= 100
+                    or args.market not in {"ALL", "SH", "SZ"}
+                    or args.board not in {"ALL", "MAIN_BOARD", "GEM"}):
+                raise ResearchEntryError("UNIVERSE_PAGE_INVALID", "ZIP来源分页或过滤条件无效")
+            filtered = tuple(
+                item for item in pool.candidates
+                if (args.market == "ALL" or item["market"] == args.market)
+                and (args.board == "ALL" or item["board"] == args.board)
+            )
+            page_candidates = filtered[args.offset:args.offset + args.limit]
+            extraction_root, _extracted = extract_vipdata_candidate_page(
+                package,
+                page_candidates,
+                max_extract_bytes=args.max_vipdata_extract_bytes,
+            )
+            result = research_universe_preview(
+                target_session=args.target_session,
+                source_roots=(str(extraction_root),),
+                units=units,
+                limits=limits,
+                offset=args.offset,
+                limit=args.limit,
+                market_filter=args.market,
+                board_filter=args.board,
+                discovery_budget=discovery_budget,
+                budget=budget,
+                profile_contract=profile_contract,
+                source_candidate_pool=pool.candidates,
+                source_candidate_catalog=pool.catalog,
+            )
+            result["source_package"] = {
+                "package_id": f"TDX-HSJDAY-SHA256:{package.sha256}",
+                "sha256": package.sha256,
+                "file_name": package.file_name,
+                "file_size": package.file_size,
+                "zip_crc": package.zip_crc,
+                "zip_entry_count": package.zip_entry_count,
+                "entry_count_by_market": dict(package.entry_count_by_market),
+                "official_package_url": "https://data.tdx.com.cn/vipdoc/hsjday.zip",
+                "origin_evidence_status": "PREVIOUS_OFFICIAL_INGRESS_REPORTED; THIS_CALL_RECONFIRMED_LOCAL_SHA_AND_CRC",
+                "verified_at": package.verified_at.isoformat(),
+                "published_at": "UNKNOWN",
+                "first_available_at": "UNKNOWN",
+                "identity_status": "SOURCE_SYMBOL_ONLY",
+                "membership_and_listing_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
+                "price_coordinate": "RAW_UNADJUSTED",
+                "amount_unit_authority": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
+                "volume_unit_authority": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
+                "acceptance_status": "NOT_ACCEPTED_NOT_PERSISTED",
+            }
+            for item in result["results"]:
+                candidate = item.get("source_candidate")
+                if isinstance(candidate, dict):
+                    _attach_vipdata_provenance(item, package, candidate)
+                    detail = item.get("detail_query")
+                    if isinstance(detail, dict) and isinstance(detail.get("arguments"), list):
+                        detail["arguments"].extend((
+                            "--vipdata-package", str(package.file_path),
+                            "--vipdata-package-sha256", package.sha256,
+                        ))
+    except VipdataError as error:
+        _emit({
+            "ok": False,
+            "code": error.code,
+            "message": str(error),
+            "database_io_attempted": False,
+            "database_write_attempted": False,
+            "source_fallback_attempted": False,
+        }, error=True)
+        return _EXIT_UNAVAILABLE
     except ResearchEntryError as error:
         if error.code == "SOURCE_ACCESS_DENIED":
             code = _EXIT_PERMISSION
@@ -1426,6 +1626,9 @@ def _run_research_universe(args: argparse.Namespace) -> int:
             "database_write_attempted": False,
         }, error=True)
         return code
+    finally:
+        if extraction_root is not None:
+            cleanup_vipdata_extraction(extraction_root)
     result.update({
         "ok": result["status"] == "COMPLETE_WITH_DISCLOSURES",
         "configuration_path": str(config_path),
@@ -1433,7 +1636,14 @@ def _run_research_universe(args: argparse.Namespace) -> int:
         "database_write_attempted": False,
     })
     if args.output_format == "summary":
-        sys.stdout.write(_render_universe_summary(result) + "\n")
+        summary = _render_universe_summary(result)
+        source_package = result.get("source_package")
+        if isinstance(source_package, dict):
+            summary = (
+                f"显式VIPDATA来源包 {source_package['package_id']}；ZIP SHA-256={source_package['sha256']}；"
+                f"CRC={source_package['zip_crc']}；沪深主板/GEM为代码池，不是官方上市总体\n" + summary
+            )
+        sys.stdout.write(summary + "\n")
     else:
         _emit(result)
     return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE

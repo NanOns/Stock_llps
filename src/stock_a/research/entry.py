@@ -15,7 +15,7 @@ from pathlib import Path
 import re
 import stat
 import time
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from stock_a.canonical.selection import CanonicalReadSelection, build_tdx_read_selection
@@ -1955,6 +1955,8 @@ def research_universe_preview(
     discovery_budget: UniverseDiscoveryBudget | None = None,
     budget: CompareBudget | None = None,
     profile_contract: dict[str, Any] | None = None,
+    source_candidate_pool: Sequence[Mapping[str, Any]] | None = None,
+    source_candidate_catalog: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """只读发现TDX来源代码候选并对单页复用既有Core和累计预算。"""
     started = time.monotonic()
@@ -1981,7 +1983,27 @@ def research_universe_preview(
         roots = tuple(source_roots)
     except TypeError as error:
         raise ResearchEntryError("SOURCE_PATH_INVALID", "source_roots必须是根路径序列") from error
-    candidates, catalog = _discover_source_candidates(roots, discovery_budget)
+    if source_candidate_pool is None:
+        if source_candidate_catalog is not None:
+            raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "候选目录摘要必须与候选池同时提供")
+        candidates, catalog = _discover_source_candidates(roots, discovery_budget)
+    else:
+        if not roots or not isinstance(source_candidate_catalog, Mapping):
+            raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "显式候选池必须绑定来源根和目录摘要")
+        try:
+            candidates = tuple(dict(item) for item in source_candidate_pool)
+        except (TypeError, ValueError) as error:
+            raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "显式候选池格式无效") from error
+        if (source_candidate_catalog.get("complete") is not True
+                or source_candidate_catalog.get("candidate_count") != len(candidates)
+                or any(not isinstance(item.get("symbol"), str)
+                       or item.get("market") not in {"SH", "SZ"}
+                       or item.get("board") not in {"MAIN_BOARD", "GEM"}
+                       for item in candidates)
+                or len({item["symbol"] for item in candidates}) != len(candidates)):
+            raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "显式候选池与目录摘要不一致")
+        candidates = tuple(sorted(candidates, key=lambda item: item["symbol"]))
+        catalog = dict(source_candidate_catalog)
     selected = tuple(
         candidate for candidate in candidates
         if (market_filter == "ALL" or candidate["market"] == market_filter)
@@ -2042,6 +2064,9 @@ def research_universe_preview(
         total_records += chunk["budget"]["used_records"]
         for result in chunk["results"]:
             candidate = candidate_by_symbol[result["requested_symbol"]]
+            if candidate.get("empty_placeholder") is True and result.get("status") == "FAILED":
+                result["error_code"] = "ZIP_DAY_ENTRY_EMPTY"
+                result["message"] = "官方ZIP将此证券作为零字节占位；未向Core提供行情"
             result["source_candidate"] = {
                 **candidate,
                 "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",

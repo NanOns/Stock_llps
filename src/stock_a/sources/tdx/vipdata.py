@@ -157,6 +157,32 @@ class VipdataPackage:
 
 
 @dataclass(frozen=True)
+class VerifiedVipdataPackage:
+    """一次本地重验产生的短期包句柄；不代表来源封口、PIT或PG接受。"""
+
+    file_path: Path
+    file_name: str
+    file_size: int
+    sha256: str
+    zip_entry_count: int
+    zip_crc: str
+    total_uncompressed_bytes: int
+    entry_count_by_market: Mapping[str, int]
+    day_entries: tuple[VipdataDayEntry, ...]
+    verified_at: datetime
+    file_identity: tuple[int, int, int, int]
+
+
+@dataclass(frozen=True)
+class VipdataCandidatePool:
+    """由ZIP目录动态派生的沪深主板/创业板研究代码池。"""
+
+    candidates: tuple[dict[str, Any], ...]
+    catalog: Mapping[str, Any]
+    entry_classification_counts: Mapping[str, int]
+
+
+@dataclass(frozen=True)
 class VipdataDayScan:
     entry: VipdataDayEntry
     record_count: int
@@ -731,6 +757,248 @@ def validate_vipdata_zip(
         raise
     except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError) as error:
         raise VipdataError("ZIP_INVALID", "ZIP中央目录、压缩方法或内容校验失败") from error
+
+
+def verify_existing_vipdata_package(
+    zip_path: str | Path,
+    *,
+    expected_sha256: str,
+    budgets: VipdataBudgets = VipdataBudgets(),
+) -> VerifiedVipdataPackage:
+    """重验G盘现存包的字节身份、完整目录与CRC，不联网也不改包。"""
+    if not isinstance(expected_sha256, str) or re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256) is None:
+        raise VipdataError("PACKAGE_SHA_INVALID", "显式VIPDATA包必须提供64位十六进制SHA-256")
+    path = _safe_temp_file(zip_path)
+    before = path.stat()
+    if before.st_size <= 0 or before.st_size > budgets.max_package_bytes:
+        raise VipdataError("PACKAGE_SIZE_INVALID", "本地ZIP为空或超过最大包字节数")
+    started = time.monotonic()
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as source:
+            while True:
+                if time.monotonic() - started > budgets.max_total_seconds:
+                    raise VipdataError("PACKAGE_VERIFY_TIMEOUT", "本地ZIP SHA校验超过总耗时预算")
+                chunk = source.read(1024 * 1024)
+                if not chunk:
+                    break
+                digest.update(chunk)
+        actual_sha256 = digest.hexdigest()
+        if actual_sha256 != expected_sha256.lower():
+            raise VipdataError("PACKAGE_SHA_MISMATCH", "本地ZIP SHA-256与显式绑定值不一致")
+        entry_count, total_uncompressed, entries, by_market = validate_vipdata_zip(path, budgets=budgets)
+        if time.monotonic() - started > budgets.max_total_seconds:
+            raise VipdataError("PACKAGE_VERIFY_TIMEOUT", "本地ZIP SHA及CRC校验超过总耗时预算")
+        after = path.stat()
+        identity_before = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+        identity_after = (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns)
+        if identity_before != identity_after:
+            raise VipdataError("PACKAGE_CHANGED", "完整校验期间ZIP文件身份或大小发生变化")
+    except VipdataError:
+        raise
+    except OSError as error:
+        raise VipdataError("PACKAGE_VERIFY_IO_ERROR", "读取G盘本地ZIP失败") from error
+    return VerifiedVipdataPackage(
+        file_path=path,
+        file_name=path.name,
+        file_size=after.st_size,
+        sha256=actual_sha256,
+        zip_entry_count=entry_count,
+        zip_crc="PASS",
+        total_uncompressed_bytes=total_uncompressed,
+        entry_count_by_market=by_market,
+        day_entries=entries,
+        verified_at=datetime.now(timezone.utc),
+        file_identity=identity_after,
+    )
+
+
+def vipdata_research_candidate_pool(package: VerifiedVipdataPackage) -> VipdataCandidatePool:
+    """动态按现役符号合同分出沪深主板/GEM候选，BJ和非目标代码保留分账。"""
+    from stock_a.research.entry import ResearchEntryError, _normalize_symbol
+
+    if not isinstance(package, VerifiedVipdataPackage):
+        raise VipdataError("PACKAGE_HANDLE_INVALID", "候选池必须来自本次本地完整校验的VIPDATA包")
+    started = time.monotonic()
+    candidates: list[dict[str, Any]] = []
+    classifications: dict[str, int] = {}
+    seen: dict[str, str] = {}
+    excluded_out_of_scope = 0
+    invalid_names = 0
+    for entry in package.day_entries:
+        market = entry.market.upper()
+        code = entry.symbol.upper()
+        category: str
+        if market == "BJ":
+            category = "BJ_OPTIONAL_DEFERRED"
+        elif market not in {"SH", "SZ"}:
+            category = "OTHER_MARKET"
+        elif re.fullmatch(r"[0-9]{6}", code) is None:
+            category = "INVALID_SYMBOL_CODE"
+            invalid_names += 1
+        else:
+            try:
+                normalized, _directory, board = _normalize_symbol(f"{market}.{code}")
+            except ResearchEntryError as error:
+                if error.code != "SYMBOL_OUT_OF_SCOPE":
+                    raise VipdataError("PACKAGE_SYMBOL_INVALID", "VIPDATA证券代码无法按现役规则核验") from error
+                excluded_out_of_scope += 1
+                if market == "SH" and code.startswith(("688", "689")):
+                    category = "SH_STAR"
+                elif market == "SH" and code.startswith("900"):
+                    category = "SH_B_SHARE"
+                elif market == "SZ" and code.startswith("200"):
+                    category = "SZ_B_SHARE"
+                elif (market == "SZ" and code.startswith("399")) or code.startswith("000") and market == "SH":
+                    category = "INDEX_OR_OTHER"
+                else:
+                    category = "SH_SZ_OTHER"
+            else:
+                category = f"{market}_{board}"
+                if normalized in seen:
+                    raise VipdataError("PACKAGE_SYMBOL_DUPLICATE", "ZIP同一市场代码出现多个日线条目")
+                seen[normalized] = entry.path
+                candidates.append({
+                    "symbol": normalized,
+                    "market": market,
+                    "board": board,
+                    "zip_entry_path": entry.path,
+                    "zip_entry_bytes": entry.uncompressed_bytes,
+                    "empty_placeholder": entry.uncompressed_bytes == 0,
+                })
+        classifications[category] = classifications.get(category, 0) + 1
+    if sum(classifications.values()) != len(package.day_entries):
+        raise VipdataError("PACKAGE_CLASSIFICATION_INCOMPLETE", "VIPDATA目录条目未能互斥完整分区")
+    candidates.sort(key=lambda item: item["symbol"])
+    by_market = {market: sum(item["market"] == market for item in candidates) for market in ("SH", "SZ")}
+    by_board = {board: sum(item["board"] == board for item in candidates) for board in ("MAIN_BOARD", "GEM")}
+    catalog = {
+        "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
+        "complete": True,
+        "configured_root_count": 1,
+        "directories": [
+            {"directory": f"{market.lower()}/lday", "directory_entries": package.entry_count_by_market.get(market.lower(), 0)}
+            for market in ("SH", "SZ", "BJ")
+        ],
+        "directory_entries_scanned": len(package.day_entries),
+        "day_file_entries": len(package.day_entries),
+        "candidate_count": len(candidates),
+        "excluded_out_of_scope": excluded_out_of_scope,
+        "invalid_day_filenames": invalid_names,
+        "invalid_day_filename_samples": [],
+        "invalid_day_filename_sample_limit": 100,
+        "candidate_counts_by_market": by_market,
+        "candidate_counts_by_board": by_board,
+        "elapsed_seconds": round(time.monotonic() - started, 6),
+        "source_package_id": f"TDX-HSJDAY-SHA256:{package.sha256}",
+        "source_package_sha256": package.sha256,
+        "entry_classification_counts": dict(sorted(classifications.items())),
+        "empty_placeholder_count": sum(entry.uncompressed_bytes == 0 for entry in package.day_entries),
+        "empty_placeholder_paths": sorted(
+            entry.path for entry in package.day_entries if entry.uncompressed_bytes == 0
+        )[:100],
+        "official_universe_denominator": "UNKNOWN",
+        "identity_disclosure": "ZIP文件名仅形成来源代码候选；不证明稳定实体、正式成员、上市、当日可交易或ST状态",
+    }
+    return VipdataCandidatePool(tuple(candidates), catalog, dict(sorted(classifications.items())))
+
+
+def extract_vipdata_candidate_page(
+    package: VerifiedVipdataPackage,
+    candidates: tuple[dict[str, Any], ...],
+    *,
+    destination_parent: str | Path = Path("G:/codex_tmp/stock_a_vipdata"),
+    max_extract_bytes: int = 512 * 1024 * 1024,
+) -> tuple[Path, dict[str, Path]]:
+    """一次ZIP身份校验后，仅解压本页条目；不为每只证券重算全包SHA。"""
+    if not isinstance(package, VerifiedVipdataPackage):
+        raise VipdataError("PACKAGE_HANDLE_INVALID", "页面抽取必须使用本次完整校验包句柄")
+    if type(max_extract_bytes) is not int or max_extract_bytes <= 0:
+        raise VipdataError("PACKAGE_EXTRACT_BUDGET_INVALID", "页面解压预算必须为正整数")
+    total_bytes = sum(item.get("zip_entry_bytes", -1) for item in candidates)
+    if any(type(item.get("zip_entry_bytes")) is not int or item["zip_entry_bytes"] < 0 for item in candidates):
+        raise VipdataError("PACKAGE_ENTRY_INVALID", "页面含未绑定目录身份的ZIP条目")
+    if total_bytes > max_extract_bytes:
+        raise VipdataError("PACKAGE_EXTRACT_BUDGET_EXCEEDED", "当前分页解压字节数超过显式页面预算")
+    path = _safe_temp_file(package.file_path)
+    if _file_identity(path) != package.file_identity:
+        raise VipdataError("PACKAGE_CHANGED", "SHA/CRC校验后VIPDATA文件身份发生变化")
+    parent = _safe_temp_directory(destination_parent)
+    if shutil.disk_usage(parent).free < total_bytes + 64 * 1024 * 1024:
+        raise VipdataError("PACKAGE_EXTRACT_DISK_BUDGET", "G盘空间不足以临时抽取当前页并保留64MiB")
+    extraction_root = parent / f"select-{uuid.uuid4().hex}"
+    extraction_root.mkdir()
+    extracted: dict[str, Path] = {}
+    entries_by_path = {entry.path: entry for entry in package.day_entries}
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            for candidate in candidates:
+                entry_path = candidate.get("zip_entry_path")
+                entry = entries_by_path.get(entry_path) if isinstance(entry_path, str) else None
+                symbol = candidate.get("symbol")
+                if entry is None or not isinstance(symbol, str):
+                    raise VipdataError("PACKAGE_ENTRY_INVALID", "分页候选与已校验ZIP目录不匹配")
+                normalized, market_directory = _candidate_entry_destination(symbol)
+                if normalized != symbol or candidate.get("market") != symbol.split(".", 1)[0]:
+                    raise VipdataError("PACKAGE_ENTRY_INVALID", "分页候选市场、代码与条目身份不匹配")
+                if candidate.get("zip_entry_bytes") != entry.uncompressed_bytes:
+                    raise VipdataError("PACKAGE_ENTRY_INVALID", "分页候选条目大小与已校验目录不匹配")
+                relative = PurePosixPath("vipdoc") / market_directory / "lday" / f"{market_directory}{symbol.split('.', 1)[1]}.day"
+                parts = _safe_entry_path(str(relative))
+                output_path = extraction_root.joinpath(*parts)
+                output_path.parent.mkdir(parents=True, exist_ok=True)
+                output_path.parent.resolve(strict=True).relative_to(extraction_root)
+                info = archive.getinfo(entry.path)
+                if info.file_size != entry.uncompressed_bytes:
+                    raise VipdataError("PACKAGE_CHANGED", "ZIP条目大小与本次重验目录不一致")
+                with archive.open(info, "r") as source, output_path.open("xb") as target:
+                    written = 0
+                    while True:
+                        chunk = source.read(64 * 1024)
+                        if not chunk:
+                            break
+                        written += len(chunk)
+                        if written > entry.uncompressed_bytes:
+                            raise VipdataError("ZIP_ENTRY_SIZE_MISMATCH", "分页条目解压长度超过中央目录")
+                        target.write(chunk)
+                    target.flush()
+                    os.fsync(target.fileno())
+                if written != entry.uncompressed_bytes or (written and written % 32 != 0):
+                    raise VipdataError("ZIP_DAY_LENGTH_INVALID", "分页日线条目长度不符合32字节记录合同")
+                extracted[symbol] = output_path
+        if _file_identity(path) != package.file_identity:
+            raise VipdataError("PACKAGE_CHANGED", "分页抽取期间VIPDATA文件身份发生变化")
+    except VipdataError:
+        if extraction_root.exists():
+            shutil.rmtree(extraction_root)
+        raise
+    except (OSError, KeyError, zipfile.BadZipFile, RuntimeError) as error:
+        if extraction_root.exists():
+            shutil.rmtree(extraction_root)
+        raise VipdataError("ZIP_EXTRACT_INVALID", "分页ZIP条目未能安全抽取") from error
+    return extraction_root, extracted
+
+
+def cleanup_vipdata_extraction(extraction_root: str | Path) -> None:
+    """仅移除本调用创建、位于G盘临时根内的唯一分页抽取目录。"""
+    root = Path(extraction_root)
+    parent = _safe_temp_directory(root.parent)
+    resolved = root.resolve(strict=True)
+    if resolved.parent != parent or not resolved.name.startswith("select-") or root.is_symlink():
+        raise VipdataError("EXTRACTION_CLEANUP_REFUSED", "拒绝清理非本次创建的VIPDATA临时目录")
+    shutil.rmtree(resolved)
+
+
+def _candidate_entry_destination(symbol: str) -> tuple[str, str]:
+    from stock_a.research.entry import _normalize_symbol
+
+    normalized, directory, _board = _normalize_symbol(symbol)
+    return normalized, directory
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int]:
+    info = path.stat()
+    return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
 
 
 def download_vipdata_package(
