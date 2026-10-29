@@ -1,7 +1,7 @@
 """Canonical日线typed桥的纯映射与SQL计划；不持有连接，也不执行SQL。"""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal, localcontext
 from fractions import Fraction
@@ -19,6 +19,8 @@ _FIELDS = ("open", "high", "low", "close", "amount", "volume")
 _PRICE_FIELDS = _FIELDS[:4]
 _QUALITIES = {"OBSERVED", "UNKNOWN_DATA", "NOT_APPLICABLE"}
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_VERIFIED_IDENTITY_AUTHORITY = object()
+_VERIFIED_UNIT_AUTHORITY = object()
 
 
 class TypedBridgeError(ValueError):
@@ -36,6 +38,7 @@ class StableIdentityBinding:
     status: str
     entity_id: str
     identity_revision: str
+    _authority_proof: object | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -46,6 +49,7 @@ class UnitAuthority:
     version: str
     amount_unit: str
     volume_unit: str
+    _authority_proof: object | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass(frozen=True)
@@ -224,14 +228,18 @@ def prepare_canonical_daily_candidate(
 ) -> CanonicalDailyCandidate:
     """在真实身份与单位权威通过后生成typed行；当前TDX研究输入会被正确拒绝。"""
     groups = map_canonical_selection_fields(selection)
-    if not isinstance(identity, StableIdentityBinding) or identity.status != "OFFICIAL_STABLE":
+    if (not isinstance(identity, StableIdentityBinding)
+            or identity.status != "OFFICIAL_STABLE"
+            or identity._authority_proof is not _VERIFIED_IDENTITY_AUTHORITY):
         raise TypedBridgeError("IDENTITY_NOT_BOUND", "缺少官方稳定security_id与有效身份版本，拒绝生成正式Canonical行")
     if (not isinstance(identity.entity_id, str) or not identity.entity_id
             or identity.entity_id == getattr(selection, "source_symbol", None)):
         raise TypedBridgeError("IDENTITY_NOT_BOUND", "来源代码不能替代稳定security_id")
     if not isinstance(identity.identity_revision, str) or _SHA256.fullmatch(identity.identity_revision) is None:
         raise TypedBridgeError("IDENTITY_REVISION_INVALID", "身份版本必须是有效SHA-256")
-    if not isinstance(units, UnitAuthority) or units.status != "VERIFIED":
+    if (not isinstance(units, UnitAuthority)
+            or units.status != "VERIFIED"
+            or units._authority_proof is not _VERIFIED_UNIT_AUTHORITY):
         raise TypedBridgeError("UNIT_AUTHORITY_NOT_BOUND", "调用方单位假设未通过独立验收，拒绝生成正式Canonical行")
     if (not isinstance(units.version, str) or not units.version.strip()
             or units.version != selection.units.version

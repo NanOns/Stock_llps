@@ -92,11 +92,27 @@ def build_tdx_read_selection(
             or not isinstance(calendar_evidence_status, str) or not calendar_evidence_status
             or not isinstance(units, UnitContract)):
         raise ValueError("规范选择缺少来源代码、日历、证据状态或单位合同")
+    file_identity = capture.source_identity
+    package_entry = capture.source_package_entry
+    file_identity_valid = (
+        file_identity is not None
+        and file_identity.path_binding_verified is True
+        and file_identity.handle_path_verified is True
+        and file_identity.requested_access == "GENERIC_READ"
+        and file_identity.size_before == capture.byte_count
+        and file_identity.size_after == capture.byte_count
+        and file_identity.mtime_ns_before == file_identity.mtime_ns_after
+    )
+    package_entry_valid = (
+        package_entry is not None
+        and package_entry.source_symbol == source_symbol
+        and package_entry.target_session == target_session
+        and package_entry.entry_sha256 == capture.content_sha256
+        and package_entry.entry_byte_count == capture.byte_count
+    )
     if (capture.record_count <= 0 or capture.byte_count != capture.record_count * 32
             or capture.first_date > capture.last_date
-            or not capture.source_identity.path_binding_verified
-            or not capture.source_identity.handle_path_verified
-            or capture.source_identity.requested_access != "GENERIC_READ"):
+            or (file_identity_valid == package_entry_valid)):
         raise ValueError("规范选择拒绝不完整或未核验的TDX来源扫描")
     if type(future_source_rows_excluded) is not int or future_source_rows_excluded < 0:
         raise ValueError("未来来源记录排除数必须是非负整数")

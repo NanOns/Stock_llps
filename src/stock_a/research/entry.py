@@ -37,6 +37,7 @@ from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
 from stock_a.sources.tdx.capture import TdxCaptureRequest, build_tdx_capture_envelope
 from stock_a.sources.tdx.day_source import open_day_file
 from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
+from stock_a.sources.tdx.vipdata import VipdataEntryCapture
 
 
 _CALENDAR_RESOURCE_PATTERN = re.compile(r"^cn_equity_sessions_([0-9]{4})\.json$")
@@ -700,6 +701,8 @@ def _core_history_from_selection(selection: CanonicalReadSelection) -> tuple[Cor
 
 def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, Any]:
     capture = selection.capture
+    package_entry = capture.source_package_entry
+    source_identity = capture.source_identity
     target_fields: dict[str, Any] = {}
     for fact in selection.target_fields:
         payload = _render_field(fact.value)
@@ -741,17 +744,40 @@ def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, 
             "byte_count": capture.byte_count,
             "record_date_range": [capture.first_date.isoformat(), capture.last_date.isoformat()],
             "complete_read": True,
-            "source_authority": "UNVERIFIED_LOCAL_TDX_INSTALLATION",
-            "source_identity": {
-                "requested_access": capture.source_identity.requested_access,
-                "path_binding_verified": capture.source_identity.path_binding_verified,
-                "handle_path_verified": capture.source_identity.handle_path_verified,
-                "size_stable_during_read": capture.source_identity.size_before == capture.source_identity.size_after,
-                "mtime_stable_during_read": capture.source_identity.mtime_ns_before == capture.source_identity.mtime_ns_after,
-            },
+            "source_authority": (
+                "VIPDATA_OFFICIAL_ENDPOINT_LOCAL_PACKAGE_AND_ENTRY_BYTES_REVALIDATED"
+                if package_entry is not None else "UNVERIFIED_LOCAL_TDX_INSTALLATION"
+            ),
+            "source_identity": ({
+                "kind": "VERIFIED_TDX_ZIP_ENTRY",
+                "package_id": package_entry.package_id,
+                "package_sha256": package_entry.package_sha256,
+                "official_package_url": package_entry.official_package_url,
+                "package_file_size": package_entry.package_file_size,
+                "zip_entry_count": package_entry.zip_entry_count,
+                "zip_crc": package_entry.zip_crc,
+                "package_verified_at": package_entry.package_verified_at.isoformat(),
+                "zip_entry_path": package_entry.zip_entry_path,
+                "entry_sha256": package_entry.entry_sha256,
+                "entry_byte_count": package_entry.entry_byte_count,
+                "source_symbol": package_entry.source_symbol,
+                "target_session": package_entry.target_session.isoformat(),
+                "source_clock_role": package_entry.source_clock_role,
+                "published_at": "UNKNOWN",
+                "first_available_at": "UNKNOWN",
+            } if package_entry is not None else {
+                "kind": "READONLY_LOCAL_FILE_HANDLE",
+                "requested_access": source_identity.requested_access,
+                "path_binding_verified": source_identity.path_binding_verified,
+                "handle_path_verified": source_identity.handle_path_verified,
+                "size_stable_during_read": source_identity.size_before == source_identity.size_after,
+                "mtime_stable_during_read": source_identity.mtime_ns_before == source_identity.mtime_ns_after,
+            }),
             "observed_started_at": capture.observed_started_at.isoformat(),
             "observed_completed_at": capture.observed_completed_at.isoformat(),
-            "observation_clock_role": "LOCAL_FILE_READ_TIME_ONLY",
+            "observation_clock_role": (
+                package_entry.source_clock_role if package_entry is not None else "LOCAL_FILE_READ_TIME_ONLY"
+            ),
             "first_available_at": "UNKNOWN",
             "published_at": "UNKNOWN",
         },
@@ -1455,6 +1481,7 @@ def research_stock(
     limits: ReadLimits,
     profile_contract: dict[str, Any] | None = None,
     include_baostock_evidence: bool = False,
+    vipdata_capture: VipdataEntryCapture | None = None,
 ) -> dict[str, Any]:
     """验证目标会话后保留可读Raw；仅在可用前态上调用现有Core。"""
     target = _parse_target(target_session)
@@ -1464,48 +1491,77 @@ def research_stock(
     session_set = set(calendar_sessions)
     normalized, market_directory, board = _normalize_symbol(symbol)
     code = normalized.split(".")[1]
-    root, path = _source_path(source_roots, market_directory, code)
     selected: dict[date, DecodedDay] = {}
     future_source_rows_excluded = 0
-    try:
-        with open_day_file(path, (root,), units, limits) as scan:
-            for located in scan:
-                day = located.decoded.session_date
-                if day.year in calendar_years and day not in session_set:
-                    raise ResearchEntryError(
-                        "SOURCE_SESSION_NOT_IN_CALENDAR",
-                        f"TDX来源在已核验年度包含非交易会话记录：{day.isoformat()}",
-                        context={"byte_count": scan.progress[0], "record_count": scan.progress[1]},
-                    )
-                if day > target:
-                    future_source_rows_excluded += 1
-                elif day in session_set:
-                    selected[day] = located.decoded
-            file_summary = scan.summary
-    except DayReadError:
-        raise
-    except PermissionError as error:
-        raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝读取配置的TDX日线文件") from error
-    except OSError as error:
-        raise ResearchEntryError("SOURCE_IO_ERROR", "只读TDX扫描遇到操作系统I/O错误") from error
+    file_summary = None
+    root: Path | None = None
+    path: Path | None = None
+    if vipdata_capture is not None:
+        if (not isinstance(vipdata_capture, VipdataEntryCapture)
+                or vipdata_capture.source_symbol != normalized
+                or vipdata_capture.target_session != target
+                or vipdata_capture.capture.source_package_entry is None):
+            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获与请求代码或目标日不匹配")
+        scan_summary = vipdata_capture.scan_summary
+        if not scan_summary.complete:
+            raise ResearchEntryError("VIPDATA_CAPTURE_INCOMPLETE", "官网ZIP条目尚未完成只读扫描")
+        for decoded in vipdata_capture.rows:
+            day = decoded.session_date
+            if day.year in calendar_years and day not in session_set:
+                raise ResearchEntryError(
+                    "SOURCE_SESSION_NOT_IN_CALENDAR",
+                    f"TDX来源在已核验年度包含非交易会话记录：{day.isoformat()}",
+                )
+            if day > target:
+                future_source_rows_excluded += 1
+            elif day in session_set:
+                selected[day] = decoded
+        if future_source_rows_excluded != vipdata_capture.future_source_rows_excluded:
+            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "来源捕获的未来行计数与读取行不一致")
+        capture_envelope = vipdata_capture.capture
+    else:
+        root, path = _source_path(source_roots, market_directory, code)
+        try:
+            with open_day_file(path, (root,), units, limits) as scan:
+                for located in scan:
+                    day = located.decoded.session_date
+                    if day.year in calendar_years and day not in session_set:
+                        raise ResearchEntryError(
+                            "SOURCE_SESSION_NOT_IN_CALENDAR",
+                            f"TDX来源在已核验年度包含非交易会话记录：{day.isoformat()}",
+                            context={"byte_count": scan.progress[0], "record_count": scan.progress[1]},
+                        )
+                    if day > target:
+                        future_source_rows_excluded += 1
+                    elif day in session_set:
+                        selected[day] = located.decoded
+                file_summary = scan.summary
+        except DayReadError:
+            raise
+        except PermissionError as error:
+            raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝读取配置的TDX日线文件") from error
+        except OSError as error:
+            raise ResearchEntryError("SOURCE_IO_ERROR", "只读TDX扫描遇到操作系统I/O错误") from error
+        scan_summary = file_summary.scan
 
     session_slice = tuple(day for day in calendar_sessions if day <= target)
-    capture_request = TdxCaptureRequest(
-        capture_id=str(uuid4()),
-        dataset_id="TDX_DAILY_BARS",
-        dataset_version="TDX_DAY_RECORD_32B_CANDIDATE",
-        query_scope={
-            "source_symbol": normalized,
-            "target_session": target.isoformat(),
-            "selection_mode": "OFFICIAL_SESSIONS_NOT_AFTER_TARGET",
-            "research_mode": "NON_PIT_RETROSPECTIVE",
-        },
-        query_start=min(file_summary.scan.first_date, target),
-        query_end=max(file_summary.scan.last_date, target),
-        parser_version="stock_a.sources.tdx.day.decode_day_record",
-        validation_contract="TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00",
-    )
-    capture_envelope = build_tdx_capture_envelope(file_summary, capture_request)
+    if vipdata_capture is None:
+        capture_request = TdxCaptureRequest(
+            capture_id=str(uuid4()),
+            dataset_id="TDX_DAILY_BARS",
+            dataset_version="TDX_DAY_RECORD_32B_CANDIDATE",
+            query_scope={
+                "source_symbol": normalized,
+                "target_session": target.isoformat(),
+                "selection_mode": "OFFICIAL_SESSIONS_NOT_AFTER_TARGET",
+                "research_mode": "NON_PIT_RETROSPECTIVE",
+            },
+            query_start=min(scan_summary.first_date, target),
+            query_end=max(scan_summary.last_date, target),
+            parser_version="stock_a.sources.tdx.day.decode_day_record",
+            validation_contract="TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00",
+        )
+        capture_envelope = build_tdx_capture_envelope(file_summary, capture_request)
     canonical_selection = build_tdx_read_selection(
         source_symbol=normalized,
         target_session=target,
@@ -1536,7 +1592,7 @@ def research_stock(
     observation_summary = _observation_summary(
         symbol=normalized,
         target_session=target,
-        source_last_session=file_summary.scan.last_date,
+        source_last_session=scan_summary.last_date,
         raw_fields=raw_fields,
         raw_close=raw_close,
         core=core,
@@ -1568,11 +1624,14 @@ def research_stock(
     basic_fact_dimensions, availability_explanation = _basic_fact_dimensions(
         symbol=normalized,
         target_session=target,
-        source_last_session=file_summary.scan.last_date,
+        source_last_session=scan_summary.last_date,
         read_time={
-            "started_at": file_summary.scan.read_started_at.isoformat(),
-            "completed_at": file_summary.scan.read_completed_at.isoformat(),
-            "clock_role": "LOCAL_FILE_READ_TIME_ONLY",
+            "started_at": scan_summary.read_started_at.isoformat(),
+            "completed_at": scan_summary.read_completed_at.isoformat(),
+            "clock_role": (
+                vipdata_capture.capture.source_package_entry.source_clock_role
+                if vipdata_capture is not None else "LOCAL_FILE_READ_TIME_ONLY"
+            ),
         },
         source={"budgets": {
             "max_bytes": limits.max_bytes,
@@ -1606,32 +1665,61 @@ def research_stock(
         "board_scope": board,
         "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_SERIES_ONLY",
         "target_session": target.isoformat(),
-        "source_last_session": file_summary.scan.last_date.isoformat(),
-        "source_first_session": file_summary.scan.first_date.isoformat(),
+        "source_last_session": scan_summary.last_date.isoformat(),
+        "source_first_session": scan_summary.first_date.isoformat(),
         "read_time": {
-            "started_at": file_summary.scan.read_started_at.isoformat(),
-            "completed_at": file_summary.scan.read_completed_at.isoformat(),
-            "clock_role": "LOCAL_FILE_READ_TIME_ONLY",
+            "started_at": scan_summary.read_started_at.isoformat(),
+            "completed_at": scan_summary.read_completed_at.isoformat(),
+            "clock_role": (
+                vipdata_capture.capture.source_package_entry.source_clock_role
+                if vipdata_capture is not None else "LOCAL_FILE_READ_TIME_ONLY"
+            ),
         },
-        "source": {
-            "configured_root": str(root),
-            "final_path": file_summary.source.handle_path,
-            "format_contract": "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00",
-            "source_contract_status": "RESEARCH_LAYOUT_ONLY_AUTHORITY_AND_CAPTURE_CLOCK_UNRESOLVED",
-            "raw_byte_sha256": file_summary.scan.raw_byte_sha256,
-            "record_count": file_summary.scan.record_count,
-            "byte_count": file_summary.scan.byte_count,
-            "read_started_at": file_summary.scan.read_started_at.isoformat(),
-            "read_completed_at": file_summary.scan.read_completed_at.isoformat(),
-            "read_clock_role": "LOCAL_FILE_READ_TIME_ONLY",
-            "complete_read": file_summary.complete,
+        "source": ({
+            "configured_root": None,
+            "final_path": None,
+            "format_contract": "TDX_HSJDAY_ZIP_ENTRY_32_BYTE_LAYOUT_R1",
+            "source_contract_status": "OFFICIAL_PACKAGE_BYTES_REVALIDATED; MEMBERSHIP_PIT_AND_UNIT_AUTHORITY_UNBOUND",
+            "package_id": vipdata_capture.capture.source_package_entry.package_id,
+            "package_sha256": vipdata_capture.capture.source_package_entry.package_sha256,
+            "official_package_url": vipdata_capture.capture.source_package_entry.official_package_url,
+            "package_verified_at": vipdata_capture.capture.source_package_entry.package_verified_at.isoformat(),
+            "zip_entry_path": vipdata_capture.capture.source_package_entry.zip_entry_path,
+            "zip_entry_sha256": vipdata_capture.capture.source_package_entry.entry_sha256,
+            "raw_byte_sha256": scan_summary.raw_byte_sha256,
+            "record_count": scan_summary.record_count,
+            "byte_count": scan_summary.byte_count,
+            "read_started_at": scan_summary.read_started_at.isoformat(),
+            "read_completed_at": scan_summary.read_completed_at.isoformat(),
+            "read_clock_role": vipdata_capture.capture.source_package_entry.source_clock_role,
+            "published_at": "UNKNOWN",
+            "first_available_at": "UNKNOWN",
+            "complete_read": scan_summary.complete,
             "budgets": {
                 "max_bytes": limits.max_bytes,
                 "max_records": limits.max_records,
                 "chunk_records": limits.chunk_records,
                 "max_seconds": limits.max_seconds,
             },
-        },
+        } if vipdata_capture is not None else {
+            "configured_root": str(root),
+            "final_path": file_summary.source.handle_path,
+            "format_contract": "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00",
+            "source_contract_status": "RESEARCH_LAYOUT_ONLY_AUTHORITY_AND_CAPTURE_CLOCK_UNRESOLVED",
+            "raw_byte_sha256": scan_summary.raw_byte_sha256,
+            "record_count": scan_summary.record_count,
+            "byte_count": scan_summary.byte_count,
+            "read_started_at": scan_summary.read_started_at.isoformat(),
+            "read_completed_at": scan_summary.read_completed_at.isoformat(),
+            "read_clock_role": "LOCAL_FILE_READ_TIME_ONLY",
+            "complete_read": scan_summary.complete,
+            "budgets": {
+                "max_bytes": limits.max_bytes,
+                "max_records": limits.max_records,
+                "chunk_records": limits.chunk_records,
+                "max_seconds": limits.max_seconds,
+            },
+        }),
         "unit_contract": {
             "version": units.version,
             "amount_to_cny": str(units.amount_to_cny),
@@ -1693,14 +1781,40 @@ def research_stock(
         result["profile_preview"] = _build_profile_preview(
             symbol=normalized,
             target_session=target,
-            source_last_session=file_summary.scan.last_date,
-            source_sha256=file_summary.scan.raw_byte_sha256,
+            source_last_session=scan_summary.last_date,
+            source_sha256=scan_summary.raw_byte_sha256,
             target_bar=target_bar,
             history=history,
             core=core,
             calendar_revision=calendar_revision,
             contract=profile_contract,
         )
+    if vipdata_capture is not None:
+        source_ref = vipdata_capture.capture.source_package_entry
+        result["source_package"] = {
+            "package_id": source_ref.package_id,
+            "sha256": source_ref.package_sha256,
+            "official_package_url": source_ref.official_package_url,
+            "file_size": source_ref.package_file_size,
+            "zip_entry_count": source_ref.zip_entry_count,
+            "zip_crc": source_ref.zip_crc,
+            "verified_at": source_ref.package_verified_at.isoformat(),
+            "zip_entry_path": source_ref.zip_entry_path,
+            "zip_entry_sha256": source_ref.entry_sha256,
+            "zip_entry_bytes": source_ref.entry_byte_count,
+            "target_session": source_ref.target_session.isoformat(),
+            "entry_observed_started_at": source_ref.observed_started_at.isoformat(),
+            "entry_observed_completed_at": source_ref.observed_completed_at.isoformat(),
+            "published_at": "UNKNOWN",
+            "first_available_at": "UNKNOWN",
+            "identity_status": "SOURCE_SYMBOL_ONLY",
+            "membership_and_listing_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
+            "price_coordinate": "RAW_UNADJUSTED",
+            "amount_unit_authority": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
+            "volume_unit_authority": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
+            "acceptance_status": "NOT_ACCEPTED_NOT_PERSISTED",
+            "profile_admission": "DENY_TRUSTED_FOUNDATION_SELECTOR_REQUIRED",
+        }
     if type(include_baostock_evidence) is not bool:
         raise ResearchEntryError("BAOSTOCK_OPTION_INVALID", "BaoStock证据开关必须为布尔值")
     if include_baostock_evidence:
@@ -1727,6 +1841,7 @@ def research_compare(
     limits: ReadLimits,
     budget: CompareBudget | None = None,
     profile_contract: dict[str, Any] | None = None,
+    source_captures: Mapping[str, VipdataEntryCapture] | None = None,
 ) -> dict[str, Any]:
     """同一日期逐代码只读计算，并对整批请求共享字节、记录和耗时预算。"""
     budget = budget or CompareBudget()
@@ -1738,6 +1853,15 @@ def research_compare(
     normalized = tuple(_normalize_symbol(item)[0] for item in requested)
     if len(set(normalized)) != len(normalized):
         raise ResearchEntryError("DUPLICATE_SYMBOL", "对比代码重复；拒绝静默去重")
+    if source_captures is not None:
+        if (not isinstance(source_captures, Mapping)
+                or any(not isinstance(key, str) or not isinstance(value, VipdataEntryCapture)
+                       for key, value in source_captures.items())
+                or not set(normalized).issubset(source_captures)):
+            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获没有覆盖本次对比请求")
+        if any(source_captures[symbol].target_session.isoformat() != target_session
+               for symbol in normalized):
+            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获目标日与本次对比不一致")
     roots = tuple(source_roots)
     target = _parse_target(target_session)
     started = time.monotonic()
@@ -1802,6 +1926,7 @@ def research_compare(
                 units=units,
                 limits=per_symbol_limits,
                 profile_contract=profile_contract,
+                vipdata_capture=source_captures.get(item) if source_captures is not None else None,
             )
             item_bytes = result["source"]["byte_count"]
             item_records = result["source"]["record_count"]
@@ -1957,6 +2082,7 @@ def research_universe_preview(
     profile_contract: dict[str, Any] | None = None,
     source_candidate_pool: Sequence[Mapping[str, Any]] | None = None,
     source_candidate_catalog: Mapping[str, Any] | None = None,
+    source_captures: Mapping[str, VipdataEntryCapture] | None = None,
 ) -> dict[str, Any]:
     """只读发现TDX来源代码候选并对单页复用既有Core和累计预算。"""
     started = time.monotonic()
@@ -1984,11 +2110,12 @@ def research_universe_preview(
     except TypeError as error:
         raise ResearchEntryError("SOURCE_PATH_INVALID", "source_roots必须是根路径序列") from error
     if source_candidate_pool is None:
-        if source_candidate_catalog is not None:
+        if source_candidate_catalog is not None or source_captures is not None:
             raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "候选目录摘要必须与候选池同时提供")
         candidates, catalog = _discover_source_candidates(roots, discovery_budget)
     else:
-        if not roots or not isinstance(source_candidate_catalog, Mapping):
+        if (not isinstance(source_candidate_catalog, Mapping)
+                or (not roots and source_captures is None)):
             raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "显式候选池必须绑定来源根和目录摘要")
         try:
             candidates = tuple(dict(item) for item in source_candidate_pool)
@@ -2012,11 +2139,38 @@ def research_universe_preview(
     candidate_total = len(selected)
     page_candidates = selected[offset:offset + limit]
     candidate_by_symbol = {item["symbol"]: item for item in page_candidates}
+    scannable_candidates = tuple(item for item in page_candidates if item.get("empty_placeholder") is not True)
+    if source_captures is not None:
+        if not isinstance(source_captures, Mapping):
+            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获必须是按代码索引的映射")
+        if set(source_captures) != {item["symbol"] for item in scannable_candidates}:
+            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获未精确覆盖本页非空条目")
+        for candidate in scannable_candidates:
+            symbol = candidate["symbol"]
+            capture = source_captures.get(symbol)
+            source_ref = capture.capture.source_package_entry if isinstance(capture, VipdataEntryCapture) else None
+            if (not isinstance(capture, VipdataEntryCapture)
+                    or capture.target_session != target
+                    or capture.source_symbol != symbol
+                    or source_ref is None
+                    or source_ref.package_sha256 != catalog.get("source_package_sha256")
+                    or source_ref.zip_entry_path != candidate.get("zip_entry_path")):
+                raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "ZIP候选页与Capture的包/条目/目标日身份不一致")
     page_results: list[dict[str, Any]] = []
     total_bytes = 0
     total_records = 0
     stop_code: str | None = None
     next_position = 0
+    for candidate in page_candidates:
+        if candidate.get("empty_placeholder") is True:
+            page_results.append({
+                "status": "FAILED",
+                "requested_symbol": candidate["symbol"],
+                "error_code": "ZIP_DAY_ENTRY_EMPTY",
+                "message": "官方ZIP将此证券作为零字节占位；未向Core提供行情",
+                "read_usage": {"bytes": 0, "records": 0},
+                "source_candidate": {**candidate, "contract": "TDX_SOURCE_CANDIDATES_NON_PIT"},
+            })
 
     def mark_page_not_evaluated(symbols: Iterable[str], code: str) -> None:
         for symbol in symbols:
@@ -2033,7 +2187,7 @@ def research_universe_preview(
                 },
             })
 
-    while next_position < len(page_candidates):
+    while next_position < len(scannable_candidates):
         elapsed = time.monotonic() - started
         remaining_seconds = budget.max_total_seconds - elapsed
         remaining_bytes = budget.max_total_bytes - total_bytes
@@ -2046,11 +2200,11 @@ def research_universe_preview(
             stop_code = "MAX_TOTAL_RECORDS_EXCEEDED"
         if stop_code is not None:
             mark_page_not_evaluated(
-                (item["symbol"] for item in page_candidates[next_position:]), stop_code
+                (item["symbol"] for item in scannable_candidates[next_position:]), stop_code
             )
             break
 
-        chunk_candidates = page_candidates[next_position:next_position + _MAX_COMPARE_SYMBOLS]
+        chunk_candidates = scannable_candidates[next_position:next_position + _MAX_COMPARE_SYMBOLS]
         chunk = research_compare(
             symbols=tuple(item["symbol"] for item in chunk_candidates),
             target_session=target.isoformat(),
@@ -2059,6 +2213,10 @@ def research_universe_preview(
             limits=limits,
             budget=CompareBudget(remaining_bytes, remaining_records, remaining_seconds),
             profile_contract=profile_contract,
+            source_captures=(
+                {item["symbol"]: source_captures[item["symbol"]] for item in chunk_candidates}
+                if source_captures is not None else None
+            ),
         )
         total_bytes += chunk["budget"]["used_bytes"]
         total_records += chunk["budget"]["used_records"]
@@ -2074,11 +2232,14 @@ def research_universe_preview(
             page_results.append(result)
         next_position += len(chunk["results"])
         stop_code = chunk["budget"]["exhausted_by"]
-        if stop_code is not None and next_position < len(page_candidates):
+        if stop_code is not None and next_position < len(scannable_candidates):
             mark_page_not_evaluated(
-                (item["symbol"] for item in page_candidates[next_position:]), stop_code
+                (item["symbol"] for item in scannable_candidates[next_position:]), stop_code
             )
             break
+
+    page_order = {item["symbol"]: index for index, item in enumerate(page_candidates)}
+    page_results.sort(key=lambda item: page_order[item["requested_symbol"]])
 
     available = sum(item.get("status") == "AVAILABLE" for item in page_results)
     failed = sum(item.get("status") == "FAILED" for item in page_results)

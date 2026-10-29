@@ -41,6 +41,29 @@ class TdxCaptureRequest:
 
 
 @dataclass(frozen=True)
+class TdxPackageEntryReference:
+    """官网ZIP条目的来源身份与本次本地重验时钟；不代表PIT或官方成员身份。"""
+
+    package_id: str
+    package_sha256: str
+    official_package_url: str
+    package_verified_at: datetime
+    package_file_size: int
+    zip_entry_count: int
+    zip_crc: str
+    source_symbol: str
+    zip_entry_path: str
+    entry_sha256: str
+    entry_byte_count: int
+    target_session: date
+    observed_started_at: datetime
+    observed_completed_at: datetime
+    published_at: datetime | None = None
+    first_available_at: datetime | None = None
+    source_clock_role: str = "LOCAL_VERIFIED_ZIP_ENTRY_READ_NON_PIT"
+
+
+@dataclass(frozen=True)
 class TdxCaptureEnvelope:
     """完成扫描的审计投影，不代表PIT、覆盖通过或source_set封口。"""
 
@@ -64,7 +87,8 @@ class TdxCaptureEnvelope:
     volume: FieldGroupCount
     observed_started_at: datetime
     observed_completed_at: datetime
-    source_identity: FileSourceIdentity
+    source_identity: FileSourceIdentity | None
+    source_package_entry: TdxPackageEntryReference | None = None
 
 
 def _required_text(value: object, name: str) -> str:
@@ -125,18 +149,75 @@ def _validate_source_identity(source: FileSourceIdentity, byte_count: int) -> No
         raise TdxCaptureError("CAPTURE_SOURCE_CHANGED", "来源句柄版本与完整扫描字节数不一致")
 
 
-def build_tdx_capture_envelope(
-    summary: DayFileSummary,
+def _validate_package_entry_reference(
+    source: TdxPackageEntryReference,
+    scan: DayScanSummary,
     request: TdxCaptureRequest,
+) -> None:
+    if not isinstance(source, TdxPackageEntryReference):
+        raise TdxCaptureError("CAPTURE_SOURCE_IDENTITY_INVALID", "缺少已核验的官网ZIP条目来源身份")
+    if (not isinstance(source.package_id, str)
+            or source.package_id != f"TDX-HSJDAY-SHA256:{source.package_sha256}"
+            or not isinstance(source.package_sha256, str)
+            or not _HEX_SHA256.fullmatch(source.package_sha256)
+            or not isinstance(source.entry_sha256, str)
+            or not _HEX_SHA256.fullmatch(source.entry_sha256)):
+        raise TdxCaptureError("CAPTURE_SOURCE_IDENTITY_INVALID", "ZIP包或条目SHA身份无效")
+    if source.official_package_url != "https://data.tdx.com.cn/vipdoc/hsjday.zip":
+        raise TdxCaptureError("CAPTURE_SOURCE_IDENTITY_INVALID", "ZIP条目未绑定登记的通达信官网端点")
+    if (type(source.package_file_size) is not int or source.package_file_size <= 0
+            or type(source.zip_entry_count) is not int or source.zip_entry_count <= 0
+            or source.zip_crc != "PASS"
+            or type(source.entry_byte_count) is not int or source.entry_byte_count != scan.byte_count
+            or source.entry_sha256 != scan.raw_byte_sha256):
+        raise TdxCaptureError("CAPTURE_SOURCE_IDENTITY_INVALID", "ZIP条目字节数或SHA与完整扫描摘要不一致")
+    if (not isinstance(source.source_symbol, str) or not source.source_symbol
+            or not isinstance(source.zip_entry_path, str) or not source.zip_entry_path
+            or type(source.target_session) is not date):
+        raise TdxCaptureError("CAPTURE_SOURCE_IDENTITY_INVALID", "ZIP条目路径、来源代码或目标会话无效")
+    if (request.query_scope.get("source_symbol") != source.source_symbol
+            or request.query_scope.get("target_session") != source.target_session.isoformat()):
+        raise TdxCaptureError("CAPTURE_SOURCE_IDENTITY_INVALID", "ZIP条目来源代码或目标日与捕获请求不一致")
+    timestamps = (source.package_verified_at, source.observed_started_at, source.observed_completed_at)
+    if any(not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None
+           for value in timestamps):
+        raise TdxCaptureError("CAPTURE_OBSERVATION_TIME_INVALID", "ZIP包验证及条目观测时间必须带时区")
+    if (source.observed_completed_at < source.observed_started_at
+            or source.package_verified_at > source.observed_started_at
+            or source.source_clock_role != "LOCAL_VERIFIED_ZIP_ENTRY_READ_NON_PIT"):
+        raise TdxCaptureError("CAPTURE_OBSERVATION_TIME_INVALID", "ZIP条目本地重验时间顺序或时间角色无效")
+    if any(value is not None for value in (source.published_at, source.first_available_at)):
+        raise TdxCaptureError("CAPTURE_OBSERVATION_TIME_INVALID", "未知官网发布时间或历史首获时间不得伪造")
+
+
+def build_tdx_capture_envelope(
+    summary: DayFileSummary | DayScanSummary,
+    request: TdxCaptureRequest,
+    *,
+    source_package_entry: TdxPackageEntryReference | None = None,
 ) -> TdxCaptureEnvelope:
-    """将已完成且最终核验的单文件扫描结果投影为不可变捕获封套。"""
+    """将已完成的只读文件或官网ZIP条目扫描投影为不可变捕获封套。"""
     if not isinstance(request, TdxCaptureRequest):
         raise TdxCaptureError("CAPTURE_REQUEST_INVALID", "必须提供显式TDX捕获请求合同")
-    if not isinstance(summary, DayFileSummary) or not isinstance(summary.scan, DayScanSummary):
-        raise TdxCaptureError("CAPTURE_SCAN_INVALID", "必须提供TDX日线文件扫描摘要")
-    scan = summary.scan
+    if isinstance(summary, DayFileSummary):
+        scan = summary.scan
+        source_identity = summary.source
+    elif isinstance(summary, DayScanSummary):
+        scan = summary
+        source_identity = None
+    else:
+        raise TdxCaptureError("CAPTURE_SCAN_INVALID", "必须提供TDX日线文件或ZIP条目的扫描摘要")
+    if not isinstance(scan, DayScanSummary):
+        raise TdxCaptureError("CAPTURE_SCAN_INVALID", "缺少TDX日线扫描摘要")
     if scan.complete is not True:
         raise TdxCaptureError("CAPTURE_SCAN_INCOMPLETE", "来源扫描未完整到达EOF并完成最终核验")
+    if source_package_entry is None:
+        if source_identity is None:
+            raise TdxCaptureError("CAPTURE_SOURCE_IDENTITY_INVALID", "完整扫描必须绑定只读文件句柄或已核验ZIP条目")
+    else:
+        if source_identity is not None:
+            raise TdxCaptureError("CAPTURE_SOURCE_IDENTITY_INVALID", "Capture来源不得混合本地解压文件与ZIP条目身份")
+        _validate_package_entry_reference(source_package_entry, scan, request)
     capture_id = _required_text(request.capture_id, "capture_id")
     try:
         if str(UUID(capture_id)) != capture_id:
@@ -172,7 +253,8 @@ def build_tdx_capture_envelope(
             raise TdxCaptureError("CAPTURE_OBSERVATION_TIME_INVALID", "读取观测时间必须是带时区datetime")
     if scan.read_completed_at < scan.read_started_at:
         raise TdxCaptureError("CAPTURE_OBSERVATION_TIME_INVALID", "读取完成时间早于读取开始时间")
-    _validate_source_identity(summary.source, scan.byte_count)
+    if source_identity is not None:
+        _validate_source_identity(source_identity, scan.byte_count)
     digest_payload = {
         "dataset_id": dataset_id,
         "dataset_version": dataset_version,
@@ -221,5 +303,6 @@ def build_tdx_capture_envelope(
         volume=scan.volume,
         observed_started_at=scan.read_started_at,
         observed_completed_at=scan.read_completed_at,
-        source_identity=summary.source,
+        source_identity=source_identity,
+        source_package_entry=source_package_entry,
     )

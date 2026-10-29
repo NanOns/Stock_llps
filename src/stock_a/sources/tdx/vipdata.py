@@ -196,6 +196,122 @@ class VipdataDayScan:
 
 
 @dataclass(frozen=True)
+class VipdataEntryCapture:
+    """从已重验官网ZIP直接扫描的单个条目；Capture含包/条目来源身份。"""
+
+    source_symbol: str
+    market: str
+    board: str
+    target_session: date
+    capture: Any
+    scan_summary: Any
+    rows: tuple[Any, ...]
+    target_bar: Any | None
+    future_source_rows_excluded: int
+
+
+@dataclass(frozen=True)
+class VipdataTargetScanBudget:
+    """全候选目标日扫描的明确分页、读取量和耗时上限。"""
+
+    page_size: int = 100
+    max_total_bytes: int = 4 * 1024 * 1024 * 1024
+    max_total_records: int = 125_000_000
+    max_total_seconds: float = 1800.0
+    max_candidate_bytes: int = 32 * 1024 * 1024
+    max_candidate_records: int = 1_000_000
+    max_candidate_seconds: float = 30.0
+    chunk_records: int = 1024
+
+    def __post_init__(self) -> None:
+        for name in (
+            "page_size", "max_total_bytes", "max_total_records",
+            "max_candidate_bytes", "max_candidate_records", "chunk_records",
+        ):
+            value = getattr(self, name)
+            if type(value) is not int or value <= 0:
+                raise VipdataError("TARGET_SCAN_BUDGET_INVALID", f"{name}必须是拒绝bool的正整数")
+        if self.page_size > 100:
+            raise VipdataError("TARGET_SCAN_BUDGET_INVALID", "目标日评价页大小不得超过100")
+        for name in ("max_total_seconds", "max_candidate_seconds"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value <= 0:
+                raise VipdataError("TARGET_SCAN_BUDGET_INVALID", f"{name}必须是有限正数")
+
+
+@dataclass(frozen=True)
+class VipdataCandidateQuality:
+    """一个来源候选在指定目标日的独立评价与逐字段组质量。"""
+
+    source_index: int
+    page_offset: int
+    symbol: str
+    market: str
+    board: str
+    status: str
+    reason: str | None
+    target_bar_present: bool
+    record_count: int
+    first_date: date | None
+    last_date: date | None
+    package_id: str
+    package_sha256: str
+    zip_entry_path: str
+    target_session: date
+    entry_sha256: str | None
+    bytes_read: int
+    future_rows_excluded: int
+    observed_started_at: datetime | None
+    observed_completed_at: datetime | None
+    source_clock_role: str | None
+    price_quality: str | None
+    price_reason: str | None
+    amount_quality: str | None
+    amount_reason: str | None
+    volume_quality: str | None
+    volume_reason: str | None
+
+
+@dataclass(frozen=True)
+class VipdataTargetQualityPage:
+    page_number: int
+    offset: int
+    candidate_count: int
+    first_symbol: str | None
+    last_symbol: str | None
+    evaluated: int
+    target_present: int
+    target_missing: int
+    read_failed: int
+    not_evaluated: int
+    bytes_read: int
+    elapsed_seconds: float
+
+
+@dataclass(frozen=True)
+class VipdataTargetQualityReport:
+    target_session: date
+    package_id: str
+    package_sha256: str
+    package_verified_at: datetime
+    candidate_total: int
+    evaluated: int
+    target_present: int
+    target_missing: int
+    read_failed: int
+    not_evaluated: int
+    bytes_read: int
+    records_read: int
+    elapsed_seconds: float
+    by_market: Mapping[str, Mapping[str, int]]
+    by_board: Mapping[str, Mapping[str, int]]
+    field_quality: Mapping[str, Mapping[str, int]]
+    pages: tuple[VipdataTargetQualityPage, ...]
+    candidates: tuple[VipdataCandidateQuality, ...]
+    budget: VipdataTargetScanBudget
+
+
+@dataclass(frozen=True)
 class _HttpOpened:
     response: Any
     status: int
@@ -901,6 +1017,453 @@ def vipdata_research_candidate_pool(package: VerifiedVipdataPackage) -> VipdataC
         "identity_disclosure": "ZIP文件名仅形成来源代码候选；不证明稳定实体、正式成员、上市、当日可交易或ST状态",
     }
     return VipdataCandidatePool(tuple(candidates), catalog, dict(sorted(classifications.items())))
+
+
+def vipdata_candidate_pages(
+    candidates: tuple[dict[str, Any], ...],
+    *,
+    page_size: int,
+    offset: int = 0,
+) -> tuple[tuple[dict[str, Any], ...], ...]:
+    """按候选池既有稳定顺序分页；越界offset返回空页集合。"""
+    if not isinstance(candidates, tuple):
+        raise VipdataError("CANDIDATE_PAGE_INVALID", "候选分页输入必须是稳定排序的tuple")
+    if type(page_size) is not int or page_size <= 0 or type(offset) is not int or offset < 0:
+        raise VipdataError("CANDIDATE_PAGE_INVALID", "page_size须为正整数且offset须为非负整数")
+    if any(not isinstance(item, Mapping) for item in candidates):
+        raise VipdataError("CANDIDATE_PAGE_INVALID", "候选分页含非法来源条目")
+    selected = candidates[offset:]
+    return tuple(tuple(selected[start:start + page_size]) for start in range(0, len(selected), page_size))
+
+
+def _bound_vipdata_entry(
+    package: VerifiedVipdataPackage,
+    candidate: Mapping[str, Any],
+) -> VipdataDayEntry:
+    if not isinstance(package, VerifiedVipdataPackage):
+        raise VipdataError("PACKAGE_HANDLE_INVALID", "条目生产者必须使用本次完整校验的VIPDATA包句柄")
+    if _file_identity(_safe_temp_file(package.file_path)) != package.file_identity:
+        raise VipdataError("PACKAGE_CHANGED", "包SHA/CRC校验后ZIP文件身份发生变化")
+    symbol = candidate.get("symbol")
+    market = candidate.get("market")
+    path = candidate.get("zip_entry_path")
+    entry_size = candidate.get("zip_entry_bytes")
+    if (not isinstance(symbol, str) or not isinstance(market, str) or not isinstance(path, str)
+            or type(entry_size) is not int or entry_size < 0):
+        raise VipdataError("PACKAGE_ENTRY_INVALID", "候选缺少来源代码、市场、条目路径或大小")
+    match = re.fullmatch(r"(SH|SZ)\.([0-9]{6})", symbol)
+    entry = next((item for item in package.day_entries if item.path == path), None)
+    if (match is None or entry is None or match.group(1) != market or entry.market != market
+            or entry.symbol != match.group(2) or entry.uncompressed_bytes != entry_size):
+        raise VipdataError("PACKAGE_ENTRY_INVALID", "候选代码/市场/路径/大小与已验证ZIP目录不匹配")
+    return entry
+
+
+def _read_vipdata_candidate(
+    package: VerifiedVipdataPackage,
+    candidate: Mapping[str, Any],
+    *,
+    target_session: date,
+    units: Any,
+    limits: Any,
+    archive: zipfile.ZipFile,
+    retain_rows: bool,
+) -> VipdataEntryCapture:
+    from stock_a.domain import ContractError
+    from stock_a.sources.tdx.capture import (
+        TdxCaptureRequest,
+        TdxPackageEntryReference,
+        build_tdx_capture_envelope,
+    )
+    from stock_a.sources.tdx.day import UnitContract
+    from stock_a.sources.tdx.day_stream import DayReadError, DayRecordScan, ReadLimits
+    from uuid import uuid4
+
+    if type(target_session) is not date or not isinstance(units, UnitContract) or not isinstance(limits, ReadLimits):
+        raise VipdataError("ENTRY_SCAN_ARGUMENT_INVALID", "條目掃描必須綁定date、UnitContract和ReadLimits")
+    entry = _bound_vipdata_entry(package, candidate)
+    if entry.uncompressed_bytes == 0:
+        raise VipdataError("ZIP_DAY_ENTRY_EMPTY", "零字节官方占位没有可评价的目标日K线")
+    if entry.uncompressed_bytes > limits.max_bytes or entry.uncompressed_bytes // 32 > limits.max_records:
+        wrapped = VipdataError("READ_LIMIT_EXCEEDED", "单条目大小超过显式日线读取预算")
+        wrapped.context = {"bytes_read_actual": 0, "records_read_actual": 0}
+        raise wrapped
+    try:
+        info = archive.getinfo(entry.path)
+    except KeyError as error:
+        raise VipdataError("PACKAGE_ENTRY_MISSING", "已验证ZIP目录条目在读取时不存在") from error
+    if info.file_size != entry.uncompressed_bytes:
+        raise VipdataError("PACKAGE_CHANGED", "ZIP条目大小与验证后的中央目录不一致")
+
+    rows: list[Any] = []
+    target_bar = None
+    future_rows = 0
+    try:
+        with archive.open(info, "r") as member:
+            scan = DayRecordScan(member, units, limits)
+            try:
+                for located in scan:
+                    decoded = located.decoded
+                    if retain_rows:
+                        rows.append(decoded)
+                    if decoded.session_date == target_session:
+                        target_bar = decoded
+                    if decoded.session_date > target_session:
+                        future_rows += 1
+                summary = scan.summary
+            except DayReadError as error:
+                error.context.setdefault("bytes_read_actual", scan.progress[0])
+                error.context.setdefault("records_read_actual", scan.progress[1])
+                raise
+    except VipdataError:
+        raise
+    except (DayReadError, OSError, KeyError, zipfile.BadZipFile, RuntimeError, NotImplementedError) as error:
+        if isinstance(error, DayReadError):
+            wrapped = VipdataError(error.code, str(error))
+            wrapped.context = dict(error.context)
+            raise wrapped from error
+        raise VipdataError("ZIP_ENTRY_READ_FAILED", "VIPDATA日线条目解压或读取失败") from error
+    if _file_identity(_safe_temp_file(package.file_path)) != package.file_identity:
+        raise VipdataError("PACKAGE_CHANGED", "读取VIPDATA条目期间ZIP文件身份发生变化")
+
+    source_reference = TdxPackageEntryReference(
+        package_id=f"TDX-HSJDAY-SHA256:{package.sha256}",
+        package_sha256=package.sha256,
+        official_package_url=OFFICIAL_PACKAGE_URL,
+        package_verified_at=package.verified_at,
+        package_file_size=package.file_size,
+        zip_entry_count=package.zip_entry_count,
+        zip_crc=package.zip_crc,
+        source_symbol=str(candidate["symbol"]),
+        zip_entry_path=entry.path,
+        entry_sha256=summary.raw_byte_sha256,
+        entry_byte_count=summary.byte_count,
+        target_session=target_session,
+        observed_started_at=summary.read_started_at,
+        observed_completed_at=summary.read_completed_at,
+    )
+    request = TdxCaptureRequest(
+        capture_id=str(uuid4()),
+        dataset_id="TDX_DAILY_BARS",
+        dataset_version="TDX_HSJDAY_ZIP_ENTRY_32B_R1",
+        query_scope={
+            "source_symbol": str(candidate["symbol"]),
+            "target_session": target_session.isoformat(),
+            "selection_mode": "OFFICIAL_SESSIONS_NOT_AFTER_TARGET",
+            "research_mode": "NON_PIT_RETROSPECTIVE",
+        },
+        query_start=min(summary.first_date, target_session),
+        query_end=max(summary.last_date, target_session),
+        parser_version="stock_a.sources.tdx.day.decode_day_record",
+        validation_contract="TDX_HSJDAY_ZIP_ENTRY_32_BYTE_LAYOUT_R1",
+    )
+    try:
+        capture = build_tdx_capture_envelope(
+            summary,
+            request,
+            source_package_entry=source_reference,
+        )
+    except (ContractError, ValueError) as error:
+        raise VipdataError("ENTRY_CAPTURE_INVALID", "VIPDATA条目无法形成结构化来源捕获") from error
+    return VipdataEntryCapture(
+        source_symbol=str(candidate["symbol"]),
+        market=str(candidate["market"]),
+        board=str(candidate["board"]),
+        target_session=target_session,
+        capture=capture,
+        scan_summary=summary,
+        rows=tuple(rows),
+        target_bar=target_bar,
+        future_source_rows_excluded=future_rows,
+    )
+
+
+def read_vipdata_candidate(
+    package: VerifiedVipdataPackage,
+    candidate: Mapping[str, Any],
+    *,
+    target_session: date,
+    units: Any,
+    limits: Any,
+) -> VipdataEntryCapture:
+    """从已校验官网ZIP直接构造Canonical可消费的条目Capture，不生成临时业务文件。"""
+    path = _safe_temp_file(package.file_path)
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            return _read_vipdata_candidate(
+                package, candidate, target_session=target_session, units=units,
+                limits=limits, archive=archive, retain_rows=True,
+            )
+    except VipdataError:
+        raise
+    except (OSError, zipfile.BadZipFile, RuntimeError) as error:
+        raise VipdataError("ZIP_ENTRY_READ_FAILED", "VIPDATA ZIP在只读条目扫描时失败") from error
+
+
+def _quality_bucket(field_value: Any) -> tuple[str, str | None]:
+    quality = getattr(field_value, "quality", None)
+    reason = getattr(field_value, "reason", None)
+    if quality == "OBSERVED":
+        return "OBSERVED", None
+    if quality == "NOT_APPLICABLE":
+        return "NOT_APPLICABLE", reason
+    if isinstance(reason, str) and reason.startswith("DATA_INVALID_"):
+        return "BAD_VALUE", reason
+    return "UNKNOWN", reason
+
+
+def _target_quality_row(
+    candidate: Mapping[str, Any],
+    *,
+    package_sha256: str,
+    target_session: date,
+    source_index: int,
+    page_offset: int,
+    capture: VipdataEntryCapture | None,
+    status: str,
+    reason: str | None,
+    bytes_read: int,
+    record_count: int = 0,
+) -> VipdataCandidateQuality:
+    target = capture.target_bar if capture is not None else None
+    source_ref = capture.capture.source_package_entry if capture is not None else None
+    groups = {}
+    if target is not None:
+        groups = {
+            name: _quality_bucket(getattr(target, name))
+            for name in ("prices", "amount", "volume")
+        }
+    summary = capture.scan_summary if capture is not None else None
+    return VipdataCandidateQuality(
+        source_index=source_index,
+        page_offset=page_offset,
+        symbol=str(candidate["symbol"]),
+        market=str(candidate["market"]),
+        board=str(candidate["board"]),
+        status=status,
+        reason=reason,
+        target_bar_present=target is not None,
+        record_count=summary.record_count if summary is not None else record_count,
+        first_date=summary.first_date if summary is not None else None,
+        last_date=summary.last_date if summary is not None else None,
+        package_id=f"TDX-HSJDAY-SHA256:{package_sha256}",
+        package_sha256=package_sha256,
+        zip_entry_path=str(candidate["zip_entry_path"]),
+        target_session=target_session,
+        entry_sha256=capture.capture.source_package_entry.entry_sha256 if capture is not None else None,
+        bytes_read=summary.byte_count if summary is not None else bytes_read,
+        future_rows_excluded=capture.future_source_rows_excluded if capture is not None else 0,
+        observed_started_at=source_ref.observed_started_at if source_ref is not None else None,
+        observed_completed_at=source_ref.observed_completed_at if source_ref is not None else None,
+        source_clock_role=source_ref.source_clock_role if source_ref is not None else None,
+        price_quality=groups.get("prices", (None, None))[0],
+        price_reason=groups.get("prices", (None, None))[1],
+        amount_quality=groups.get("amount", (None, None))[0],
+        amount_reason=groups.get("amount", (None, None))[1],
+        volume_quality=groups.get("volume", (None, None))[0],
+        volume_reason=groups.get("volume", (None, None))[1],
+    )
+
+
+def scan_vipdata_target_quality(
+    package: VerifiedVipdataPackage,
+    pool: VipdataCandidatePool,
+    *,
+    target_session: date,
+    units: Any,
+    budget: VipdataTargetScanBudget = VipdataTargetScanBudget(),
+    market: str = "ALL",
+    board: str = "ALL",
+    on_page: Callable[[VipdataTargetQualityPage], None] | None = None,
+) -> VipdataTargetQualityReport:
+    """在同一已校验ZIP句柄上逐页评价全来源候选，不写文件或业务存储。"""
+    from stock_a.sources.tdx.day import UnitContract
+    from stock_a.sources.tdx.day_stream import DayReadError, ReadLimits
+
+    if (not isinstance(package, VerifiedVipdataPackage) or not isinstance(pool, VipdataCandidatePool)
+            or type(target_session) is not date or not isinstance(units, UnitContract)
+            or not isinstance(budget, VipdataTargetScanBudget)):
+        raise VipdataError("TARGET_SCAN_ARGUMENT_INVALID", "全范围质量扫描的包、日期、单位或预算无效")
+    if market not in {"ALL", "SH", "SZ"} or board not in {"ALL", "MAIN_BOARD", "GEM"}:
+        raise VipdataError("TARGET_SCAN_FILTER_INVALID", "市场或板别过滤不符合现役沪深研究范围")
+    candidates = tuple(
+        item for item in pool.candidates
+        if (market == "ALL" or item["market"] == market)
+        and (board == "ALL" or item["board"] == board)
+    )
+    pages = vipdata_candidate_pages(candidates, page_size=budget.page_size)
+    evaluations: list[VipdataCandidateQuality] = []
+    page_summaries: list[VipdataTargetQualityPage] = []
+    by_market: dict[str, dict[str, int]] = {}
+    by_board: dict[str, dict[str, int]] = {}
+    field_quality = {
+        name: {"OBSERVED": 0, "UNKNOWN": 0, "NOT_APPLICABLE": 0, "BAD_VALUE": 0, "denominator": 0}
+        for name in ("price", "amount", "volume")
+    }
+    started = time.monotonic()
+    bytes_read = 0
+    records_read = 0
+    budget_exhausted_reason: str | None = None
+    limits = ReadLimits(
+        max_bytes=budget.max_candidate_bytes,
+        max_records=budget.max_candidate_records,
+        chunk_records=budget.chunk_records,
+        max_seconds=budget.max_candidate_seconds,
+    )
+    path = _safe_temp_file(package.file_path)
+
+    try:
+        with zipfile.ZipFile(path, "r") as archive:
+            for page_index, page in enumerate(pages):
+                page_started = time.monotonic()
+                page_begin = len(evaluations)
+                for within_page, candidate in enumerate(page):
+                    global_index = page_index * budget.page_size + within_page
+                    if budget_exhausted_reason is None:
+                        elapsed = time.monotonic() - started
+                        remaining_bytes = budget.max_total_bytes - bytes_read
+                        remaining_records = budget.max_total_records - records_read
+                        candidate_size = int(candidate["zip_entry_bytes"])
+                        candidate_records = candidate_size // 32
+                        if elapsed >= budget.max_total_seconds:
+                            budget_exhausted_reason = "TOTAL_TIME_BUDGET_EXHAUSTED"
+                        elif candidate_size > remaining_bytes:
+                            budget_exhausted_reason = "TOTAL_BYTE_BUDGET_EXHAUSTED"
+                        elif candidate_records > remaining_records:
+                            budget_exhausted_reason = "TOTAL_RECORD_BUDGET_EXHAUSTED"
+
+                    if budget_exhausted_reason is not None:
+                        row = _target_quality_row(
+                            candidate, package_sha256=package.sha256, target_session=target_session,
+                            source_index=global_index, page_offset=global_index,
+                            capture=None, status="NOT_EVALUATED", reason=budget_exhausted_reason,
+                            bytes_read=0,
+                        )
+                    elif bool(candidate.get("empty_placeholder")):
+                        row = _target_quality_row(
+                            candidate, package_sha256=package.sha256, target_session=target_session,
+                            source_index=global_index, page_offset=global_index,
+                            capture=None, status="TARGET_MISSING", reason="EMPTY_PLACEHOLDER_NO_BAR",
+                            bytes_read=0,
+                        )
+                    else:
+                        try:
+                            capture = _read_vipdata_candidate(
+                                package, candidate, target_session=target_session, units=units,
+                                limits=limits, archive=archive, retain_rows=False,
+                            )
+                        except DayReadError as error:
+                            actual_bytes = int(error.context.get("bytes_read_actual", error.context.get("byte_count", 0)))
+                            actual_records = int(error.context.get("records_read_actual", error.context.get("record_count", 0)))
+                            bytes_read += max(0, actual_bytes)
+                            records_read += max(0, actual_records)
+                            if error.code in {"READ_LIMIT_EXCEEDED", "READ_TIMEOUT"}:
+                                row = _target_quality_row(
+                                    candidate, package_sha256=package.sha256, target_session=target_session,
+                                    source_index=global_index, page_offset=global_index,
+                                    capture=None, status="NOT_EVALUATED", reason=error.code,
+                                    bytes_read=actual_bytes, record_count=actual_records,
+                                )
+                                budget_exhausted_reason = error.code
+                            else:
+                                row = _target_quality_row(
+                                    candidate, package_sha256=package.sha256, target_session=target_session,
+                                    source_index=global_index, page_offset=global_index,
+                                    capture=None, status="READ_FAILED", reason=error.code,
+                                    bytes_read=actual_bytes, record_count=actual_records,
+                                )
+                        except VipdataError as error:
+                            context = getattr(error, "context", {})
+                            actual_bytes = int(context.get("bytes_read_actual", context.get("byte_count", 0)))
+                            actual_records = int(context.get("records_read_actual", context.get("record_count", 0)))
+                            bytes_read += max(0, actual_bytes)
+                            records_read += max(0, actual_records)
+                            is_budget = error.code in {"READ_LIMIT_EXCEEDED", "READ_TIMEOUT"}
+                            row = _target_quality_row(
+                                candidate, package_sha256=package.sha256, target_session=target_session,
+                                source_index=global_index, page_offset=global_index,
+                                capture=None, status="NOT_EVALUATED" if is_budget else "READ_FAILED",
+                                reason=error.code, bytes_read=actual_bytes, record_count=actual_records,
+                            )
+                            if is_budget:
+                                budget_exhausted_reason = error.code
+                        else:
+                            row = _target_quality_row(
+                                candidate, package_sha256=package.sha256, target_session=target_session,
+                                source_index=global_index, page_offset=global_index,
+                                capture=capture,
+                                status="TARGET_PRESENT" if capture.target_bar is not None else "TARGET_MISSING",
+                                reason=None if capture.target_bar is not None else "TARGET_SESSION_BAR_MISSING",
+                                bytes_read=capture.scan_summary.byte_count,
+                            )
+                            bytes_read += capture.scan_summary.byte_count
+                            records_read += capture.scan_summary.record_count
+                            if capture.target_bar is not None:
+                                for name, quality, reason in (
+                                    ("price", row.price_quality, row.price_reason),
+                                    ("amount", row.amount_quality, row.amount_reason),
+                                    ("volume", row.volume_quality, row.volume_reason),
+                                ):
+                                    field_quality[name]["denominator"] += 1
+                                    field_quality[name][quality] += 1
+                    evaluations.append(row)
+                    for counts in (by_market.setdefault(row.market, {}), by_board.setdefault(row.board, {})):
+                        counts[row.status] = counts.get(row.status, 0) + 1
+
+                subset = evaluations[page_begin:]
+                page_summary = VipdataTargetQualityPage(
+                    page_number=page_index + 1,
+                    offset=page_index * budget.page_size,
+                    candidate_count=len(page),
+                    first_symbol=page[0]["symbol"] if page else None,
+                    last_symbol=page[-1]["symbol"] if page else None,
+                    evaluated=sum(item.status != "NOT_EVALUATED" for item in subset),
+                    target_present=sum(item.status == "TARGET_PRESENT" for item in subset),
+                    target_missing=sum(item.status == "TARGET_MISSING" for item in subset),
+                    read_failed=sum(item.status == "READ_FAILED" for item in subset),
+                    not_evaluated=sum(item.status == "NOT_EVALUATED" for item in subset),
+                    bytes_read=sum(item.bytes_read for item in subset),
+                    elapsed_seconds=round(time.monotonic() - page_started, 6),
+                )
+                page_summaries.append(page_summary)
+                if on_page is not None:
+                    on_page(page_summary)
+    except (OSError, zipfile.BadZipFile, RuntimeError) as error:
+        raise VipdataError("ZIP_TARGET_SCAN_FAILED", "VIPDATA目标日全范围扫描遇到包级读取错误") from error
+
+    elapsed = time.monotonic() - started
+    evaluated = sum(item.status != "NOT_EVALUATED" for item in evaluations)
+    target_present = sum(item.status == "TARGET_PRESENT" for item in evaluations)
+    target_missing = sum(item.status == "TARGET_MISSING" for item in evaluations)
+    read_failed = sum(item.status == "READ_FAILED" for item in evaluations)
+    not_evaluated = sum(item.status == "NOT_EVALUATED" for item in evaluations)
+    total = len(candidates)
+    if total != evaluated + not_evaluated or evaluated != target_present + target_missing + read_failed:
+        raise VipdataError("TARGET_SCAN_CLOSURE_INVALID", "目标日全范围候选、评价与bar状态分母未闭合")
+    if any(sum(values[key] for key in ("OBSERVED", "UNKNOWN", "NOT_APPLICABLE", "BAD_VALUE")) != values["denominator"]
+           for values in field_quality.values()):
+        raise VipdataError("TARGET_SCAN_QUALITY_CLOSURE_INVALID", "目标日逐字段质量计数与bar分母未闭合")
+    return VipdataTargetQualityReport(
+        target_session=target_session,
+        package_id=f"TDX-HSJDAY-SHA256:{package.sha256}",
+        package_sha256=package.sha256,
+        package_verified_at=package.verified_at,
+        candidate_total=total,
+        evaluated=evaluated,
+        target_present=target_present,
+        target_missing=target_missing,
+        read_failed=read_failed,
+        not_evaluated=not_evaluated,
+        bytes_read=bytes_read,
+        records_read=records_read,
+        elapsed_seconds=round(elapsed, 6),
+        by_market={key: dict(value) for key, value in sorted(by_market.items())},
+        by_board={key: dict(value) for key, value in sorted(by_board.items())},
+        field_quality={key: dict(value) for key, value in field_quality.items()},
+        pages=tuple(page_summaries),
+        candidates=tuple(evaluations),
+        budget=budget,
+    )
 
 
 def extract_vipdata_candidate_page(
