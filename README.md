@@ -161,6 +161,8 @@ stock-a research-universe-preview --target-session YYYY-MM-DD `
 
 `research-universe-preview`只读枚举已配置来源根内的`vipdoc/sh/lday`和`vipdoc/sz/lday`，按标准化来源代码排序，使用`_normalize_symbol`的范围规则保留沪深主板/创业板候选；不依据ST名称过滤。文件名只代表`TDX_SOURCE_CANDIDATES_NON_PIT`来源候选，不证明证券实体、上市状态、当日可交易或行情更新。默认每页20只、最多100只，支持offset/limit及市场/板别过滤；目录项和发现耗时有独立上限，目录缺失、越界链接、重复代码及超预算明确失败且不报告完整总数。单页跨20只子批查询时仍共享一次字节、记录和耗时预算。默认以短摘要显示总候选分母、本页、剩余和未评价数量；`--format json`提供完整逐对象详情。`raw_availability`与`core_availability`独立列出观察数、未知数和原因；兼容字段`status`/`classification`不意味着Core全部已知。页内每行生成的单股详情查询引用携带同一目标日、单位和单文件预算，并显式请求画像组件预览；该摘要不连接PG、不写业务状态。
 
+JSON和短摘要另提供`coverage_summary`中的当前页实际目标Bar、目标缺Bar、读取失败、未评价对象、按市场/板别拆分及本页已完成读取文件的末条日期直方图/最大值。末条日期只代表本页完整读到EOF并核验句柄的来源文件，不是来源可得时钟，也不自动证明完整过滤池；多页总体只能在调用方确认计划页全部实际执行后合并。`candidate_counts_by_board`是来源文件名候选分布，主板/创业板研究候选与被研究范围排除的文件分开；均不等同官方有效证券总体。
+
 可选`--include-profile-preview`在当前请求页复用一次固定day-chain合同，并在原有Raw/Core对象计算中附加11项Profile组件；不额外扫描来源，也不逐股重载合同。分页JSON在每个已处理对象中保留完整组件输入来源、质量、原因和规则身份，并另提供紧凑`summary[].profile_preview`与`profile_preview_denominators`。页级组件分母只统计实际返回画像的对象；`evaluated`组件包含质量为`UNKNOWN_DATA`的已执行规则，分别统计`observed`、`unknown_data`、`not_implemented`和`contract_unbound`。失败和预算未评价对象没有伪造组件。中文摘要逐行显示11个组件的结果/质量或未接原因，并显示请求、已评价、失败和未评价分母。未带开关时保留现有分页JSON及摘要行为。预览仍是RAW_UNADJUSTED、NON_PIT、SOURCE_SYMBOL_ONLY，不代表正式Profile、全市场官方证券总体或RPS；正式`profile()`生产门继续阻断。
 
 ## GBBQ字节解析

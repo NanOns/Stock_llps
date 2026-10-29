@@ -1138,6 +1138,13 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
             f"Raw/Core状态见逐行列"
         ),
         (
+            f"本页目标Bar={result['coverage_summary']['actual_bar_on_target_count']}、"
+            f"目标缺Bar={result['coverage_summary']['missing_target_bar_count']}、"
+            f"读失败={result['coverage_summary']['source_read_failed_count']}、"
+            f"已读文件末日最大值={result['coverage_summary']['latest_source_session'] or '无'}；"
+            "此最大值只属于本页已完整读完的文件，不是全市场正式可得时钟"
+        ),
+        (
             f"读取={budget['used_bytes']}字节/{budget['used_records']}条，"
             f"发现={budget['discovery_elapsed_seconds']}秒，总耗时={budget['elapsed_seconds']}秒；"
             f"未复权、NON_PIT，不代表全候选池已读取或全部指标已知"

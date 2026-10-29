@@ -2106,6 +2106,7 @@ def research_universe_preview(
             "board": candidate["board"],
             "target_session": target.isoformat(),
             "status": item["status"],
+            "target_bar_present": item.get("target_bar_present"),
             "source_last_session": item.get("source_last_session"),
             "raw_close": fields.get("raw_close"),
             "ma5": fields.get("ma5"),
@@ -2165,6 +2166,43 @@ def research_universe_preview(
     page_remaining = max(0, candidate_total - min(offset + len(page_candidates), candidate_total))
     evaluated_page = available + failed + partial_unknown
     status = "COMPLETE_WITH_DISCLOSURES" if failed == 0 and partial_unknown == 0 and not_evaluated == 0 else "PARTIAL"
+    completed_reads = [item for item in page_results if isinstance(item.get("source_last_session"), str)]
+    source_last_session_counts: dict[str, int] = {}
+    for item in completed_reads:
+        last_session = item["source_last_session"]
+        source_last_session_counts[last_session] = source_last_session_counts.get(last_session, 0) + 1
+    latest_source_session = max(source_last_session_counts, default=None)
+    page_coverage_by_market: dict[str, dict[str, int]] = {}
+    page_coverage_by_board: dict[str, dict[str, int]] = {}
+    for dimension, key in ((page_coverage_by_market, "market"), (page_coverage_by_board, "board")):
+        for value in sorted({item["source_candidate"][key] for item in page_results}):
+            matching = [item for item in page_results if item["source_candidate"][key] == value]
+            dimension[value] = {
+                "candidate_count": len(matching),
+                "evaluated_count": sum(item.get("status") != "NOT_EVALUATED" for item in matching),
+                "not_evaluated_count": sum(item.get("status") == "NOT_EVALUATED" for item in matching),
+                "actual_bar_on_target_count": sum(item.get("target_bar_present") is True for item in matching),
+                "missing_target_bar_count": sum(item.get("target_bar_present") is False for item in matching),
+                "source_read_failed_count": sum(item.get("status") == "FAILED" for item in matching),
+            }
+    coverage_summary = {
+        "candidate_contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
+        "candidate_total_in_filtered_pool": candidate_total,
+        "page_candidate_count": len(page_candidates),
+        "evaluated_count": evaluated_page,
+        "not_evaluated_count": not_evaluated,
+        "actual_bar_on_target_count": sum(item.get("target_bar_present") is True for item in page_results),
+        "missing_target_bar_count": sum(item.get("target_bar_present") is False for item in page_results),
+        "source_read_failed_count": failed,
+        "latest_source_session": latest_source_session,
+        "latest_source_session_scope": "本页已完整读到EOF并核验句柄的来源文件末条日期最大值；不是全市场正式可得时钟",
+        "source_last_session_counts": dict(sorted(source_last_session_counts.items())),
+        "by_market": page_coverage_by_market,
+        "by_board": page_coverage_by_board,
+        "page_partition_complete": classified == len(page_candidates),
+        "filtered_pool_complete": offset == 0 and page_remaining == 0 and not_evaluated == 0,
+        "pool_completion_note": "本入口只知道当前页；只有offset=0且单页覆盖完整过滤池时才标true。多页汇总须由调用方确认每一计划页均已实际完成；不代表官方上市总体",
+    }
     result = {
         "status": status,
         "status_explanation": "COMPLETE_WITH_DISCLOSURES仅表示当前页请求已处理并附带数据披露；不表示全候选池已读取，也不表示所有Raw/Core字段已知。请检查本页、未评价分母和逐字段quality/reason。",
@@ -2200,6 +2238,7 @@ def research_universe_preview(
         },
         "raw_availability": _aggregate_availability(page_results, "raw_availability"),
         "core_availability": _aggregate_availability(page_results, "core_availability"),
+        "coverage_summary": coverage_summary,
         "budget": {
             "max_total_bytes": budget.max_total_bytes,
             "max_total_records": budget.max_total_records,
