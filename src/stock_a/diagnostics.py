@@ -55,6 +55,7 @@ from stock_a.research.entry import (
     _normalize_symbol,
     _load_calendar,
     _parse_target,
+    apply_identity_observation,
     research_compare,
     research_stock,
     research_universe_preview,
@@ -437,7 +438,9 @@ def _parser() -> argparse.ArgumentParser:
     stock.add_argument("--format", dest="output_format", choices=("summary", "json"), default="json", help="输出可读事实摘要或完整JSON，默认json")
     stock.add_argument("--include-profile-preview", action="store_true", help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
     stock.add_argument("--include-baostock-evidence", action="store_true", help="显式查询目标日单条BaoStock只读补充字段；可能联网，单位与身份仍需独立核验")
-    stock.add_argument("--include-baostock-identity", action="store_true", help="显式一次登录读取Bao身份资料及目标日名录，并在同一研究结果中说明与TDX Bar状态的关系；NON_PIT，可能联网")
+    stock.add_argument("--include-baostock-identity", action="store_true", help="显式一次登录查询单证券Bao基本资料和目标日名录；先返回TDX/Core，再在有限预算内补充身份，NON_PIT")
+    stock.add_argument("--baostock-timeout-seconds", type=float, default=8.0, help="BaoStock单个socket等待上限，默认8秒")
+    stock.add_argument("--baostock-max-seconds", type=float, default=25.0, help="BaoStock身份会话总预算上限，默认25秒；只在显式启用身份查询时生效")
     compare = commands.add_parser("research-compare", help="盘后只读输出有界多标的Core基础观察摘要")
     compare.add_argument("symbols", nargs="+", help="一个或多个来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(compare)
@@ -1142,8 +1145,15 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
 
 
 def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
+    cli_started = time.perf_counter()
+    stage_timings: dict[str, Any] = {}
     config, config_path = _load_runtime_config()
+    vipdata_validation_started = time.perf_counter()
     package = _verify_explicit_vipdata_package(args)
+    if package is not None:
+        stage_timings["vipdata_package_verify_elapsed_ms"] = round(
+            (time.perf_counter() - vipdata_validation_started) * 1000, 3,
+        )
     roots = () if package is not None else config["source_policy"]["configured_tdx_source_roots"]
     if package is None and not roots:
         raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX来源保护根，拒绝读取行情")
@@ -1182,24 +1192,22 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         except ResearchEntryError as error:
             _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
             return _EXIT_ARGUMENT
-        from stock_a.sources.baostock.client import query_identity_reference
-
-        identity_snapshot = query_identity_reference((target_text,))
-        identity_query_status = str(identity_snapshot.get("status", "SOURCE_UNAVAILABLE"))
-        calls = identity_snapshot.get("calls")
-        if identity_query_status == "RESPONSE_RECEIVED" and isinstance(calls, dict):
-            basic = calls.get("stock_basic")
-            daily_by_date = calls.get("all_stock")
-            session = daily_by_date.get(target_text) if isinstance(daily_by_date, dict) else None
-            if isinstance(basic, dict) and isinstance(session, dict):
-                identity_projection = project_identity_lifecycle(
-                    source_symbol=args.symbol,
-                    target_session=_parse_target(target_text),
-                    basic_snapshot=basic,
-                    session_snapshot=session,
-                )
-            else:
-                identity_query_status = "QUERY_FAILED"
+        timeout_seconds = getattr(args, "baostock_timeout_seconds", 8.0)
+        max_total_seconds = getattr(args, "baostock_max_seconds", 25.0)
+        if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
+                or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 30
+                or isinstance(max_total_seconds, bool) or not isinstance(max_total_seconds, (int, float))
+                or not math.isfinite(max_total_seconds) or not 0.5 <= max_total_seconds <= 30):
+            _emit({
+                "ok": False,
+                "code": "BAOSTOCK_BUDGET_INVALID",
+                "message": "BaoStock socket超时须在0至30秒内，总预算须在0.5至30秒内。",
+                "database_io_attempted": False,
+            }, error=True)
+            return _EXIT_ARGUMENT
+    else:
+        target_text = None
+    core_timings: dict[str, float] = {}
     try:
         if compare:
             budget = CompareBudget(
@@ -1218,16 +1226,24 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         elif package is not None:
             if compare:
                 raise DiagnosticError("VIPDATA_COMPARE_UNSUPPORTED", "当前显式ZIP入口只接research-stock和research-universe-preview")
+            candidate_index_started = time.perf_counter()
             pool = vipdata_research_candidate_pool(package)
+            stage_timings["vipdata_candidate_index_elapsed_ms"] = round(
+                (time.perf_counter() - candidate_index_started) * 1000, 3,
+            )
             normalized, _directory, _board = _normalize_symbol(args.symbol)
             candidate = next((item for item in pool.candidates if item["symbol"] == normalized), None)
             if candidate is None:
                 raise VipdataError("ZIP_DAY_ENTRY_NOT_FOUND", "已校验VIPDATA包中没有该沪深主板/创业板证券条目")
             if candidate["empty_placeholder"]:
                 raise VipdataError("ZIP_DAY_ENTRY_EMPTY", "官方ZIP将此证券作为零字节占位；未送入Raw/Core")
+            entry_read_started = time.perf_counter()
             vipdata_capture = read_vipdata_candidate(
                 package, candidate, target_session=_parse_target(args.target_session),
                 units=units, limits=limits,
+            )
+            stage_timings["vipdata_entry_read_elapsed_ms"] = round(
+                (time.perf_counter() - entry_read_started) * 1000, 3,
             )
             result = research_stock(
                 symbol=normalized,
@@ -1238,8 +1254,7 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 profile_contract=profile_contract,
                 include_baostock_evidence=False,
                 vipdata_capture=vipdata_capture,
-                identity_projection=identity_projection,
-                identity_query_status=identity_query_status,
+                timing_sink=core_timings,
             )
         else:
             result = research_stock(
@@ -1250,8 +1265,7 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 limits=limits,
                 profile_contract=profile_contract,
                 include_baostock_evidence=getattr(args, "include_baostock_evidence", False),
-                identity_projection=identity_projection,
-                identity_query_status=identity_query_status,
+                timing_sink=core_timings,
             )
     except ResearchEntryError as error:
         if error.code == "SOURCE_ACCESS_DENIED":
@@ -1285,6 +1299,64 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
             "source_fallback_attempted": False,
         }, error=True)
         return _EXIT_UNAVAILABLE
+    if include_identity and target_text is not None:
+        identity_started = time.perf_counter()
+        try:
+            from stock_a.sources.baostock.client import query_identity_reference
+
+            identity_snapshot = query_identity_reference(
+                (target_text,),
+                target_symbol=args.symbol,
+                timeout_seconds=timeout_seconds,
+                max_total_seconds=max_total_seconds,
+            )
+        except Exception as error:
+            identity_snapshot = {
+                "status": "ENGINEERING_ERROR",
+                "source": "BAOSTOCK",
+                "sdk_version": None,
+                "target_symbol": args.symbol,
+                "target_sessions": [target_text],
+                "login_attempted": False,
+                "logout_attempted": False,
+                "query_calls": 0,
+                "retry_count": 0,
+                "verified_source_capture_id": None,
+                "request_started_at": None,
+                "request_completed_at": None,
+                "capture_clock_role": "UNKNOWN_QUERY_DID_NOT_RETURN",
+                "total_elapsed_ms": round((time.perf_counter() - identity_started) * 1000, 3),
+                "stage_elapsed_ms": {},
+                "reason": f"BaoStock身份查询程序异常：{type(error).__name__}: {str(error)[:240]}",
+                "error_type": type(error).__name__,
+                "calls": {},
+            }
+        identity_query_status = str(identity_snapshot.get("status", "SOURCE_UNAVAILABLE"))
+        calls = identity_snapshot.get("calls")
+        if identity_query_status == "RESPONSE_RECEIVED" and isinstance(calls, dict):
+            basic = calls.get("stock_basic")
+            daily_by_date = calls.get("all_stock")
+            session = daily_by_date.get(target_text) if isinstance(daily_by_date, dict) else None
+            if isinstance(basic, dict) and isinstance(session, dict):
+                try:
+                    identity_projection = project_identity_lifecycle(
+                        source_symbol=args.symbol,
+                        target_session=_parse_target(target_text),
+                        basic_snapshot=basic,
+                        session_snapshot=session,
+                    )
+                except Exception as error:
+                    identity_query_status = "IDENTITY_PROJECTION_ERROR"
+                    identity_snapshot["reason"] = (
+                        f"BaoStock响应已读取，但身份投影失败：{type(error).__name__}: {str(error)[:240]}"
+                    )
+            else:
+                identity_query_status = "QUERY_FAILED"
+        apply_identity_observation(
+            result,
+            identity_projection=identity_projection,
+            identity_query_status=identity_query_status,
+        )
     result.update({
         "ok": result.get("status") in ("AVAILABLE", "COMPLETE_WITH_DISCLOSURES"),
         "configuration_path": str(config_path),
@@ -1292,19 +1364,57 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         "database_write_attempted": False,
     })
     if identity_snapshot is not None:
+        calls = identity_snapshot.get("calls")
+        basic = calls.get("stock_basic") if isinstance(calls, dict) else None
+        daily_by_date = calls.get("all_stock") if isinstance(calls, dict) else None
+        session = daily_by_date.get(target_text) if isinstance(daily_by_date, dict) else None
         result["bao_identity_capture"] = {
             "source": "BAOSTOCK",
+            "target_symbol": identity_snapshot.get("target_symbol"),
+            "target_session": target_text,
             "status": identity_snapshot.get("status"),
+            "projection_status": identity_query_status,
             "sdk_version": identity_snapshot.get("sdk_version"),
             "login_attempted": identity_snapshot.get("login_attempted"),
+            "login_error_code": identity_snapshot.get("login_error_code"),
+            "login_error_message": identity_snapshot.get("login_error_message"),
+            "logout_attempted": identity_snapshot.get("logout_attempted"),
+            "logout_error_code": identity_snapshot.get("logout_error_code"),
+            "logout_error_message": identity_snapshot.get("logout_error_message"),
             "query_calls": identity_snapshot.get("query_calls"),
             "request_started_at": identity_snapshot.get("request_started_at"),
             "request_completed_at": identity_snapshot.get("request_completed_at"),
             "capture_clock_role": identity_snapshot.get("capture_clock_role"),
             "verified_source_capture_id": identity_snapshot.get("verified_source_capture_id"),
+            "basic_query": ({
+                key: basic.get(key) for key in (
+                    "status", "requested_code", "query_error_code", "response_fields", "rows_seen",
+                    "max_rows_limit",
+                    "request_started_at", "request_completed_at", "api_call_elapsed_ms",
+                    "row_read_elapsed_ms", "elapsed_ms", "local_error",
+                )
+            } if isinstance(basic, dict) else None),
+            "target_day_list_query": ({
+                key: session.get(key) for key in (
+                    "status", "target_session", "query_error_code", "response_fields", "rows_seen",
+                    "max_rows_limit",
+                    "request_started_at", "request_completed_at", "api_call_elapsed_ms",
+                    "row_read_elapsed_ms", "elapsed_ms", "local_error",
+                )
+            } if isinstance(session, dict) else None),
+            "stage_elapsed_ms": identity_snapshot.get("stage_elapsed_ms"),
+            "max_total_seconds": identity_snapshot.get("max_total_seconds"),
+            "total_elapsed_ms": identity_snapshot.get("total_elapsed_ms"),
+            "retry_count": identity_snapshot.get("retry_count"),
+            "error_type": identity_snapshot.get("error_type"),
             "reason": identity_snapshot.get("reason"),
         }
-    if not compare and getattr(args, "output_format", "json") == "summary":
+        result["bao_status"] = identity_query_status
+    stage_timings.update(core_timings)
+    stage_timings["cli_elapsed_before_output_ms"] = round((time.perf_counter() - cli_started) * 1000, 3)
+    stage_timings["clock"] = "Python perf_counter monotonic; process wall-clock independently recorded by caller"
+    result["diagnostic_timing"] = stage_timings
+    if not compare and getattr(args, "output_format", "json") == "summary" and not include_identity:
         summary = _render_basic_fact_summary(result)
         source_package = result.get("source_package")
         if isinstance(source_package, dict):

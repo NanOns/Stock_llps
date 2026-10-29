@@ -1506,6 +1506,42 @@ def _build_profile_preview(
     }
 
 
+def apply_identity_observation(
+    result: dict[str, Any],
+    *,
+    identity_projection: IdentityLifecycleProjection | None,
+    identity_query_status: str,
+) -> dict[str, Any]:
+    """将一次Bao观察附加到已完成的TDX/Core结果，不触发重读或重算。"""
+    if not isinstance(result, dict) or not isinstance(identity_query_status, str) or not identity_query_status:
+        raise ResearchEntryError("IDENTITY_QUERY_STATUS_INVALID", "Bao身份结果或来源状态无效")
+    if identity_projection is not None and (
+            identity_projection.source_symbol != result.get("requested_symbol")
+            or identity_projection.target_session.isoformat() != result.get("target_session")):
+        raise ResearchEntryError("IDENTITY_PROJECTION_MISMATCH", "BaoStock身份投影与已计算TDX/Core结果不匹配")
+    if identity_projection is None:
+        result.setdefault("identity", {}).update({
+            "status": "UNAVAILABLE",
+            "reason": f"BAOSTOCK_IDENTITY_SOURCE_{identity_query_status}",
+        })
+    else:
+        result["identity"] = {
+            **identity_projection.as_dict(),
+            "security_id": None,
+            "stable_security_id_issued": False,
+        }
+    selection = result.get("canonical_selection")
+    target_bar_status = selection.get("target_bar_status") if isinstance(selection, dict) else None
+    if target_bar_status not in {"PRESENT", "TARGET_MISSING", "READ_FAILED", "NOT_EVALUATED"}:
+        target_bar_status = "PRESENT" if result.get("target_bar_present") is True else "TARGET_MISSING"
+    result["identity_reconciliation"] = reconcile_identity_bar_status(
+        identity_projection,
+        target_bar_status=target_bar_status,
+        source_status="RESPONSE_RECEIVED" if identity_projection is not None else identity_query_status,
+    )
+    return result
+
+
 def research_stock(
     *,
     symbol: str,
@@ -1518,6 +1554,7 @@ def research_stock(
     vipdata_capture: VipdataEntryCapture | None = None,
     identity_projection: IdentityLifecycleProjection | None = None,
     identity_query_status: str = "NOT_REQUESTED",
+    timing_sink: dict[str, float] | None = None,
 ) -> dict[str, Any]:
     """验证目标会话后保留可读Raw；仅在可用前态上调用现有Core。"""
     target = _parse_target(target_session)
@@ -1623,8 +1660,14 @@ def research_stock(
         revision=calendar_revision,
         sessions=session_slice,
     )
+    history_started = time.perf_counter()
     history = _core_history_from_selection(canonical_selection)
+    if timing_sink is not None:
+        timing_sink["core_history_build_elapsed_ms"] = round((time.perf_counter() - history_started) * 1000, 3)
+    core_started = time.perf_counter()
     core = calculate_core(history, official_calendar=bounded_calendar)
+    if timing_sink is not None:
+        timing_sink["core_calculation_elapsed_ms"] = round((time.perf_counter() - core_started) * 1000, 3)
     _apply_calendar_coverage_to_core(core, history, coverage_context)
     target_bar = selected.get(target)
     unknown_core = sum(field.quality != "OBSERVED" for field in core.values())
@@ -1830,16 +1873,10 @@ def research_stock(
         },
     }
     if identity_projection is not None or identity_query_status != "NOT_REQUESTED":
-        if identity_projection is None:
-            result["identity"].update({
-                "status": "UNAVAILABLE",
-                "reason": f"BAOSTOCK_IDENTITY_SOURCE_{identity_query_status}",
-            })
-        result["identity_reconciliation"] = reconcile_identity_bar_status(
-            identity_projection,
-            target_bar_status="PRESENT" if target_bar is not None else "TARGET_MISSING",
-            source_status=("RESPONSE_RECEIVED" if identity_projection is not None
-                           else identity_query_status),
+        apply_identity_observation(
+            result,
+            identity_projection=identity_projection,
+            identity_query_status=identity_query_status,
         )
     if profile_contract is not None:
         result["profile_preview"] = _build_profile_preview(
