@@ -208,3 +208,51 @@ def project_identity_lifecycle(
         name, security_type, listing_status, ipo_date, out_date, trade_status,
         classification, observed_at, reason=reason,
     )
+
+
+def classify_missing_bar_candidates(
+    *,
+    source_symbols: tuple[str, ...],
+    target_session: date,
+    basic_snapshot: Mapping[str, Any],
+    session_snapshot: Mapping[str, Any],
+) -> dict[str, Any]:
+    """用Bao实际响应解释TDX缺Bar候选；任何未匹配项都保留UNKNOWN。"""
+    if type(target_session) is not date or not isinstance(source_symbols, tuple):
+        raise ValueError("缺Bar分类必须绑定明确目标日和有序来源代码元组")
+    normalized = [normalize_baostock_symbol(item) for item in source_symbols]
+    if any(item is None for item in normalized):
+        raise ValueError("缺Bar候选含非沪深证券代码")
+    if len(set(normalized)) != len(normalized):
+        raise ValueError("缺Bar候选含重复代码，拒绝制造互斥分类分母")
+    basic_ok = _valid_response(basic_snapshot, _REQUIRED_BASIC_FIELDS)
+    session_ok = _valid_response(session_snapshot, _REQUIRED_SESSION_FIELDS,
+                                 target_session=target_session.isoformat())
+    projections: list[IdentityLifecycleProjection] = []
+    for symbol in normalized:
+        projections.append(project_identity_lifecycle(
+            source_symbol=symbol, target_session=target_session,
+            basic_snapshot=basic_snapshot, session_snapshot=session_snapshot,
+        ))
+    by_class: dict[str, int] = {}
+    for projection in projections:
+        by_class[projection.classification] = by_class.get(projection.classification, 0) + 1
+    if sum(by_class.values()) != len(normalized):
+        raise AssertionError("缺Bar分类计数未闭合")
+    return {
+        "target_session": target_session.isoformat(),
+        "source_symbol_denominator": len(normalized),
+        "evidence_status": "REAL_CAPTURED_NON_PIT" if basic_ok and session_ok else "PARTIAL_OR_UNAVAILABLE",
+        "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+        "basic_capture_completed_at": basic_snapshot.get("request_completed_at") if basic_ok else None,
+        "session_capture_completed_at": session_snapshot.get("request_completed_at") if session_ok else None,
+        "strict_pit": False,
+        "stable_security_id_issued": False,
+        "classification_counts": (dict(sorted(by_class.items())) if basic_ok and session_ok
+                                   else ({"NOT_EVALUATED": len(normalized)} if normalized else {})),
+        "classified_with_evidence": (len(normalized) - by_class.get("UNKNOWN_NO_BAR", 0))
+        if basic_ok and session_ok else 0,
+        "unknown": by_class.get("UNKNOWN_NO_BAR", 0) if basic_ok and session_ok else 0,
+        "not_evaluated": 0 if basic_ok and session_ok else len(normalized),
+        "rows": [projection.as_dict() for projection in projections],
+    }

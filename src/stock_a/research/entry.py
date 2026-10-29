@@ -1790,9 +1790,13 @@ def research_stock(
             "missing_bar_state": "UNKNOWN; 不推断为停牌或上市前",
         },
         "identity": {
-            "status": "SOURCE_SYMBOL_ONLY",
+            **(identity_projection.as_dict() if identity_projection is not None else {
+                "status": "SOURCE_SYMBOL_ONLY",
+                "security_id": None,
+                "reason": "OFFICIAL_STABLE_SECURITY_ID_SOURCE_NOT_BOUND",
+            }),
             "security_id": None,
-            "reason": "OFFICIAL_STABLE_SECURITY_ID_SOURCE_NOT_BOUND",
+            "stable_security_id_issued": False,
         },
         "canonical_selection": _render_canonical_selection(canonical_selection),
         "adjustment": {

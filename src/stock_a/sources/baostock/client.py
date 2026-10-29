@@ -66,6 +66,16 @@ def resolve_verified_baostock_identity_capture(capture_id: str) -> BaoStockIdent
     return _VERIFIED_IDENTITY_CAPTURES.get(capture_id)
 
 
+def _daily_row_content_sha256(
+    *, fields: tuple[str, ...], row: dict[str, str], symbol: str, target_session: str,
+) -> str:
+    """只摘要同一未复权日线行内容；capture ID与观察时钟另行绑定。"""
+    payload = {"fields": fields, "row": row, "source_symbol": symbol.upper(),
+               "target_session": target_session, "adjustflag": "3"}
+    return sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
+                              separators=(",", ":"), allow_nan=False).encode("utf-8")).hexdigest()
+
+
 def _issue_verified_identity_capture(snapshot: dict[str, Any], *, injected_transport: bool) -> str | None:
     if injected_transport or snapshot.get("status") != "RESPONSE_RECEIVED":
         return None
@@ -123,7 +133,7 @@ def _issue_verified_daily_capture(
     if injected_transport or len(rows) != 1:
         return None
     row = rows[0]
-    required = {"date", "code", "open", "high", "low", "close", "volume", "amount", "adjustflag"}
+    required = set(_QUERY_FIELDS.split(","))
     if (not required.issubset(fields) or row.get("code", "").lower() != symbol.lower()
             or row.get("date") != target_session or row.get("adjustflag") != "3"):
         return None
@@ -131,15 +141,51 @@ def _issue_verified_daily_capture(
         captured_at = datetime.fromisoformat(completed_at)
         if captured_at.tzinfo is None or captured_at.utcoffset() is None:
             return None
-        payload = {"fields": fields, "row": row, "source_symbol": symbol.lower(),
-                   "target_session": target_session, "adjustflag": "3", "captured_at": completed_at}
-        digest = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True,
-                                   separators=(",", ":")).encode("utf-8")).hexdigest()
+        digest = _daily_row_content_sha256(
+            fields=fields, row=row, symbol=symbol, target_session=target_session,
+        )
         capture = BaoStockDailySourceCapture(
             capture_id=str(uuid4()), source_symbol=symbol.upper(),
             target_session=date.fromisoformat(target_session), adjustflag="3",
             amount_raw=row["amount"], volume_raw=row["volume"], source_sha256=digest,
             captured_at=captured_at,
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+    _VERIFIED_DAILY_CAPTURES[capture.capture_id] = capture
+    while len(_VERIFIED_DAILY_CAPTURES) > 256:
+        _VERIFIED_DAILY_CAPTURES.pop(next(iter(_VERIFIED_DAILY_CAPTURES)))
+    return capture
+
+
+def _issue_verified_daily_row_capture(
+    *, symbol: str, start_session: str, end_session: str, fields: tuple[str, ...],
+    row: dict[str, str], captured_at: str, injected_transport: bool,
+) -> BaoStockDailySourceCapture | None:
+    """为一次真实完整范围响应中的单个行签发本进程内capture。"""
+    if injected_transport:
+        return None
+    required = set(_QUERY_FIELDS.split(","))
+    if len(fields) != len(set(fields)) or not required.issubset(fields):
+        return None
+    if (row.get("code", "").upper() != symbol.upper()
+            or row.get("adjustflag") != "3"
+            or not start_session <= row.get("date", "") <= end_session):
+        return None
+    try:
+        session = date.fromisoformat(row["date"])
+        if session.isoformat() != row["date"]:
+            return None
+        captured_clock = datetime.fromisoformat(captured_at)
+        if captured_clock.tzinfo is None or captured_clock.utcoffset() is None:
+            return None
+        digest = _daily_row_content_sha256(
+            fields=fields, row=row, symbol=symbol, target_session=row["date"],
+        )
+        capture = BaoStockDailySourceCapture(
+            capture_id=str(uuid4()), source_symbol=symbol.upper(), target_session=session,
+            adjustflag="3", amount_raw=row["amount"], volume_raw=row["volume"],
+            source_sha256=digest, captured_at=captured_clock,
         )
     except (KeyError, TypeError, ValueError):
         return None
@@ -718,6 +764,7 @@ def query_daily_range_rows(
     logout_code = None
     logout_message = None
     rows_by_symbol: dict[str, Any] = {}
+    verified_captures: dict[str, list[dict[str, str]]] = {}
     query_calls = 0
     status = "RESPONSE_RECEIVED"
     reason = "BaoStock未复权日线范围查询完成"
@@ -808,6 +855,40 @@ def query_daily_range_rows(
         if login_attempted:
             _close_sdk_socket(injected_transport=transport is not None)
         socket.setdefaulttimeout(previous_timeout)
+    # 只有登录、全部请求/逐行读取和logout都成功后才签发；
+    # 一个证券的重复、越界或错代码行会使该证券整个响应不获签发。
+    if status == "RESPONSE_RECEIVED" and login_code == logout_code == "0":
+        for symbol, response in rows_by_symbol.items():
+            rows = response.get("rows", [])
+            dates = [row.get("date") for row in rows]
+            valid_rows = (
+                response.get("complete") is True
+                and len(response.get("response_fields", [])) == len(set(response.get("response_fields", [])))
+                and set(_QUERY_FIELDS.split(",")).issubset(response.get("response_fields", []))
+                and len(dates) == len(set(dates))
+                and all(isinstance(value, str) and start_date <= value <= end_date
+                        for value in dates)
+                and all(row.get("code", "").upper() == f"{symbol[:2]}.{symbol[3:]}".upper()
+                        and row.get("adjustflag") == "3" for row in rows)
+            )
+            if not valid_rows:
+                continue
+            issued: list[dict[str, str]] = []
+            for row in rows:
+                capture = _issue_verified_daily_row_capture(
+                    symbol=symbol, start_session=start_date, end_session=end_date,
+                    fields=tuple(response["response_fields"]), row=row,
+                    captured_at=response["request_completed_at"], injected_transport=transport is not None,
+                )
+                if capture is None:
+                    issued = []
+                    break
+                issued.append({
+                    "date": row["date"], "code": row["code"],
+                    "verified_source_capture_id": capture.capture_id,
+                    "verified_source_sha256": capture.source_sha256,
+                })
+            verified_captures[symbol] = issued
     return {
         "contract": "STOCK-A-BAOSTOCK-DAILY-RANGE-READ/R1",
         "status": status, "source": "BAOSTOCK", "symbols": list(symbols),
@@ -824,6 +905,7 @@ def query_daily_range_rows(
         "login_error_message": login_message, "logout_attempted": logout_attempted,
         "logout_error_code": logout_code, "logout_error_message": logout_message,
         "query_calls": query_calls, "retry_count": 0, "responses": rows_by_symbol,
+        "verified_source_captures": verified_captures,
         "captured_sdk_output_chars": len(output_capture.getvalue()),
         "error_type": error_type, "reason": reason,
     }
