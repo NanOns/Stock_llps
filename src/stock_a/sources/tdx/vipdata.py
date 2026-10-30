@@ -581,12 +581,14 @@ def _validate_target_session(
     if target.isoformat() != target_session:
         raise VipdataError("TARGET_SESSION_INVALID", "目标会话日期格式不规范")
     if session_checker is None:
-        from stock_a.research.entry import _load_calendar
+        from stock_a.research.entry import ResearchEntryError, _load_calendar
 
         try:
-            _load_calendar(target)
-            is_session = True
-        except Exception as error:
+            _payload, _metadata, _revision, sessions = _load_calendar(target)
+            is_session = target in sessions
+        except ResearchEntryError as error:
+            if error.code == "TARGET_NOT_TRADING_SESSION":
+                raise VipdataError("TARGET_SESSION_NOT_TRADING_DAY", "目标日期不是已核验的正式交易会话") from error
             raise VipdataError("TARGET_CALENDAR_UNVERIFIED", "项目交易日历无法独立验证目标会话") from error
     else:
         try:

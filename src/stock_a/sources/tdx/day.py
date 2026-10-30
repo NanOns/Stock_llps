@@ -113,7 +113,8 @@ def decode_day_record(raw32: bytes, units: UnitContract) -> DecodedDay:
     prices = tuple(Fraction(x, 100) for x in (o, h, l, c))
     # float32解包后按实际二进制值精确转换；不把NaN/Infinity写成合法金额。
     amount_decimal = Decimal.from_float(amount) if math.isfinite(amount) else Decimal("NaN")
-    raw_amount = FieldValue(amount_decimal) if amount_decimal.is_finite() else unknown("DATA_INVALID_AMOUNT")
+    raw_amount = (FieldValue(amount_decimal) if amount_decimal.is_finite() and amount_decimal >= 0
+                  else unknown("DATA_INVALID_AMOUNT"))
     raw_volume = FieldValue(volume)
     fields = normalize_components(prices, amount_decimal, volume, units)
     price_value, amount_value, volume_value = fields

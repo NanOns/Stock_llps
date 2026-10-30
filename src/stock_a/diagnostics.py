@@ -1292,7 +1292,9 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
         lines = [
             f"PG历史候选页 offset={page_info['offset']} limit={page_info['limit']} "
             f"rows={page_info['page_count']} filtered_total={page_info['total_source_candidates']} "
-            f"next={page_info['next_offset']} window={result['session_start']}..{result['session_end']}",
+            f"next={page_info['next_offset']} window={result['session_start']}..{result['session_end']} "
+            f"来源版本={result['source_version_status']} "
+            f"实际/期望={result['source_version_row_count']}/{result['source_version_expected_row_count']}",
         ]
         for item in result["results"]:
             core_fields = item.get("core_price_fields", {})

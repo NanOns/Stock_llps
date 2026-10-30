@@ -3410,6 +3410,9 @@ def research_universe_pg_history_preview(
         },
         "target_day_source_status_counts": page["bar_status_counts"],
         "candidate_partition_closed": page["partition_closed"],
+        "source_version_status": page["version_status"],
+        "source_version_row_count": page["version_row_count"],
+        "source_version_expected_row_count": page["version_expected_row_count"],
         "results": results,
         "execution": {
             "sql_pagination": True,

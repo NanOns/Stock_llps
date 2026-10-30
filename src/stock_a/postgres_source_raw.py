@@ -1078,7 +1078,7 @@ def read_raw_daily_stock(
             """SELECT r.*, c.read_started_at AS capture_read_started_at,
        c.validated_at AS capture_validated_at, c.source_time_quality AS capture_time_quality,
        c.source_clock_role AS capture_clock_role, c.canonical_digest AS capture_digest,
-       s.dataset_id, s.byte_sha, s.byte_count
+       s.dataset_id, s.byte_sha, s.byte_count, c.content_id AS capture_content_id
 FROM stock.source_raw_daily r
 JOIN stock.source_captures c ON c.namespace_id=r.namespace_id AND c.capture_id=r.source_capture_id
 JOIN stock.source_contents s ON s.namespace_id=r.namespace_id AND s.content_id=r.source_content_id
@@ -1090,7 +1090,8 @@ WHERE r.namespace_id=%s::uuid AND r.source_symbol=%s AND r.session_date=%s AND r
             return None
         names = [item.name for item in cursor.description]
         result = dict(zip(names, row, strict=True))
-        if result["byte_sha"] != package_sha256 or result["dataset_id"] != _DATASET_ID:
+        if (result["byte_sha"] != package_sha256 or result["dataset_id"] != _DATASET_ID
+                or result["capture_content_id"] != result["source_content_id"]):
             raise RawSourcePgError("SOURCE_REFERENCE_MISMATCH", "Raw读回的package SHA或source_contents数据集不匹配")
         result["namespace_id"] = str(result["namespace_id"])
         result["source_capture_id"] = str(result["source_capture_id"])
@@ -1131,7 +1132,8 @@ def _read_history_rows(
         f"""SELECT r.*, c.read_started_at AS capture_read_started_at,
        c.validated_at AS capture_validated_at, c.source_time_quality AS capture_time_quality,
        c.source_clock_role AS capture_clock_role, c.canonical_digest AS capture_digest,
-       c.normalized_count AS capture_normalized_count, s.dataset_id, s.byte_sha, s.byte_count
+       c.normalized_count AS capture_normalized_count, s.dataset_id, s.byte_sha, s.byte_count,
+       c.content_id AS capture_content_id
 FROM stock.source_raw_daily r
 JOIN stock.source_captures c ON c.namespace_id=r.namespace_id AND c.capture_id=r.source_capture_id
 JOIN stock.source_contents s ON s.namespace_id=r.namespace_id AND s.content_id=r.source_content_id
@@ -1147,7 +1149,8 @@ ORDER BY r.source_symbol, r.session_date""",
                 or row["source_symbol"] not in source_symbols
                 or row["session_date"] not in sessions
                 or row["source_entry_sha256"] is not None and _SHA256.fullmatch(row["source_entry_sha256"]) is None
-                or row["capture_normalized_count"] <= 0):
+                or row["capture_normalized_count"] <= 0
+                or row["capture_content_id"] != row["source_content_id"]):
             raise RawSourcePgError("SOURCE_REFERENCE_MISMATCH", "PG历史Raw行与显式包、来源捕获或内容元数据不匹配")
         if row["bar_status"] not in _BAR_STATUSES:
             raise RawSourcePgError("SOURCE_STATUS_INVALID", "PG历史Raw包含未登记的来源状态")
@@ -1215,6 +1218,29 @@ def read_raw_daily_history_stock(
     }
 
 
+def _page_version_status(cursor: Any, namespace_id: str, target_session: date,
+                         package_sha256: str) -> tuple[str, int, int | None]:
+    """同一只读快照中核验未过滤的目标日分母和来源引用。"""
+    cursor.execute("""SELECT count(*)::bigint, count(DISTINCT r.source_capture_id)::bigint,
+       min(c.normalized_count), max(c.normalized_count),
+       count(*) FILTER (WHERE c.capture_id IS NULL OR s.content_id IS NULL
+           OR c.content_id IS DISTINCT FROM r.source_content_id
+           OR s.byte_sha IS DISTINCT FROM r.package_sha256
+           OR s.dataset_id IS DISTINCT FROM %s)::bigint
+FROM stock.source_raw_daily r
+LEFT JOIN stock.source_captures c ON c.namespace_id=r.namespace_id AND c.capture_id=r.source_capture_id
+LEFT JOIN stock.source_contents s ON s.namespace_id=r.namespace_id AND s.content_id=r.source_content_id
+WHERE r.namespace_id=%s::uuid AND r.session_date=%s AND r.package_sha256=%s""",
+                   (_DATASET_ID, namespace_id, target_session, package_sha256))
+    actual, captures, expected, expected_max, broken = cursor.fetchone()
+    if actual == 0:
+        return "EMPTY", 0, None
+    if (captures != 1 or broken or expected is None or expected <= 0
+            or expected != expected_max or actual > expected):
+        raise RawSourcePgError("SOURCE_REFERENCE_MISMATCH", "Raw分页的来源引用或捕获分母不一致")
+    return ("CLOSED" if actual == expected else "PARTIAL", int(actual), int(expected))
+
+
 def read_raw_daily_history_page(
     config: Mapping[str, Any],
     *,
@@ -1237,6 +1263,9 @@ def read_raw_daily_history_page(
     if market not in {"ALL", "SH", "SZ"} or board not in {"ALL", "MAIN_BOARD", "GEM"}:
         raise RawSourcePgError("PG_FILTER_INVALID", "PG历史分页市场或板别过滤无效")
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        version_status, version_rows, expected_rows = _page_version_status(
+            cursor, namespace_id, target_session, package_sha256,
+        )
         cursor.execute(
             """SELECT bar_status, count(*) FROM stock.source_raw_daily
 WHERE namespace_id=%s::uuid AND session_date=%s AND package_sha256=%s
@@ -1290,7 +1319,10 @@ ORDER BY source_symbol LIMIT %s OFFSET %s""",
         "total_count": total,
         "next_offset": next_offset if next_offset < total else None,
         "bar_status_counts": by_status,
-        "partition_closed": total == sum(by_status.values()),
+        "partition_closed": version_status == "CLOSED" and total == sum(by_status.values()),
+        "version_status": version_status,
+        "version_row_count": version_rows,
+        "version_expected_row_count": expected_rows,
         "market_filter": market,
         "board_filter": board,
         "candidates": candidates,
@@ -1315,6 +1347,9 @@ def read_raw_daily_page(
     if market not in {"ALL", "SH", "SZ"} or board not in {"ALL", "MAIN_BOARD", "GEM"}:
         raise RawSourcePgError("PG_FILTER_INVALID", "PG市场或板别过滤值无效")
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        version_status, version_rows, expected_rows = _page_version_status(
+            cursor, namespace_id, target_session, package_sha256,
+        )
         cursor.execute(
             """SELECT bar_status, count(*) FROM stock.source_raw_daily
 WHERE namespace_id=%s::uuid AND session_date=%s AND package_sha256=%s
@@ -1341,7 +1376,10 @@ ORDER BY source_symbol LIMIT %s OFFSET %s""",
         "page_count": len(rows), "total_count": total,
         "next_offset": next_offset if next_offset < total else None,
         "bar_status_counts": by_status,
-        "partition_closed": total == sum(by_status.values()),
+        "partition_closed": version_status == "CLOSED" and total == sum(by_status.values()),
+        "version_status": version_status,
+        "version_row_count": version_rows,
+        "version_expected_row_count": expected_rows,
         "market_filter": market, "board_filter": board,
         "rows": page_rows, "pit_status": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY", "source_zip_opened": False,
