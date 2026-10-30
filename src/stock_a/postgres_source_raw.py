@@ -1520,6 +1520,122 @@ LIMIT %s OFFSET %s""",
     }
 
 
+def read_raw_daily_readiness(
+    config: Mapping[str, Any], *, target_session: date, package_sha256: str,
+) -> dict[str, Any]:
+    """对一个明确日期和包SHA做有界的PG只读汇总，不扫描目录或来源文件。"""
+    if type(target_session) is not date:
+        raise RawSourcePgError("PG_READINESS_DATE_INVALID", "准备状态查询必须提供明确交易日期")
+    if not isinstance(package_sha256, str) or _SHA256.fullmatch(package_sha256) is None:
+        raise RawSourcePgError("PG_READINESS_SHA_INVALID", "准备状态查询必须提供完整来源包SHA")
+
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        cursor.execute(
+            """SELECT count(*)::bigint AS stored_row_count,
+       count(*) FILTER (WHERE r.bar_status='TARGET_PRESENT')::bigint AS target_present,
+       count(*) FILTER (WHERE r.bar_status='TARGET_MISSING')::bigint AS target_missing,
+       count(*) FILTER (WHERE r.bar_status='READ_FAILED')::bigint AS read_failed,
+       count(*) FILTER (WHERE r.bar_status NOT IN ('TARGET_PRESENT','TARGET_MISSING','READ_FAILED'))::bigint AS unknown_bar_status,
+       count(DISTINCT r.source_capture_id)::bigint AS capture_count,
+       min(c.normalized_count) AS expected_row_count,
+       max(c.normalized_count) AS expected_row_count_max,
+       min(c.read_started_at) AS capture_read_started_at,
+       max(c.read_started_at) AS capture_read_started_at_max,
+       min(c.validated_at) AS capture_validated_at,
+       max(c.validated_at) AS capture_validated_at_max,
+       array_agg(DISTINCT c.source_time_quality ORDER BY c.source_time_quality) AS source_time_qualities,
+       array_agg(DISTINCT c.source_clock_role ORDER BY c.source_clock_role) AS source_clock_roles,
+       count(*) FILTER (WHERE c.source_available_at IS NOT NULL)::bigint AS source_available_at_count,
+       count(*) FILTER (WHERE c.capture_id IS NULL OR s.content_id IS NULL
+           OR c.content_id IS DISTINCT FROM r.source_content_id)::bigint AS broken_reference_count,
+       array_agg(DISTINCT s.dataset_id ORDER BY s.dataset_id) AS dataset_ids,
+       array_agg(DISTINCT s.byte_sha ORDER BY s.byte_sha) AS content_shas,
+       array_agg(DISTINCT r.price_quality ORDER BY r.price_quality) AS price_qualities,
+       array_agg(DISTINCT r.amount_quality ORDER BY r.amount_quality) AS amount_qualities,
+       array_agg(DISTINCT r.amount_unit_status ORDER BY r.amount_unit_status) AS amount_unit_statuses,
+       array_agg(DISTINCT r.volume_quality ORDER BY r.volume_quality) AS volume_qualities,
+       array_agg(DISTINCT r.volume_unit_status ORDER BY r.volume_unit_status) AS volume_unit_statuses
+FROM stock.source_raw_daily r
+LEFT JOIN stock.source_captures c
+  ON c.namespace_id=r.namespace_id AND c.capture_id=r.source_capture_id
+LEFT JOIN stock.source_contents s
+  ON s.namespace_id=r.namespace_id AND s.content_id=r.source_content_id
+WHERE r.namespace_id=%s::uuid AND r.session_date=%s AND r.package_sha256=%s""",
+            (namespace_id, target_session, package_sha256),
+        )
+        row = cursor.fetchone()
+        names = [item.name for item in cursor.description]
+        item = dict(zip(names, row, strict=True))
+
+    stored_count = int(item["stored_row_count"])
+    if stored_count == 0:
+        return {
+            "status": "EMPTY",
+            "namespace_id": namespace_id,
+            "source_date": target_session.isoformat(),
+            "package_sha256": package_sha256,
+        }
+
+    counts = {
+        "TARGET_PRESENT": int(item["target_present"]),
+        "TARGET_MISSING": int(item["target_missing"]),
+        "READ_FAILED": int(item["read_failed"]),
+    }
+    source_time_qualities = item["source_time_qualities"] or []
+    source_clock_roles = item["source_clock_roles"] or []
+    dataset_ids = item["dataset_ids"] or []
+    content_shas = item["content_shas"] or []
+    expected_count = item["expected_row_count"]
+    if (
+        sum(counts.values()) != stored_count or item["unknown_bar_status"] != 0
+        or item["capture_count"] != 1 or item["broken_reference_count"] != 0
+        or expected_count is None or expected_count <= 0
+        or expected_count != item["expected_row_count_max"]
+        or stored_count > expected_count
+        or content_shas != [package_sha256] or dataset_ids != [_DATASET_ID]
+        or len(source_time_qualities) != 1 or len(source_clock_roles) != 1
+        or item["capture_read_started_at"] != item["capture_read_started_at_max"]
+        or item["capture_validated_at"] != item["capture_validated_at_max"]
+    ):
+        raise RawSourcePgError(
+            "SOURCE_REFERENCE_MISMATCH", "精确日期/SHA的Raw行、来源引用、时钟或状态分区未闭合",
+        )
+
+    return {
+        "status": "AVAILABLE",
+        "namespace_id": namespace_id,
+        "source_date": target_session.isoformat(),
+        "package_sha256": package_sha256,
+        "stored_row_count": stored_count,
+        "capture_expected_row_count": int(expected_count),
+        "unpersisted_candidate_count": int(expected_count) - stored_count,
+        "bar_status_counts": counts,
+        "source_capture_count": int(item["capture_count"]),
+        "capture_read_started_at": _db_scalar(item["capture_read_started_at"]),
+        "capture_validated_at": _db_scalar(item["capture_validated_at"]),
+        "source_available_at_count": int(item["source_available_at_count"]),
+        "source_time_quality": source_time_qualities[0],
+        "source_clock_role": source_clock_roles[0],
+        "dataset_id": dataset_ids[0],
+        "price_qualities": item["price_qualities"] or [],
+        "amount_qualities": item["amount_qualities"] or [],
+        "amount_unit_statuses": item["amount_unit_statuses"] or [],
+        "volume_qualities": item["volume_qualities"] or [],
+        "volume_unit_statuses": item["volume_unit_statuses"] or [],
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "version_status": "CLOSED" if stored_count == expected_count else "PARTIAL",
+        "evidence_type": "REAL_PG",
+        "producer": "stock.source_raw_daily + stock.source_captures + stock.source_contents",
+        "consumer": "现有Raw目录、来源分页、Raw单股及本状态GET",
+        "database_write": False,
+        "ddl_executed": False,
+        "source_zip_opened": False,
+        "source_recalculated": False,
+    }
+
+
 def raw_source_capacity(config: Mapping[str, Any]) -> dict[str, Any]:
     """读取本批Raw表行数、占用页和关系总字节，不请求外部统计扩展。"""
     with _transaction(config, write=False) as (_connection, cursor, _namespace_id):

@@ -181,6 +181,8 @@ JSON和短摘要另提供`coverage_summary`中的当前页实际目标Bar、目�
 
 在开发环境中，可由用户显式启动仅监听`127.0.0.1:28766`的研究预览服务，并用浏览器访问`http://127.0.0.1:28766/`。页面只从固定`stock_a.stock`读取已经保存的Raw版本和候选分页；单股预览在用户提交查询后读取精确PG历史并调用现役Core/Profile。服务不写PG、不扫描来源ZIP、不联网、不保存结果；结果为`RAW_UNADJUSTED`、`SOURCE_SYMBOL_ONLY`及`NON_PIT_RETROSPECTIVE`，不表示官方上市总体、正式选股或生产发布。
 
+选择PG目录中的明确日期和完整来源包SHA后，页面还会读取「当前数据链准备状态」。该状态按精确日期/SHA汇总Raw和捕获元数据，并从唯一day-chain合同展示P00–P25的输入、产物与消费者；正式阶段能力依据当前代码接线登记。来源`CLOSED`只表示候选行和捕获引用闭合；Core/Profile仍是用户触发的单股研究预览，不表示正式Foundation、Owner、Publication、Head或整日链完成。
+
 ```powershell
 stock-a preview-serve --host 127.0.0.1 --port 28766
 ```

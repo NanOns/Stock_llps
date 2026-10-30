@@ -19,6 +19,7 @@ from stock_a.postgres_source_raw import (
     RawSourcePgError,
     read_raw_daily_catalog,
     read_raw_daily_page,
+    read_raw_daily_readiness,
     read_raw_daily_stock,
     read_raw_daily_history_stock,
 )
@@ -35,6 +36,123 @@ _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _PROFILE_CONTRACT_NAME = "STOCK_A_DAY_CHAIN_R10"
+
+_READINESS_GROUPS = (
+    {"id": "source", "label": "来源", "stage_ids": ("P00", "P01", "P02", "P03")},
+    {"id": "base_facts", "label": "基础事实", "stage_ids": ("P04", "P05", "P06")},
+    {"id": "base_profile", "label": "基础画像", "stage_ids": ("P07", "P08", "P09")},
+    {"id": "research", "label": "研究域", "stage_ids": tuple(f"P{i:02d}" for i in range(10, 20))},
+    {"id": "publication_view", "label": "发布与用户呈现", "stage_ids": ("P20", "P21", "P22", "P23", "P24", "P25")},
+)
+
+# 只登记运行代码当前实际提供的能力边界。阶段名称、输入、产物和消费者始终来自机器合同。
+_STAGE_CAPABILITIES: dict[str, dict[str, str]] = {
+    "P00": {
+        "implementation_level": "PURE_KERNEL", "data_status": "NOT_CHECKED",
+        "consumer_status": "NOT_CONNECTED", "evidence_type": "STATIC",
+        "producer": "stock_a.planning.assemble_day_plan",
+        "consumer": "当前28766预览不执行或持久化正式day_plan",
+        "status_reason": "计划装配内核存在；本地预览没有正式DAG执行与day_plan持久化生产者。",
+    },
+    "P01": {
+        "implementation_level": "PG_SOURCE_FACT", "data_status": "AVAILABLE",
+        "consumer_status": "CONNECTED_PREVIEW", "evidence_type": "REAL_PG",
+        "producer": "stock.source_raw_daily + stock.source_captures + stock.source_contents",
+        "consumer": "Raw目录、来源分页、Raw单股及本状态GET",
+        "status_reason": "所选日期和包SHA的来源捕获及PG观察元数据已核对。",
+    },
+    "P02": {
+        "implementation_level": "DESIGN_ONLY", "data_status": "NOT_CHECKED",
+        "consumer_status": "NOT_CONNECTED", "evidence_type": "STATIC",
+        "producer": "stock_a.sources.baostock连接器代码（未绑定本次阶段采集）",
+        "consumer": "可选补充源能力状态尚未接入本页查询；Bao数据可选，不阻断TDX Core",
+        "status_reason": "存在独立连接器代码，但本只读请求没有采集BaoStock，也没有声明其对本日期可用。",
+    },
+    "P03": {
+        "implementation_level": "DESIGN_ONLY", "data_status": "MISSING",
+        "consumer_status": "NOT_CONNECTED", "evidence_type": "STATIC",
+        "producer": "尚无接入本地预览的数据源封口生产者",
+        "consumer": "P04日期身份及基础目录、P05正式RAW状态",
+        "status_reason": "所选日期缺少正式source_set/source_capabilities产物；当前运行代码没有登记来源封口生产者。这是已知阶段断点，不是PG查询失败。",
+    },
+    "P04": {
+        "implementation_level": "PURE_KERNEL", "data_status": "MISSING",
+        "consumer_status": "NOT_CONNECTED", "evidence_type": "STATIC",
+        "producer": "stock_a.canonical.identity语义摘要内核（未接为当日身份目录生产者）",
+        "consumer": "P05正式RAW状态及后续规范计算尚未接通",
+        "status_reason": "所选日期没有接通正式身份、有效期交易日历和官方Universe目录；身份摘要纯内核不能代替这些日期事实。",
+    },
+    "P05": {
+        "implementation_level": "PG_SOURCE_FACT", "data_status": "AVAILABLE",
+        "consumer_status": "CONNECTED_PREVIEW", "evidence_type": "REAL_PG",
+        "producer": "stock.source_raw_daily精确日期/SHA来源代码观察",
+        "consumer": "Raw目录、原始字段、来源分页及用户触发的单股历史预览",
+        "status_reason": "PG已保存来源代码级Raw观察；这不是正式identity/universe下的raw_bars、基础事实持久化或完整RAW阶段。",
+    },
+    "P06": {
+        "implementation_level": "PURE_KERNEL", "data_status": "MISSING",
+        "consumer_status": "NOT_CONNECTED", "evidence_type": "STATIC",
+        "producer": "stock_a.canonical.adjustment与adjustment_periods纯内核",
+        "consumer": "正式复权坐标、周月周期及reference_series生产链未接通",
+        "status_reason": "复权和周期内核存在；本次GET不运行计算，且没有接通P05规范输入或正式持久化生产者。周/月规则仍标记NOT_IMPLEMENTED；量额单位按来源质量逐字段核实，relative未接通的字段仍显示CONTRACT_UNBOUND。",
+    },
+    "P07": {
+        "implementation_level": "ON_DEMAND_PREVIEW", "data_status": "NOT_CHECKED",
+        "consumer_status": "CONNECTED_PREVIEW", "evidence_type": "STATIC",
+        "producer": "用户明确POST /api/preview/stock -> stock_a.research.core.calculate_core",
+        "consumer": "现有28766单股研究预览；无正式Foundation/Owner持久化",
+        "status_reason": "Core43只在用户明确触发单股研究预览时计算；本GET不计算Core，也不把查询能力当作正式P07结果。",
+    },
+    "P08": {
+        "implementation_level": "PURE_KERNEL", "data_status": "MISSING",
+        "consumer_status": "NOT_CONNECTED", "evidence_type": "STATIC",
+        "producer": "stock_a.research.cross_section.calculate_cross_section纯内核",
+        "consumer": "没有连接正式Foundation成员集或持久化横截面消费者",
+        "status_reason": "所选日期没有正式横截面产物；横截面内核存在，但来源候选不是有效上市总体，当前没有可接通的Foundation分母。",
+    },
+    "P09": {
+        "implementation_level": "ON_DEMAND_PREVIEW", "data_status": "NOT_CHECKED",
+        "consumer_status": "CONNECTED_PREVIEW", "evidence_type": "STATIC",
+        "producer": "用户明确POST /api/preview/stock -> stock_a.research.entry Profile11预览",
+        "consumer": "现有28766单股研究预览；无正式Foundation/Owner持久化",
+        "status_reason": "Profile11只在用户明确触发单股研究预览时计算；本GET不计算Profile，也不代表正式基础画像产物。",
+    },
+    "P15": {
+        "implementation_level": "PURE_KERNEL", "data_status": "NOT_CHECKED",
+        "consumer_status": "NOT_CONNECTED", "evidence_type": "STATIC",
+        "producer": "stock_a.research.structure结构与锚点内核",
+        "consumer": "没有接通P15正式同日输入和下游状态消费者",
+        "status_reason": "结构/锚点纯计算内核存在；没有正式阶段执行或持久化证据。",
+    },
+    "P16": {
+        "implementation_level": "PURE_KERNEL", "data_status": "NOT_CHECKED",
+        "consumer_status": "NOT_CONNECTED", "evidence_type": "STATIC",
+        "producer": "stock_a.research.state.reduce_episode状态内核",
+        "consumer": "没有接通正式状态、episode及差异事件生产链",
+        "status_reason": "状态转换内核存在；历史前态及同日输入未在本页范围读取，不能宣称P16完成。",
+    },
+    "P17": {
+        "implementation_level": "PURE_KERNEL", "data_status": "NOT_CHECKED",
+        "consumer_status": "NOT_CONNECTED", "evidence_type": "STATIC",
+        "producer": "stock_a.research.risk.compose风险内核",
+        "consumer": "没有接通正式风险行和完整画像消费者",
+        "status_reason": "风险计算内核存在；依赖的研究域输入、正式生产者与持久化结果没有在本页接通。",
+    },
+    "P18": {
+        "implementation_level": "PURE_KERNEL", "data_status": "NOT_CHECKED",
+        "consumer_status": "NOT_CONNECTED", "evidence_type": "STATIC",
+        "producer": "stock_a.research.risk.priority_status资格内核（部分）",
+        "consumer": "没有接通正式Priority、雷达或Near-Miss发布消费者",
+        "status_reason": "局部资格内核存在；P18完整依赖闭包及输出均未作为正式阶段运行。",
+    },
+    "P25": {
+        "implementation_level": "ON_DEMAND_PREVIEW", "data_status": "NOT_CHECKED",
+        "consumer_status": "CONNECTED_PREVIEW", "evidence_type": "STATIC",
+        "producer": "现有Stock A 28766开发预览页面",
+        "consumer": "本机研究预览用户；未接入正式P25显示确认和聚合完成消费者",
+        "status_reason": "HTTP开发页可见不等于接受Publication、Head、正式API读回或frontend_view_ack；不声明FULL_CHAIN_DISPLAYED。",
+    },
+}
 
 
 class PreviewHttpError(Exception):
@@ -200,6 +318,172 @@ def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
         "source_recalculated": False,
         "ddl_executed": False,
         "database_write": False,
+    }
+
+
+def _chain_readiness_payload(
+    contract: Mapping[str, Any], source_version: Mapping[str, Any], *, checked_at: str,
+) -> dict[str, Any]:
+    """将唯一机器合同和本次精确PG证据组合为只读准备状态。"""
+    stages = contract.get("stages")
+    artifacts = contract.get("artifact_groups")
+    scope = contract.get("scope_bindings", {}).get("FOUNDATION_EOD")
+    bindings = scope.get("stage_bindings") if isinstance(scope, Mapping) else None
+    expected_ids = [f"P{index:02d}" for index in range(26)]
+    if (
+        not isinstance(stages, list) or len(stages) != 26
+        or [item.get("id") for item in stages if isinstance(item, Mapping)] != expected_ids
+        or not isinstance(artifacts, Mapping) or not isinstance(bindings, list)
+    ):
+        raise DayChainContractError("DAY_CHAIN_READINESS_CONTRACT_INVALID", "数据链准备页要求完整的P00至P25机器合同及FOUNDATION_EOD绑定")
+    scope_ids = {
+        row.get("stage_id") for row in bindings if isinstance(row, Mapping)
+    }
+    if not scope_ids or not scope_ids.issubset(set(expected_ids)):
+        raise DayChainContractError("DAY_CHAIN_READINESS_SCOPE_INVALID", "FOUNDATION_EOD阶段绑定必须属于机器合同的P00至P25")
+    bindings_by_id = {
+        row["stage_id"]: row for row in bindings
+        if isinstance(row, Mapping) and isinstance(row.get("stage_id"), str)
+    }
+
+    counts = source_version["bar_status_counts"]
+    has_failed = counts["READ_FAILED"] > 0
+    source_data_status = (
+        "PARTIAL" if source_version["version_status"] == "PARTIAL" or has_failed
+        else "AVAILABLE"
+    )
+    first_break_id = "P05" if source_version["version_status"] == "PARTIAL" or has_failed else "P03"
+    first_break_reasons = {
+        "P05": "所选来源包行数未达到捕获期望数，或存在READ_FAILED；来源候选保存链自身仍有缺口。",
+        "P03": "真实捕获及来源代码级Raw观察已存在；下一正式来源封口source_set尚无已接通生产者，正式Canonical链从此断开。",
+    }
+
+    stage_rows: list[dict[str, Any]] = []
+    by_id: dict[str, dict[str, Any]] = {}
+    for stage in stages:
+        stage_id = stage["id"]
+        capability = _STAGE_CAPABILITIES.get(stage_id, {
+            "implementation_level": "DESIGN_ONLY",
+            "data_status": "NOT_APPLICABLE",
+            "consumer_status": "NOT_CONNECTED",
+            "evidence_type": "STATIC",
+            "producer": "当前运行代码没有登记此阶段的生产者绑定",
+            "consumer": "机器合同所列下游尚未由正式运行路径接通",
+            "status_reason": "该阶段目前只有设计合同或算法引用；未接通正式阶段执行、输入读取和持久化消费者。这是未实现状态，不是所选数据查询失败。",
+        })
+        capability = dict(capability)
+        if stage_id in {"P01", "P05"}:
+            capability["data_status"] = source_data_status
+            capability["evidence_type"] = "REAL_PG"
+            if stage_id == "P05":
+                capability["status_reason"] = (
+                    f"PG精确读取到{source_version['stored_row_count']}/{source_version['capture_expected_row_count']}条来源代码观察，"
+                    "bar状态分区和来源引用均已核验；这是source_raw_daily来源观察，不是正式identity/universe下的raw_bars或Foundation持久化。"
+                    if source_data_status == "AVAILABLE" else
+                    f"PG精确读取到{source_version['stored_row_count']}/{source_version['capture_expected_row_count']}条来源代码观察；"
+                    "当前版本为PARTIAL或含READ_FAILED，且这些观察仍不等于正式identity/universe下的raw_bars。"
+                )
+        prior_inputs = [
+            {key: item[key] for key in ("role", "temporal_role", "first_day", "component") if key in item}
+            for item in stage.get("prior_inputs", ()) if isinstance(item, Mapping)
+        ]
+        output_consumers: list[dict[str, Any]] = []
+        next_consumer_ids: set[str] = set()
+        for output in stage.get("outputs", ()):
+            artifact = artifacts.get(output)
+            if not isinstance(artifact, Mapping) or artifact.get("producer") != stage_id:
+                continue
+            consumers = artifact.get("consumers", ())
+            terminal = artifact.get("terminal_consumers", ())
+            output_consumers.append({
+                "output": output,
+                "consumers": list(consumers) if isinstance(consumers, (list, tuple)) else [],
+                "terminal_consumers": list(terminal) if isinstance(terminal, (list, tuple)) else [],
+                "data_role": artifact.get("data_role"),
+            })
+            next_consumer_ids.update(value for value in consumers if isinstance(value, str))
+        row = {
+            "stage_id": stage_id,
+            "name_zh": stage["name_zh"],
+            "completion_role": stage.get("completion_role"),
+            "scope_binding": (
+                bindings_by_id[stage_id].get("kernel_role", "FOUNDATION_BOUND")
+                if stage_id in bindings_by_id else "OUTSIDE_FOUNDATION_EOD_FULL_CHAIN_DESIGN"
+            ),
+            "implementation_level": capability["implementation_level"],
+            "data_status": capability["data_status"],
+            "consumer_status": capability["consumer_status"],
+            "evidence_type": capability["evidence_type"],
+            "producer": capability["producer"],
+            "consumer": capability["consumer"],
+            "required_inputs": list(stage.get("required_inputs", ())),
+            "optional_inputs": list(stage.get("optional_inputs", ())),
+            "prior_inputs": prior_inputs,
+            "outputs": list(stage.get("outputs", ())),
+            "output_consumers": output_consumers,
+            "next_consumer_stage_ids": sorted(next_consumer_ids),
+            "source_date": source_version["source_date"],
+            "package_sha256": source_version["package_sha256"],
+            "status_reason": capability["status_reason"],
+            "checked_at": checked_at,
+            "is_first_break": stage_id == first_break_id,
+        }
+        stage_rows.append(row)
+        by_id[stage_id] = row
+
+    groups = []
+    for group in _READINESS_GROUPS:
+        group_stages = [by_id[stage_id] for stage_id in group["stage_ids"]]
+        broken = next((row for row in group_stages if row["is_first_break"]), None)
+        if broken is None:
+            broken = next((row for row in group_stages if row["data_status"] == "MISSING"), None)
+        groups.append({
+            "group_id": group["id"],
+            "label": group["label"],
+            "stage_ids": list(group["stage_ids"]),
+            "first_break_stage_id": broken["stage_id"] if broken else None,
+            "summary": (
+                f"本组首先缺少：{broken['stage_id']} {broken['name_zh']}。{broken['status_reason']}"
+                if broken else
+                "按机器合同展示能力、输入和消费者；未运行阶段不会误标为数据故障。"
+            ),
+        })
+    first_break = {
+        "stage_id": first_break_id,
+        "name_zh": by_id[first_break_id]["name_zh"],
+        "kind": "SOURCE_VERSION_PARTIAL" if first_break_id == "P05" else "FORMAL_SOURCE_SET_NOT_CONNECTED",
+        "scope": "现有来源观察之后的正式业务链",
+        "status_reason": first_break_reasons[first_break_id],
+    }
+    return {
+        "ok": True,
+        "status": "FORMAL_FOUNDATION_NOT_READY",
+        "highest_available_scope": "SOURCE_SYMBOL_ONLY / RAW_UNADJUSTED / NON_PIT_QUERY_PREVIEW_CAPABILITY",
+        "formal_foundation_status": "NOT_CONNECTED",
+        "day_chain_complete": False,
+        "official_listing_population": "UNKNOWN_NOT_CONNECTED",
+        "source_version": dict(source_version),
+        "first_break": first_break,
+        "groups": groups,
+        "stages": stage_rows,
+        "contract": {
+            "contract_id": contract.get("contract_id"),
+            "version": contract.get("version"),
+            "sha256": _canonical_sha(contract),
+            "scope_id": "FOUNDATION_EOD",
+        },
+        "source_date": source_version["source_date"],
+        "package_sha256": source_version["package_sha256"],
+        "evidence_type": "REAL_PG_AND_STATIC_CODE_BINDINGS",
+        "producer": source_version["producer"],
+        "consumer": source_version["consumer"],
+        "status_reason": "来源候选与研究预览可用范围已核实；正式source_set、identity/universe、Canonical/Owner/Publication/Head链及P25正式显示确认未接通。",
+        "checked_at": checked_at,
+        "database_write": False,
+        "ddl_executed": False,
+        "source_zip_opened": False,
+        "source_recalculated": False,
+        "core_calculated": False,
     }
 
 
@@ -443,6 +727,27 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "source_recalculated": False,
                 })
                 return
+            if parsed.path == "/api/preview/chain-readiness":
+                values = _query(self.path, {"target_session", "package_sha256"})
+                if set(values) != {"target_session", "package_sha256"}:
+                    raise PreviewHttpError(400, "PREVIEW_QUERY_REQUIRED", "数据链准备状态必须显式提供目标日期和完整来源包SHA")
+                target = _iso_date(values["target_session"])
+                package_sha = _sha(values["package_sha256"])
+                source_version = read_raw_daily_readiness(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    package_sha256=package_sha,
+                )
+                if source_version["status"] == "EMPTY":
+                    raise PreviewHttpError(404, "PG_SOURCE_NO_MATCH", "当前DEV namespace中没有该明确日期和来源包SHA的Raw来源版本")
+                checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
+                payload = _chain_readiness_payload(
+                    self.preview_server.state.profile_contract,
+                    source_version,
+                    checked_at=checked_at,
+                )
+                self._send_json(200, payload)
+                return
             if parsed.path == "/api/preview/raw":
                 values = _query(self.path, {"target_session", "package_sha256", "symbol"})
                 required = {"target_session", "package_sha256", "symbol"}
@@ -595,6 +900,8 @@ _INDEX_HTML = """<!doctype html>
 <section class="panel"><div class="panel-head"><div><h2>预览范围</h2><p>日期和包SHA都来自真实PG目录；任何查询都不会回退到最新版本。</p></div><button id="reloadCatalog" class="quiet">刷新目录</button></div>
 <div class="controls"><label>目标交易日与来源包版本<select id="versionSelect" disabled><option>正在读取PG目录…</option></select></label><label>市场筛选<select id="marketSelect"><option value="ALL">沪深全部来源候选</option><option value="SH">上海来源候选</option><option value="SZ">深圳来源候选</option></select></label><label>板别筛选<select id="boardSelect"><option value="ALL">主板与创业板</option><option value="MAIN_BOARD">主板</option><option value="GEM">创业板</option></select></label></div>
 <div id="population" class="population" role="status">等待读取PG来源目录。</div></section>
+<section class="panel chain-panel" aria-labelledby="chainTitle"><div class="panel-head"><div><h2 id="chainTitle">当前数据链准备状态</h2><p>使用当前明确选择的日期和完整SHA；仅做有界PG只读汇总，不计算Core/Profile或切换正式Head。</p></div><span id="chainChecked" class="count">尚未查询</span></div>
+<div id="chainState" class="chain-state" role="status">请先从PG目录选择目标日期和来源包版本。</div><div id="chainOverview" class="chain-overview"></div><div id="chainGroups" class="chain-groups"></div></section>
 <div class="columns"><section class="panel"><div class="panel-head"><div><h2>来源候选</h2><p>按代码稳定排序；每页最多50行。缺Bar只说明来源缺值，不推断停牌或退市。</p></div><span id="pageCount" class="count">—</span></div>
 <div class="table-wrap"><table><thead><tr><th>来源代码</th><th>市场 / 板别</th><th>目标日Bar</th><th>身份</th><th></th></tr></thead><tbody id="candidateRows"><tr><td colspan="5" class="muted">等待选择PG版本。</td></tr></tbody></table></div>
 <div class="pager"><button id="prevPage" class="quiet" disabled>上一页</button><span id="pageStatus">—</span><div class="pager-actions"><button id="nextPage" class="quiet" disabled>下一页</button><button id="lastPage" class="quiet" disabled>末页</button></div></div></section>
@@ -615,10 +922,11 @@ _APP_CSS = """*{box-sizing:border-box}body{margin:0;background:#f2f5f8;color:#16
 
 
 _APP_CSS += ".message.success{background:#e9f7ef;color:#20683c}.pager-actions{display:flex;gap:7px}button{font:600 14px \"Segoe UI\",sans-serif}@media(max-width:1300px){.raw-grid{grid-template-columns:repeat(2,minmax(0,1fr))}}"
+_APP_CSS += ".chain-state{padding:12px 14px;border-radius:8px;background:#eef5f7;color:#233f50;font-weight:600;overflow-wrap:anywhere}.chain-state.partial{background:#fff3dc;color:#72520c}.chain-state.error{background:#fff0ee;color:#8a3024}.chain-overview{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:9px;margin-top:11px}.chain-stat{border:1px solid #dfe7ec;border-radius:8px;padding:10px;min-width:0;overflow-wrap:anywhere}.chain-stat span{display:block;color:#667b89;font-size:11px}.chain-stat strong{display:block;font-size:13px;overflow-wrap:anywhere}.chain-groups{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:9px;margin-top:12px}.chain-group{border:1px solid #dce5ea;border-radius:8px;padding:10px;min-width:0}.chain-group>summary{display:flex;gap:8px;align-items:flex-start;justify-content:space-between;color:#1e4053}.chain-group>summary span{overflow-wrap:anywhere}.chain-group p{margin:8px 0;color:#546b79;font-size:12px;overflow-wrap:anywhere}.chain-stage{border-top:1px solid #e7edf0;padding:7px 0}.chain-stage summary{font-size:13px;overflow-wrap:anywhere}.chain-detail{display:grid;grid-template-columns:minmax(120px,.28fr) minmax(0,1fr);gap:4px 10px;margin-top:8px;font-size:12px}.chain-detail dt{color:#647987}.chain-detail dd{margin:0;overflow-wrap:anywhere}.chain-chip{display:inline-block;padding:2px 7px;border-radius:12px;background:#edf3f6;color:#334f5e;font-size:11px;font-weight:600;white-space:normal}.chain-first-break{border-left:3px solid #d19a27;background:#fff8e8;padding:7px 9px;border-radius:4px;margin:7px 0;color:#684c12;font-size:12px}@media(max-width:900px){.chain-overview{grid-template-columns:repeat(2,minmax(0,1fr))}.chain-groups{grid-template-columns:1fr}}@media(max-width:620px){.chain-overview{grid-template-columns:1fr}.chain-detail{grid-template-columns:1fr;gap:1px}.chain-detail dd{margin-bottom:6px}.chain-group>summary{display:block}}"
 
 _APP_JS = """'use strict';
 const $=id=>document.getElementById(id);
-const state={versions:[],version:null,offset:0,limit:20,total:0,pageRequest:0,loading:false};
+const state={versions:[],version:null,offset:0,limit:20,total:0,pageRequest:0,readinessRequest:0,stockRequest:0,catalogRequest:0,loading:false};
 const labels={'TARGET_PRESENT':'有Bar','TARGET_MISSING':'来源无Bar','READ_FAILED':'读取失败','MAIN_BOARD':'主板','GEM':'创业板','OBSERVED':'可观察','UNKNOWN':'未知','UNKNOWN_DATA':'数据未知','NOT_IMPLEMENTED':'未实现','CONTRACT_UNBOUND':'合同未绑定','NOT_APPLICABLE':'不适用','NOT_EVALUATED':'未评价','UNIT_AUTHORITY_NOT_VERIFIED':'量额单位权威未核实','SHORT_HISTORY':'历史窗口不足','UNKNOWN_SESSION_GAP':'未知交易会话缺口','PG_HISTORY_SESSION_MISSING':'PG缺少所需历史会话','HISTORY_WINDOW_INCOMPLETE':'历史窗口不完整','EVALUATED':'已计算'};
 const profileLabels={'profile.trend':'趋势','profile.position':'价格位置','profile.ma_structure':'均线结构','profile.relative':'相对强弱','profile.compression':'压缩状态','profile.participation':'成交参与','profile.extension':'延伸程度','profile.near_high20':'接近20会话高点','profile.drawdown60':'60会话回撤','profile.closed_week_trend':'闭合周趋势','profile.closed_month_trend':'闭合月趋势'};
 const text=v=>{if(v===null||v===undefined)return '—';if(typeof v==='object'){if(v.exact!==undefined)return `${v.exact} (${v.decimal??''})`;return JSON.stringify(v)}return labels[String(v)]||String(v)};
@@ -629,18 +937,78 @@ function setMessage(message,ok=false){const el=$('stockError');el.hidden=!messag
 async function api(url,options){const response=await fetch(url,{cache:'no-store',...options});let payload;try{payload=await response.json()}catch{throw new Error('服务器返回了无法读取的响应。')}if(!response.ok||payload.ok===false)throw new Error(`${payload.code||'请求失败'}：${payload.message||'请检查输入和PG目录。'}`);return payload}
 function selectedVersion(){const option=$('versionSelect').selectedOptions[0];if(!option||!option.value.includes('|'))return null;const [target_session,package_sha256]=option.value.split('|');return {target_session,package_sha256}}
 function clearResult(){ $('stockResult').hidden=true;$('coreRows').replaceChildren();$('allCoreRows').replaceChildren();$('profileRows').replaceChildren();$('rawSummary').replaceChildren();setMessage('') }
+const implementationLabels={DESIGN_ONLY:'仅有机器合同设计',PURE_KERNEL:'纯计算内核可用，正式生产者未接通',PG_SOURCE_FACT:'PG来源事实已保存（来源代码级观察）',ON_DEMAND_PREVIEW:'用户触发的开发研究预览',FORMAL_PERSISTED:'正式PG持久结果',PUBLISHED:'正式发布'};
+const dataLabels={AVAILABLE:'已发现可用记录',PARTIAL:'部分记录或存在读取失败',MISSING:'所需记录缺失',NOT_CHECKED:'本请求未检查',NOT_APPLICABLE:'不适用于当前阶段'};
+const consumerLabels={CONNECTED_PREVIEW:'已接入开发预览',CONNECTED_FORMAL:'已接入正式消费',NOT_CONNECTED:'正式下游未接通',NOT_APPLICABLE:'不适用'};
+const appendText=(parent,tag,value,className)=>{const node=document.createElement(tag);if(className)node.className=className;node.textContent=value;parent.append(node);return node};
+function clearChainReadiness(message){$('chainState').className='chain-state';$('chainState').textContent=message;$('chainChecked').textContent='尚未查询';$('chainOverview').replaceChildren();$('chainGroups').replaceChildren()}
+function readinessDetail(parent,label,value){const dt=document.createElement('dt');dt.textContent=label;const dd=document.createElement('dd');dd.textContent=value;parent.append(dt,dd)}
+function renderReadiness(data){
+ const v=data.source_version,c=v.bar_status_counts,partial=v.version_status==='PARTIAL'||c.READ_FAILED>0,versionLabel=v.version_status==='CLOSED'?'来源版本已闭合（CLOSED）':'来源版本部分入库（PARTIAL)',failureText=c.READ_FAILED>0?`；其中READ_FAILED ${c.READ_FAILED}，来源质量不完整`:'';
+ $('chainState').className=`chain-state${partial?' partial':''}`;
+ $('chainState').textContent=`${v.source_date} · ${versionLabel} · Raw ${v.stored_row_count}/${v.capture_expected_row_count} · 有Bar ${c.TARGET_PRESENT} / 来源无Bar ${c.TARGET_MISSING} / 读取失败 ${c.READ_FAILED}${failureText}。${partial?'先修复来源保存缺口。':'正式Foundation仍未接通；来源包闭合不代表业务链完成。'} 来源候选数 ≠ 官方有效上市证券数。`;
+ $('chainChecked').textContent=`只读核查 ${data.checked_at}`;
+ const stats=[
+  ['PG与来源命名空间',`stock_a.stock · ${v.namespace_id}`],
+  ['当前最高可用范围',data.highest_available_scope],
+  ['正式Foundation / 整日链',`${data.formal_foundation_status} / day_chain_complete=false`],
+  ['首个可见断点',`${data.first_break.stage_id} ${data.first_break.name_zh} · ${data.first_break.scope}`],
+  ['来源时钟与质量',`${v.source_clock_role} · ${v.source_time_quality}；捕获开始 ${v.capture_read_started_at}，校验 ${v.capture_validated_at}`],
+  ['价格/量额质量与单位',`价格 ${v.price_qualities.join(', ')||'—'}；金额单位 ${v.amount_unit_statuses.join(', ')||'—'}；成交量单位 ${v.volume_unit_statuses.join(', ')||'—'}`],
+  ['来源分母',`包内候选 ${v.capture_expected_row_count}；官方有效上市总体 UNKNOWN_NOT_CONNECTED`],
+  ['合同版本与SHA',`${data.contract.contract_id} ${data.contract.version} · ${data.contract.sha256}`],
+ ];
+ const overview=$('chainOverview');overview.replaceChildren();
+ for(const [label,value] of stats){const card=document.createElement('div');card.className='chain-stat';appendText(card,'span',label);appendText(card,'strong',value);overview.append(card)}
+ const groupRoot=$('chainGroups');groupRoot.replaceChildren();
+ const stageById=new Map(data.stages.map(stage=>[stage.stage_id,stage]));
+ for(const group of data.groups){
+  const details=document.createElement('details');details.className='chain-group';
+  const summary=document.createElement('summary');appendText(summary,'span',`${group.label} · ${group.stage_ids.length}个合同阶段`);appendText(summary,'span',group.first_break_stage_id?`首断点 ${group.first_break_stage_id}`:'查看状态');details.append(summary);
+  appendText(details,'p',group.summary);
+  for(const stageId of group.stage_ids){const stage=stageById.get(stageId);if(!stage)continue;
+   const item=document.createElement('details');item.className='chain-stage';
+   const head=document.createElement('summary');appendText(head,'span',`${stage.stage_id} · ${stage.name_zh}`);
+   const chips=document.createElement('span');chips.className='chain-chip';chips.textContent=`${implementationLabels[stage.implementation_level]||stage.implementation_level} · ${dataLabels[stage.data_status]||stage.data_status}`;head.append(chips);item.append(head);
+   if(stage.is_first_break)appendText(item,'div',`首个断点：${stage.status_reason}`,'chain-first-break');
+   const dl=document.createElement('dl');dl.className='chain-detail';
+   readinessDetail(dl,'实现层级',`${implementationLabels[stage.implementation_level]||stage.implementation_level} (${stage.implementation_level})`);
+   readinessDetail(dl,'本日期数据状况',`${dataLabels[stage.data_status]||stage.data_status} (${stage.data_status})`);
+   readinessDetail(dl,'消费者接通',`${consumerLabels[stage.consumer_status]||stage.consumer_status} (${stage.consumer_status}) · ${stage.consumer}`);
+   readinessDetail(dl,'当前生产者',stage.producer);
+   readinessDetail(dl,'所需输入',stage.required_inputs.join('、')||'无');
+   readinessDetail(dl,'可选 / 前态输入',[...stage.optional_inputs,...stage.prior_inputs.map(input=>`${input.role} (${input.temporal_role||'PREVIOUS_ACCEPTED'})`)].join('、')||'无');
+   readinessDetail(dl,'合同产物与下一消费者',stage.outputs.map(output=>{const edge=stage.output_consumers.find(row=>row.output===output);return edge?`${output} → ${[...edge.consumers,...edge.terminal_consumers].join(', ')||'无'}`:output}).join('；')||'无');
+   readinessDetail(dl,'证据、日期与SHA',`${stage.evidence_type} · ${stage.source_date} · ${stage.package_sha256}`);
+   readinessDetail(dl,'当前说明',stage.status_reason);
+   item.append(dl);details.append(item);
+  }
+  groupRoot.append(details);
+ }
+}
+async function loadReadiness(){
+ const version=selectedVersion(),requestId=++state.readinessRequest;
+ clearChainReadiness(version?'正在按当前明确日期和完整SHA读取只读准备状态…':'请先从PG目录选择目标日期和来源包版本。');
+ if(!version)return;
+ const key=`${version.target_session}|${version.package_sha256}`;
+ try{const data=await api(`/api/preview/chain-readiness?${new URLSearchParams(version)}`);if(requestId!==state.readinessRequest||key!==`${selectedVersion()?.target_session}|${selectedVersion()?.package_sha256}`)return;renderReadiness(data)}
+ catch(error){if(requestId!==state.readinessRequest)return;$('chainState').className='chain-state error';$('chainState').textContent=`准备状态读取失败：${error.message}。当前版本未核实，不显示旧结果。`;}
+}
 async function loadCatalog(){
- state.pageRequest++;
+ const catalogRequest=++state.catalogRequest;state.pageRequest++;state.readinessRequest++;state.stockRequest++;clearResult();clearChainReadiness('正在从PostgreSQL只读读取来源日期与版本目录…');
  $('versionSelect').disabled=true;$('versionSelect').replaceChildren(new Option('正在读取PG目录…',''));$('population').textContent='正在从PostgreSQL只读读取来源日期与版本目录。';
  try{
-  const data=await api('/api/preview/catalog?offset=0&limit=100');state.versions=data.versions;$('versionSelect').replaceChildren(new Option('— 请选择目标日期与来源包版本 —',''));
+  const data=await api('/api/preview/catalog?offset=0&limit=100');if(catalogRequest!==state.catalogRequest)return;state.versions=data.versions;$('versionSelect').replaceChildren(new Option('— 请选择目标日期与来源包版本 —',''));
   for(const v of data.versions){const title=`${v.session_date} · ${v.package_sha256.slice(0,12)}… · ${v.version_status} · Raw ${v.row_count}/${v.expected_row_count}（有Bar ${v.bar_status_counts.TARGET_PRESENT||0} / 缺Bar ${v.bar_status_counts.TARGET_MISSING||0}）`;const option=new Option(title,`${v.session_date}|${v.package_sha256}`);$('versionSelect').append(option)}
   $('versionSelect').disabled=state.versions.length===0;state.version=null;state.offset=0;$('candidateRows').replaceChildren();$('pageCount').textContent='—';$('pageStatus').textContent=state.versions.length?'请选择PG日期和版本':'PG目录为空';$('prevPage').disabled=true;$('nextPage').disabled=true;$('lastPage').disabled=true;
-  $('population').textContent=state.versions.length?`已读取${data.total_version_count}个真实PG日期/版本。请选择明确版本；Raw来源候选不代表官方上市总体。`:'PG中没有可选的Raw来源版本。';
- }catch(error){$('population').textContent=`目录读取失败：${error.message}`;$('candidateRows').replaceChildren();tableRow($('candidateRows'),['PG目录不可用','','','','']);$('versionSelect').disabled=true}
+  $('population').textContent=state.versions.length?`已读取${data.total_version_count}个真实PG日期/版本。请选择明确版本；Raw来源候选不代表官方上市总体。`:'PG中没有可选的Raw来源版本。';clearChainReadiness(state.versions.length?'请选择一个精确日期和完整包SHA。':'PG目录没有可选来源版本。');
+ }catch(error){if(catalogRequest!==state.catalogRequest)return;$('population').textContent=`目录读取失败：${error.message}`;$('candidateRows').replaceChildren();tableRow($('candidateRows'),['PG目录不可用','','','','']);$('versionSelect').disabled=true;clearChainReadiness(`PG目录不可用：${error.message}`)}
 }
 function describePopulation(page){const version=page.source_version;const versionText=version.status==='CLOSED'?`来源包Raw记录闭合：${version.stored_raw_rows}/${version.capture_expected_rows}`:`来源包Raw部分入库：${version.stored_raw_rows}/${version.capture_expected_rows}；不得按全市场完成解释`;return `${page.target_session} · 包SHA ${page.package_sha256} · ${versionText}。当前筛选来源候选=${page.filtered_total}；有效上市总体=UNKNOWN（NOT_CONNECTED）。这只是该来源包的候选分母。`}
-async function loadPage(){const v=selectedVersion();if(!v)return;const requestId=++state.pageRequest;state.version=v;clearResult();$('candidateRows').replaceChildren();$('pageStatus').textContent='正在读取PG分页…';const query=new URLSearchParams({target_session:v.target_session,package_sha256:v.package_sha256,offset:String(state.offset),limit:String(state.limit),market:$('marketSelect').value,board:$('boardSelect').value});try{const data=await api(`/api/preview/source-page?${query}`);if(requestId!==state.pageRequest)return;const p=data.page;state.total=p.filtered_total;$('population').textContent=describePopulation(p);$('pageCount').textContent=`本页 ${p.page_count} / 筛选分母 ${p.filtered_total}`;$('pageStatus').textContent=`偏移 ${p.offset}，后续 ${p.next_offset===null?0:p.filtered_total-p.next_offset}`;$('prevPage').disabled=p.offset===0;$('nextPage').disabled=p.next_offset===null;$('candidateRows').replaceChildren();if(!p.results.length){tableRow($('candidateRows'),['当前筛选没有来源记录','','','','']);return}for(const item of p.results){const tr=document.createElement('tr');cell(tr,item.source_symbol);cell(tr,`${item.market} / ${text(item.board)}`);cell(tr,text(item.bar_status));cell(tr,'SOURCE_SYMBOL_ONLY');const td=document.createElement('td');const button=document.createElement('button');button.className='row-select';button.type='button';button.textContent='查看';button.addEventListener('click',()=>{$('symbolInput').value=item.source_symbol;$('stockForm').requestSubmit()});td.append(button);tr.append(td);$('candidateRows').append(tr)}}catch(error){if(requestId!==state.pageRequest)return;$('population').textContent=`候选页读取失败：${error.message}`;$('pageStatus').textContent='分页不可用';$('prevPage').disabled=true;$('nextPage').disabled=true;tableRow($('candidateRows'),['PG分页失败','','','',''])}}
+async function loadPage(){
+ const v=selectedVersion();if(!v){state.version=null;state.total=0;state.pageRequest++;state.stockRequest++;clearResult();$('candidateRows').replaceChildren();$('pageCount').textContent='—';$('pageStatus').textContent='请选择PG日期和版本';$('population').textContent='等待选择PG来源版本。';$('prevPage').disabled=true;$('nextPage').disabled=true;$('lastPage').disabled=true;return}
+ const requestId=++state.pageRequest;state.stockRequest++;const key=`${v.target_session}|${v.package_sha256}`;state.version=v;clearResult();$('candidateRows').replaceChildren();$('pageStatus').textContent='正在读取PG分页…';const query=new URLSearchParams({target_session:v.target_session,package_sha256:v.package_sha256,offset:String(state.offset),limit:String(state.limit),market:$('marketSelect').value,board:$('boardSelect').value});try{const data=await api(`/api/preview/source-page?${query}`);if(requestId!==state.pageRequest||key!==`${selectedVersion()?.target_session}|${selectedVersion()?.package_sha256}`)return;const p=data.page;state.total=p.filtered_total;$('population').textContent=describePopulation(p);$('pageCount').textContent=`本页 ${p.page_count} / 筛选分母 ${p.filtered_total}`;$('pageStatus').textContent=`偏移 ${p.offset}，后续 ${p.next_offset===null?0:p.filtered_total-p.next_offset}`;$('prevPage').disabled=p.offset===0;$('nextPage').disabled=p.next_offset===null;$('candidateRows').replaceChildren();if(!p.results.length){tableRow($('candidateRows'),['当前筛选没有来源记录','','','','']);return}for(const item of p.results){const tr=document.createElement('tr');cell(tr,item.source_symbol);cell(tr,`${item.market} / ${text(item.board)}`);cell(tr,text(item.bar_status));cell(tr,'SOURCE_SYMBOL_ONLY');const td=document.createElement('td');const button=document.createElement('button');button.className='row-select';button.type='button';button.textContent='查看';button.addEventListener('click',()=>{$('symbolInput').value=item.source_symbol;$('stockForm').requestSubmit()});td.append(button);tr.append(td);$('candidateRows').append(tr)}}catch(error){if(requestId!==state.pageRequest)return;$('population').textContent=`候选页读取失败：${error.message}`;$('pageStatus').textContent='分页不可用';$('prevPage').disabled=true;$('nextPage').disabled=true;tableRow($('candidateRows'),['PG分页失败','','','',''])}
+}
 labels['TARGET_SESSION_BAR_MISSING']='目标日来源记录无Bar，不推断停牌或退市';labels['CURRENT_SESSION_UNKNOWN']='目标日状态未知';
 function rawItems(raw){
  const pairs=[
@@ -660,8 +1028,12 @@ function renderFields(parent,fields,select){parent.replaceChildren();for(const n
 const coreNames=['core.ma20','core.ma60','core.atr20','core.ret20','core.pos60'];
 const loadPageOriginal=loadPage;loadPage=async function(){await loadPageOriginal();$('lastPage').disabled=state.total===0||state.offset+state.limit>=state.total};
 $('lastPage').addEventListener('click',()=>{if(state.total){state.offset=Math.floor((state.total-1)/state.limit)*state.limit;loadPage()}});
-async function queryStock(event){event.preventDefault();const v=selectedVersion();if(!v){setMessage('请先从真实PG目录选择目标日期和来源包版本。');return}const symbol=$('symbolInput').value.trim();const count=Number($('windowInput').value);clearResult();$('queryStock').disabled=true;setMessage('正在按显式日期、包SHA和窗口只读读取PG并计算现役Core/Profile…');try{const raw=await api(`/api/preview/raw?${new URLSearchParams({...v,symbol})}`);const result=await api('/api/preview/stock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,target_session:v.target_session,package_sha256:v.package_sha256,session_count:count})});const a=raw.snapshot_identity,b=result.snapshot_identity;if(a.namespace_id!==b.namespace_id||a.target_session!==b.target_session||a.package_sha256!==b.package_sha256)throw new Error('RAW与Core/Profile预览身份不一致，已拒绝合并展示。');$('stockResult').hidden=false;setMessage('研究预览已返回；数值为RAW_UNADJUSTED / NON_PIT。',true);$('resultTitle').textContent=`${symbol} · ${v.target_session}`;$('resultMode').textContent=`${result.status} · ${result.price_coordinate} · ${result.identity_status} · 正式准入 ${result.formal_foundation_status}`;$('snapshotId').textContent=`预览身份SHA256：${result.snapshot_identity.identity_sha256}（非正式context token） · 来源包SHA：${v.package_sha256}`;$('windowText').textContent=`窗口 ${result.window.start_session} 至 ${result.window.end_session}：实际Bar ${result.window.real_bar_count}/${result.window.requested_sessions}，未知会话 ${result.window.gap_count}；未使用未来会话。`;$('resultMode').dataset.namespace=result.snapshot_identity.namespace_id;rawItems(raw.raw);renderFields($('coreRows'),result.core.fields,coreNames);renderFields($('allCoreRows'),result.core.fields,Object.keys(result.core.fields).sort());$('profileRows').replaceChildren();for(const component of result.profile_preview.components){const key=component.field_id||'';tableRow($('profileRows'),[`${profileLabels[key]||key} · ${key}`,component.status==='EVALUATED'?component.quality:component.status,component.value,component.reason])}}catch(error){$('stockResult').hidden=true;setMessage(error.message)}finally{$('queryStock').disabled=false}}
-$('reloadCatalog').addEventListener('click',loadCatalog);$('versionSelect').addEventListener('change',()=>{state.offset=0;loadPage()});$('marketSelect').addEventListener('change',()=>{state.offset=0;loadPage()});$('boardSelect').addEventListener('change',()=>{state.offset=0;loadPage()});$('prevPage').addEventListener('click',()=>{state.offset=Math.max(0,state.offset-state.limit);loadPage()});$('nextPage').addEventListener('click',()=>{if(state.offset+state.limit<state.total){state.offset+=state.limit;loadPage()}});$('stockForm').addEventListener('submit',queryStock);loadCatalog();"""
+async function queryStock(event){
+ event.preventDefault();const v=selectedVersion();if(!v){setMessage('请先从真实PG目录选择目标日期和来源包版本。');return}const requestId=++state.stockRequest,key=`${v.target_session}|${v.package_sha256}`,symbol=$('symbolInput').value.trim(),count=Number($('windowInput').value);clearResult();$('queryStock').disabled=true;setMessage('正在按显式日期、包SHA和窗口只读读取PG并计算现役Core/Profile…');
+ try{const raw=await api(`/api/preview/raw?${new URLSearchParams({...v,symbol})}`);if(requestId!==state.stockRequest||key!==`${selectedVersion()?.target_session}|${selectedVersion()?.package_sha256}`)return;const result=await api('/api/preview/stock',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({symbol,target_session:v.target_session,package_sha256:v.package_sha256,session_count:count})});if(requestId!==state.stockRequest||key!==`${selectedVersion()?.target_session}|${selectedVersion()?.package_sha256}`)return;const a=raw.snapshot_identity,b=result.snapshot_identity;if(a.namespace_id!==b.namespace_id||a.target_session!==b.target_session||a.package_sha256!==b.package_sha256)throw new Error('RAW与Core/Profile预览身份不一致，已拒绝合并展示。');$('stockResult').hidden=false;setMessage('研究预览已返回；数值为RAW_UNADJUSTED / NON_PIT。',true);$('resultTitle').textContent=`${symbol} · ${v.target_session}`;$('resultMode').textContent=`${result.status} · ${result.price_coordinate} · ${result.identity_status} · 正式准入 ${result.formal_foundation_status}`;$('snapshotId').textContent=`预览身份SHA256：${result.snapshot_identity.identity_sha256}（非正式context token） · 来源包SHA：${v.package_sha256}`;$('windowText').textContent=`窗口 ${result.window.start_session} 至 ${result.window.end_session}：实际Bar ${result.window.real_bar_count}/${result.window.requested_sessions}，未知会话 ${result.window.gap_count}；未使用未来会话。`;$('resultMode').dataset.namespace=result.snapshot_identity.namespace_id;rawItems(raw.raw);renderFields($('coreRows'),result.core.fields,coreNames);renderFields($('allCoreRows'),result.core.fields,Object.keys(result.core.fields).sort());$('profileRows').replaceChildren();for(const component of result.profile_preview.components){const componentKey=component.field_id||'';tableRow($('profileRows'),[`${profileLabels[componentKey]||componentKey} · ${componentKey}`,component.status==='EVALUATED'?component.quality:component.status,component.value,component.reason])}
+ }catch(error){if(requestId!==state.stockRequest)return;$('stockResult').hidden=true;setMessage(error.message)}finally{if(requestId===state.stockRequest)$('queryStock').disabled=false}
+}
+$('reloadCatalog').addEventListener('click',loadCatalog);$('versionSelect').addEventListener('change',()=>{state.offset=0;state.stockRequest++;$('queryStock').disabled=false;clearResult();loadPage();loadReadiness()});$('marketSelect').addEventListener('change',()=>{state.offset=0;loadPage()});$('boardSelect').addEventListener('change',()=>{state.offset=0;loadPage()});$('prevPage').addEventListener('click',()=>{state.offset=Math.max(0,state.offset-state.limit);loadPage()});$('nextPage').addEventListener('click',()=>{if(state.offset+state.limit<state.total){state.offset+=state.limit;loadPage()}});$('stockForm').addEventListener('submit',queryStock);loadCatalog();"""
 
 
 def run_preview_server(*, host: str = _HOST, port: int = _PORT) -> int:
