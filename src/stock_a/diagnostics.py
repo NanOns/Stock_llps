@@ -53,8 +53,8 @@ from stock_a.postgres_binding import (
     registered_migration_ids, registered_task_scopes,
 )
 from stock_a.postgres_source_raw import (
-    RawSourcePgError, import_verified_vipdata_target,
-    read_raw_daily_page, read_raw_daily_stock,
+    RAW_DAILY_APPEND_TASK_SCOPES, RawSourcePgError, import_verified_vipdata_target,
+    read_raw_daily_catalog, read_raw_daily_page, read_raw_daily_stock,
 )
 from stock_a.research.entry import (
     CompareBudget,
@@ -544,12 +544,12 @@ def _parser() -> argparse.ArgumentParser:
     vipdata.add_argument("--max-symbol-seconds", default="30", help="Core消费者单个日线文件最大扫描秒数，默认30")
     raw_import = commands.add_parser(
         "source-vipdata-persist",
-        help="在本批明示范围内将已验证VIPDATA单日来源Raw观察写入固定PG typed表",
-        description="只接受显式G盘ZIP、目标交易会话和R01/R02本批范围；最多5000候选，分块写stock_a.stock.source_raw_daily。",
+        help="按稳定Raw每日APPEND操作将已验证VIPDATA单日观察写入固定PG typed表",
+        description="只接受已登记的稳定Raw每日APPEND操作标识、显式G盘ZIP和目标交易会话；最多5000候选，分块写stock_a.stock.source_raw_daily。",
     )
     raw_import.add_argument("--task-scope", required=True,
-                            choices=("R01_R02_SOURCE_RAW_PG_DAILY_READ_R1",),
-                            help="必填：本批精确授权范围")
+                            choices=RAW_DAILY_APPEND_TASK_SCOPES,
+                            help="仅登记Raw每日APPEND操作及过渡兼容标识")
     raw_import.add_argument("--vipdata-package", required=True, help="G:/codex_tmp内已存在且只读的VIPDATA ZIP绝对路径")
     raw_import.add_argument("--vipdata-package-sha256", required=True, help="完整ZIP的64位小写SHA-256")
     raw_import.add_argument("--max-vipdata-validation-seconds", type=float, default=300.0,
@@ -563,6 +563,13 @@ def _parser() -> argparse.ArgumentParser:
                             help="单遍全来源目标日扫描秒数上限，默认1800")
     raw_import.add_argument("--chunk-size", type=int, default=100,
                             help="每个可恢复PG事务最多写入行数，固定上限100")
+    raw_catalog = commands.add_parser(
+        "source-raw-catalog",
+        help="只读查询PG中Stock A Raw来源日期版本目录",
+    )
+    raw_catalog.add_argument("--year", type=int, help="可选年份筛选Raw目录")
+    raw_catalog.add_argument("--offset", type=int, default=0, help="版本页偏移，默认0")
+    raw_catalog.add_argument("--limit", type=int, default=100, help="每页版本数，默认100，最多200")
     return parser
 
 
@@ -1095,6 +1102,7 @@ def _run_pg_raw_stock(args: argparse.Namespace) -> int:
         "fallback_attempted": False,
         "database_io_attempted": True,
         "database_write_attempted": False,
+        "dml_executed": False,
         "ddl_executed": False,
         "source_zip_opened": False,
         "source_recalculated": False,
@@ -1129,8 +1137,33 @@ def _run_pg_raw_universe(args: argparse.Namespace) -> int:
         "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_DAILY_FROM_POSTGRESQL",
         "database_io_attempted": True,
         "database_write_attempted": False,
+        "dml_executed": False,
         "configuration_path": str(config_path),
         "canonical_or_foundation_status": "NOT_WRITTEN_OR_ACCEPTED",
+    })
+    _emit(result)
+    return _EXIT_OK
+
+
+def _run_source_raw_catalog(args: argparse.Namespace) -> int:
+    config, config_path = _load_runtime_config()
+    try:
+        result = read_raw_daily_catalog(
+            config, year=args.year, offset=args.offset, limit=args.limit,
+        )
+    except RawSourcePgError as error:
+        _emit({
+            "ok": False, "status": "REJECTED", "code": error.code,
+            "message": str(error), "database_write_attempted": False,
+            "dml_executed": False, "ddl_executed": False,
+            "source_zip_opened": False,
+        }, error=True)
+        return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    result.update({
+        "ok": True,
+        "analysis_scope": "PERSISTED_TDX_SOURCE_RAW_VERSION_CATALOG",
+        "database_io_attempted": True,
+        "configuration_path": str(config_path),
     })
     _emit(result)
     return _EXIT_OK
@@ -1139,8 +1172,8 @@ def _run_pg_raw_universe(args: argparse.Namespace) -> int:
 def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
     command_started = time.monotonic()
     config, config_path = _load_runtime_config()
-    if args.task_scope != "R01_R02_SOURCE_RAW_PG_DAILY_READ_R1":
-        raise DiagnosticError("TASK_SCOPE_REJECTED", "来源Raw入库只允许本批明示任务范围", _EXIT_PERMISSION)
+    if args.task_scope not in RAW_DAILY_APPEND_TASK_SCOPES:
+        raise DiagnosticError("TASK_SCOPE_REJECTED", "Raw APPEND只接受已登记的日更业务范围", _EXIT_PERMISSION)
     if (not math.isfinite(args.max_vipdata_validation_seconds)
             or not 0 < args.max_vipdata_validation_seconds <= 600):
         raise DiagnosticError("VIPDATA_BUDGET_INVALID", "ZIP SHA/CRC验证预算须大于0且不超过600秒", _EXIT_ARGUMENT)
@@ -2972,6 +3005,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_vipdata(args)
         if args.command == "source-vipdata-persist":
             return _run_source_vipdata_persist(args)
+        if args.command == "source-raw-catalog":
+            return _run_source_raw_catalog(args)
     except DiagnosticError as error:
         _emit({"ok": False, "code": error.code, "cause_type": type(error.__cause__).__name__ if error.__cause__ is not None else None, "message": str(error)}, error=True)
         return error.exit_code

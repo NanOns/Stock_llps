@@ -28,7 +28,13 @@ from .postgres_typed import (
 )
 
 
-_TASK_SCOPE = "R01_R02_SOURCE_RAW_PG_DAILY_READ_R1"
+RAW_DAILY_APPEND_SCOPE = "STOCK_A_SOURCE_RAW_DAILY_APPEND_R1"
+LEGACY_RAW_DAILY_APPEND_SCOPE = "R01_R02_SOURCE_RAW_PG_DAILY_READ_R1"
+RAW_DAILY_APPEND_TASK_SCOPES = (
+    RAW_DAILY_APPEND_SCOPE,
+    LEGACY_RAW_DAILY_APPEND_SCOPE,
+)
+_RAW_DAILY_APPEND_TASK_SCOPES = frozenset(RAW_DAILY_APPEND_TASK_SCOPES)
 _DATASET_ID = "TDX_VIPDATA_PACKAGE"
 _PARSER_CONTRACT = "stock_a.sources.tdx.vipdata.scan_vipdata_target_quality|TDX_HSJDAY_ZIP_ENTRY_32_BYTE_LAYOUT_R1|SOURCE_RAW_DAILY_R1"
 _CLOCK_ROLE = "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT"
@@ -153,10 +159,7 @@ def _validate_connection(cursor: Any, connection: Any, config: Mapping[str, Any]
     ids = business.get("migration_digest")
     if not isinstance(ids, str) or ids != expected.get("migration_digest"):
         raise RawSourcePgError("MIGRATION_IDENTITY_REJECTED", "PG迁移ledger摘要与唯一运行配置不一致")
-    cursor.execute("SELECT migration_id FROM stock.migration_ledger ORDER BY migration_id")
-    migration_ids = [row[0] for row in cursor.fetchall()]
-    if migration_ids != [1, 2, 3, 4]:
-        raise RawSourcePgError("MIGRATION_NOT_READY", "来源Raw操作要求连续且完整应用迁移0001–0004")
+    _validate_raw_migration_prefix(cursor, config, business.get("migration_digest"))
     cursor.execute(
         "SELECT namespace_id::text FROM stock.namespaces WHERE environment='DEV' AND instance_uuid=%s::uuid ORDER BY namespace_id",
         (expected.get("deployment_instance_uuid"),),
@@ -167,9 +170,41 @@ def _validate_connection(cursor: Any, connection: Any, config: Mapping[str, Any]
     return namespaces[0]
 
 
+def _validate_raw_migration_prefix(
+    cursor: Any, config: Mapping[str, Any], business_digest: Any,
+) -> int:
+    """验证集中登记的不可变迁移前缀，并拒绝未应用所需迁移的连接。"""
+    try:
+        sources = postgres_binding._migration_sources()
+        registered_ids = [migration_id for migration_id, _lineage, _raw, _sha in sources]
+        if registered_ids != list(range(1, len(registered_ids) + 1)):
+            raise postgres_binding.BindingRefused("迁移登记ID不是连续前缀")
+        expected_rows = [(migration_id, sha, lineage)
+                         for migration_id, lineage, _raw, sha in sources]
+        cursor.execute(
+            "SELECT migration_id, source_sha, lineage FROM stock.migration_ledger ORDER BY migration_id"
+        )
+        existing = cursor.fetchall()
+        applied_count = postgres_binding._validate_migration_history(existing, expected_rows)
+        if applied_count < 4:
+            raise postgres_binding.BindingRefused("Raw Daily 需要0001-0004全部迁移")
+        expected_digest = postgres_binding._ledger_digest(expected_rows[:applied_count])
+        identity = config.get("application_identity")
+        configured_digest = identity.get("migration_digest") if isinstance(identity, Mapping) else None
+        if (not isinstance(business_digest, str) or business_digest != expected_digest
+                or configured_digest != expected_digest):
+            raise postgres_binding.BindingRefused("数据库、配置和迁移前缀摘要不一致")
+        return applied_count
+    except (postgres_binding.BindingRefused, OSError, ValueError) as error:
+        raise RawSourcePgError(
+            "MIGRATION_HISTORY_REJECTED",
+            "PG Raw 需要完整登记迁移源 SHA 对应的不可变前缀，0004 不可修改或缺失",
+        ) from error
+
+
 def _validate_source_input(package: Any, target_session: date, *, task_scope: str) -> None:
-    if task_scope != _TASK_SCOPE:
-        raise RawSourcePgError("TASK_SCOPE_REJECTED", "Raw来源入库仅接受本批明示任务范围")
+    if task_scope not in _RAW_DAILY_APPEND_TASK_SCOPES:
+        raise RawSourcePgError("TASK_SCOPE_REJECTED", "Raw APPEND只接受已登记的每日业务操作标识")
     if type(target_session) is not date:
         raise RawSourcePgError("TARGET_SESSION_INVALID", "必须显式提供date类型目标交易会话")
     if (not isinstance(getattr(package, "sha256", None), str)
@@ -632,10 +667,7 @@ def import_verified_vipdata_target(
         normalized_count=total,
     )
     # 既有不完整批次按首次capture时钟重建目标行摘要，禁止倒签或静默改版。
-    if prior_capture is not None and (
-        capture.read_started_at != prior_capture.read_started_at
-        or capture.validated_at != prior_capture.validated_at
-    ):
+    if prior_capture is not None:
         for row in staged:
             row["observed_started_at"] = prior_capture.read_started_at
             row["observed_completed_at"] = prior_capture.validated_at
@@ -790,6 +822,133 @@ ORDER BY source_symbol LIMIT %s OFFSET %s""",
         "rows": page_rows, "pit_status": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY", "source_zip_opened": False,
         "ddl_executed": False, "source_recalculated": False,
+    }
+
+
+def read_raw_daily_catalog(
+    config: Mapping[str, Any], *, year: int | None = None, offset: int = 0, limit: int = 100,
+) -> dict[str, Any]:
+    """只读取PG已保存的Raw日期版本目录，不打开来源ZIP或执行写入。"""
+    if year is not None and (type(year) is not int or not 1900 <= year <= 9998):
+        raise RawSourcePgError("PG_CATALOG_YEAR_INVALID", "Raw目录年份无效")
+    if (type(offset) is not int or not 0 <= offset <= 2**31 - 1
+            or type(limit) is not int or not 1 <= limit <= 200):
+        raise RawSourcePgError("PG_CATALOG_PAGE_INVALID", "Raw目录offset须为非负整数，limit须在1到200")
+
+    def _where(namespace_id: str) -> tuple[str, tuple[Any, ...]]:
+        clauses = ["r.namespace_id=%s::uuid"]
+        params: list[Any] = [namespace_id]
+        if year is not None:
+            clauses.extend(("r.session_date >= %s", "r.session_date < %s"))
+            params.extend((date(year, 1, 1), date(year + 1, 1, 1)))
+        return " AND ".join(clauses), tuple(params)
+
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        where_sql, params = _where(namespace_id)
+        cursor.execute(
+            f"""SELECT count(*) FROM (
+    SELECT r.session_date, r.package_sha256
+    FROM stock.source_raw_daily r
+    WHERE {where_sql}
+    GROUP BY r.session_date, r.package_sha256
+) AS versions""",
+            params,
+        )
+        total_versions = int(cursor.fetchone()[0])
+        cursor.execute(
+            f"""SELECT r.session_date, r.package_sha256, count(*)::bigint AS row_count,
+       count(*) FILTER (WHERE r.bar_status='TARGET_PRESENT')::bigint AS target_present,
+       count(*) FILTER (WHERE r.bar_status='TARGET_MISSING')::bigint AS target_missing,
+       count(*) FILTER (WHERE r.bar_status='READ_FAILED')::bigint AS read_failed,
+       count(*) FILTER (WHERE r.bar_status NOT IN ('TARGET_PRESENT','TARGET_MISSING','READ_FAILED'))::bigint AS unknown_bar_status,
+       count(DISTINCT r.source_capture_id)::bigint AS capture_count,
+       min(c.read_started_at) AS capture_read_started_at,
+       max(c.read_started_at) AS capture_read_started_at_max,
+       min(c.validated_at) AS capture_validated_at,
+       max(c.validated_at) AS capture_validated_at_max,
+       array_agg(DISTINCT c.source_time_quality ORDER BY c.source_time_quality) AS source_time_qualities,
+       array_agg(DISTINCT c.source_clock_role ORDER BY c.source_clock_role) AS source_clock_roles,
+       count(*) FILTER (WHERE c.source_available_at IS NOT NULL)::bigint AS source_available_at_count,
+       count(*) FILTER (WHERE c.capture_id IS NULL OR s.content_id IS NULL)::bigint AS broken_reference_count,
+       array_agg(DISTINCT s.dataset_id ORDER BY s.dataset_id) AS dataset_ids,
+       array_agg(DISTINCT s.byte_sha ORDER BY s.byte_sha) AS content_shas,
+       array_agg(DISTINCT r.price_quality ORDER BY r.price_quality) AS price_qualities,
+       array_agg(DISTINCT r.amount_quality ORDER BY r.amount_quality) AS amount_qualities,
+       array_agg(DISTINCT r.amount_unit_status ORDER BY r.amount_unit_status) AS amount_unit_statuses,
+       array_agg(DISTINCT r.volume_quality ORDER BY r.volume_quality) AS volume_qualities,
+       array_agg(DISTINCT r.volume_unit_status ORDER BY r.volume_unit_status) AS volume_unit_statuses
+FROM stock.source_raw_daily r
+LEFT JOIN stock.source_captures c
+  ON c.namespace_id=r.namespace_id AND c.capture_id=r.source_capture_id
+LEFT JOIN stock.source_contents s
+  ON s.namespace_id=r.namespace_id AND s.content_id=r.source_content_id
+WHERE {where_sql}
+GROUP BY r.session_date, r.package_sha256
+ORDER BY r.session_date DESC, r.package_sha256
+LIMIT %s OFFSET %s""",
+            (*params, limit, offset),
+        )
+        names = [item.name for item in cursor.description]
+        grouped = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+
+    versions: list[dict[str, Any]] = []
+    for item in grouped:
+        row_count = int(item["row_count"])
+        status_counts = {
+            "TARGET_PRESENT": int(item["target_present"]),
+            "TARGET_MISSING": int(item["target_missing"]),
+            "READ_FAILED": int(item["read_failed"]),
+        }
+        content_shas = item["content_shas"] or []
+        dataset_ids = item["dataset_ids"] or []
+        clock_roles = item["source_clock_roles"] or []
+        time_qualities = item["source_time_qualities"] or []
+        if (sum(status_counts.values()) != row_count or item["unknown_bar_status"] != 0
+                or item["capture_count"] != 1 or item["broken_reference_count"] != 0
+                or content_shas != [item["package_sha256"]] or dataset_ids != [_DATASET_ID]
+                or len(clock_roles) != 1 or len(time_qualities) != 1
+                or item["capture_read_started_at"] != item["capture_read_started_at_max"]
+                or item["capture_validated_at"] != item["capture_validated_at_max"]):
+            raise RawSourcePgError("SOURCE_REFERENCE_MISMATCH", "Raw目录行、来源引用、时钟或状态分区未闭合")
+        versions.append({
+            "session_date": item["session_date"].isoformat(),
+            "package_sha256": item["package_sha256"],
+            "row_count": row_count,
+            "bar_status_counts": status_counts,
+            "source_capture_count": item["capture_count"],
+            "capture_read_started_at": _db_scalar(item["capture_read_started_at"]),
+            "capture_validated_at": _db_scalar(item["capture_validated_at"]),
+            "source_time_quality": time_qualities[0],
+            "source_clock_role": clock_roles[0],
+            "source_available_at_count": int(item["source_available_at_count"]),
+            "dataset_id": dataset_ids[0],
+            "price_qualities": item["price_qualities"] or [],
+            "amount_qualities": item["amount_qualities"] or [],
+            "amount_unit_statuses": item["amount_unit_statuses"] or [],
+            "volume_qualities": item["volume_qualities"] or [],
+            "volume_unit_statuses": item["volume_unit_statuses"] or [],
+            "identity_status": "SOURCE_SYMBOL_ONLY",
+            "pit_status": "NON_PIT_RETROSPECTIVE",
+            "version_status": "CLOSED",
+        })
+    next_offset = offset + len(versions)
+    return {
+        "status": "AVAILABLE" if versions else "EMPTY",
+        "namespace_id": namespace_id,
+        "year_filter": year,
+        "offset": offset,
+        "limit": limit,
+        "page_count": len(versions),
+        "total_version_count": total_versions,
+        "next_offset": next_offset if next_offset < total_versions else None,
+        "versions": versions,
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "database_write_attempted": False,
+        "dml_executed": False,
+        "ddl_executed": False,
+        "source_zip_opened": False,
+        "source_recalculated": False,
     }
 
 
