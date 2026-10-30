@@ -48,7 +48,14 @@ from stock_a.sources.tdx.vipdata import (
     vipdata_research_candidate_pool,
 )
 from stock_a.postgres_identity import inspect_postgres
-from stock_a.postgres_binding import BindingCommittedConfigError, BindingRefused, bind_stock_namespace
+from stock_a.postgres_binding import (
+    BindingCommittedConfigError, BindingRefused, bind_stock_namespace,
+    registered_migration_ids, registered_task_scopes,
+)
+from stock_a.postgres_source_raw import (
+    RawSourcePgError, import_verified_vipdata_target,
+    read_raw_daily_page, read_raw_daily_stock,
+)
 from stock_a.research.entry import (
     CompareBudget,
     ResearchEntryError,
@@ -414,10 +421,10 @@ def _parser() -> argparse.ArgumentParser:
     pg.add_argument("--timeout-seconds", type=float, default=5.0, help="连接与每条查询的秒数上限，默认5秒，最大30秒")
     bind = commands.add_parser("pg-bind", help="在明确任务范围内以stock_a账号应用指定集中迁移")
     bind.add_argument("--task-scope", required=True,
-                      choices=("R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1",),
+                      choices=registered_task_scopes(),
                       help="必填：已批准且受限的PG任务范围")
-    bind.add_argument("--migration-id", required=True, type=int, choices=(3,),
-                      help="必填：本任务唯一允许的迁移ID 3")
+    bind.add_argument("--migration-id", required=True, type=int, choices=registered_migration_ids(),
+                      help="必填：任务范围对应的已登记迁移ID；范围与ID配对由数据库绑定层再次核验")
     bind.add_argument("--timeout-seconds", type=float, default=20.0, help="身份绑定总耗时上限，默认20秒，最大30秒")
     phase0 = commands.add_parser(
         "source-phase0",
@@ -441,6 +448,8 @@ def _parser() -> argparse.ArgumentParser:
     stock = commands.add_parser("research-stock", help="只读查看单只股票的原始行情、Core字段和基础观察")
     stock.add_argument("symbol", help="来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(stock, include_vipdata=True)
+    stock.add_argument("--pg-source-raw", action="store_true", help="按显式目标日和来源SHA从stock_a.stock查询Raw事实；不打开ZIP、不重算、不执行DDL")
+    stock.add_argument("--pg-source-sha256", help="PG Raw查询必填：64位小写VIPDATA包SHA-256，不回退latest或跨日")
     stock.add_argument("--format", dest="output_format", choices=("summary", "json"), default="json", help="输出可读事实摘要或完整JSON，默认json")
     stock.add_argument("--include-profile-preview", action="store_true", help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
     stock.add_argument("--include-baostock-evidence", action="store_true", help="显式查询目标日单条BaoStock只读补充字段；可能联网，单位与身份仍需独立核验")
@@ -458,6 +467,8 @@ def _parser() -> argparse.ArgumentParser:
         help="发现沪深主板/创业板TDX来源候选并分页查看盘后基础观察",
     )
     _add_research_arguments(universe, include_vipdata=True)
+    universe.add_argument("--pg-source-raw", action="store_true", help="从stock_a.stock按显式目标日和来源SHA真实SQL分页读取Raw候选")
+    universe.add_argument("--pg-source-sha256", help="PG Raw分页查询必填：64位小写VIPDATA包SHA-256")
     universe.add_argument("--offset", type=int, default=0, help="来源候选分页起点，默认0")
     universe.add_argument("--limit", type=int, default=20, help="本页证券数，默认20，最多100")
     universe.add_argument("--market", choices=("ALL", "SH", "SZ"), default="ALL", help="市场过滤，默认ALL")
@@ -531,6 +542,27 @@ def _parser() -> argparse.ArgumentParser:
     vipdata.add_argument("--max-symbol-bytes", type=int, default=16777216, help="Core消费者单个日线文件最大读取字节数，默认16777216")
     vipdata.add_argument("--max-symbol-records", type=int, default=200000, help="Core消费者单个日线文件最大记录数，默认200000")
     vipdata.add_argument("--max-symbol-seconds", default="30", help="Core消费者单个日线文件最大扫描秒数，默认30")
+    raw_import = commands.add_parser(
+        "source-vipdata-persist",
+        help="在本批明示范围内将已验证VIPDATA单日来源Raw观察写入固定PG typed表",
+        description="只接受显式G盘ZIP、目标交易会话和R01/R02本批范围；最多5000候选，分块写stock_a.stock.source_raw_daily。",
+    )
+    raw_import.add_argument("--task-scope", required=True,
+                            choices=("R01_R02_SOURCE_RAW_PG_DAILY_READ_R1",),
+                            help="必填：本批精确授权范围")
+    raw_import.add_argument("--vipdata-package", required=True, help="G:/codex_tmp内已存在且只读的VIPDATA ZIP绝对路径")
+    raw_import.add_argument("--vipdata-package-sha256", required=True, help="完整ZIP的64位小写SHA-256")
+    raw_import.add_argument("--max-vipdata-validation-seconds", type=float, default=300.0,
+                            help="本地ZIP SHA与CRC完整复验秒数上限，默认300")
+    raw_import.add_argument("--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD")
+    raw_import.add_argument("--max-source-quality-bytes", type=int, default=4294967296,
+                            help="全来源候选条目解压字节上限，默认4GiB")
+    raw_import.add_argument("--max-source-quality-records", type=int, default=125000000,
+                            help="全来源候选记录上限，默认125000000")
+    raw_import.add_argument("--max-source-quality-seconds", type=float, default=1800.0,
+                            help="单遍全来源目标日扫描秒数上限，默认1800")
+    raw_import.add_argument("--chunk-size", type=int, default=100,
+                            help="每个可恢复PG事务最多写入行数，固定上限100")
     return parser
 
 
@@ -1016,6 +1048,159 @@ def _run_pg_bind(args: argparse.Namespace) -> int:
     return _EXIT_OK
 
 
+def _validate_pg_raw_query_args(args: argparse.Namespace, *, universe: bool) -> tuple[dict[str, Any], Path, date, str]:
+    if not getattr(args, "pg_source_raw", False):
+        if getattr(args, "pg_source_sha256", None) is not None:
+            raise DiagnosticError("PG_SOURCE_FLAG_REQUIRED", "提供来源SHA时必须同时显式启用--pg-source-raw", _EXIT_ARGUMENT)
+        raise DiagnosticError("PG_SOURCE_FLAG_REQUIRED", "缺少显式PG Raw查询选项", _EXIT_ARGUMENT)
+    source_sha = getattr(args, "pg_source_sha256", None)
+    if not isinstance(source_sha, str) or re.fullmatch(r"[0-9a-f]{64}", source_sha) is None:
+        raise DiagnosticError("PG_SOURCE_REVISION_REQUIRED", "PG Raw读取必须提供64位小写来源包SHA-256", _EXIT_ARGUMENT)
+    if getattr(args, "vipdata_package", None) is not None:
+        raise DiagnosticError("PG_SOURCE_ZIP_CONFLICT", "PG Raw读取与重新打开VIPDATA ZIP不能在同一命令混用", _EXIT_ARGUMENT)
+    if getattr(args, "amount_to_cny", None) is not None or getattr(args, "volume_to_shares", None) is not None:
+        raise DiagnosticError("PG_SOURCE_UNIT_CONFLICT", "PG Raw读取保留TDX源单位，不接受金额或数量换算倍率", _EXIT_ARGUMENT)
+    for option in ("include_profile_preview", "include_baostock_evidence", "include_baostock_identity"):
+        if getattr(args, option, False):
+            raise DiagnosticError("PG_SOURCE_RECALCULATION_CONFLICT", "PG Raw读取不能同时请求Core/Profile重算或外部来源", _EXIT_ARGUMENT)
+    if universe and any(getattr(args, name, False) for name in ("full_target_quality", "full_source_core_profile")):
+        raise DiagnosticError("PG_SOURCE_SCAN_CONFLICT", "PG Raw分页不能同时请求ZIP扫描或Core/Profile全范围计算", _EXIT_ARGUMENT)
+    config, config_path = _load_runtime_config()
+    try:
+        target = _parse_target(args.target_session)
+    except ResearchEntryError as error:
+        raise DiagnosticError(error.code, str(error), _EXIT_ARGUMENT) from error
+    return config, config_path, target, source_sha
+
+
+def _run_pg_raw_stock(args: argparse.Namespace) -> int:
+    config, config_path, target, source_sha = _validate_pg_raw_query_args(args, universe=False)
+    try:
+        row = read_raw_daily_stock(
+            config, source_symbol=args.symbol, target_session=target, package_sha256=source_sha,
+        )
+    except RawSourcePgError as error:
+        _emit({"ok": False, "status": "REJECTED", "code": error.code,
+               "message": str(error), "database_write_attempted": False,
+               "ddl_executed": False, "source_zip_opened": False}, error=True)
+        return _EXIT_PERMISSION if "REJECTED" in error.code or error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    result = {
+        "ok": True,
+        "status": "AVAILABLE" if row is not None else "NO_MATCH",
+        "requested_symbol": args.symbol,
+        "target_session": target.isoformat(),
+        "package_sha256": source_sha,
+        "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_DAILY_FROM_POSTGRESQL",
+        "row": row,
+        "fallback_attempted": False,
+        "database_io_attempted": True,
+        "database_write_attempted": False,
+        "ddl_executed": False,
+        "source_zip_opened": False,
+        "source_recalculated": False,
+        "configuration_path": str(config_path),
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "amount_unit_status": "UNIT_UNVERIFIED",
+        "volume_unit_status": "UNIT_UNVERIFIED",
+        "canonical_or_foundation_status": "NOT_WRITTEN_OR_ACCEPTED",
+    }
+    _emit(result)
+    return _EXIT_OK
+
+
+def _run_pg_raw_universe(args: argparse.Namespace) -> int:
+    config, config_path, target, source_sha = _validate_pg_raw_query_args(args, universe=True)
+    if (type(args.offset) is not int or type(args.limit) is not int
+            or not 1 <= args.limit <= 100):
+        raise DiagnosticError("PG_PAGE_INVALID", "PG分页limit必须在1至100内，offset必须是非负整数", _EXIT_ARGUMENT)
+    try:
+        result = read_raw_daily_page(
+            config, target_session=target, package_sha256=source_sha,
+            offset=args.offset, limit=args.limit, market=args.market, board=args.board,
+        )
+    except RawSourcePgError as error:
+        _emit({"ok": False, "status": "REJECTED", "code": error.code,
+               "message": str(error), "database_write_attempted": False,
+               "ddl_executed": False, "source_zip_opened": False}, error=True)
+        return _EXIT_PERMISSION if "REJECTED" in error.code or error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    result.update({
+        "ok": True,
+        "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_DAILY_FROM_POSTGRESQL",
+        "database_io_attempted": True,
+        "database_write_attempted": False,
+        "configuration_path": str(config_path),
+        "canonical_or_foundation_status": "NOT_WRITTEN_OR_ACCEPTED",
+    })
+    _emit(result)
+    return _EXIT_OK
+
+
+def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
+    command_started = time.monotonic()
+    config, config_path = _load_runtime_config()
+    if args.task_scope != "R01_R02_SOURCE_RAW_PG_DAILY_READ_R1":
+        raise DiagnosticError("TASK_SCOPE_REJECTED", "来源Raw入库只允许本批明示任务范围", _EXIT_PERMISSION)
+    if (not math.isfinite(args.max_vipdata_validation_seconds)
+            or not 0 < args.max_vipdata_validation_seconds <= 600):
+        raise DiagnosticError("VIPDATA_BUDGET_INVALID", "ZIP SHA/CRC验证预算须大于0且不超过600秒", _EXIT_ARGUMENT)
+    package = _verify_explicit_vipdata_package(args)
+    if package is None:
+        raise DiagnosticError("VIPDATA_PACKAGE_REQUIRED", "Raw来源入库必须显式绑定已验证ZIP", _EXIT_ARGUMENT)
+    try:
+        target = _parse_target(args.target_session)
+    except ResearchEntryError as error:
+        raise DiagnosticError(error.code, str(error), _EXIT_ARGUMENT) from error
+    _calendar_payload, _calendar_metadata, _calendar_revision, sessions = _load_calendar(target)
+    if target not in sessions:
+        raise DiagnosticError("TARGET_DATE_INVALID", "目标日期不在现行已核交易日历内", _EXIT_ARGUMENT)
+    try:
+        budget = VipdataTargetScanBudget(
+            max_total_bytes=args.max_source_quality_bytes,
+            max_total_records=args.max_source_quality_records,
+            max_total_seconds=args.max_source_quality_seconds,
+        )
+        result = import_verified_vipdata_target(
+            config, package, target, task_scope=args.task_scope,
+            scan_budget=budget, chunk_size=args.chunk_size,
+        )
+    except (ValueError, ContractError) as error:
+        raise DiagnosticError("SOURCE_RAW_ARGUMENT_INVALID", f"来源Raw扫描参数无效：{error}", _EXIT_ARGUMENT) from error
+    except RawSourcePgError as error:
+        payload = {
+            "ok": False, "status": "PARTIAL" if error.committed_rows is not None else "REJECTED",
+            "code": error.code, "message": str(error),
+            "committed_row_count": error.committed_rows,
+            "target_session": target.isoformat(), "package_sha256": package.sha256,
+            "zip_crc": package.zip_crc, "package_file_size": package.file_size,
+            "task_scope": args.task_scope,
+            "storage_location_status": "USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED",
+            "database_write_attempted": error.metadata_committed or error.committed_rows not in (None, 0),
+            "source_fallback_attempted": False, "production_switched": False,
+        }
+        _emit(payload, error=True)
+        return _EXIT_UNAVAILABLE
+    result.update({
+        "ok": result.get("status") in {"COMPLETE", "ALREADY_COMPLETE"},
+        "mode": "verified_local_source_raw_ingest",
+        "package_file_name": package.file_name,
+        "package_file_size": package.file_size,
+        "zip_crc": package.zip_crc,
+        "zip_entry_count": package.zip_entry_count,
+        "entry_count_by_market": dict(package.entry_count_by_market),
+        "official_package_url": "https://data.tdx.com.cn/vipdoc/hsjday.zip",
+        "package_verified_at": package.verified_at.isoformat(),
+        "task_scope": args.task_scope,
+        "configuration_path": str(config_path),
+        "database_io_attempted": True,
+        "database_write_attempted": result.get("new_rows_committed", 0) > 0,
+        "production_switched": False,
+        "command_elapsed_seconds": round(time.monotonic() - command_started, 6),
+    })
+    _emit(result, error=not result["ok"])
+    return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
+
+
 def _run_source_inspect(args: argparse.Namespace) -> int:
     if not Path(args.path).is_absolute():
         raise DiagnosticError("SOURCE_PATH_INVALID", "来源文件必须使用绝对路径")
@@ -1282,6 +1467,12 @@ def _run_vipdata_revision_compare(args: argparse.Namespace) -> int:
 
 
 def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
+    if getattr(args, "pg_source_raw", False):
+        if compare:
+            raise DiagnosticError("PG_SOURCE_COMMAND_UNSUPPORTED", "research-compare不支持本批PG Raw查询入口", _EXIT_ARGUMENT)
+        return _run_pg_raw_stock(args)
+    if getattr(args, "pg_source_sha256", None) is not None:
+        raise DiagnosticError("PG_SOURCE_FLAG_REQUIRED", "提供来源SHA时必须同时显式启用--pg-source-raw", _EXIT_ARGUMENT)
     cli_started = time.perf_counter()
     stage_timings: dict[str, Any] = {}
     config, config_path = _load_runtime_config()
@@ -2324,6 +2515,10 @@ def _run_full_source_core_profile(
 
 
 def _run_research_universe(args: argparse.Namespace) -> int:
+    if getattr(args, "pg_source_raw", False):
+        return _run_pg_raw_universe(args)
+    if getattr(args, "pg_source_sha256", None) is not None:
+        raise DiagnosticError("PG_SOURCE_FLAG_REQUIRED", "提供来源SHA时必须同时显式启用--pg-source-raw", _EXIT_ARGUMENT)
     command_started = time.monotonic()
     config, config_path = _load_runtime_config()
     package_verification_seconds = 0.0
@@ -2775,6 +2970,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_vipdata_revision_compare(args)
         if args.command == "source-vipdata":
             return _run_source_vipdata(args)
+        if args.command == "source-vipdata-persist":
+            return _run_source_vipdata_persist(args)
     except DiagnosticError as error:
         _emit({"ok": False, "code": error.code, "cause_type": type(error.__cause__).__name__ if error.__cause__ is not None else None, "message": str(error)}, error=True)
         return error.exit_code

@@ -11,15 +11,18 @@ from typing import Any
 from . import postgres_identity as identity
 
 _MIGRATIONS = (
-    (1, "STOCK_A_INITIAL_R1", ("migrations", "0001_stock_identity.sql")),
-    (2, "STOCK_A_INITIAL_R1", ("migrations", "0002_stock_a_business_login.sql")),
-    (3, "STOCK_A_INITIAL_R1", ("migrations", "0003_r01_source_identity_canonical.sql")),
+    (1, "STOCK_A_INITIAL_R1", ("migrations", "0001_stock_identity.sql"),
+     "010b4fcd0497b847c1dc5e1c90725b9c692012cc2d7dbede0ce702c40a1a7428"),
+    (2, "STOCK_A_INITIAL_R1", ("migrations", "0002_stock_a_business_login.sql"),
+     "b991f72174ffed1747b616b4d75264ddafca48776cccab9c251bcc9198da2abb"),
+    (3, "STOCK_A_INITIAL_R1", ("migrations", "0003_r01_source_identity_canonical.sql"),
+     "293c6d24a04b05200cc3f0df6f4b7673626055a15da99a7eeac69f0ffe441d5a"),
+    (4, "STOCK_A_INITIAL_R1", ("migrations", "0004_r01_source_raw_daily.sql"),
+     "6b14004deb034e2441fb0ec2288aa46c980f808dc27d02ce2dcb34fe1ca8eed4"),
 )
 _TASK_SCOPE_MIGRATIONS = {
-    "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": 3,
-}
-_TASK_MIGRATION_SHA256 = {
-    3: "293c6d24a04b05200cc3f0df6f4b7673626055a15da99a7eeac69f0ffe441d5a",
+    "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
+    "R01_R02_SOURCE_RAW_PG_DAILY_READ_R1": frozenset({4}),
 }
 _BASE_TABLES = {
     "installation_identity", "migration_ledger", "namespaces", "role_bindings",
@@ -27,6 +30,11 @@ _BASE_TABLES = {
 _R01_TABLES = _BASE_TABLES | {
     "source_contents", "source_captures", "entities", "identity_observations",
     "calendar_sessions", "canonical_daily",
+}
+_RELATIONS_BY_MIGRATION_COUNT = {
+    2: _BASE_TABLES,
+    3: _R01_TABLES,
+    4: _R01_TABLES | {"source_raw_daily"},
 }
 
 
@@ -39,26 +47,44 @@ class BindingCommittedConfigError(BindingRefused):
 
 
 def _validate_task_scope(task_scope: str | None, migration_id: int) -> None:
-    """只放行当前用户任务明示的迁移，不接受通用的待迁移队列。"""
+    """只放行任务登记表内的范围与迁移配对，不接受通用SQL执行权限。"""
     if (not isinstance(task_scope, str)
-            or _TASK_SCOPE_MIGRATIONS.get(task_scope) != migration_id):
+            or migration_id not in _TASK_SCOPE_MIGRATIONS.get(task_scope, ())):
         raise BindingRefused("PG绑定必须绑定已批准任务范围及其唯一迁移ID")
 
 
 def _validate_migration_source(migration_id: int, source_sha: str) -> None:
-    """固定本批批准的0003字节摘要，避免改名或替换迁移SQL扩大写入。"""
-    if _TASK_MIGRATION_SHA256.get(migration_id) != source_sha:
+    """固定迁移登记表内各SQL字节摘要，避免替换已批准源码扩大写入。"""
+    expected = next((item[3] for item in _MIGRATIONS if item[0] == migration_id), None)
+    if expected != source_sha:
         raise BindingRefused("本批批准的迁移源码SHA不匹配；拒绝执行DDL")
+
+
+def registered_task_scopes() -> tuple[str, ...]:
+    """返回集中迁移CLI允许选择的显式任务范围。"""
+    return tuple(sorted(_TASK_SCOPE_MIGRATIONS))
+
+
+def registered_migration_ids() -> tuple[int, ...]:
+    """返回集中迁移CLI登记的迁移ID；实际配对仍由任务scope再次核验。"""
+    return tuple(sorted({migration_id for values in _TASK_SCOPE_MIGRATIONS.values() for migration_id in values}))
 
 
 def _validate_migration_history(
     existing: list[tuple[Any, Any, Any]],
     expected_rows: list[tuple[int, str, str]],
 ) -> int:
-    """验证不可变迁移前缀，允许0003精确已应用后的幂等读回。"""
-    if len(existing) not in (2, 3) or existing != expected_rows[:len(existing)]:
+    """验证不可变迁移前缀，允许精确已应用迁移的幂等读回。"""
+    if len(existing) < 2 or len(existing) > len(expected_rows) or existing != expected_rows[:len(existing)]:
         raise BindingRefused("现有迁移账本与不可变历史迁移摘要不匹配")
     return len(existing)
+
+
+def _ledger_digest(rows: list[tuple[int, str, str]]) -> str:
+    """按既有稳定语义摘要一个已应用迁移前缀。"""
+    return hashlib.sha256(
+        "\n".join(f"{mid}:{source_sha}:{lineage}" for mid, source_sha, lineage in rows).encode("utf-8")
+    ).hexdigest()
 
 
 def _relation_names(cursor: Any) -> set[str]:
@@ -104,7 +130,7 @@ def _validate_application_identity(actual: dict[str, Any] | None,
 def _migration_sources() -> list[tuple[int, str, bytes, str]]:
     root = Path(__file__).resolve().parents[2]
     result = []
-    for migration_id, lineage, parts in _MIGRATIONS:
+    for migration_id, lineage, parts, expected_sha in _MIGRATIONS:
         path = root.joinpath(*parts)
         if path.is_symlink():
             raise BindingRefused("集中迁移文件不能通过链接替换")
@@ -114,7 +140,10 @@ def _migration_sources() -> list[tuple[int, str, bytes, str]]:
         raw = resolved.read_bytes()
         if not raw or len(raw) > 128 * 1024:
             raise BindingRefused("集中迁移文件为空或超过固定大小预算")
-        result.append((migration_id, lineage, raw, hashlib.sha256(raw).hexdigest()))
+        actual_sha = hashlib.sha256(raw).hexdigest()
+        if actual_sha != expected_sha:
+            raise BindingRefused(f"集中迁移{migration_id:04d}源码SHA与登记摘要不匹配")
+        result.append((migration_id, lineage, raw, actual_sha))
     return result
 
 
@@ -171,10 +200,9 @@ def bind_stock_namespace(config: dict[str, Any], config_path: Path, *, task_scop
     migrations = _migration_sources()
     expected_rows = [(mid, digest, lineage) for mid, lineage, _raw, digest in migrations]
     selected = [item for item in migrations if item[0] == migration_id]
-    if len(selected) != 1 or migration_id != 3:
-        raise BindingRefused("当前任务仅允许执行已登记的0003来源身份迁移")
+    if len(selected) != 1:
+        raise BindingRefused("任务登记的迁移ID未对应唯一集中迁移源码")
     _validate_migration_source(selected[0][0], selected[0][3])
-    new_digest = hashlib.sha256("\n".join(f"{mid}:{sha}:{lineage}" for mid, sha, lineage in expected_rows).encode("utf-8")).hexdigest()
     try:
         parameters = _connection_parameters()
     except ValueError as error:
@@ -207,9 +235,18 @@ def bind_stock_namespace(config: dict[str, Any], config_path: Path, *, task_scop
                 cursor.execute("SELECT migration_id, source_sha, lineage FROM stock.migration_ledger ORDER BY migration_id")
                 existing = cursor.fetchall()
                 applied_count = _validate_migration_history(existing, expected_rows)
+                current_digest = _ledger_digest(expected_rows[:applied_count])
+                target_digest = _ledger_digest(expected_rows[:migration_id])
+                prior_digest = _ledger_digest(expected_rows[:migration_id - 1])
+                if business.get("migration_digest") != current_digest:
+                    raise BindingRefused("数据库业务身份读取到的迁移摘要与精确账本前缀不匹配")
+                if config["application_identity"].get("migration_digest") not in {current_digest, prior_digest, target_digest}:
+                    raise BindingRefused("runtime.defaults迁移摘要不对应本次精确迁移前缀")
                 if not actual_identity.get("migration_lineage") == expected_identity.get("migration_lineage"):
                     raise BindingRefused("安装身份迁移lineage与运行配置不匹配")
-                expected_relations = _BASE_TABLES if applied_count == 2 else _R01_TABLES
+                expected_relations = _RELATIONS_BY_MIGRATION_COUNT.get(applied_count)
+                if expected_relations is None:
+                    raise BindingRefused("迁移账本没有对应的受控对象清单")
                 if _relation_names(cursor) != expected_relations:
                     raise BindingRefused("现有stock关系清单与迁移账本版本不一致；拒绝执行DDL")
                 cursor.execute("LOCK TABLE stock.installation_identity, stock.migration_ledger IN SHARE ROW EXCLUSIVE MODE")
@@ -227,21 +264,25 @@ def bind_stock_namespace(config: dict[str, Any], config_path: Path, *, task_scop
                 if locked_rows != existing:
                     raise BindingRefused("部署核验后迁移账本发生变化；拒绝提交迁移")
                 applied = []
-                if applied_count == 2:
+                if applied_count == migration_id - 1:
                     mid, lineage, raw, digest = selected[0]
                     cursor.execute(raw.decode("utf-8"))
                     cursor.execute("INSERT INTO stock.migration_ledger(migration_id, source_sha, applied_at, lineage) VALUES (%s,%s,clock_timestamp(),%s)", (mid, digest, lineage))
                     applied.append(mid)
+                elif applied_count != migration_id:
+                    raise BindingRefused("只允许逐步应用当前登记的下一条迁移；不自动执行或跳过其它迁移")
                 cursor.execute("SELECT migration_id, source_sha, lineage FROM stock.migration_ledger ORDER BY migration_id")
                 committed_rows = cursor.fetchall()
                 if committed_rows != expected_rows:
                     raise BindingRefused("集中迁移提交前账本精确读回不匹配")
-                if _relation_names(cursor) != _R01_TABLES:
+                final_relations = _RELATIONS_BY_MIGRATION_COUNT.get(migration_id)
+                if final_relations is None or _relation_names(cursor) != final_relations:
                     raise BindingRefused("集中迁移提交前stock关系清单不匹配")
                 cursor.execute("SELECT session_user, current_user, count(*) FROM stock.installation_identity WHERE application_id='STOCK_A'")
                 if cursor.fetchone() != ("stock_a", "stock_a", 1):
                     raise BindingRefused("身份单例或实际业务登录读回不匹配")
         transaction_committed = True
+        new_digest = _ledger_digest(expected_rows[:migration_id])
         if config["application_identity"].get("migration_digest") != new_digest:
             try:
                 _update_runtime_config(config_path, config, new_digest)
@@ -254,7 +295,7 @@ def bind_stock_namespace(config: dict[str, Any], config_path: Path, *, task_scop
                 "migration_count": len(expected_rows), "migration_digest": new_digest,
                 "task_scope": task_scope, "migration_id": migration_id,
                 "storage_location_status": "USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED",
-                "business_write_admission": "REQUIRES_IDENTITY_READBACK"}
+                "business_write_admission": "MIGRATION_SCOPE_ONLY"}
     except BindingRefused:
         raise
     except Exception as error:
