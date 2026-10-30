@@ -83,7 +83,9 @@ from stock_a.storage.postgres.source_set_candidate import SourceSetCandidatePgEr
 from stock_a.application.source_ingress import (
     SourceIngressError,
     build_source_ingress_plan,
+    persist_formal_source_set,
 )
+from stock_a.storage.postgres.source_set_writer import SourceSetWriteError
 from stock_a.research.entry import (
     CompareBudget,
     ResearchEntryError,
@@ -881,6 +883,22 @@ def _parser() -> argparse.ArgumentParser:
     source_ingress.add_argument("--max-total-bytes", type=int, default=33554432)
     source_ingress.add_argument("--max-records", type=int, default=200000)
     source_ingress.add_argument("--max-seconds", default="30")
+    source_p03_write = commands.add_parser(
+        "source-p03-write",
+        help="基于真实Phase0和精确PG候选提交正式P03来源集合",
+        description="仅执行有界候选写入及PENDING、ACK、独立读回和最终封口；不切换Head。",
+    )
+    source_p03_write.add_argument(
+        "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
+    )
+    source_p03_write.add_argument(
+        "--package-sha256", required=True, help="完整TDX来源包SHA-256"
+    )
+    source_p03_write.add_argument("--max-entries", type=int, default=50000)
+    source_p03_write.add_argument("--max-file-bytes", type=int, default=16777216)
+    source_p03_write.add_argument("--max-total-bytes", type=int, default=33554432)
+    source_p03_write.add_argument("--max-records", type=int, default=200000)
+    source_p03_write.add_argument("--max-seconds", default="30")
     source_set_catalog = commands.add_parser(
         "source-set-catalog", help="按精确日期与TDX包SHA只读查询P03来源集合候选"
     )
@@ -888,6 +906,16 @@ def _parser() -> argparse.ArgumentParser:
         "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
     )
     source_set_catalog.add_argument(
+        "--package-sha256", required=True, help="完整TDX来源包SHA-256"
+    )
+    source_p04 = commands.add_parser(
+        "source-p04-read",
+        help="按精确日期与包SHA只读正式P03来源集合",
+    )
+    source_p04.add_argument(
+        "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
+    )
+    source_p04.add_argument(
         "--package-sha256", required=True, help="完整TDX来源包SHA-256"
     )
     preview_serve = commands.add_parser(
@@ -2295,6 +2323,98 @@ def _run_source_ingress_plan(args: argparse.Namespace) -> int:
         if result["environment_gate"]["status"] == "READY"
         else _EXIT_UNAVAILABLE
     )
+
+
+def _run_source_p03_write(args: argparse.Namespace) -> int:
+    config, config_path = _load_runtime_config()
+    target_session = _parse_source_set_date(args.target_session)
+    phase0_result = _collect_source_phase0(
+        argparse.Namespace(
+            max_entries=args.max_entries,
+            max_file_bytes=args.max_file_bytes,
+            max_total_bytes=args.max_total_bytes,
+            max_records=args.max_records,
+            max_seconds=args.max_seconds,
+        )
+    )
+    try:
+        result = persist_formal_source_set(
+            config,
+            target_session=target_session,
+            package_sha256=args.package_sha256,
+            phase0_result=phase0_result,
+        )
+    except (
+        SourceIngressError,
+        SourceSetWriteError,
+        RawSourcePgError,
+        SourceSetCandidatePgError,
+    ) as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "BLOCKED"
+                if isinstance(error, SourceIngressError)
+                else "FAILED",
+                "code": getattr(error, "code", "SOURCE_P03_WRITE_FAILED"),
+                "message": str(error),
+                "target_session": target_session.isoformat(),
+                "package_sha256": args.package_sha256,
+                "phase0_status": phase0_result.get("status"),
+                "database_write_attempted": bool(
+                    isinstance(error, SourceSetWriteError)
+                    or getattr(error, "metadata_committed", False)
+                ),
+                "ddl_executed": False,
+                "head_changed": False,
+                "production_switched": False,
+                "configuration_path": str(config_path),
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
+    result["configuration_path"] = str(config_path)
+    result["phase0_status"] = phase0_result.get("status")
+    _emit(result)
+    return _EXIT_OK if result.get("formal_p03_complete") else _EXIT_UNAVAILABLE
+
+
+def _run_source_p04_read(args: argparse.Namespace) -> int:
+    config, config_path = _load_runtime_config()
+    target_session = _parse_source_set_date(args.target_session)
+    from stock_a.storage.postgres.source_set_ingress import read_p04_source_input
+
+    try:
+        result = read_p04_source_input(
+            config,
+            target_session=target_session,
+            package_sha256=args.package_sha256,
+        )
+    except Exception as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "BLOCKED",
+                "code": getattr(error, "code", "P04_READ_FAILED"),
+                "message": str(error),
+                "target_session": target_session.isoformat(),
+                "package_sha256": args.package_sha256,
+                "database_write": False,
+                "ddl_executed": False,
+                "candidate_fallback": False,
+                "configuration_path": str(config_path),
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
+    result.update(
+        {
+            "ok": result.get("status") == "AVAILABLE",
+            "configuration_path": str(config_path),
+        }
+    )
+    _emit(result)
+    return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
 
 
 def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
@@ -4752,8 +4872,12 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_set_candidate(args, compute_candidate=True)
         if args.command == "source-set-catalog":
             return _run_source_set_candidate(args, compute_candidate=False)
+        if args.command == "source-p04-read":
+            return _run_source_p04_read(args)
         if args.command == "source-ingress-plan":
             return _run_source_ingress_plan(args)
+        if args.command == "source-p03-write":
+            return _run_source_p03_write(args)
         if args.command == "preview-serve":
             from stock_a.service.preview_http import run_preview_server
 

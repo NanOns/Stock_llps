@@ -80,20 +80,46 @@ def _scope_revision_contract(
 
 
 def _accepted_source_state(
-    config: Mapping[str, Any], *, target_session: date
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    source_digest: str,
 ) -> dict[str, Any]:
     """从正式精确读者构造P00前态；候选、Raw和未封口行不构成accepted-state。"""
-    result = read_accepted_source_state(config, target_session=target_session)
-    if result.get("status") == "BLOCKED":
+    result = read_accepted_source_state(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        source_digest=source_digest,
+    )
+    if result.get("status") in {"BLOCKED", "RANGE_REPAIR_REQUIRED"}:
         raise SourceIngressError(
             str(result.get("reason", "正式accepted-state读回失败"))
         )
+    if result.get("status") == "RESUME_REQUIRED":
+        pending = result.get("pending")
+        if (
+            not isinstance(pending, Mapping)
+            or pending.get("package_sha256") != package_sha256
+            or pending.get("source_digest") != source_digest
+            or result.get("same_day_sealed_conflict") is True
+        ):
+            raise SourceIngressError(
+                "目标日PENDING记录与当前输入不同或存在同日SEALED冲突，禁止隐式覆盖"
+            )
     previous_row = result.get("previous")
     if previous_row is None:
-        if result.get("status") != "FIRST_OBSERVATION":
+        if result.get("status") not in {"FIRST_OBSERVATION", "RESUME_REQUIRED"}:
             raise SourceIngressError("accepted-state读者返回状态与前态不一致")
+        if result.get("status") == "RESUME_REQUIRED":
+            result["plan_status"] = "FIRST_OBSERVATION"
         return {**result, "previous_identity": None}
-    if result.get("status") != "ACCEPTED" or not isinstance(previous_row, Mapping):
+    if result.get("status") not in {
+        "APPEND",
+        "NOOP",
+        "RESUME_REQUIRED",
+    } or not isinstance(previous_row, Mapping):
         raise SourceIngressError("accepted-state读者返回了不完整正式关系")
     try:
         previous = AcceptedRunIdentity(
@@ -112,6 +138,8 @@ def _accepted_source_state(
         raise SourceIngressError("accepted-state缺少P00所需的精确身份字段") from error
     if type(previous.target_session) is not date:
         raise SourceIngressError("accepted-state目标日不是官方date")
+    if result.get("status") == "RESUME_REQUIRED":
+        result["plan_status"] = "ACCEPTED"
     return {**result, "previous_identity": previous}
 
 
@@ -222,6 +250,53 @@ def _phase0_evidence(
                 and bool(sample.get("read_started_at"))
                 and bool(sample.get("read_completed_at"))
             )
+    stable_market_evidence = {}
+    if sampled_reads_valid:
+        for market in ("sh", "sz", "bj"):
+            market_row = markets[market]
+            sample = market_row["sample"]
+            identity = sample["source_identity"]
+            stable_market_evidence[market] = {
+                "scope_complete": market_row["scope_complete"],
+                "market_status": market_row.get("market_status"),
+                "day_file_count": market_row.get("day_file_count"),
+                "sample": {
+                    "raw_byte_sha256": sample["raw_byte_sha256"],
+                    "byte_count": sample["byte_count"],
+                    "record_count": sample["record_count"],
+                    "first_date": sample.get("first_date"),
+                    "last_date": sample.get("last_date"),
+                    "source_identity": {
+                        key: identity.get(key)
+                        for key in (
+                            "volume_serial_number",
+                            "file_id",
+                            "size_before",
+                            "size_after",
+                            "path_binding_verified",
+                            "handle_path_verified",
+                        )
+                    },
+                },
+            }
+    scope_projection = {
+        "scope": "SOURCE_INGRESS",
+        "source_root_final_path": report_root,
+        "configured_root": configured_root,
+        "source_roots_read_only": source_policy.get("all_source_roots_read_only")
+        is True,
+        "market_sample_identities": stable_market_evidence,
+        "pg_content_id": candidate.get("source_content_id"),
+        "pg_capture_id": candidate.get("source_capture_id"),
+        "pg_candidate_digest": candidate.get("candidate_sha256"),
+        "pg_raw_row_count": candidate.get("raw_row_count"),
+        "pg_raw_digest": candidate.get("raw_source_digest"),
+    }
+    scope_digest = sha256(
+        json.dumps(
+            scope_projection, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
     scope_ready = (
         exact_pg_source
         and source_policy.get("all_source_roots_read_only") is True
@@ -229,24 +304,14 @@ def _phase0_evidence(
         and report_root == configured_root
         and sampled_reads_valid
     )
-    blockers = [
-        item.get("capability")
-        for item in phase0_result.get("capabilities", ())
-        if isinstance(item, Mapping)
-        and item.get("required") is True
-        and item.get("status") not in {"FULL_PASS", "DEGRADED_PASS"}
-    ]
     return (
         CapabilityEvidence(
             "READY" if scope_ready else "DENY",
-            f"source-ingress-phase0-projection:{digest}" if scope_ready else None,
+            f"source-ingress-phase0-projection:{scope_digest}" if scope_ready else None,
             {
                 "scope": "SOURCE_INGRESS",
                 "evidence_type": "PHASE0_PATH_READ_AND_EXACT_PG_SOURCE_FACTS",
-                "full_phase0_status": status,
-                "full_phase0_digest": digest,
-                "full_phase0_blocked_capabilities": blockers,
-                "p04_pending": p04_pending,
+                "source_scope_digest": scope_digest,
                 "field_unit_admission_is_separate": True,
             },
         ),
@@ -255,6 +320,7 @@ def _phase0_evidence(
             "scope_status": "SOURCE_INGRESS_READY" if scope_ready else "BLOCKED",
             "scope": "SOURCE_INGRESS",
             "digest": digest,
+            "source_scope_digest": scope_digest,
             "p04_pending": p04_pending,
             "full_phase0_rewritten": False,
         },
@@ -390,9 +456,15 @@ def build_source_ingress_plan(
     candidate = candidate_result["candidate"]
     bao_policy = config["source_policy"]["baostock_supplement"]
     bao_policy_sha256 = _canonical_sha256(bao_policy)
-    accepted_state = _accepted_source_state(config, target_session=target_session)
+    accepted_state = _accepted_source_state(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        source_digest=candidate["candidate_sha256"],
+    )
     previous = accepted_state["previous_identity"]
     accepted_state_reason = str(accepted_state.get("reason", ""))
+    planning_state = str(accepted_state.get("plan_status", accepted_state["status"]))
     previous_p02 = (accepted_state.get("previous") or {}).get("p02_capability")
     historical_repair_required = bool(
         previous is not None
@@ -404,13 +476,32 @@ def build_source_ingress_plan(
         target_session=target_session,
         package_sha256=package_sha256,
     )
-    durability = _durability_evidence(config)
+    if p04_source_input.get("status") == "AVAILABLE":
+        durability = {
+            "status": "VERIFIED",
+            "durable_at": p04_source_input.get("durable_at"),
+            "server_commit_at": None,
+            "commit_ack_observed_at": p04_source_input.get("commit_ack_observed_at"),
+            "post_commit_observed_at": p04_source_input.get("durable_at"),
+            "method": "PENDING_COMMIT_ACK_PLUS_SEPARATE_READBACK_AND_SEALED_ROW_READBACK",
+            "track_commit_timestamp": None,
+            "synchronous_commit": None,
+            "fsync": None,
+            "reason_code": None,
+        }
+    else:
+        durability = _durability_evidence(config)
     seal_blockers = []
-    if durability["status"] != "VERIFIED":
-        seal_blockers.append("DURABLE_AT_NOT_PROVABLE")
-    seal_blockers.append("P02_EVIDENCE_NOT_PERSISTED_WITH_PLAN_POLICY_BINDING")
-    if p04_source_input["status"] not in {"AVAILABLE", "NO_MATCH"}:
-        seal_blockers.append("FORMAL_SOURCE_SET_STORAGE_NOT_CONNECTED")
+    if p04_source_input.get("status") != "AVAILABLE":
+        seal_blockers.append("FORMAL_SOURCE_SET_NOT_SEALED")
+        if p04_source_input.get("status") not in {
+            "NO_MATCH",
+            "P04_INGRESS_READER_NOT_CONNECTED",
+        }:
+            seal_blockers.append("FORMAL_SOURCE_SET_READER_BLOCKED")
+        if durability["status"] != "VERIFIED":
+            seal_blockers.append("DURABLE_AT_NOT_PROVABLE")
+        seal_blockers.append("P02_EVIDENCE_PENDING_FORMAL_SOURCE_SET_BINDING")
     pg_identity = inspect_postgres(config, timeout_seconds=5)
     contract = load_day_chain_contract(Path(config["paths"]["configuration_root"]))
     scope = contract["scope_bindings"].get("SOURCE_INGRESS")
@@ -448,8 +539,7 @@ def build_source_ingress_plan(
             "READY",
             "stock_catalog:SOURCE_INGRESS",
             {
-                "status": accepted_state["status"],
-                "reason": accepted_state_reason,
+                "status": planning_state,
                 "previous_source_set_id": (accepted_state.get("previous") or {}).get(
                     "source_set_id"
                 ),
@@ -481,7 +571,7 @@ def build_source_ingress_plan(
             "READY",
             "stock_catalog:SOURCE_INGRESS",
             {
-                "status": accepted_state["status"],
+                "status": planning_state,
                 "previous_source_set_id": (accepted_state.get("previous") or {}).get(
                     "source_set_id"
                 ),
@@ -526,8 +616,7 @@ def build_source_ingress_plan(
         "universe": "EXACT_TDX_PACKAGE_CANDIDATES_ONLY",
         "member_revision": "NOT_APPLICABLE_P04_OUTSIDE_SCOPE",
         "previous_accepted_context": {
-            "status": accepted_state["status"],
-            "accepted_state_reason": accepted_state_reason,
+            "status": planning_state,
             "previous": (
                 {
                     key: (value.isoformat() if isinstance(value, date) else value)
@@ -627,11 +716,10 @@ def build_source_ingress_plan(
                     if accepted_state.get("previous")
                     else None
                 ),
-                "status": accepted_state["status"],
+                "status": planning_state,
                 "previous_source_set_id": (accepted_state.get("previous") or {}).get(
                     "source_set_id"
                 ),
-                "reason": accepted_state_reason,
             },
         )
     )
@@ -654,17 +742,30 @@ def build_source_ingress_plan(
             "mode": plan.mode,
             "plan_sha256": plan.plan_sha256,
             "contract_sha256": plan.contract_sha256,
+            "input_digest": plan.input_digest,
+            "expected_parent_generation": plan.expected_parent_generation,
             "scheduled_stage_ids": list(plan.scheduled_stage_ids),
             "required_stage_ids": list(plan.required_stage_ids),
             "candidate_ready": plan.candidate_ready,
             "reason_codes": list(plan.reason_codes),
         },
         "plan_record_kind": "PREVIEW_COMPUTED_PLAN",
+        "scope_contract_version": scope_contract.contract_version,
+        "scope_contract_digest": scope_contract.binding_digest,
+        "scope_catalog_digest": scope_contract.catalog_digest,
         "source_scope_status": "SOURCE_INGRESS_READY"
         if plan_result.environment_gate.status == "READY"
         else "SOURCE_INGRESS_BLOCKED",
-        "p04_scope_status": "P04_PENDING",
-        "p04_post_write_check": "REQUIRED_AFTER_TYPED_COMMIT_BY_EXACT_DATE_AND_PACKAGE_SHA",
+        "p04_scope_status": (
+            "P04_FORMAL_SOURCE_AVAILABLE"
+            if p04_source_input.get("status") == "AVAILABLE"
+            else "P04_PENDING"
+        ),
+        "p04_post_write_check": (
+            "ALREADY_VERIFIED_BY_EXACT_TYPED_READER"
+            if p04_source_input.get("status") == "AVAILABLE"
+            else "REQUIRED_AFTER_TYPED_COMMIT_BY_EXACT_DATE_AND_PACKAGE_SHA"
+        ),
         "environment_gate": {
             "status": plan_result.environment_gate.status,
             "reason_codes": list(plan_result.environment_gate.reason_codes),
@@ -734,7 +835,11 @@ def build_source_ingress_plan(
         "p02_baostock": {
             **bao,
             "record_kind": "PREVIEW_COMPUTED_CAPABILITY_ACCOUNTING",
-            "formal_candidate_binding": "NOT_PERSISTED_WITH_PLAN_POLICY_BINDING",
+            "formal_candidate_binding": (
+                "BOUND_IN_FORMAL_SOURCE_SET"
+                if p04_source_input.get("status") == "AVAILABLE"
+                else "PENDING_FORMAL_SOURCE_SET_COMMIT"
+            ),
             "formal_binding_sha256": bao["binding_sha256"],
         },
         "build_identity": {
@@ -777,4 +882,88 @@ def build_source_ingress_plan(
             "blockers": seal_blockers,
             "migration_0006_created_or_executed": False,
         },
+    }
+
+
+def persist_formal_source_set(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    phase0_result: Mapping[str, Any],
+) -> dict[str, Any]:
+    """以真实Phase0、P00/P02和精确PG候选执行PENDING→ACK→读回→封口。"""
+    from stock_a.storage.postgres.source_set_candidate import (
+        persist_source_set_candidate as persist_pg_candidate,
+    )
+    from stock_a.storage.postgres.source_set_ingress import read_p04_source_input
+    from stock_a.storage.postgres.source_set_writer import (
+        persist_formal_source_set as write_p03,
+    )
+
+    calendar = _official_calendar(target_session)
+    ingress = build_source_ingress_plan(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        phase0_result=phase0_result,
+    )
+    if ingress.get("source_scope_status") != "SOURCE_INGRESS_READY":
+        raise SourceIngressError("真实Phase0和精确PG Raw未证明SOURCE_INGRESS范围可写")
+    if ingress.get("environment_gate", {}).get("status") != "READY":
+        raise SourceIngressError("P00 SOURCE_INGRESS环境准入未就绪")
+
+    accepted_state = ingress.get("accepted_state", {})
+    if accepted_state.get("status") == "NOOP":
+        readback = read_p04_source_input(
+            config,
+            target_session=target_session,
+            package_sha256=package_sha256,
+        )
+        if readback.get("status") != "AVAILABLE" or readback.get(
+            "source_digest"
+        ) != ingress.get("p01_capture", {}).get("candidate_sha256"):
+            raise SourceIngressError(
+                "同日既有SEALED来源没有精确P04读回，不能作为幂等NOOP"
+            )
+        return {
+            "status": "NOOP",
+            "target_session": target_session.isoformat(),
+            "package_sha256": package_sha256,
+            "source_set_id": readback["source_set_id"],
+            "source_digest": readback["source_digest"],
+            "p00_plan_sha256": ingress["plan"]["plan_sha256"],
+            "p02_binding_sha256": ingress["p02_baostock"]["binding_sha256"],
+            "p04_readback": readback,
+            "candidate_database_write": False,
+            "formal_database_write": False,
+            "formal_p03_complete": True,
+            "database_write_attempted": False,
+        }
+
+    if ingress.get("plan", {}).get("mode") not in {"INITIAL", "APPEND"}:
+        raise SourceIngressError("当前P00模式不是允许正式来源写入的INITIAL或APPEND")
+    candidate_persist = persist_pg_candidate(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        calendar=calendar,
+        bao_capability=ingress["p02_baostock"],
+    )
+    formal = write_p03(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        calendar=calendar,
+        ingress=ingress,
+    )
+    return {
+        **formal,
+        "p00_plan": ingress["plan"],
+        "p00_scope_status": ingress["source_scope_status"],
+        "p00_environment_gate": ingress["environment_gate"],
+        "p02_baostock": ingress["p02_baostock"],
+        "candidate_persist": candidate_persist,
+        "formal_p03_complete": formal.get("seal_status") == "SEALED",
+        "database_write_attempted": True,
     }

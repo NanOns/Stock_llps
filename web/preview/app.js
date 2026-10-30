@@ -146,6 +146,7 @@ function clearChainReadiness(message) {
   $("sourceIngressSummary").textContent =
     "等待精确日期与来源包版本的实时PG核算。";
   $("sourceSetCandidate").textContent = "等待精确日期与包版本查询。";
+  $("formalSourceSet").textContent = "等待精确日期与来源包版本的正式封口读取。";
   $("chainOverview").replaceChildren();
   $("chainGroups").replaceChildren();
 }
@@ -212,10 +213,16 @@ function renderSourceIngress(data) {
     "p",
     `NON_PIT来源事实 ${ingress.p01_capture?.non_pit_source_facts || "未知"}；严格PIT ${ingress.p01_capture?.strict_pit_qualification || "未知"}。价格 ${ingress.p01_capture?.field_admission?.PRICE?.status || "未知"}；金额 ${ingress.p01_capture?.field_admission?.AMOUNT?.status || "未知"}；数量 ${ingress.p01_capture?.field_admission?.VOLUME?.status || "未知"}。`,
   );
+  const p04InputStatus =
+    ingress.p01_capture?.p04_input?.status ||
+    "P04_INGRESS_READER_NOT_CONNECTED";
   appendText(
     p00,
     "p",
-    `正式P03来源封口 ${ingress.p01_capture?.formal_source_seal || "未知"}；阻断项 ${(ingress.p01_capture?.formal_source_seal_blockers || []).join("、") || "无"}；P04输入读取 ${ingress.p01_capture?.p04_input?.status || "P04_INGRESS_READER_NOT_CONNECTED"}。`,
+    `P03正式产物 ${p04InputStatus === "AVAILABLE" ? "SEALED并由P04精确读回" : "尚未由P04读回"}；` +
+      `本次新封口前置 ${ingress.p01_capture?.formal_source_seal || "未知"}，` +
+      `阻断项 ${(ingress.p01_capture?.formal_source_seal_blockers || []).join("、") || "无"}；` +
+      `P04输入读取 ${p04InputStatus}。`,
   );
   appendText(
     p00,
@@ -267,14 +274,14 @@ function renderSourceSetCandidate(data) {
     appendText(
       root,
       "p",
-      "该精确日期与TDX包SHA没有已持久化来源集合候选；正式P03仍未接通。",
+      "该精确日期与TDX包SHA没有已保存来源集合候选；本区只展示候选预览。",
     );
     return;
   }
   appendText(
     root,
     "p",
-    `已保存的只读候选 · ${candidate.target_session} · ${candidate.candidate_status}；正式P03=${candidate.formal_p03_status}，Foundation未完成。`,
+    `PG保存的来源集合候选 · ${candidate.target_session} · ${candidate.candidate_status}；此候选自身不是P03正式封口。`,
     "candidate-status",
   );
   const details = document.createElement("details");
@@ -340,6 +347,89 @@ function renderSourceSetCandidate(data) {
   details.append(inputs);
   root.append(details);
 }
+function renderFormalSourceSet(data) {
+  const root = $("formalSourceSet");
+  root.replaceChildren();
+  const sourceSet = data.formal_source_set || {};
+  if (sourceSet.status !== "AVAILABLE") {
+    const status = sourceSet.status || "NOT_RUN";
+    appendText(
+      root,
+      "p",
+      `当前精确日期与来源包SHA的P04读取状态：${status}。候选预览不作为正式来源集合回退。`,
+    );
+    return;
+  }
+  appendText(
+    root,
+    "p",
+    `SEALED · ${sourceSet.target_session} · revision ${sourceSet.revision_id} · source_set_id ${sourceSet.source_set_id}`,
+    "formal-source-status",
+  );
+  const list = document.createElement("dl");
+  list.className = "formal-source-facts";
+  const p02 = sourceSet.p02_capability || {};
+  const ack = sourceSet.commit_ack || {};
+  const facts = [
+    ["精确来源包 SHA", sourceSet.package_sha256],
+    [
+      "来源内容 / 捕获",
+      `${sourceSet.source_content_id} / ${sourceSet.source_capture_id}`,
+    ],
+    [
+      "捕获读取起止时钟",
+      `${sourceSet.capture_read_started_at} / ${sourceSet.capture_validated_at}`,
+    ],
+    [
+      "P00计划 SHA / P02绑定 SHA",
+      `${sourceSet.plan_sha256} / ${p02.binding_sha256}`,
+    ],
+    ["P02策略 SHA / 状态", `${p02.policy_sha256} / ${p02.status}`],
+    ["PENDING COMMIT ACK观察", ack.commit_ack_observed_at],
+    ["PENDING独立读回 durable_at", sourceSet.durable_at],
+    ["SEALED时钟", sourceSet.sealed_at],
+    [
+      "来源可得时间 / 时钟资格",
+      `${sourceSet.source_available_at || "未知（未填充）"} / ${sourceSet.source_time_quality}`,
+    ],
+    [
+      "来源性质",
+      `${sourceSet.identity_status} · ${sourceSet.stable_security_identity} · ${sourceSet.source_time_quality}`,
+    ],
+    [
+      "Raw分母",
+      `${sourceSet.raw_row_count}/${sourceSet.capture_expected_row_count}；有Bar ${sourceSet.target_present_count} / 缺Bar ${sourceSet.target_missing_count} / 失败 ${sourceSet.read_failed_count}`,
+    ],
+    [
+      "价格 / 成交额 / 成交量单位",
+      `${sourceSet.price_unit_status} / ${sourceSet.amount_unit_status} / ${sourceSet.volume_unit_status}`,
+    ],
+    ["封口摘要", sourceSet.seal_digest_sha256],
+  ];
+  for (const [label, value] of facts)
+    readinessDetail(list, label, value == null ? "—" : String(value));
+  root.append(list);
+  const details = document.createElement("details");
+  appendText(details, "summary", "查看提交回执与Raw独立核验");
+  const evidence = document.createElement("dl");
+  evidence.className = "formal-source-facts";
+  for (const [label, value] of [
+    ["PENDING创建事务 XID", ack.writer_transaction_id],
+    ["PENDING独立观察事务 XID", ack.observer_transaction_id],
+    ["PENDING行 xmin", ack.pending_row_xmin],
+    ["PENDING创建事务全量 XID", ack.pending_creation_transaction_id],
+    ["P02 capability SHA", p02.capability_digest],
+    ["COMMIT ACK capability SHA", ack.capability_digest],
+    ["候选 / Raw / 捕获核验", JSON.stringify(sourceSet.raw_revalidation || {})],
+    [
+      "身份与PIT限制",
+      `${sourceSet.identity_status}；稳定证券身份尚未解析；当前仅后验NON_PIT来源事实。`,
+    ],
+  ])
+    readinessDetail(evidence, label, value == null ? "—" : String(value));
+  details.append(evidence);
+  root.append(details);
+}
 function renderReadiness(data) {
   const v = data.source_version,
     c = v.bar_status_counts,
@@ -362,6 +452,7 @@ function renderReadiness(data) {
   $("chainChecked").textContent = `只读核查 ${data.checked_at}`;
   renderSourceIngress(data);
   renderSourceSetCandidate(data);
+  renderFormalSourceSet(data);
   const stats = [
     ["PG与来源命名空间", `stock_a.stock · ${v.namespace_id}`],
     ["当前最高可用范围", data.highest_available_scope],

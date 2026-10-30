@@ -167,16 +167,12 @@ def _formal_source_set_readback_matches(
     """只把P00/P02/P03的精确typed封口读回视为正式消费者证据。"""
     if not isinstance(source_ingress_result, Mapping):
         return False
-    plan = source_ingress_result.get("plan")
     bao = source_ingress_result.get("p02_baostock")
     capture = source_ingress_result.get("p01_capture")
     p04 = capture.get("p04_input") if isinstance(capture, Mapping) else None
     capability = p04.get("p02_capability") if isinstance(p04, Mapping) else None
-    if not all(
-        isinstance(item, Mapping) for item in (plan, bao, capture, p04, capability)
-    ):
+    if not all(isinstance(item, Mapping) for item in (bao, capture, p04, capability)):
         return False
-    plan_sha = plan.get("plan_sha256")
     policy_sha = bao.get("policy_sha256")
     requests = bao.get("actual_requests")
     return bool(
@@ -189,8 +185,8 @@ def _formal_source_set_readback_matches(
         and p04.get("target_session") == source_ingress_result.get("target_session")
         and p04.get("package_sha256") == source_ingress_result.get("package_sha256")
         and p04.get("source_capture_id") == capture.get("source_capture_id")
-        and p04.get("plan_sha256") == plan_sha
-        and capability.get("plan_sha256") == plan_sha
+        and p04.get("source_digest") == capture.get("candidate_sha256")
+        and p04.get("plan_sha256") == capability.get("plan_sha256")
         and capability.get("policy_sha256") == policy_sha
         and capability.get("status") == bao.get("status")
         and capability.get("actual_logins") == (requests or {}).get("logins")
@@ -376,7 +372,7 @@ def build_chain_readiness_payload(
                     "p02_binding_status": "EXACT_PLAN_AND_POLICY_SHA_MATCH",
                     "status_reason": (
                         f"精确封口{p04_input.get('source_set_id')}已由P04按目标日、包SHA、"
-                        "捕获、P00计划和P02策略摘要读回；稳定身份解析仍属于后续P04能力。"
+                        "捕获、封存的P00计划和当前P02策略摘要读回；稳定身份解析仍属于后续P04能力。"
                     ),
                 }
             )
@@ -565,6 +561,15 @@ def build_chain_readiness_payload(
         "source_set_candidate": dict(
             source_set_candidate or {"status": "NO_MATCH", "candidate": None}
         ),
+        "formal_source_set": dict(
+            (
+                source_ingress_result.get("p01_capture", {}).get("p04_input")
+                if isinstance(source_ingress_result, Mapping)
+                and isinstance(source_ingress_result.get("p01_capture"), Mapping)
+                else None
+            )
+            or {"status": "NOT_RUN", "candidate_fallback": False}
+        ),
         "source_ingress": dict(source_ingress_result or {"status": "NOT_RUN"}),
         "source_observations": {
             "status": source_data_status,
@@ -575,7 +580,11 @@ def build_chain_readiness_payload(
             "status_reason": (
                 "来源版本本身存在未达到捕获期望数或READ_FAILED缺口；此来源质量问题与正式P03未接通是两项独立状态。"
                 if source_data_status == "PARTIAL"
-                else "PG来源代码观察分母闭合；这只描述来源包，不代表正式P03 source_set 或全市场总体已接通。"
+                else (
+                    "PG来源代码观察分母闭合；正式P03封口与P04逐行读回状态见正式来源集合字段。"
+                    if formal_source_set_readback
+                    else "PG来源代码观察分母闭合；这只描述来源包，不代表正式P03 source_set 或全市场总体已接通。"
+                )
             ),
         },
         "first_break": first_break,
@@ -593,7 +602,11 @@ def build_chain_readiness_payload(
         "formal_source_set_readback": formal_source_set_readback,
         "producer": source_version["producer"],
         "consumer": source_version["consumer"],
-        "status_reason": "来源候选与研究预览可用范围已核实；正式source_set、identity/universe、Canonical/Owner/Publication/Head链及P25正式显示确认未接通。",
+        "status_reason": (
+            "正式source_set已由P04按精确日期和来源SHA读回；稳定identity/universe、Canonical/Owner/Publication/Head链及P25正式显示确认仍未接通。"
+            if formal_source_set_readback
+            else "来源候选与研究预览可用范围已核实；正式source_set、identity/universe、Canonical/Owner/Publication/Head链及P25正式显示确认未接通。"
+        ),
         "checked_at": checked_at,
         "database_write": False,
         "ddl_executed": False,

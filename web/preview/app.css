@@ -398,6 +398,29 @@ button {
   margin: 0 0 7px;
   font-size: 15px;
 }
+.formal-source-set {
+  margin-top: 11px;
+  padding: 10px 12px;
+  border: 1px solid #cfe2d7;
+  border-radius: 8px;
+  background: #f7fbf8;
+  overflow-wrap: anywhere;
+}
+.formal-source-set h3 {
+  margin: 0 0 7px;
+  font-size: 15px;
+}
+.formal-source-status {
+  margin: 0 0 8px;
+  color: #245d40;
+  font-weight: 700;
+}
+.formal-source-facts {
+  margin-bottom: 0;
+}
+.formal-source-set details {
+  margin-top: 8px;
+}
 .source-ingress-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
