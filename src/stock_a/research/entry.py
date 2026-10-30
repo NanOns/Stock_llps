@@ -3131,6 +3131,9 @@ def research_stock_pg_history_preview(
             or expected_sessions[-1] != target
             or any(day not in all_calendar_sessions for day in expected_sessions)):
         raise ResearchEntryError("PG_HISTORY_CALENDAR_INVALID", "PG历史窗口未与版本化官方日历严格绑定")
+    official_window = tuple(day for day in all_calendar_sessions if expected_sessions[0] <= day <= target)
+    if expected_sessions != official_window:
+        raise ResearchEntryError("CALENDAR_SESSION_GAP", "PG历史窗口遗漏版本化官方日历中的交易会话")
 
     rows = tuple(history_rows)
     if len(rows) != len(expected_sessions):

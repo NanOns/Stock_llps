@@ -1386,6 +1386,8 @@ def read_raw_daily_catalog(
        count(*) FILTER (WHERE r.bar_status='READ_FAILED')::bigint AS read_failed,
        count(*) FILTER (WHERE r.bar_status NOT IN ('TARGET_PRESENT','TARGET_MISSING','READ_FAILED'))::bigint AS unknown_bar_status,
        count(DISTINCT r.source_capture_id)::bigint AS capture_count,
+       min(c.normalized_count) AS expected_row_count,
+       max(c.normalized_count) AS expected_row_count_max,
        min(c.read_started_at) AS capture_read_started_at,
        max(c.read_started_at) AS capture_read_started_at_max,
        min(c.validated_at) AS capture_validated_at,
@@ -1393,7 +1395,7 @@ def read_raw_daily_catalog(
        array_agg(DISTINCT c.source_time_quality ORDER BY c.source_time_quality) AS source_time_qualities,
        array_agg(DISTINCT c.source_clock_role ORDER BY c.source_clock_role) AS source_clock_roles,
        count(*) FILTER (WHERE c.source_available_at IS NOT NULL)::bigint AS source_available_at_count,
-       count(*) FILTER (WHERE c.capture_id IS NULL OR s.content_id IS NULL)::bigint AS broken_reference_count,
+       count(*) FILTER (WHERE c.capture_id IS NULL OR s.content_id IS NULL OR c.content_id IS DISTINCT FROM r.source_content_id)::bigint AS broken_reference_count,
        array_agg(DISTINCT s.dataset_id ORDER BY s.dataset_id) AS dataset_ids,
        array_agg(DISTINCT s.byte_sha ORDER BY s.byte_sha) AS content_shas,
        array_agg(DISTINCT r.price_quality ORDER BY r.price_quality) AS price_qualities,
@@ -1429,6 +1431,9 @@ LIMIT %s OFFSET %s""",
         time_qualities = item["source_time_qualities"] or []
         if (sum(status_counts.values()) != row_count or item["unknown_bar_status"] != 0
                 or item["capture_count"] != 1 or item["broken_reference_count"] != 0
+                or item["expected_row_count"] is None or item["expected_row_count"] <= 0
+                or item["expected_row_count"] != item["expected_row_count_max"]
+                or row_count > item["expected_row_count"]
                 or content_shas != [item["package_sha256"]] or dataset_ids != [_DATASET_ID]
                 or len(clock_roles) != 1 or len(time_qualities) != 1
                 or item["capture_read_started_at"] != item["capture_read_started_at_max"]
@@ -1438,6 +1443,7 @@ LIMIT %s OFFSET %s""",
             "session_date": item["session_date"].isoformat(),
             "package_sha256": item["package_sha256"],
             "row_count": row_count,
+            "expected_row_count": int(item["expected_row_count"]),
             "bar_status_counts": status_counts,
             "source_capture_count": item["capture_count"],
             "capture_read_started_at": _db_scalar(item["capture_read_started_at"]),
@@ -1453,7 +1459,7 @@ LIMIT %s OFFSET %s""",
             "volume_unit_statuses": item["volume_unit_statuses"] or [],
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "pit_status": "NON_PIT_RETROSPECTIVE",
-            "version_status": "CLOSED",
+            "version_status": "CLOSED" if row_count == item["expected_row_count"] else "PARTIAL",
         })
     next_offset = offset + len(versions)
     return {

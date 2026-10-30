@@ -2392,9 +2392,12 @@ def _run_full_source_core_profile(
     sample_symbols = {
         item["symbol"] for index, item in enumerate(requested_page) if index in sample_positions
     }
-    candidate_symbols = {item["symbol"] for item in filtered}
-    oracle_symbols = {"SH.600000", "SZ.000001", "SZ.300001"} & candidate_symbols
-    sample_symbols.update(oracle_symbols)
+    sampled_groups: set[tuple[str, str]] = set()
+    for item in filtered:
+        group = (item["market"], item["board"])
+        if group not in sampled_groups:
+            sample_symbols.add(item["symbol"])
+            sampled_groups.add(group)
 
     scope = profile_contract.get("scope_bindings", {}).get("FOUNDATION_EOD", {})
     field_registry = scope.get("field_registry", [])
