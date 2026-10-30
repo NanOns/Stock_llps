@@ -177,6 +177,16 @@ JSON和短摘要另提供`coverage_summary`中的当前页实际目标Bar、目�
 
 可选`--include-profile-preview`在当前请求页复用一次固定day-chain合同，并在原有Raw/Core对象计算中附加11项Profile组件；不额外扫描来源，也不逐股重载合同。分页JSON在每个已处理对象中保留完整组件输入来源、质量、原因和规则身份，并另提供紧凑`summary[].profile_preview`与`profile_preview_denominators`。页级组件分母只统计实际返回画像的对象；`evaluated`组件包含质量为`UNKNOWN_DATA`的已执行规则，分别统计`observed`、`unknown_data`、`not_implemented`和`contract_unbound`。失败和预算未评价对象没有伪造组件。中文摘要逐行显示11个组件的结果/质量或未接原因，并显示请求、已评价、失败和未评价分母。未带开关时保留现有分页JSON及摘要行为。预览仍是RAW_UNADJUSTED、NON_PIT、SOURCE_SYMBOL_ONLY，不代表正式Profile、全市场官方证券总体或RPS；正式`profile()`生产门继续阻断。
 
+## 本机PG研究预览
+
+在开发环境中，可由用户显式启动仅监听`127.0.0.1:28766`的研究预览服务，并用浏览器访问`http://127.0.0.1:28766/`。页面只从固定`stock_a.stock`读取已经保存的Raw版本和候选分页；单股预览在用户提交查询后读取精确PG历史并调用现役Core/Profile。服务不写PG、不扫描来源ZIP、不联网、不保存结果；结果为`RAW_UNADJUSTED`、`SOURCE_SYMBOL_ONLY`及`NON_PIT_RETROSPECTIVE`，不表示官方上市总体、正式选股或生产发布。
+
+```powershell
+stock-a preview-serve --host 127.0.0.1 --port 28766
+```
+
+按`Ctrl+C`安全停止。服务拒绝其它主机、端口28765或已被占用的28766；不会接管或终止现有进程。
+
 ## GBBQ字节解析
 
 `decode_gbbq_bytes`只解析调用方已经取得的有限字节。调用方必须提供协议版本、类别1单位版本、来源引用及字节/记录预算；它不打开来源文件或读取配置。此示例展示纯解析调用，`source_ref`用于追溯输入，不是证券稳定身份：

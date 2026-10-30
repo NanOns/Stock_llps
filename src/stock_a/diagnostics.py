@@ -580,6 +580,13 @@ def _parser() -> argparse.ArgumentParser:
     raw_catalog.add_argument("--year", type=int, help="可选年份筛选Raw目录")
     raw_catalog.add_argument("--offset", type=int, default=0, help="版本页偏移，默认0")
     raw_catalog.add_argument("--limit", type=int, default=100, help="每页版本数，默认100，最多200")
+    preview_serve = commands.add_parser(
+        "preview-serve",
+        help="显式启动本机PG来源级研究预览页面（仅127.0.0.1:28766）",
+        description="仅用于开发研究预览；只读现有PG Raw，非正式发布、非PIT。",
+    )
+    preview_serve.add_argument("--host", default="127.0.0.1", help="固定127.0.0.1，不允许远程监听")
+    preview_serve.add_argument("--port", type=int, default=28766, help="固定开发端口28766")
     return parser
 
 
@@ -3203,6 +3210,9 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_vipdata_persist(args)
         if args.command == "source-raw-catalog":
             return _run_source_raw_catalog(args)
+        if args.command == "preview-serve":
+            from stock_a.web_preview import run_preview_server
+            return run_preview_server(host=args.host, port=args.port)
     except DiagnosticError as error:
         _emit({"ok": False, "code": error.code, "cause_type": type(error.__cause__).__name__ if error.__cause__ is not None else None, "message": str(error)}, error=True)
         return error.exit_code
