@@ -86,55 +86,55 @@
       {
         "path": "contracts/day-chain.contract.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT",
-        "contract": "STOCK-A-DAY-CHAIN/R10",
+        "contract": "STOCK-A-DAY-CHAIN/R11",
         "consumer": "stock_a.contracts.load_day_chain_contract（唯一入口清单）"
       },
       {
         "path": "contracts/day-chain/pipeline.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R10",
+        "contract": "STOCK-A-DAY-CHAIN/R11",
         "consumer": "stock_a.contracts.load_day_chain_contract（pipeline）"
       },
       {
         "path": "contracts/day-chain/fields-source.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R10",
+        "contract": "STOCK-A-DAY-CHAIN/R11",
         "consumer": "stock_a.contracts.load_day_chain_contract（source fields）"
       },
       {
         "path": "contracts/day-chain/fields-core.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R10",
+        "contract": "STOCK-A-DAY-CHAIN/R11",
         "consumer": "stock_a.contracts.load_day_chain_contract（Core fields）"
       },
       {
         "path": "contracts/day-chain/fields-profile.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R10",
+        "contract": "STOCK-A-DAY-CHAIN/R11",
         "consumer": "stock_a.contracts.load_day_chain_contract（cross/Profile rules）"
       },
       {
         "path": "contracts/day-chain/fields-control.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R10",
+        "contract": "STOCK-A-DAY-CHAIN/R11",
         "consumer": "stock_a.contracts.load_day_chain_contract（control fields）"
       },
       {
         "path": "contracts/day-chain/research.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R10",
+        "contract": "STOCK-A-DAY-CHAIN/R11",
         "consumer": "stock_a.contracts.load_day_chain_contract（research rules）"
       },
       {
         "path": "contracts/day-chain/service.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R10",
+        "contract": "STOCK-A-DAY-CHAIN/R11",
         "consumer": "stock_a.contracts.load_day_chain_contract（service contract）"
       },
       {
         "path": "contracts/day-chain/policies.json",
         "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R10",
+        "contract": "STOCK-A-DAY-CHAIN/R11",
         "consumer": "stock_a.contracts.load_day_chain_contract（policies）"
       }
     ],

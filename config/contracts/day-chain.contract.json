@@ -1,7 +1,7 @@
 {
   "format": "STOCK-A-DAY-CHAIN-MODULES/R1",
   "contract_id": "STOCK-A-DAY-CHAIN",
-  "version": "R10",
+  "version": "R11",
   "modules": [
     {
       "module": "pipeline",
@@ -36,5 +36,5 @@
       "path": "day-chain/policies.json"
     }
   ],
-  "assembled_sha256": "b641a1ae4e427964f805659cd33c15bf0284ccb39ea2adee542231af42f63471"
+  "assembled_sha256": "5de6736b46db9f452c739045d87bba23c27918b2696023fc76c36ca275b56ede"
 }

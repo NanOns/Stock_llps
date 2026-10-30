@@ -698,6 +698,13 @@ def read_source_set_candidate(
         "target_session": target_session.isoformat(),
         "package_sha256": package_sha256,
         "candidate": _public_candidate(header, inputs),
+        "p02_binding": {
+            "status": "NOT_BOUND_TO_P00_PLAN_OR_POLICY",
+            "stored_input_status": inputs[6]["input_status"],
+            "stored_reason_code": inputs[6]["reason_code"],
+            "plan_sha256": None,
+            "policy_sha256": None,
+        },
         "database_write": False,
         "ddl_executed": False,
     }

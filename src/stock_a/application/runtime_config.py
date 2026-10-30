@@ -195,7 +195,7 @@ def _validate_config(config: Any) -> None:
             "CONFIG_INVALID", "独立PG部署核验连接必须按唯一安全环境变量合同登记"
         )
     registered = policy.get("public_files")
-    contract_revision = "STOCK-A-DAY-CHAIN/R10"
+    contract_revision = "STOCK-A-DAY-CHAIN/R11"
     expected = {
         (
             "runtime.defaults.json",

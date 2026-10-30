@@ -1,7 +1,7 @@
 {
   "top_level": {
     "contract_id": "STOCK-A-DAY-CHAIN",
-    "version": "R10",
+    "version": "R11",
     "contract_kind": "BUSINESS_PIPELINE_SPECIFICATION",
     "requires_implementation_binding": true,
     "scope_policy": {
@@ -41,14 +41,19 @@
           "required_consumers": [
             "SOURCE_INGRESS_CLI",
             "SOURCE_INGRESS_API",
-            "SOURCE_INGRESS_WEB"
+            "SOURCE_INGRESS_WEB",
+            "P04_SOURCE_SET_INGRESS_READER"
           ],
           "history_policy": {
             "source": "EXACT_TDX_CONTENT_AND_CAPTURE_NON_PIT",
             "selection": "EXPLICIT_TARGET_SESSION_AND_PACKAGE_SHA256",
             "first_observation": "EXPLICIT_FIRST_RUN_NO_ACCEPTED_SOURCE_SET",
             "p04_identity_and_strict_pit": "NOT_A_P03_PREREQUISITE",
-            "source_available_at_missing": "FORMAL_SEAL_BLOCKED"
+            "source_available_at_missing": "ALLOW_NON_PIT_SOURCE_FACTS_STRICT_PIT_BLOCKED",
+            "durable_at_missing": "FORMAL_NON_PIT_SEAL_BLOCKED",
+            "unverified_amount_volume_units": "BLOCK_NORMALIZED_FIELDS_ONLY",
+            "p02_formal_binding": "REQUIRE_TARGET_PLAN_AND_POLICY_SHA",
+            "p04_scope_status": "P04_PENDING"
           },
           "required_environment_capabilities": [
             "validated_configuration",
@@ -57,7 +62,7 @@
             "contract_registry",
             "build_identity",
             "pg_deployment",
-            "source_phase0",
+            "source_scope_evidence",
             "readonly_source_roots"
           ]
         },

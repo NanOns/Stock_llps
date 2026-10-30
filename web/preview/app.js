@@ -177,6 +177,16 @@ function renderSourceIngress(data) {
   appendText(
     p00,
     "p",
+    `计划类型 ${ingress.plan_record_kind || "—"}；来源范围 ${ingress.source_scope_status || "—"}；下游身份 ${ingress.p04_scope_status || "P04_PENDING"}`,
+  );
+  appendText(
+    p00,
+    "p",
+    `完整阶段0 ${ingress.phase0?.status || "NOT_RUN"}；来源范围证据 ${ingress.phase0?.scope_status || ingress.source_scope_status || "—"}；完整阶段0结论不由范围投影覆盖。`,
+  );
+  appendText(
+    p00,
+    "p",
     `阶段要求 ${ingress.plan?.required_stage_ids?.join("、") || "—"}；本次排程 ${ingress.plan?.scheduled_stage_ids?.join("、") || "无"}`,
   );
   const blocked = (ingress.environment_gate?.capabilities || [])
@@ -200,7 +210,17 @@ function renderSourceIngress(data) {
   appendText(
     p00,
     "p",
-    `正式来源封口 ${ingress.p01_capture?.formal_source_seal || "未知"}；阻断项 ${(ingress.p01_capture?.formal_source_seal_blockers || []).join("、") || "无"}。P04身份与严格PIT不是P03候选前置。`,
+    `NON_PIT来源事实 ${ingress.p01_capture?.non_pit_source_facts || "未知"}；严格PIT ${ingress.p01_capture?.strict_pit_qualification || "未知"}。价格 ${ingress.p01_capture?.field_admission?.PRICE?.status || "未知"}；金额 ${ingress.p01_capture?.field_admission?.AMOUNT?.status || "未知"}；数量 ${ingress.p01_capture?.field_admission?.VOLUME?.status || "未知"}。`,
+  );
+  appendText(
+    p00,
+    "p",
+    `正式P03来源封口 ${ingress.p01_capture?.formal_source_seal || "未知"}；阻断项 ${(ingress.p01_capture?.formal_source_seal_blockers || []).join("、") || "无"}；P04输入读取 ${ingress.p01_capture?.p04_input?.status || "P04_INGRESS_READER_NOT_CONNECTED"}。`,
+  );
+  appendText(
+    p00,
+    "p",
+    `耐久时间证据 ${ingress.p01_capture?.durability_evidence?.status || "未知"} · ${ingress.p01_capture?.durability_evidence?.reason_code || "无原因码"}；不以capture或查询时间代填。`,
   );
 
   const p02 = document.createElement("div");
@@ -230,6 +250,11 @@ function renderSourceIngress(data) {
     p02,
     "p",
     `P02绑定计划SHA ${bao.plan_sha256 || "—"}；配置摘要 ${bao.policy_sha256 || "—"}`,
+  );
+  appendText(
+    p02,
+    "p",
+    `P02记录类型 ${bao.record_kind || "—"}；历史候选绑定 ${bao.formal_candidate_binding || "—"}。零请求账不冒充已持久接受。`,
   );
   grid.append(p00, p02);
   root.append(grid);
@@ -289,6 +314,14 @@ function renderSourceSetCandidate(data) {
       `${candidate.candidate_sha256} · ${candidate.calendar_revision} (${candidate.calendar_sha256})`,
     ],
     ["身份 / PIT", `${candidate.identity_status} · ${candidate.pit_status}`],
+    [
+      "历史P02绑定",
+      `${data.source_set_candidate?.p02_binding?.status || "NOT_BOUND_TO_P00_PLAN_OR_POLICY"}；plan SHA ${data.source_set_candidate?.p02_binding?.plan_sha256 || "无"}；policy SHA ${data.source_set_candidate?.p02_binding?.policy_sha256 || "无"}`,
+    ],
+    [
+      "P04来源输入读取",
+      `${data.source_ingress?.p01_capture?.p04_input?.status || "P04_INGRESS_READER_NOT_CONNECTED"}；正式source_set缺失时不回退候选。`,
+    ],
   ];
   const list = document.createElement("dl");
   list.className = "candidate-facts";
@@ -319,8 +352,8 @@ function renderReadiness(data) {
         : "";
   $("chainState").className = `chain-state${partial ? " partial" : ""}`;
   const chainDetail = partial
-    ? "来源观察自身存在缺口；正式链首断点仍为P03。"
-    : "正式Foundation仍未接通；来源包闭合不代表业务链完成。";
+    ? `来源观察自身存在缺口；SOURCE_INGRESS首断点 ${data.first_break.stage_id || "无"}。`
+    : `正式Foundation仍未接通；SOURCE_INGRESS首断点 ${data.first_break.stage_id || "无"}。`;
   $("chainState").textContent = [
     `${v.source_date} · ${versionLabel} · Raw ${v.stored_row_count}/${v.capture_expected_row_count} · `,
     `有Bar ${c.TARGET_PRESENT} / 来源无Bar ${c.TARGET_MISSING} / 读取失败 ${c.READ_FAILED}${failureText}。`,

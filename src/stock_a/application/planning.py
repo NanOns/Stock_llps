@@ -17,7 +17,7 @@ from stock_a.domain import ContractError
 
 # 该摘要固定正式机器合同中的完整scope闭包目录；依赖键仅维护在合同文件。
 _OFFICIAL_SCOPE_CLOSURE_CATALOG_DIGEST = (
-    "3cce5f595d838d988e422199df8346359bebe5910811d98f88c94dcfe013f265"
+    "d94c6ea490ad01b4e25f5c308a5735a9b35345494506ea8c6ed8deb1a69bfeb0"
 )
 _DAY_PLAN_KERNEL_SYMBOL = "stock_a.planning:assemble_day_plan"
 _OMIT_DIGEST_VALUE = object()
@@ -525,7 +525,7 @@ def _validated_contract(request: DayPlanRequest) -> tuple[Mapping[str, object], 
         )
     if (
         request.contract.get("contract_id") != "STOCK-A-DAY-CHAIN"
-        or request.contract.get("version") != "R10"
+        or request.contract.get("version") != "R11"
     ):
         raise _plan_error("CONTRACT_VERSION_MISMATCH", "机器合同身份或版本不匹配")
     binding = request.contract.get("scope_bindings")
@@ -1061,7 +1061,7 @@ def _business_input_digest(
         raise _plan_error("SEMANTIC_REVISION_INVALID", "语义revision必须显式提供映射")
     payload = {
         "contract_id": "STOCK-A-DAY-CHAIN",
-        "contract_version": "R10",
+        "contract_version": "R11",
         "contract_sha256": contract_sha256,
         "scope_id": request.scope_id,
         "scope_revision_binding_digest": request.scope_revision_contract.binding_digest,

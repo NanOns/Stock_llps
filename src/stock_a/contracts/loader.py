@@ -371,7 +371,7 @@ def _validate_progress_keys(document: Any) -> None:
 def _validate_business_structure(document: dict[str, Any]) -> None:
     if (
         document.get("contract_id") != "STOCK-A-DAY-CHAIN"
-        or document.get("version") != "R10"
+        or document.get("version") != "R11"
     ):
         raise DayChainContractError(
             "DAY_CHAIN_IDENTITY_MISMATCH", "day-chain身份或版本不匹配"
@@ -521,7 +521,7 @@ def load_day_chain_contract(configuration_root: Path | str) -> LoadedDayChainCon
     if (
         manifest.get("format") != _FORMAT_ID
         or manifest.get("contract_id") != "STOCK-A-DAY-CHAIN"
-        or manifest.get("version") != "R10"
+        or manifest.get("version") != "R11"
     ):
         raise DayChainContractError(
             "DAY_CHAIN_MANIFEST_INVALID", "入口清单格式、合同身份或版本不匹配"

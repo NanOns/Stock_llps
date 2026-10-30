@@ -874,7 +874,7 @@ def _parser() -> argparse.ArgumentParser:
     source_ingress.add_argument(
         "--skip-phase0-scan",
         action="store_true",
-        help="不重复扫描TDX根；计划将source_phase0标记UNKNOWN并阻止stage调度",
+        help="不重复扫描TDX根；仅按PG捕获事实核验SOURCE_INGRESS范围，不改变阶段0总体结论",
     )
     source_ingress.add_argument("--max-entries", type=int, default=50000)
     source_ingress.add_argument("--max-file-bytes", type=int, default=16777216)

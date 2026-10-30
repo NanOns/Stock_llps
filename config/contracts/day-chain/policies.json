@@ -195,11 +195,11 @@
         "scope_contracts": {
           "SOURCE_INGRESS": {
             "contract_id": "STOCK-A-DAY-CHAIN",
-            "contract_version": "R10",
+            "contract_version": "R11",
             "required_semantic_revision_keys": [
               "source"
             ],
-            "binding_digest": "f15df7407e8764e64abc40c0cb7ff9c20fc04d3b7857e010b5b56b31936b6a93"
+            "binding_digest": "47a79c9aa95bdb7e9d7e95c1991892943d55eb48a1384d99c7179bf9dfd67acc"
           },
           "FOUNDATION_EOD": {
             "contract_id": "STOCK-A-DAY-CHAIN",
@@ -213,7 +213,7 @@
             "binding_digest": "195d8e847905946d6845b5d1244ab1b5838cb9ad662021b279449ae6ebb5b2a6"
           }
         },
-        "scope_catalog_digest": "3cce5f595d838d988e422199df8346359bebe5910811d98f88c94dcfe013f265",
+        "scope_catalog_digest": "d94c6ea490ad01b4e25f5c308a5735a9b35345494506ea8c6ed8deb1a69bfeb0",
         "current_key_set": "EXACT_MATCH_TO_FORMAL_SCOPE_CONTRACT_REQUIRED_KEYS",
         "accepted_scope_or_contract_mismatch": "RANGE_REPAIR_REQUIRED",
         "accepted_key_set_mismatch": "RANGE_REPAIR_REQUIRED",

@@ -54,7 +54,7 @@ _MAX_OFFSET = 2**31 - 1
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
-_PROFILE_CONTRACT_NAME = "STOCK_A_DAY_CHAIN_R10"
+_PROFILE_CONTRACT_NAME = "STOCK_A_DAY_CHAIN_R11"
 
 
 # 只登记运行代码当前实际提供的能力边界。阶段名称、输入、产物和消费者始终来自机器合同。

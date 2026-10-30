@@ -22,6 +22,7 @@ from stock_a.application.source_set_candidate import (
 from stock_a.contracts import LoadedDayChainContract, load_day_chain_contract
 from stock_a.storage.postgres.identity import inspect_postgres
 from stock_a.storage.postgres import source_raw
+from stock_a.storage.postgres.source_set_ingress import inspect_p04_source_input
 
 
 class SourceIngressError(ValueError):
@@ -74,8 +75,8 @@ def _scope_revision_contract(
     )
 
 
-def _accepted_source_state(config: Mapping[str, Any]) -> tuple[bool, str]:
-    """只认正式封口关系；候选表本身不构成已接受前态。"""
+def _accepted_source_state(config: Mapping[str, Any]) -> tuple[bool | None, str]:
+    """仅在正式表不存在或都为空时声明首次观察；候选表不是接受前态。"""
     with source_raw._transaction(config, write=False) as (
         _connection,
         cursor,
@@ -83,31 +84,101 @@ def _accepted_source_state(config: Mapping[str, Any]) -> tuple[bool, str]:
     ):
         cursor.execute(
             """SELECT to_regclass('stock.source_sets')::text,
-                      to_regclass('stock.source_capabilities')::text,
+                      to_regclass('stock.source_set_capabilities')::text,
                       to_regclass('stock.source_set_candidates')::text"""
         )
         source_sets, source_capabilities, candidate_table = cursor.fetchone()
-    if source_sets is None and source_capabilities is None:
-        return (
-            True,
-            "stock.source_sets/source_capabilities不存在；candidate表不计为接受前态",
+        if source_sets is None and source_capabilities is None:
+            return (
+                True,
+                "stock.source_sets/source_set_capabilities不存在；candidate表不计为接受前态",
+            )
+        if source_sets is None or source_capabilities is None:
+            return (
+                None,
+                "正式source_set主表与能力表未成对存在；拒绝把不完整关系当首次或接受前态",
+            )
+        cursor.execute(
+            "SELECT EXISTS (SELECT 1 FROM stock.source_sets LIMIT 1), "
+            "EXISTS (SELECT 1 FROM stock.source_set_capabilities LIMIT 1)"
         )
+        source_set_has_rows, capability_has_rows = cursor.fetchone()
+        if not source_set_has_rows and not capability_has_rows:
+            return (
+                True,
+                "正式source_set与能力表都为空；candidate表不计为接受前态",
+            )
     return (
-        False,
-        "检测到正式封口关系，当前P00未实现其accepted-state精确读回，拒绝猜测前态",
+        None,
+        "正式来源集合已有记录但accepted-state精确读回schema尚未绑定；拒绝猜测首次运行或APPEND",
     )
+
+
+def _path_key(value: Any) -> str | None:
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        return str(Path(value).resolve(strict=True)).casefold()
+    except (OSError, RuntimeError, ValueError):
+        return None
 
 
 def _phase0_evidence(
     phase0_result: Mapping[str, Any] | None,
+    *,
+    config: Mapping[str, Any],
+    candidate: Mapping[str, Any],
 ) -> tuple[CapabilityEvidence, dict[str, Any]]:
+    """从真实读取证据投影SOURCE_INGRESS能力，不重写Phase0总体结论。"""
+    p04_pending = [
+        "SECURITY_ENTITY_AND_LIFECYCLE",
+        "OFFICIAL_TRADING_CALENDAR_AND_STATUS",
+    ]
+    source_policy = config.get("source_policy", {})
+    roots = (
+        source_policy.get("configured_tdx_source_roots")
+        if isinstance(source_policy, Mapping)
+        else None
+    )
+    exact_pg_source = (
+        isinstance(candidate.get("source_content_id"), str)
+        and isinstance(candidate.get("source_capture_id"), str)
+        and candidate.get("raw_row_count")
+        == candidate.get("capture_expected_row_count")
+        and candidate.get("read_failed_count") == 0
+        and candidate.get("raw_source_digest")
+        == candidate.get("capture_canonical_digest")
+    )
     if not isinstance(phase0_result, Mapping):
+        available = (
+            exact_pg_source
+            and source_policy.get("all_source_roots_read_only") is True
+            and isinstance(roots, list)
+            and len(roots) == 1
+        )
         return (
             CapabilityEvidence(
-                "UNKNOWN", None, {"reason": "本次调用没有实时阶段0结果"}
+                "READY" if available else "UNKNOWN",
+                "source-ingress-pg-facts:" + str(candidate.get("candidate_sha256"))
+                if available
+                else None,
+                {
+                    "scope": "SOURCE_INGRESS",
+                    "evidence_type": "EXACT_PG_CONTENT_CAPTURE_RAW",
+                    "full_phase0_status": "NOT_SCANNED_BY_READ_ONLY_API",
+                    "p04_pending": p04_pending,
+                },
             ),
-            {"status": "NOT_RUN", "digest": None},
+            {
+                "status": "NOT_RUN",
+                "scope_status": "SOURCE_INGRESS_READY" if available else "UNKNOWN",
+                "scope": "SOURCE_INGRESS",
+                "digest": None,
+                "p04_pending": p04_pending,
+                "full_phase0_rewritten": False,
+            },
         )
+
     status = phase0_result.get("status")
     if status not in {"FULL_PASS", "DEGRADED_PASS", "BLOCKED"}:
         raise SourceIngressError("阶段0输入必须是真实来源检查结果")
@@ -120,14 +191,109 @@ def _phase0_evidence(
             default=str,
         ).encode("utf-8")
     ).hexdigest()
+    report_root = _path_key(phase0_result.get("source_root_final_path"))
+    configured_root = (
+        _path_key(roots[0]) if isinstance(roots, list) and len(roots) == 1 else None
+    )
+    markets = phase0_result.get("market_directories")
+    sampled_reads_valid = isinstance(markets, Mapping) and set(markets) == {
+        "sh",
+        "sz",
+        "bj",
+    }
+    if sampled_reads_valid:
+        for market in ("sh", "sz", "bj"):
+            market_row = markets[market]
+            sample = (
+                market_row.get("sample") if isinstance(market_row, Mapping) else None
+            )
+            identity = (
+                sample.get("source_identity") if isinstance(sample, Mapping) else None
+            )
+            sampled_reads_valid = bool(
+                sampled_reads_valid
+                and isinstance(market_row, Mapping)
+                and market_row.get("scope_complete") is True
+                and isinstance(sample, Mapping)
+                and isinstance(identity, Mapping)
+                and identity.get("path_binding_verified") is True
+                and identity.get("handle_path_verified") is True
+                and isinstance(sample.get("raw_byte_sha256"), str)
+                and len(sample["raw_byte_sha256"]) == 64
+                and bool(sample.get("read_started_at"))
+                and bool(sample.get("read_completed_at"))
+            )
+    scope_ready = (
+        exact_pg_source
+        and source_policy.get("all_source_roots_read_only") is True
+        and report_root is not None
+        and report_root == configured_root
+        and sampled_reads_valid
+    )
+    blockers = [
+        item.get("capability")
+        for item in phase0_result.get("capabilities", ())
+        if isinstance(item, Mapping)
+        and item.get("required") is True
+        and item.get("status") not in {"FULL_PASS", "DEGRADED_PASS"}
+    ]
     return (
         CapabilityEvidence(
-            "READY" if status in {"FULL_PASS", "DEGRADED_PASS"} else "DENY",
-            f"source-phase0:{status}:{digest}",
-            {"status": status, "digest": digest},
+            "READY" if scope_ready else "DENY",
+            f"source-ingress-phase0-projection:{digest}" if scope_ready else None,
+            {
+                "scope": "SOURCE_INGRESS",
+                "evidence_type": "PHASE0_PATH_READ_AND_EXACT_PG_SOURCE_FACTS",
+                "full_phase0_status": status,
+                "full_phase0_digest": digest,
+                "full_phase0_blocked_capabilities": blockers,
+                "p04_pending": p04_pending,
+                "field_unit_admission_is_separate": True,
+            },
         ),
-        {"status": status, "digest": digest},
+        {
+            "status": status,
+            "scope_status": "SOURCE_INGRESS_READY" if scope_ready else "BLOCKED",
+            "scope": "SOURCE_INGRESS",
+            "digest": digest,
+            "p04_pending": p04_pending,
+            "full_phase0_rewritten": False,
+        },
     )
+
+
+def _durability_evidence(config: Mapping[str, Any]) -> dict[str, Any]:
+    """读取PG提交时间可追溯性；不以created_at或读取时钟代填。"""
+    with source_raw._transaction(config, write=False) as (
+        _connection,
+        cursor,
+        _namespace,
+    ):
+        cursor.execute(
+            """SELECT current_setting('track_commit_timestamp'),
+                      current_setting('synchronous_commit'),
+                      current_setting('fsync')"""
+        )
+        track_commit_timestamp, synchronous_commit, fsync = cursor.fetchone()
+    if track_commit_timestamp != "on":
+        return {
+            "status": "NOT_PROVABLE",
+            "durable_at": None,
+            "method": "PG_COMMIT_TIMESTAMP_DISABLED",
+            "track_commit_timestamp": track_commit_timestamp,
+            "synchronous_commit": synchronous_commit,
+            "fsync": fsync,
+            "reason_code": "PG_COMMIT_TIME_NOT_RECORDED",
+        }
+    return {
+        "status": "NOT_PROVABLE",
+        "durable_at": None,
+        "method": "PG_ROW_COMMIT_BINDING_NOT_VERIFIED",
+        "track_commit_timestamp": track_commit_timestamp,
+        "synchronous_commit": synchronous_commit,
+        "fsync": fsync,
+        "reason_code": "PG_ROW_COMMIT_BINDING_NOT_VERIFIED",
+    }
 
 
 def calculate_baostock_capability(
@@ -209,24 +375,31 @@ def build_source_ingress_plan(
     candidate = candidate_result["candidate"]
     bao_policy = config["source_policy"]["baostock_supplement"]
     bao_policy_sha256 = _canonical_sha256(bao_policy)
-    seal_blockers = []
-    if candidate.get("source_available_at") is None:
-        seal_blockers.append("SOURCE_AVAILABLE_AT_UNKNOWN")
-    if candidate.get("source_time_quality") != "VERIFIED_SOURCE_TIME":
-        seal_blockers.append("SOURCE_TIME_NOT_VERIFIED")
-    for family, input_row in zip(
-        ("PRICE", "AMOUNT", "VOLUME"), candidate["inputs"][3:6], strict=True
-    ):
-        if input_row.get("unit_status") == "UNIT_UNVERIFIED":
-            seal_blockers.append(f"{family}_UNIT_UNVERIFIED")
-    seal_blockers.append("FORMAL_P03_CONSUMER_NOT_CONNECTED")
     source_state_absent, accepted_state_reason = _accepted_source_state(config)
+    if source_state_absent is None:
+        raise SourceIngressError(accepted_state_reason)
+    p04_source_input = inspect_p04_source_input(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+    )
+    durability = _durability_evidence(config)
+    seal_blockers = []
+    if durability["status"] != "VERIFIED":
+        seal_blockers.append("DURABLE_AT_NOT_PROVABLE")
+    if p04_source_input["status"] == "P04_INGRESS_READER_NOT_CONNECTED":
+        seal_blockers.append("P04_INGRESS_READER_NOT_CONNECTED")
+    seal_blockers.append("P02_EVIDENCE_NOT_PERSISTED_WITH_PLAN_POLICY_BINDING")
+    if p04_source_input["status"] not in {"AVAILABLE", "NO_MATCH"}:
+        seal_blockers.append("FORMAL_SOURCE_SET_STORAGE_NOT_CONNECTED")
     pg_identity = inspect_postgres(config, timeout_seconds=5)
     contract = load_day_chain_contract(Path(config["paths"]["configuration_root"]))
     scope = contract["scope_bindings"].get("SOURCE_INGRESS")
     if not isinstance(scope, Mapping):
         raise SourceIngressError("已装配机器合同缺少SOURCE_INGRESS")
-    phase0_capability, phase0_summary = _phase0_evidence(phase0_result)
+    phase0_capability, phase0_summary = _phase0_evidence(
+        phase0_result, config=config, candidate=candidate
+    )
     sessions = _calendar_sessions(target_session, calendar["calendar_sha256"])
     target = target_session.isoformat()
     scope_contract = _scope_revision_contract(contract, "SOURCE_INGRESS")
@@ -255,7 +428,12 @@ def build_source_ingress_plan(
         "ext.accepted_state_catalog": CapabilityEvidence(
             "READY" if source_state_absent else "UNKNOWN",
             "stock_catalog:SOURCE_INGRESS",
-            {"first_run": source_state_absent, "reason": accepted_state_reason},
+            {
+                "status": "FIRST_OBSERVATION"
+                if source_state_absent
+                else "ACCEPTED_STATE_UNVERIFIED",
+                "reason": accepted_state_reason,
+            },
         ),
         "ext.contract_registry": CapabilityEvidence(
             "READY",
@@ -282,7 +460,11 @@ def build_source_ingress_plan(
         "accepted_state_catalog": CapabilityEvidence(
             "READY" if source_state_absent else "UNKNOWN",
             "stock_catalog:SOURCE_INGRESS",
-            {"first_run": source_state_absent},
+            {
+                "status": "FIRST_OBSERVATION"
+                if source_state_absent
+                else "ACCEPTED_STATE_UNVERIFIED"
+            },
         ),
         "contract_registry": CapabilityEvidence(
             "READY", "day-chain.contract.json:" + contract.assembled_sha256, {}
@@ -305,7 +487,7 @@ def build_source_ingress_plan(
                 "storage_location_status": "USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED",
             },
         ),
-        "source_phase0": phase0_capability,
+        "source_scope_evidence": phase0_capability,
         "readonly_source_roots": CapabilityEvidence(
             "READY"
             if config["source_policy"].get("all_source_roots_read_only") is True
@@ -325,6 +507,7 @@ def build_source_ingress_plan(
         "previous_accepted_context": {
             "first_run": source_state_absent,
             "accepted_state_reason": accepted_state_reason,
+            "accepted_state_status": "FIRST_OBSERVATION",
         },
         "required_owner_roles": owner_ids,
         "required_field_contracts": field_ids,
@@ -424,6 +607,11 @@ def build_source_ingress_plan(
             "candidate_ready": plan.candidate_ready,
             "reason_codes": list(plan.reason_codes),
         },
+        "plan_record_kind": "PREVIEW_COMPUTED_PLAN",
+        "source_scope_status": "SOURCE_INGRESS_READY"
+        if plan_result.environment_gate.status == "READY"
+        else "SOURCE_INGRESS_BLOCKED",
+        "p04_scope_status": "P04_PENDING",
         "environment_gate": {
             "status": plan_result.environment_gate.status,
             "reason_codes": list(plan_result.environment_gate.reason_codes),
@@ -452,8 +640,49 @@ def build_source_ingress_plan(
             "candidate_sha256": source_digest,
             "formal_source_seal": "BLOCKED" if seal_blockers else "READY",
             "formal_source_seal_blockers": seal_blockers,
+            "non_pit_source_facts": "AVAILABLE_NON_PIT_RESEARCH_ONLY",
+            "strict_pit_qualification": "BLOCKED",
+            "strict_pit_blockers": [
+                reason
+                for reason, blocked in (
+                    (
+                        "SOURCE_AVAILABLE_AT_UNKNOWN",
+                        candidate["source_available_at"] is None,
+                    ),
+                    (
+                        "SOURCE_TIME_NOT_VERIFIED",
+                        candidate["source_time_quality"] != "VERIFIED_SOURCE_TIME",
+                    ),
+                    ("DURABLE_AT_NOT_PROVABLE", durability["status"] != "VERIFIED"),
+                )
+                if blocked
+            ],
+            "durability_evidence": durability,
+            "field_admission": {
+                "PRICE": {
+                    "status": "RAW_UNADJUSTED_NON_PIT",
+                    "observed_rows": candidate["inputs"][3][
+                        "normalized_observed_count"
+                    ],
+                    "unknown_rows": candidate["inputs"][3]["normalized_unknown_count"],
+                    "unit_status": candidate["inputs"][3]["unit_status"],
+                },
+                "AMOUNT": {
+                    "status": "UNIT_UNVERIFIED_NORMALIZED_FACTOR_BLOCKED",
+                    "unit_status": candidate["inputs"][4]["unit_status"],
+                },
+                "VOLUME": {
+                    "status": "UNIT_UNVERIFIED_NORMALIZED_FACTOR_BLOCKED",
+                    "unit_status": candidate["inputs"][5]["unit_status"],
+                },
+            },
+            "p04_input": p04_source_input,
         },
-        "p02_baostock": bao,
+        "p02_baostock": {
+            **bao,
+            "record_kind": "PREVIEW_COMPUTED_CAPABILITY_ACCOUNTING",
+            "formal_candidate_binding": "NOT_PERSISTED_WITH_PLAN_POLICY_BINDING",
+        },
         "build_identity": {
             "application_id": config["application_identity"]["application_id"],
             "package_version": __version__,
@@ -461,11 +690,13 @@ def build_source_ingress_plan(
         "phase0": phase0_summary,
         "accepted_state": {
             "first_run": source_state_absent,
+            "status": "FIRST_OBSERVATION",
             "reason": accepted_state_reason,
         },
         "database_write_attempted": False,
         "network_accessed": False,
-        "p04_required_for_p03": False,
+        "p04_identity_and_strict_pit_required_for_p03": False,
+        "p04_source_set_reader_required_for_formal_p03": True,
         "strict_pit_required_for_candidate_p03": False,
         "formal_source_seal": {
             "status": "BLOCKED" if seal_blockers else "READY",

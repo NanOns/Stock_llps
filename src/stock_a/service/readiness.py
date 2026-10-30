@@ -276,9 +276,10 @@ def build_chain_readiness_payload(
                     "producer": "stock_a.application.source_ingress.build_source_ingress_plan → stock_a.application.planning.assemble_day_plan",
                     "consumer": "source-ingress-plan CLI、GET /api/preview/chain-readiness、预览页",
                     "status_reason": (
+                        f"{source_ingress_result.get('plan_record_kind', 'PREVIEW_COMPUTED_PLAN')}："
                         f"精确版本P00计划={plan.get('mode')}，摘要={plan.get('plan_sha256')}；"
                         f"环境门={gate_status}，原因={','.join(gate.get('reason_codes', [])) or '无'}。"
-                        "计划不会执行P01至P03。"
+                        "该计划未持久接受，计划本身不会执行P01至P03。"
                     ),
                 }
             )
@@ -296,32 +297,45 @@ def build_chain_readiness_payload(
                         f"本日期Bao策略={bao.get('status')}，实际登录/查询="
                         f"{bao.get('actual_requests', {}).get('logins', 0)}/"
                         f"{bao.get('actual_requests', {}).get('queries', 0)}；能力保持"
-                        f"{bao.get('capability', 'UNKNOWN')}，零请求且可选补充不阻断Core。"
+                        f"{bao.get('capability', 'UNKNOWN')}，零请求且可选补充不阻断Core；"
+                        f"{bao.get('record_kind', 'PREVIEW_COMPUTED_CAPABILITY_ACCOUNTING')}。"
                     ),
                 }
             )
         if stage_id == "P03" and candidate_status == "AVAILABLE":
             candidate = source_set_candidate.get("candidate", {})
-            capability["status_reason"] = (
-                f"存在精确绑定本日期与来源包SHA的P03来源集合候选（摘要{candidate.get('candidate_sha256', '未知')}）；"
-                "其状态为NON_PIT候选；正式封口仍取决于来源时钟、质量、单位与正式消费者。"
-            )
+            p02_binding = source_set_candidate.get("p02_binding", {})
             if isinstance(source_ingress_result, Mapping):
+                ingress_capture = source_ingress_result.get("p01_capture", {})
+                blockers = ingress_capture.get("formal_source_seal_blockers", [])
+                p04_input = ingress_capture.get("p04_input", {})
                 capability.update(
                     {
                         "implementation_level": "PG_CANDIDATE",
                         "data_status": "AVAILABLE_CANDIDATE",
-                        "consumer_status": "CONNECTED_PREVIEW",
+                        "consumer_status": "NOT_CONNECTED",
+                        "candidate_consumer_status": "CONNECTED_PREVIEW",
                         "evidence_type": "REAL_PG_NON_PIT_CANDIDATE",
                         "producer": "stock_a.storage.postgres.source_set_candidate.persist_source_set_candidate",
-                        "consumer": "精确候选目录、只读准备状态API与预览页",
+                        "consumer": "P04正式source_set输入读取；当前未接通，候选仅供只读诊断",
+                        "formal_source_set_status": ingress_capture.get(
+                            "formal_source_seal", "BLOCKED"
+                        ),
+                        "p04_input_status": p04_input.get(
+                            "status", "P04_INGRESS_READER_NOT_CONNECTED"
+                        ),
+                        "p02_binding_status": p02_binding.get(
+                            "status", "NOT_BOUND_TO_P00_PLAN_OR_POLICY"
+                        ),
+                        "status_reason": (
+                            f"只读候选摘要{candidate.get('candidate_sha256', '未知')}；"
+                            "NON_PIT价格Raw事实可供受限后验研究。source_available_at未知只阻断严格PIT；"
+                            "量额单位未知只阻断相应规范化字段。正式seal仍被"
+                            f"{','.join(blockers) or '未确认前置'}阻断；"
+                            f"旧候选P02绑定={p02_binding.get('status', 'NOT_BOUND_TO_P00_PLAN_OR_POLICY')}。"
+                        ),
                     }
                 )
-        if stage_id == "P03" and isinstance(source_ingress_result, Mapping):
-            capability["status_reason"] += (
-                " 正式NON_PIT来源封口仍受source_available_at为空及金额/数量单位未验证阻断；"
-                "P04稳定身份和严格PIT不是P03候选持久化前置。"
-            )
         prior_inputs = [
             {
                 key: item[key]
