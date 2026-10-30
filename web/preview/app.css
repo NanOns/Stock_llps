@@ -376,6 +376,35 @@ button {
   background: #fff0ee;
   color: #8a3024;
 }
+.source-set-candidate {
+  margin-top: 11px;
+  padding: 10px 12px;
+  border: 1px solid #dfe7ec;
+  border-radius: 8px;
+  overflow-wrap: anywhere;
+}
+.source-set-candidate h3 {
+  margin: 0 0 7px;
+  font-size: 15px;
+}
+.candidate-status {
+  margin: 0;
+  color: #315a48;
+  font-weight: 600;
+}
+.candidate-facts {
+  margin-bottom: 0;
+}
+.candidate-inputs {
+  margin: 8px 0 0;
+  padding-left: 20px;
+  color: #526977;
+  font-size: 12px;
+}
+.candidate-inputs li {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
 .chain-overview {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));

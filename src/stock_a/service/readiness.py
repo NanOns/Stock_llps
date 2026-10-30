@@ -166,6 +166,7 @@ def build_chain_readiness_payload(
     source_version: Mapping[str, Any],
     *,
     checked_at: str,
+    source_set_candidate: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """将唯一机器合同和本次精确PG证据组合为只读准备状态。"""
     stages = contract.get("stages")
@@ -209,6 +210,11 @@ def build_chain_readiness_payload(
         "真实捕获及来源代码级Raw观察之后，正式来源封口source_set尚无已接通生产者；"
         "正式Canonical链从P03开始断开。来源观察自身的完整性单独显示，不改变此正式首断点。"
     )
+    candidate_status = (
+        source_set_candidate.get("status", "NO_MATCH")
+        if isinstance(source_set_candidate, Mapping)
+        else "NO_MATCH"
+    )
 
     stage_rows: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
@@ -238,6 +244,12 @@ def build_chain_readiness_payload(
                     else f"PG精确读取到{source_version['stored_row_count']}/{source_version['capture_expected_row_count']}条来源代码观察；"
                     "当前版本为PARTIAL或含READ_FAILED，且这些观察仍不等于正式identity/universe下的raw_bars。"
                 )
+        if stage_id == "P03" and candidate_status == "AVAILABLE":
+            candidate = source_set_candidate.get("candidate", {})
+            capability["status_reason"] = (
+                f"存在精确绑定本日期与来源包SHA的P03来源集合候选（摘要{candidate.get('candidate_sha256', '未知')}）；"
+                "其状态为NON_PIT候选，Bao/稳定身份/真实PIT等正式前置仍未接通，正式P03保持未接通。"
+            )
         prior_inputs = [
             {
                 key: item[key]
@@ -339,6 +351,9 @@ def build_chain_readiness_payload(
         "day_chain_complete": False,
         "official_listing_population": "UNKNOWN_NOT_CONNECTED",
         "source_version": dict(source_version),
+        "source_set_candidate": dict(
+            source_set_candidate or {"status": "NO_MATCH", "candidate": None}
+        ),
         "source_observations": {
             "status": source_data_status,
             "version_status": source_version["version_status"],

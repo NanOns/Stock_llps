@@ -33,6 +33,10 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_stock,
     read_raw_daily_history_stock,
 )
+from stock_a.storage.postgres.source_set_candidate import (
+    SourceSetCandidatePgError,
+    read_source_set_candidate,
+)
 from stock_a.research import core as research_core
 from stock_a.research import entry as research_entry
 
@@ -441,6 +445,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 status = 503
             self._error(PreviewHttpError(status, error.code, str(error)))
             return
+        if isinstance(error, SourceSetCandidatePgError):
+            self._error(PreviewHttpError(503, error.code, str(error)))
+            return
         if isinstance(error, DiagnosticError):
             status = 400 if error.code.endswith("INVALID") else 503
             self._error(PreviewHttpError(status, error.code, str(error)))
@@ -560,6 +567,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     target_session=target,
                     package_sha256=package_sha,
                 )
+                source_candidate = read_source_set_candidate(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    package_sha256=package_sha,
+                )
                 if source_version["status"] == "EMPTY":
                     raise PreviewHttpError(
                         404,
@@ -571,6 +583,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.profile_contract,
                     source_version,
                     checked_at=checked_at,
+                    source_set_candidate=source_candidate,
                 )
                 self._send_json(200, payload)
                 return

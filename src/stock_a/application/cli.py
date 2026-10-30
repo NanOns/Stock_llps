@@ -71,6 +71,12 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_history_stock,
     read_raw_daily_stock,
 )
+from stock_a.application.source_set_candidate import (
+    SourceSetCandidateApplicationError,
+    prepare_source_set_candidate,
+    read_source_set_candidate,
+)
+from stock_a.storage.postgres.source_set_candidate import SourceSetCandidatePgError
 from stock_a.research.entry import (
     CompareBudget,
     ResearchEntryError,
@@ -832,6 +838,33 @@ def _parser() -> argparse.ArgumentParser:
     raw_catalog.add_argument("--offset", type=int, default=0, help="版本页偏移，默认0")
     raw_catalog.add_argument(
         "--limit", type=int, default=100, help="每页版本数，默认100，最多200"
+    )
+    source_set = commands.add_parser(
+        "source-set-candidate",
+        help="按精确日期与TDX包SHA预检或读取P03来源集合候选",
+    )
+    source_set.add_argument(
+        "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
+    )
+    source_set.add_argument(
+        "--package-sha256", required=True, help="完整TDX来源包SHA-256"
+    )
+    source_set.add_argument(
+        "--persist", action="store_true", help="持久化本批授权的非PIT候选"
+    )
+    source_set.add_argument(
+        "--task-scope",
+        choices=("R01_R02_P03_SOURCE_SET_BROWSER_RULE_R1",),
+        help="持久化必须显式绑定唯一任务范围",
+    )
+    source_set_catalog = commands.add_parser(
+        "source-set-catalog", help="按精确日期与TDX包SHA只读查询P03来源集合候选"
+    )
+    source_set_catalog.add_argument(
+        "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
+    )
+    source_set_catalog.add_argument(
+        "--package-sha256", required=True, help="完整TDX来源包SHA-256"
     )
     preview_serve = commands.add_parser(
         "preview-serve",
@@ -2111,6 +2144,92 @@ def _run_source_raw_catalog(args: argparse.Namespace) -> int:
     )
     _emit(result)
     return _EXIT_OK
+
+
+def _parse_source_set_date(value: str) -> date:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) is None
+    ):
+        raise DiagnosticError(
+            "TARGET_SESSION_INVALID",
+            "目标交易会话必须使用YYYY-MM-DD格式",
+            _EXIT_ARGUMENT,
+        )
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError as error:
+        raise DiagnosticError(
+            "TARGET_SESSION_INVALID", "目标交易会话不是有效日期", _EXIT_ARGUMENT
+        ) from error
+    if parsed.isoformat() != value:
+        raise DiagnosticError(
+            "TARGET_SESSION_INVALID",
+            "目标交易会话必须使用标准ISO日期",
+            _EXIT_ARGUMENT,
+        )
+    return parsed
+
+
+def _run_source_set_candidate(args: argparse.Namespace, *, read_only: bool) -> int:
+    config, config_path = _load_runtime_config()
+    target_session = _parse_source_set_date(args.target_session)
+    try:
+        if read_only:
+            result = read_source_set_candidate(
+                config,
+                target_session=target_session,
+                package_sha256=args.package_sha256,
+            )
+        else:
+            if (
+                args.persist
+                and args.task_scope != "R01_R02_P03_SOURCE_SET_BROWSER_RULE_R1"
+            ):
+                raise DiagnosticError(
+                    "TASK_SCOPE_REQUIRED",
+                    "持久化必须显式提供本批唯一授权任务范围",
+                    _EXIT_PERMISSION,
+                )
+            if not args.persist and args.task_scope is not None:
+                raise DiagnosticError(
+                    "TASK_SCOPE_UNEXPECTED",
+                    "只读预检不得附带PG写入任务范围",
+                    _EXIT_ARGUMENT,
+                )
+            result = prepare_source_set_candidate(
+                config,
+                target_session=target_session,
+                package_sha256=args.package_sha256,
+                persist=args.persist,
+                task_scope=args.task_scope,
+            )
+    except (SourceSetCandidateApplicationError, SourceSetCandidatePgError) as error:
+        code = getattr(error, "code", "SOURCE_SET_CANDIDATE_REJECTED")
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "dml_executed": False,
+                "ddl_executed": False,
+            },
+            error=True,
+        )
+        return _EXIT_ARGUMENT if code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    result.update(
+        {
+            "ok": result.get("status") not in {"NO_MATCH", "REJECTED"},
+            "analysis_scope": "P03_SOURCE_SET_CANDIDATE_NON_PIT",
+            "configuration_path": str(config_path),
+            "database_write": bool(result.get("dml_executed", False)),
+            "formal_p03_complete": False,
+        }
+    )
+    _emit(result)
+    return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
 
 
 def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
@@ -4541,6 +4660,10 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_vipdata_persist(args)
         if args.command == "source-raw-catalog":
             return _run_source_raw_catalog(args)
+        if args.command == "source-set-candidate":
+            return _run_source_set_candidate(args, read_only=False)
+        if args.command == "source-set-catalog":
+            return _run_source_set_candidate(args, read_only=True)
         if args.command == "preview-serve":
             from stock_a.service.preview_http import run_preview_server
 

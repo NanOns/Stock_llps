@@ -134,6 +134,7 @@ function clearChainReadiness(message) {
   $("chainState").className = "chain-state";
   $("chainState").textContent = message;
   $("chainChecked").textContent = "尚未查询";
+  $("sourceSetCandidate").textContent = "等待精确日期与包版本查询。";
   $("chainOverview").replaceChildren();
   $("chainGroups").replaceChildren();
 }
@@ -143,6 +144,79 @@ function readinessDetail(parent, label, value) {
   const dd = document.createElement("dd");
   dd.textContent = value;
   parent.append(dt, dd);
+}
+function renderSourceSetCandidate(data) {
+  const root = $("sourceSetCandidate");
+  root.replaceChildren();
+  const candidate = data.source_set_candidate?.candidate;
+  if (!candidate) {
+    appendText(
+      root,
+      "p",
+      "该精确日期与TDX包SHA没有已持久化来源集合候选；正式P03仍未接通。",
+    );
+    return;
+  }
+  appendText(
+    root,
+    "p",
+    `候选已保存 · ${candidate.target_session} · ${candidate.candidate_status}；正式P03=${candidate.formal_p03_status}，Foundation未完成。`,
+    "candidate-status",
+  );
+  const details = document.createElement("details");
+  details.className = "candidate-details";
+  appendText(
+    details,
+    "summary",
+    `查看真实来源身份、质量分母与输入引用（${candidate.input_count}项）`,
+  );
+  const facts = [
+    ["来源包SHA", candidate.package_sha256],
+    ["PG内容身份", candidate.source_content_id],
+    ["真实捕获UUID", candidate.source_capture_id],
+    [
+      "来源捕获时钟",
+      `${candidate.capture_read_started_at} → ${candidate.capture_validated_at}`,
+    ],
+    ["来源真实可得时间", candidate.source_available_at || "未知（未填充）"],
+    [
+      "时钟质量 / 角色",
+      `${candidate.source_time_quality} · ${candidate.source_clock_role}`,
+    ],
+    [
+      "Raw分母与状态",
+      `${candidate.raw_row_count}/${candidate.capture_expected_row_count}；有Bar ${candidate.target_present_count} / 缺Bar ${candidate.target_missing_count} / 失败 ${candidate.read_failed_count}`,
+    ],
+    [
+      "Raw / 捕获摘要",
+      `${candidate.raw_source_digest} / ${candidate.capture_canonical_digest}`,
+    ],
+    [
+      "字段质量单位状态",
+      `价格 RAW_UNADJUSTED；金额 ${candidate.inputs[4].unit_status}；数量 ${candidate.inputs[5].unit_status}`,
+    ],
+    [
+      "候选摘要 / 日历",
+      `${candidate.candidate_sha256} · ${candidate.calendar_revision} (${candidate.calendar_sha256})`,
+    ],
+    ["身份 / PIT", `${candidate.identity_status} · ${candidate.pit_status}`],
+  ];
+  const list = document.createElement("dl");
+  list.className = "candidate-facts";
+  for (const [label, value] of facts)
+    readinessDetail(list, label, String(value));
+  details.append(list);
+  const inputs = document.createElement("ul");
+  inputs.className = "candidate-inputs";
+  for (const input of candidate.inputs) {
+    const description =
+      input.input_role === "BAOSTOCK_CAPABILITY"
+        ? "BaoStock未请求；无虚构捕获或内容身份。"
+        : `${input.input_role}${input.field_family ? ` · ${input.field_family}` : ""} · ${input.input_status}${input.evidence_sha256 ? ` · ${input.evidence_sha256}` : ""}`;
+    appendText(inputs, "li", description);
+  }
+  details.append(inputs);
+  root.append(details);
 }
 function renderReadiness(data) {
   const v = data.source_version,
@@ -164,6 +238,7 @@ function renderReadiness(data) {
     `${chainDetail} 来源候选数 ≠ 官方有效上市证券数。`,
   ].join("");
   $("chainChecked").textContent = `只读核查 ${data.checked_at}`;
+  renderSourceSetCandidate(data);
   const stats = [
     ["PG与来源命名空间", `stock_a.stock · ${v.namespace_id}`],
     ["当前最高可用范围", data.highest_available_scope],

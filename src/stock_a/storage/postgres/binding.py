@@ -36,10 +36,17 @@ _MIGRATIONS = (
         ("migrations", "0004_r01_source_raw_daily.sql"),
         "6b14004deb034e2441fb0ec2288aa46c980f808dc27d02ce2dcb34fe1ca8eed4",
     ),
+    (
+        5,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0005_r01_p03_source_set_candidate.sql"),
+        "cb069824c9c41144d10e4e78cc3b2d18c615c18f8a8c0132d74a902410ba29ba",
+    ),
 )
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
     "R01_R02_SOURCE_RAW_PG_DAILY_READ_R1": frozenset({4}),
+    "R01_R02_P03_SOURCE_SET_BROWSER_RULE_R1": frozenset({5}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -59,6 +66,12 @@ _RELATIONS_BY_MIGRATION_COUNT = {
     2: _BASE_TABLES,
     3: _R01_TABLES,
     4: _R01_TABLES | {"source_raw_daily"},
+    5: _R01_TABLES
+    | {
+        "source_raw_daily",
+        "source_set_candidates",
+        "source_set_candidate_inputs",
+    },
 }
 
 
