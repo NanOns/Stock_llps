@@ -1609,6 +1609,8 @@ def _build_profile_preview(
     core: dict[str, FieldValue],
     calendar_revision: str,
     contract: dict[str, Any],
+    source_snapshot_id: str | None = None,
+    source_snapshot_role: str = "LOCAL_FILE_SNAPSHOT_ID_NOT_CAPTURED_AVAILABLE_AT",
 ) -> dict[str, Any]:
     """把本次真实Raw/Core读取接到既有规则；显式限于未复权NON_PIT预览。"""
     if not isinstance(contract, dict):
@@ -1634,7 +1636,7 @@ def _build_profile_preview(
     entry_sha = _profile_preview_source_digest(Path(__file__), "_build_profile_preview")
     normalized = _normalize_symbol(symbol)[0]
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
-    snapshot_id = "TDX_LOCAL_FILE_SNAPSHOT_SHA256:" + source_sha256
+    snapshot_id = source_snapshot_id or "TDX_LOCAL_FILE_SNAPSHOT_SHA256:" + source_sha256
     target_close = target_bar.raw_close if target_bar is not None else unknown("TARGET_BAR_MISSING")
 
     components: list[dict[str, Any]] = []
@@ -1831,7 +1833,7 @@ def _build_profile_preview(
         "source": {
             "raw_byte_sha256": source_sha256,
             "source_cutoff_id": snapshot_id,
-            "source_cutoff_role": "LOCAL_FILE_SNAPSHOT_ID_NOT_CAPTURED_AVAILABLE_AT",
+            "source_cutoff_role": source_snapshot_role,
             "local_read_clock_is_historical_availability": False,
         },
         "production_profile_entry": {
@@ -3050,3 +3052,369 @@ def research_universe_preview(
     if profile_preview_denominators is not None:
         result["profile_preview_denominators"] = profile_preview_denominators
     return result
+
+
+def _field_from_pg_raw(row: Mapping[str, Any], name: str, quality_column: str,
+                       reason_column: str, *, raw_quality: bool = False) -> FieldValue:
+    value = row.get(name)
+    quality = row.get(quality_column)
+    if quality in ({"RAW_SOURCE_VALUE_OBSERVED", "OBSERVED"} if raw_quality else {"OBSERVED"}) and value is not None:
+        return FieldValue(value)
+    reason = row.get(reason_column)
+    if not isinstance(reason, str) or not reason:
+        reason = "PG_RAW_VALUE_NOT_OBSERVED"
+    return unknown(reason)
+
+
+def _decoded_day_from_pg_raw(row: Mapping[str, Any]) -> DecodedDay | None:
+    if row.get("bar_status") != "TARGET_PRESENT":
+        return None
+    session = row.get("session_date")
+    if type(session) is not date:
+        raise ResearchEntryError("PG_RAW_SESSION_INVALID", "PG来源Raw行缺少date会话")
+    fields = tuple(
+        _field_from_pg_raw(row, column, "price_quality", "price_reason")
+        for column in ("raw_open", "raw_high", "raw_low", "raw_close")
+    )
+    if all(item.quality == "OBSERVED" for item in fields):
+        prices = FieldValue(tuple(item.value for item in fields))
+    else:
+        prices = unknown(next((item.reason for item in fields if item.quality != "OBSERVED"), "PRICE_QUALITY_UNKNOWN"))
+    raw_amount = _field_from_pg_raw(
+        row, "raw_amount", "raw_amount_quality", "raw_amount_reason", raw_quality=True,
+    )
+    raw_volume = _field_from_pg_raw(
+        row, "raw_volume", "raw_volume_quality", "raw_volume_reason", raw_quality=True,
+    )
+    amount = (unknown("UNIT_AUTHORITY_NOT_VERIFIED") if raw_amount.quality == "OBSERVED"
+              else unknown(raw_amount.reason or "DATA_INVALID_AMOUNT"))
+    volume = (unknown("UNIT_AUTHORITY_NOT_VERIFIED") if raw_volume.quality == "OBSERVED"
+              else unknown(raw_volume.reason or "DATA_INVALID_VOLUME"))
+    return DecodedDay(
+        session_date=session,
+        prices=prices,
+        raw_open=fields[0],
+        raw_high=fields[1],
+        raw_low=fields[2],
+        raw_close=fields[3],
+        amount=amount,
+        volume=volume,
+        reserved=0,
+        unit_version="TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1",
+        raw_amount=raw_amount,
+        raw_volume=raw_volume,
+    )
+
+
+def research_stock_pg_history_preview(
+    *,
+    symbol: str,
+    target_session: str,
+    package_sha256: str,
+    session_dates: Sequence[date],
+    history_rows: Sequence[Mapping[str, Any]],
+    namespace_id: str,
+    profile_contract: dict[str, Any],
+) -> dict[str, Any]:
+    """把明确PG Raw窗口适配至现役Core和Profile11研究预览。"""
+    target = _parse_target(target_session)
+    normalized = _normalize_symbol(symbol)[0]
+    if (not isinstance(package_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
+            or not isinstance(namespace_id, str) or not namespace_id):
+        raise ResearchEntryError("PG_HISTORY_BINDING_INVALID", "PG历史预览缺少包SHA或namespace身份")
+    calendar_payload, calendar_metadata, calendar_revision, all_calendar_sessions = _load_calendar(target)
+    coverage_context = calendar_metadata[-1]["coverage_context"]
+    expected_sessions = tuple(session_dates)
+    if (not expected_sessions or len(expected_sessions) > 75
+            or any(type(day) is not date for day in expected_sessions)
+            or tuple(sorted(set(expected_sessions))) != expected_sessions
+            or expected_sessions[-1] != target
+            or any(day not in all_calendar_sessions for day in expected_sessions)):
+        raise ResearchEntryError("PG_HISTORY_CALENDAR_INVALID", "PG历史窗口未与版本化官方日历严格绑定")
+
+    rows = tuple(history_rows)
+    if len(rows) != len(expected_sessions):
+        missing = sorted(set(expected_sessions) - {row.get("session_date") for row in rows})
+        return {
+            "ok": False,
+            "status": "HISTORY_WINDOW_INCOMPLETE",
+            "code": "PG_HISTORY_SESSION_MISSING",
+            "message": "PG历史窗口缺少明确交易会话",
+            "symbol": normalized,
+            "missing_sessions": [day.isoformat() for day in missing],
+            "expected_session_count": len(expected_sessions),
+            "actual_session_count": len(rows),
+        }
+    if any(row.get("source_symbol") != normalized or row.get("package_sha256") != package_sha256
+           or row.get("namespace_id") != namespace_id for row in rows):
+        raise ResearchEntryError("PG_HISTORY_REVISION_MISMATCH", "PG历史行混入不同来源代码、包SHA或namespace")
+    if tuple(row.get("session_date") for row in rows) != expected_sessions:
+        raise ResearchEntryError("PG_HISTORY_SESSION_ORDER_INVALID", "PG历史行会话与请求日历序列不一致")
+
+    target_row = rows[-1]
+    target_bar = _decoded_day_from_pg_raw(target_row)
+    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
+    history: list[CoreObservation] = []
+    status_counts = {"TARGET_PRESENT": 0, "TARGET_MISSING": 0, "READ_FAILED": 0}
+    price_quality_counts: dict[str, int] = {}
+    raw_amount_quality_counts: dict[str, int] = {}
+    raw_volume_quality_counts: dict[str, int] = {}
+    for row in rows:
+        state = row.get("bar_status")
+        status_counts[state] = status_counts.get(state, 0) + 1
+        for counter, key in (
+            (price_quality_counts, "price_quality"),
+            (raw_amount_quality_counts, "raw_amount_quality"),
+            (raw_volume_quality_counts, "raw_volume_quality"),
+        ):
+            quality = str(row.get(key) or "UNKNOWN")
+            counter[quality] = counter.get(quality, 0) + 1
+        if state == "TARGET_PRESENT":
+            decoded = _decoded_day_from_pg_raw(row)
+            assert decoded is not None
+            history.append(CoreObservation(
+                session=row["session_date"],
+                state="ACTUAL",
+                coordinate_id=coordinate_id,
+                open=decoded.raw_open,
+                high=decoded.raw_high,
+                low=decoded.raw_low,
+                close=decoded.raw_close,
+                amount=decoded.amount,
+                volume=decoded.volume,
+            ))
+        elif state in {"TARGET_MISSING", "READ_FAILED"}:
+            reason = row.get("bar_reason") or (
+                "TARGET_SESSION_BAR_MISSING" if state == "TARGET_MISSING" else "SOURCE_ENTRY_READ_FAILED"
+            )
+            history.append(CoreObservation(
+                session=row["session_date"],
+                state="UNKNOWN",
+                open=unknown(reason), high=unknown(reason), low=unknown(reason), close=unknown(reason),
+                amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+                volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+            ))
+        else:
+            raise ResearchEntryError("PG_HISTORY_STATUS_INVALID", "PG历史行含未登记的Raw来源状态")
+    if sum(status_counts.values()) != len(expected_sessions):
+        raise ResearchEntryError("PG_HISTORY_PARTITION_INCOMPLETE", "PG历史目标行状态分母未闭合")
+
+    bounded_calendar = MarketSessionCalendar(
+        calendar_id=calendar_payload["calendar_id"],
+        revision=calendar_revision,
+        sessions=expected_sessions,
+    )
+    core = calculate_core(tuple(history), official_calendar=bounded_calendar)
+    _apply_calendar_coverage_to_core(core, tuple(history), coverage_context)
+    rendered_core = {name: _render_field(value) for name, value in sorted(core.items())}
+    unknown_reasons: dict[str, int] = {}
+    for value in core.values():
+        if value.quality != "OBSERVED":
+            reason = value.reason or "UNKNOWN_REASON_NOT_PROVIDED"
+            unknown_reasons[reason] = unknown_reasons.get(reason, 0) + 1
+    if len(core) != 43:
+        raise ResearchEntryError("PG_CORE_FIELD_COUNT_INVALID", f"Core现役字段数异常：{len(core)}")
+
+    entry_shas = sorted({row.get("source_entry_sha256") for row in rows if row.get("source_entry_sha256")})
+    if len(entry_shas) > 1:
+        raise ResearchEntryError("PG_HISTORY_ENTRY_SHA_CONFLICT", "同包同来源代码的跨日条目SHA不一致")
+    captures_by_session = []
+    for row in rows:
+        captures_by_session.append({
+            "session_date": row["session_date"].isoformat(),
+            "source_capture_id": row["source_capture_id"],
+            "capture_digest": row["capture_digest"],
+            "capture_read_started_at": row["capture_read_started_at"].isoformat(),
+            "capture_validated_at": row["capture_validated_at"].isoformat(),
+            "capture_normalized_count": row["capture_normalized_count"],
+            "source_entry_sha256": row.get("source_entry_sha256"),
+        })
+
+    source_snapshot_id = f"STOCK_A_PG_RAW_HISTORY:{namespace_id}:{package_sha256}:{target.isoformat()}"
+    profile_preview = _build_profile_preview(
+        symbol=normalized,
+        target_session=target,
+        source_last_session=target,
+        source_sha256=package_sha256,
+        target_bar=target_bar,
+        history=tuple(history),
+        core=core,
+        calendar_revision=calendar_revision,
+        contract=profile_contract,
+        source_snapshot_id=source_snapshot_id,
+        source_snapshot_role="PG_CAPTURE_HISTORY_ID_NOT_CAPTURED_AVAILABLE_AT",
+    )
+    profile_components = profile_preview.get("components", [])
+    if len(profile_components) != 11:
+        raise ResearchEntryError("PG_PROFILE_RULE_COUNT_INVALID", "Profile现役规则数异常")
+    actual_bars = status_counts["TARGET_PRESENT"]
+    gaps = status_counts["TARGET_MISSING"] + status_counts["READ_FAILED"]
+    return {
+        "ok": True,
+        "contract": "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1",
+        "status": "RESEARCH_PREVIEW_NON_PIT",
+        "symbol": normalized,
+        "target_session": target.isoformat(),
+        "research_mode": "SOURCE_SYMBOL_NON_PIT_PREVIEW",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "formal_foundation_status": "NOT_ADMITTED",
+        "source": {
+            "storage": "POSTGRESQL_TYPED_SOURCE_RAW",
+            "namespace_id": namespace_id,
+            "package_sha256": package_sha256,
+            "dataset_id": target_row["dataset_id"],
+            "source_content_id": target_row["source_content_id"],
+            "source_entry_sha256": entry_shas[0] if entry_shas else None,
+            "target_source_capture_id": target_row["source_capture_id"],
+            "source_clock_role": target_row["capture_clock_role"],
+            "source_time_quality": target_row["capture_time_quality"],
+            "source_available_at": None,
+            "capture_revisions": captures_by_session,
+        },
+        "window": {
+            "calendar_id": calendar_payload["calendar_id"],
+            "calendar_revision": calendar_revision,
+            "start_session": expected_sessions[0].isoformat(),
+            "end_session": expected_sessions[-1].isoformat(),
+            "requested_sessions": len(expected_sessions),
+            "evaluated_sessions": len(rows),
+            "real_bar_count": actual_bars,
+            "gap_count": gaps,
+            "session_status_counts": status_counts,
+            "unknown_session_dates": [
+                row["session_date"].isoformat() for row in rows if row["bar_status"] != "TARGET_PRESENT"
+            ],
+            "future_session_rows_used": 0,
+        },
+        "raw": _render_raw(target_bar, UnitContract("TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1", None, None)),
+        "quality": {
+            "price_quality_counts": dict(sorted(price_quality_counts.items())),
+            "raw_amount_quality_counts": dict(sorted(raw_amount_quality_counts.items())),
+            "raw_volume_quality_counts": dict(sorted(raw_volume_quality_counts.items())),
+            "amount_unit_status": "UNIT_UNVERIFIED",
+            "volume_unit_status": "UNIT_UNVERIFIED",
+            "unit_dependent_core_reason": "UNIT_AUTHORITY_NOT_VERIFIED",
+        },
+        "core": {
+            "field_count": len(core),
+            "unknown_count": sum(value.quality != "OBSERVED" for value in core.values()),
+            "unknown_field_count": sum(value.quality != "OBSERVED" for value in core.values()),
+            "unknown_reason_counts": dict(sorted(unknown_reasons.items())),
+            "fields": rendered_core,
+        },
+        "profile_preview": profile_preview,
+        "execution": {
+            "source_zip_opened": False,
+            "source_scan_performed": False,
+            "source_recalculated": False,
+            "ddl_executed": False,
+            "database_write": False,
+            "network_access": False,
+        },
+    }
+
+
+def research_universe_pg_history_preview(
+    *,
+    target_session: str,
+    package_sha256: str,
+    session_dates: Sequence[date],
+    page: Mapping[str, Any],
+    profile_contract: dict[str, Any],
+) -> dict[str, Any]:
+    """以PG SQL分页候选结果生成来源符号级Core/Profile质量摘要。"""
+    results: list[dict[str, Any]] = []
+    for candidate in page.get("candidates", ()):
+        symbol = candidate["source_symbol"]
+        if not candidate["history_complete"]:
+            results.append({
+                "symbol": symbol,
+                "status": "HISTORY_WINDOW_INCOMPLETE",
+                "reason": "PG_HISTORY_SESSION_MISSING",
+                "missing_sessions": candidate["missing_sessions"],
+            })
+            continue
+        preview = research_stock_pg_history_preview(
+            symbol=symbol,
+            target_session=target_session,
+            package_sha256=package_sha256,
+            session_dates=session_dates,
+            history_rows=candidate["history_rows"],
+            namespace_id=page["namespace_id"],
+            profile_contract=profile_contract,
+        )
+        fields = preview.get("core", {}).get("fields", {})
+        components = preview.get("profile_preview", {}).get("components", [])
+        profile_status_counts: dict[str, int] = {}
+        profile_unavailable = []
+        for component in components:
+            status = str(component.get("status", "UNKNOWN"))
+            quality = str(component.get("quality", status)) if status == "EVALUATED" else status
+            profile_status_counts[quality] = profile_status_counts.get(quality, 0) + 1
+            if quality != "OBSERVED":
+                profile_unavailable.append({
+                    "field_id": component.get("field_id"),
+                    "status": status,
+                    "quality": component.get("quality"),
+                    "reason": component.get("reason"),
+                })
+        selected_fields = {
+            name: fields[name]
+            for name in (
+                "core.ma20", "core.ma60", "core.atr20", "core.ret20", "core.pos60",
+            )
+            if name in fields
+        }
+        results.append({
+            "symbol": symbol,
+            "status": preview.get("status"),
+            "identity_status": preview.get("identity_status"),
+            "pit_status": preview.get("pit_status"),
+            "window": preview.get("window"),
+            "price_quality_counts": preview.get("quality", {}).get("price_quality_counts"),
+            "core_price_fields": selected_fields,
+            "core_unknown_field_count": preview.get("core", {}).get("unknown_field_count"),
+            "core_unknown_reason_counts": preview.get("core", {}).get("unknown_reason_counts"),
+            "profile_rule_count": len(components),
+            "profile_status_counts": dict(sorted(profile_status_counts.items())),
+            "profile_unavailable": profile_unavailable,
+        })
+    return {
+        "ok": True,
+        "contract": "STOCK_A_PG_SOURCE_SYMBOL_UNIVERSE_CORE_PROFILE_PREVIEW_R1",
+        "status": page["status"],
+        "target_session": target_session,
+        "package_sha256": package_sha256,
+        "research_mode": "SOURCE_SYMBOL_NON_PIT_PREVIEW",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "official_listing_denominator": "UNKNOWN_NOT_PROVED_BY_SOURCE_CANDIDATES",
+        "namespace_id": page["namespace_id"],
+        "session_start": page["session_start"],
+        "session_end": page["session_end"],
+        "session_count": page["session_count"],
+        "filters": {"market": page["market_filter"], "board": page["board_filter"]},
+        "page": {
+            "offset": page["offset"],
+            "limit": page["limit"],
+            "page_count": page["page_count"],
+            "total_source_candidates": page["total_count"],
+            "next_offset": page["next_offset"],
+            "symbols": [item["symbol"] for item in results],
+        },
+        "target_day_source_status_counts": page["bar_status_counts"],
+        "candidate_partition_closed": page["partition_closed"],
+        "results": results,
+        "execution": {
+            "sql_pagination": True,
+            "source_zip_opened": False,
+            "source_scan_performed": False,
+            "source_recalculated": False,
+            "ddl_executed": False,
+            "database_write": False,
+            "network_access": False,
+        },
+    }

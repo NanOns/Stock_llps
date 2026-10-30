@@ -1517,6 +1517,80 @@ def read_vipdata_candidate(
         raise VipdataError("ZIP_ENTRY_READ_FAILED", "VIPDATA ZIP在只读条目扫描时失败") from error
 
 
+def build_vipdata_entry_capture_for_target(
+    package: VerifiedVipdataPackage,
+    candidate: Mapping[str, Any],
+    *,
+    scan_summary: Any,
+    target_session: date,
+    target_bar: Any | None,
+    future_source_rows_excluded: int,
+) -> VipdataEntryCapture:
+    """为已单遍扫描的ZIP条目构造指定会话的精确来源捕获，不再读取ZIP。"""
+    if type(target_session) is not date or type(future_source_rows_excluded) is not int or future_source_rows_excluded < 0:
+        raise VipdataError("ENTRY_CAPTURE_INVALID", "历史捕获会话或未来行计数无效")
+    if scan_summary is None or not getattr(scan_summary, "complete", False):
+        raise VipdataError("ENTRY_CAPTURE_INVALID", "历史捕获必须基于完整的单遍条目扫描")
+    entry = _bound_vipdata_entry(package, candidate)
+    from stock_a.domain import ContractError
+    from stock_a.sources.tdx.capture import (
+        TdxCaptureRequest,
+        TdxPackageEntryReference,
+        build_tdx_capture_envelope,
+    )
+
+    source_reference = TdxPackageEntryReference(
+        package_id=f"TDX-HSJDAY-SHA256:{package.sha256}",
+        package_sha256=package.sha256,
+        official_package_url=OFFICIAL_PACKAGE_URL,
+        package_verified_at=package.verified_at,
+        package_file_size=package.file_size,
+        zip_entry_count=package.zip_entry_count,
+        zip_crc=package.zip_crc,
+        source_symbol=str(candidate["symbol"]),
+        zip_entry_path=entry.path,
+        entry_sha256=scan_summary.raw_byte_sha256,
+        entry_byte_count=scan_summary.byte_count,
+        target_session=target_session,
+        observed_started_at=scan_summary.read_started_at,
+        observed_completed_at=scan_summary.read_completed_at,
+    )
+    request = TdxCaptureRequest(
+        capture_id=str(uuid.uuid4()),
+        dataset_id="TDX_DAILY_BARS",
+        dataset_version="TDX_HSJDAY_ZIP_ENTRY_32B_R1",
+        query_scope={
+            "source_symbol": str(candidate["symbol"]),
+            "target_session": target_session.isoformat(),
+            "selection_mode": "OFFICIAL_SESSIONS_NOT_AFTER_TARGET",
+            "research_mode": "NON_PIT_RETROSPECTIVE",
+        },
+        query_start=min(scan_summary.first_date, target_session),
+        query_end=max(scan_summary.last_date, target_session),
+        parser_version="stock_a.sources.tdx.day.decode_day_record",
+        validation_contract="TDX_HSJDAY_ZIP_ENTRY_32_BYTE_LAYOUT_R1",
+    )
+    try:
+        envelope = build_tdx_capture_envelope(
+            scan_summary,
+            request,
+            source_package_entry=source_reference,
+        )
+    except (ContractError, ValueError) as error:
+        raise VipdataError("ENTRY_CAPTURE_INVALID", "已扫描历史条目无法构造会话来源捕获") from error
+    return VipdataEntryCapture(
+        source_symbol=str(candidate["symbol"]),
+        market=str(candidate["market"]),
+        board=str(candidate["board"]),
+        target_session=target_session,
+        capture=envelope,
+        scan_summary=scan_summary,
+        rows=(),
+        target_bar=target_bar,
+        future_source_rows_excluded=future_source_rows_excluded,
+    )
+
+
 def _quality_bucket(field_value: Any) -> tuple[str, str | None]:
     quality = getattr(field_value, "quality", None)
     reason = getattr(field_value, "reason", None)

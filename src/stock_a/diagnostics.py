@@ -54,7 +54,9 @@ from stock_a.postgres_binding import (
 )
 from stock_a.postgres_source_raw import (
     RAW_DAILY_APPEND_TASK_SCOPES, RawSourcePgError, import_verified_vipdata_target,
-    read_raw_daily_catalog, read_raw_daily_page, read_raw_daily_stock,
+    import_verified_vipdata_history, read_raw_daily_catalog, read_raw_daily_page,
+    read_raw_daily_history_page, read_raw_daily_history_stock,
+    read_raw_daily_stock,
 )
 from stock_a.research.entry import (
     CompareBudget,
@@ -66,7 +68,9 @@ from stock_a.research.entry import (
     apply_identity_observation,
     research_compare,
     research_stock,
+    research_stock_pg_history_preview,
     research_universe_preview,
+    research_universe_pg_history_preview,
 )
 from stock_a.sources.baostock.identity import project_identity_lifecycle
 
@@ -449,7 +453,9 @@ def _parser() -> argparse.ArgumentParser:
     stock.add_argument("symbol", help="来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(stock, include_vipdata=True)
     stock.add_argument("--pg-source-raw", action="store_true", help="按显式目标日和来源SHA从stock_a.stock查询Raw事实；不打开ZIP、不重算、不执行DDL")
+    stock.add_argument("--pg-source-history", action="store_true", help="显式从PG读取同包官方会话历史，计算现役Core43/Profile11研究预览；只读、NON_PIT")
     stock.add_argument("--pg-source-sha256", help="PG Raw查询必填：64位小写VIPDATA包SHA-256，不回退latest或跨日")
+    stock.add_argument("--pg-history-session-count", type=int, default=75, help="PG历史画像官方会话窗口，1至75，默认75")
     stock.add_argument("--format", dest="output_format", choices=("summary", "json"), default="json", help="输出可读事实摘要或完整JSON，默认json")
     stock.add_argument("--include-profile-preview", action="store_true", help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
     stock.add_argument("--include-baostock-evidence", action="store_true", help="显式查询目标日单条BaoStock只读补充字段；可能联网，单位与身份仍需独立核验")
@@ -468,7 +474,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_research_arguments(universe, include_vipdata=True)
     universe.add_argument("--pg-source-raw", action="store_true", help="从stock_a.stock按显式目标日和来源SHA真实SQL分页读取Raw候选")
+    universe.add_argument("--pg-source-history", action="store_true", help="显式从PG批量读取来源候选历史并分页展示Core/Profile研究摘要；只读、NON_PIT")
     universe.add_argument("--pg-source-sha256", help="PG Raw分页查询必填：64位小写VIPDATA包SHA-256")
+    universe.add_argument("--pg-history-session-count", type=int, default=75, help="PG历史画像官方会话窗口，1至75，默认75")
     universe.add_argument("--offset", type=int, default=0, help="来源候选分页起点，默认0")
     universe.add_argument("--limit", type=int, default=20, help="本页证券数，默认20，最多100")
     universe.add_argument("--market", choices=("ALL", "SH", "SZ"), default="ALL", help="市场过滤，默认ALL")
@@ -555,6 +563,8 @@ def _parser() -> argparse.ArgumentParser:
     raw_import.add_argument("--max-vipdata-validation-seconds", type=float, default=300.0,
                             help="本地ZIP SHA与CRC完整复验秒数上限，默认300")
     raw_import.add_argument("--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD")
+    raw_import.add_argument("--history-session-count", type=int, default=1,
+                            help="显式官方日历历史窗口会话数，1保持单日行为，最多75；每个VIPDATA条目只扫描一次")
     raw_import.add_argument("--max-source-quality-bytes", type=int, default=4294967296,
                             help="全来源候选条目解压字节上限，默认4GiB")
     raw_import.add_argument("--max-source-quality-records", type=int, default=125000000,
@@ -1145,6 +1155,158 @@ def _run_pg_raw_universe(args: argparse.Namespace) -> int:
     return _EXIT_OK
 
 
+def _pg_history_window(target_text: str, count: int) -> tuple[date, tuple[date, ...], str]:
+    if type(count) is not int or not 1 <= count <= 75:
+        raise DiagnosticError("PG_HISTORY_WINDOW_INVALID", "PG历史画像会话数须为1至75", _EXIT_ARGUMENT)
+    try:
+        target = _parse_target(target_text)
+    except ResearchEntryError as error:
+        raise DiagnosticError(error.code, str(error), _EXIT_ARGUMENT) from error
+    _calendar_payload, _metadata, revision, all_sessions = _load_calendar(target)
+    if target not in all_sessions:
+        raise DiagnosticError("TARGET_DATE_INVALID", "目标日不在现役版本化官方交易日历中", _EXIT_ARGUMENT)
+    eligible = tuple(session for session in all_sessions if session <= target)
+    if len(eligible) < count:
+        raise DiagnosticError("UNKNOWN_CALENDAR", "官方日历覆盖不足以提供请求的历史会话窗口", _EXIT_UNAVAILABLE)
+    return target, eligible[-count:], revision
+
+
+def _validate_pg_history_args(args: argparse.Namespace) -> tuple[dict[str, Any], Path, date, tuple[date, ...], str]:
+    if getattr(args, "pg_source_raw", False):
+        raise DiagnosticError("PG_SOURCE_MODES_EXCLUSIVE", "--pg-source-history不能与--pg-source-raw同时使用", _EXIT_ARGUMENT)
+    if getattr(args, "vipdata_package", None) is not None or getattr(args, "vipdata_package_sha256", None) is not None:
+        raise DiagnosticError("PG_HISTORY_ZIP_CONFLICT", "PG历史查询不得同时指定VIPDATA ZIP", _EXIT_ARGUMENT)
+    if getattr(args, "amount_to_cny", None) is not None or getattr(args, "volume_to_shares", None) is not None:
+        raise DiagnosticError("PG_HISTORY_UNIT_ASSUMPTION_REJECTED", "PG来源单位尚未核实，不能用调用方倍率生成量额Core", _EXIT_ARGUMENT)
+    if getattr(args, "unit_version", None) != "TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1":
+        raise DiagnosticError("PG_HISTORY_UNIT_VERSION_REJECTED", "PG历史模式必须显式声明TDX原值单位未核实版本", _EXIT_ARGUMENT)
+    if getattr(args, "include_baostock_evidence", False) or getattr(args, "include_baostock_identity", False):
+        raise DiagnosticError("PG_HISTORY_EXTERNAL_SOURCE_REJECTED", "PG历史查询是本地只读模式，不触发BaoStock网络请求", _EXIT_ARGUMENT)
+    source_sha = getattr(args, "pg_source_sha256", None)
+    if not isinstance(source_sha, str) or re.fullmatch(r"[0-9a-f]{64}", source_sha) is None:
+        raise DiagnosticError("PG_HISTORY_PACKAGE_SHA_REQUIRED", "PG历史查询必须显式提供64位小写package SHA-256", _EXIT_ARGUMENT)
+    target, sessions, _revision = _pg_history_window(
+        args.target_session, getattr(args, "pg_history_session_count", 75),
+    )
+    config, config_path = _load_runtime_config()
+    return config, config_path, target, sessions, source_sha
+
+
+def _run_pg_history_stock(args: argparse.Namespace) -> int:
+    config, config_path, target, sessions, source_sha = _validate_pg_history_args(args)
+    try:
+        history = read_raw_daily_history_stock(
+            config,
+            source_symbol=args.symbol,
+            target_session=target,
+            package_sha256=source_sha,
+            sessions=sessions,
+        )
+        profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+        result = research_stock_pg_history_preview(
+            symbol=args.symbol,
+            target_session=target.isoformat(),
+            package_sha256=source_sha,
+            session_dates=sessions,
+            history_rows=history["history_rows"],
+            namespace_id=history["namespace_id"],
+            profile_contract=profile_contract,
+        )
+    except RawSourcePgError as error:
+        _emit({
+            "ok": False, "status": "REJECTED", "code": error.code, "message": str(error),
+            "database_write_attempted": False, "ddl_executed": False, "source_zip_opened": False,
+        }, error=True)
+        return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    except (ResearchEntryError, DayChainContractError) as error:
+        code = getattr(error, "code", "PROFILE_CONTRACT_UNAVAILABLE")
+        _emit({"ok": False, "status": "REJECTED", "code": code, "message": str(error),
+               "database_write_attempted": False, "ddl_executed": False, "source_zip_opened": False}, error=True)
+        return _EXIT_UNAVAILABLE
+    result.update({
+        "database_io_attempted": True,
+        "database_write_attempted": False,
+        "dml_executed": False,
+        "configuration_path": str(config_path),
+    })
+    if getattr(args, "output_format", "json") == "summary":
+        fields = result.get("core", {}).get("fields", {})
+        preview = result.get("profile_preview", {})
+        core_labels = ("core.ma20", "core.ma60", "core.atr20", "core.ret20", "core.pos60")
+        line = [
+            f"PG历史研究预览 {result.get('symbol')} {target.isoformat()} "
+            f"窗口={result.get('window', {}).get('start_session')}..{result.get('window', {}).get('end_session')} "
+                f"有效Bar={result.get('window', {}).get('real_bar_count')}/{result.get('window', {}).get('requested_sessions')}",
+        ]
+        line.extend(f"{name}={_summary_field(fields.get(name))}" for name in core_labels)
+        line.append(f"Core未知={result.get('core', {}).get('unknown_field_count')}/43 Profile规则={len(preview.get('components', []))}/11 NON_PIT")
+        sys.stdout.write("\n".join(line) + "\n")
+    else:
+        _emit(result)
+    return _EXIT_OK if result.get("ok") else _EXIT_UNAVAILABLE
+
+
+def _run_pg_history_universe(args: argparse.Namespace) -> int:
+    if getattr(args, "full_target_quality", False) or getattr(args, "full_source_core_profile", False):
+        raise DiagnosticError("PG_HISTORY_SCAN_OPTION_REJECTED", "PG历史模式只读取已入库Raw，不运行ZIP扫描模式", _EXIT_ARGUMENT)
+    config, config_path, target, sessions, source_sha = _validate_pg_history_args(args)
+    if type(args.offset) is not int or args.offset < 0 or type(args.limit) is not int or not 1 <= args.limit <= 100:
+        raise DiagnosticError("PG_PAGE_INVALID", "PG历史分页offset须非负且limit须为1至100", _EXIT_ARGUMENT)
+    try:
+        page = read_raw_daily_history_page(
+            config,
+            target_session=target,
+            package_sha256=source_sha,
+            sessions=sessions,
+            offset=args.offset,
+            limit=args.limit,
+            market=args.market,
+            board=args.board,
+        )
+        profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+        result = research_universe_pg_history_preview(
+            target_session=target.isoformat(),
+            package_sha256=source_sha,
+            session_dates=sessions,
+            page=page,
+            profile_contract=profile_contract,
+        )
+    except RawSourcePgError as error:
+        _emit({
+            "ok": False, "status": "REJECTED", "code": error.code, "message": str(error),
+            "database_write_attempted": False, "ddl_executed": False, "source_zip_opened": False,
+        }, error=True)
+        return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    except DayChainContractError as error:
+        _emit({"ok": False, "status": "REJECTED", "code": error.code, "message": str(error),
+               "database_write_attempted": False, "ddl_executed": False, "source_zip_opened": False}, error=True)
+        return _EXIT_UNAVAILABLE
+    result.update({
+        "database_io_attempted": True,
+        "database_write_attempted": False,
+        "dml_executed": False,
+        "configuration_path": str(config_path),
+    })
+    if getattr(args, "output_format", "summary") == "summary":
+        page_info = result["page"]
+        lines = [
+            f"PG历史候选页 offset={page_info['offset']} limit={page_info['limit']} "
+            f"rows={page_info['page_count']} filtered_total={page_info['total_source_candidates']} "
+            f"next={page_info['next_offset']} window={result['session_start']}..{result['session_end']}",
+        ]
+        for item in result["results"]:
+            core_fields = item.get("core_price_fields", {})
+            lines.append(
+                f"{item['symbol']} Core未知={item.get('core_unknown_field_count')} "
+                + " ".join(f"{field}={_summary_field(value)}" for field, value in core_fields.items())
+                + f" Profile={item.get('profile_status_counts')}"
+            )
+        sys.stdout.write("\n".join(lines) + "\n")
+    else:
+        _emit(result)
+    return _EXIT_OK
+
+
 def _run_source_raw_catalog(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config()
     try:
@@ -1184,19 +1346,37 @@ def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
         target = _parse_target(args.target_session)
     except ResearchEntryError as error:
         raise DiagnosticError(error.code, str(error), _EXIT_ARGUMENT) from error
-    _calendar_payload, _calendar_metadata, _calendar_revision, sessions = _load_calendar(target)
-    if target not in sessions:
+    _calendar_payload, _calendar_metadata, _calendar_revision, official_sessions = _load_calendar(target)
+    if target not in official_sessions:
         raise DiagnosticError("TARGET_DATE_INVALID", "目标日期不在现行已核交易日历内", _EXIT_ARGUMENT)
+    if type(args.history_session_count) is not int or not 1 <= args.history_session_count <= 75:
+        raise DiagnosticError("HISTORY_SESSION_WINDOW_INVALID", "历史扫描会话数须为1至75", _EXIT_ARGUMENT)
+    available_sessions = tuple(session for session in official_sessions if session <= target)
+    if len(available_sessions) < args.history_session_count:
+        raise DiagnosticError("UNKNOWN_CALENDAR", "官方日历覆盖不足以形成请求的历史会话窗口", _EXIT_UNAVAILABLE)
+    selected_sessions = available_sessions[-args.history_session_count:]
     try:
         budget = VipdataTargetScanBudget(
             max_total_bytes=args.max_source_quality_bytes,
             max_total_records=args.max_source_quality_records,
             max_total_seconds=args.max_source_quality_seconds,
         )
-        result = import_verified_vipdata_target(
-            config, package, target, task_scope=args.task_scope,
-            scan_budget=budget, chunk_size=args.chunk_size,
-        )
+        if args.history_session_count == 1:
+            result = import_verified_vipdata_target(
+                config, package, target, task_scope=args.task_scope,
+                scan_budget=budget, chunk_size=args.chunk_size,
+            )
+        else:
+            result = import_verified_vipdata_history(
+                config, package, selected_sessions, task_scope=args.task_scope,
+                scan_budget=budget, chunk_size=args.chunk_size, max_raw_rows=750_000,
+            )
+    except VipdataError as error:
+        raise DiagnosticError(
+            "VIPDATA_SOURCE_SCAN_FAILED",
+            f"VIPDATA来源单遍扫描失败：{error.code}",
+            _EXIT_UNAVAILABLE,
+        ) from error
     except (ValueError, ContractError) as error:
         raise DiagnosticError("SOURCE_RAW_ARGUMENT_INVALID", f"来源Raw扫描参数无效：{error}", _EXIT_ARGUMENT) from error
     except RawSourcePgError as error:
@@ -1204,7 +1384,8 @@ def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
             "ok": False, "status": "PARTIAL" if error.committed_rows is not None else "REJECTED",
             "code": error.code, "message": str(error),
             "committed_row_count": error.committed_rows,
-            "target_session": target.isoformat(), "package_sha256": package.sha256,
+            "target_session": target.isoformat(), "session_count": args.history_session_count,
+            "package_sha256": package.sha256,
             "zip_crc": package.zip_crc, "package_file_size": package.file_size,
             "task_scope": args.task_scope,
             "storage_location_status": "USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED",
@@ -1226,7 +1407,11 @@ def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
         "task_scope": args.task_scope,
         "configuration_path": str(config_path),
         "database_io_attempted": True,
-        "database_write_attempted": result.get("new_rows_committed", 0) > 0,
+        "database_write_attempted": (
+            result.get("new_rows_committed", 0) > 0
+            or result.get("database_committed_rows", 0) > 0
+            or any(item.get("new_rows_committed", 0) > 0 for item in result.get("session_results", []))
+        ),
         "production_switched": False,
         "command_elapsed_seconds": round(time.monotonic() - command_started, 6),
     })
@@ -1500,6 +1685,10 @@ def _run_vipdata_revision_compare(args: argparse.Namespace) -> int:
 
 
 def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
+    if getattr(args, "pg_source_history", False):
+        if compare:
+            raise DiagnosticError("PG_HISTORY_COMMAND_UNSUPPORTED", "research-compare不支持PG历史画像模式", _EXIT_ARGUMENT)
+        return _run_pg_history_stock(args)
     if getattr(args, "pg_source_raw", False):
         if compare:
             raise DiagnosticError("PG_SOURCE_COMMAND_UNSUPPORTED", "research-compare不支持本批PG Raw查询入口", _EXIT_ARGUMENT)
@@ -2548,6 +2737,8 @@ def _run_full_source_core_profile(
 
 
 def _run_research_universe(args: argparse.Namespace) -> int:
+    if getattr(args, "pg_source_history", False):
+        return _run_pg_history_universe(args)
     if getattr(args, "pg_source_raw", False):
         return _run_pg_raw_universe(args)
     if getattr(args, "pg_source_sha256", None) is not None:

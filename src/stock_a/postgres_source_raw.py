@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import time
 from typing import Any, Iterator, Mapping, Sequence
 import uuid
 
@@ -536,8 +537,10 @@ def _insert_raw_batch(
             raise RawSourcePgError("SOURCE_METADATA_PAIR_INVALID", "来源内容与捕获元数据必须同时提供")
         if content is not None and capture is not None:
             _ensure_source_metadata(cursor, namespace_id, content, capture)
+        inserted_count = 0
         for row in rows:
             cursor.execute(_RAW_INSERT, _row_values(row))
+            inserted_count += max(0, int(cursor.rowcount))
         cursor.execute(
             f"SELECT {_RAW_SELECT} FROM stock.source_raw_daily "
             "WHERE namespace_id=%s::uuid AND session_date=%s AND package_sha256=%s "
@@ -552,7 +555,7 @@ def _insert_raw_batch(
             for symbol in expected
         ):
             raise RawSourcePgError("RAW_REVISION_CONFLICT", "同一source_symbol/日期/包SHA已有不同Raw值；事务已回滚")
-    return len(rows)
+    return inserted_count
 
 
 def _existing_count(config: Mapping[str, Any], namespace_id: str, target_session: date, package_sha256: str) -> int:
@@ -744,6 +747,325 @@ def import_verified_vipdata_target(
     }
 
 
+def import_verified_vipdata_history(
+    config: Mapping[str, Any],
+    package: Any,
+    sessions: Sequence[date],
+    *,
+    task_scope: str,
+    scan_budget: Any,
+    chunk_size: int = 100,
+    max_raw_rows: int = 750_000,
+) -> dict[str, Any]:
+    """单遍扫描一组官方会话，并按会话追加到既有Raw typed表。"""
+    from bisect import bisect_right
+    from dataclasses import replace
+
+    from stock_a.sources.tdx.day import UnitContract
+    from stock_a.sources.tdx.vipdata import (
+        VipdataTargetScanBudget,
+        _target_quality_row,
+        build_vipdata_entry_capture_for_target,
+        scan_vipdata_target_quality,
+        vipdata_research_candidate_pool,
+    )
+
+    if (not isinstance(sessions, (tuple, list)) or not sessions
+            or len(sessions) > 75 or any(type(day) is not date for day in sessions)
+            or tuple(sorted(set(sessions))) != tuple(sessions)):
+        raise RawSourcePgError("HISTORY_SESSION_WINDOW_INVALID", "真实历史会话须为1至75个严格递增且不重复的date")
+    _validate_source_input(package, sessions[-1], task_scope=task_scope)
+    if not isinstance(scan_budget, VipdataTargetScanBudget) or not 1 <= chunk_size <= 100:
+        raise RawSourcePgError("SCAN_BUDGET_INVALID", "历史来源扫描预算或PG分块大小无效")
+    if config.get("paths", {}).get("temporary_root") != "G:/codex_tmp":
+        raise RawSourcePgError("TEMP_ROOT_REJECTED", "项目临时目录必须固定为G:/codex_tmp")
+
+    pool = vipdata_research_candidate_pool(package)
+    total = len(pool.candidates)
+    validate_source_candidate_limit(total)
+    planned_rows = total * len(sessions)
+    if type(max_raw_rows) is not int or planned_rows > max_raw_rows or planned_rows > 750_000:
+        raise RawSourcePgError(
+            "HISTORY_ROW_BUDGET_EXCEEDED",
+            f"历史Raw行预算拒绝完整候选集：{total}个来源候选×{len(sessions)}个会话={planned_rows}行",
+        )
+
+    prior_by_session: dict[date, tuple[dict[str, Any] | None, SourceCaptureCandidate | None]] = {}
+    namespace_id: str | None = None
+    for session in sessions:
+        active_namespace, prior_state, prior_capture = _complete_version_state(
+            config, package=package, target_session=session, pool=pool,
+        )
+        if namespace_id is not None and active_namespace != namespace_id:
+            raise RawSourcePgError("NAMESPACE_SCOPE_REJECTED", "历史扫描期间DEV来源命名空间发生变化")
+        namespace_id = active_namespace
+        prior_by_session[session] = (prior_state, prior_capture)
+    assert namespace_id is not None
+
+    if all(state is not None and state["row_count"] == total
+           for state, _capture in prior_by_session.values()):
+        existing = []
+        for session in sessions:
+            state, capture = prior_by_session[session]
+            assert state is not None and capture is not None
+            existing.append({
+                "target_session": session.isoformat(),
+                "candidate_total": total,
+                "row_count_before": total,
+                "row_count_after": total,
+                "new_rows_committed": 0,
+                "canonical_digest": state["canonical_digest"],
+                "source_capture_id": capture.capture_id,
+                "status": "ALREADY_COMPLETE",
+            })
+        return {
+            "status": "ALREADY_COMPLETE",
+            "namespace_id": namespace_id,
+            "target_session": sessions[-1].isoformat(),
+            "session_start": sessions[0].isoformat(),
+            "session_count": len(sessions),
+            "package_sha256": package.sha256,
+            "candidate_total": total,
+            "planned_raw_rows": planned_rows,
+            "source_scan_reused": False,
+            "source_package_parse_passes": 0,
+            "per_session_full_package_rescans": 0,
+            "source_bytes_read": 0,
+            "source_records_read": 0,
+            "session_results": existing,
+            "database_writes": 0,
+            "storage_location_status": "USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED",
+        }
+
+    candidate_by_symbol = {item["symbol"]: item for item in pool.candidates}
+    session_set = set(sessions)
+    staged_entries: dict[str, dict[str, Any]] = {}
+    observed_starts: list[datetime] = []
+    observed_finishes: list[datetime] = []
+
+    def collect_candidate(quality_row: Any, entry_capture: Any | None) -> None:
+        symbol = quality_row.symbol
+        if symbol not in candidate_by_symbol or symbol in staged_entries:
+            raise RawSourcePgError("CANDIDATE_BINDING_MISMATCH", "单遍来源结果不属于唯一动态候选目录")
+        if quality_row.observed_started_at is not None:
+            observed_starts.append(quality_row.observed_started_at)
+        if quality_row.observed_completed_at is not None:
+            observed_finishes.append(quality_row.observed_completed_at)
+        if entry_capture is None:
+            staged_entries[symbol] = {
+                "quality": quality_row,
+                "scan_summary": None,
+                "bars": {},
+                "future_counts": {},
+            }
+            return
+        if not getattr(entry_capture.scan_summary, "complete", False):
+            raise RawSourcePgError("SOURCE_SCAN_INCOMPLETE", "来源条目没有完成单遍解码")
+        record_dates = [decoded.session_date for decoded in entry_capture.rows]
+        if record_dates != sorted(record_dates) or len(record_dates) != len(set(record_dates)):
+            raise RawSourcePgError("SOURCE_HISTORY_ORDER_INVALID", "VIPDATA条目日期必须有序且唯一")
+        future_counts: dict[date, int] = {}
+        for session in sessions:
+            future_counts[session] = len(record_dates) - bisect_right(record_dates, session)
+        bars = {
+            decoded.session_date: decoded
+            for decoded in entry_capture.rows
+            if decoded.session_date in session_set
+        }
+        staged_entries[symbol] = {
+            "quality": quality_row,
+            "scan_summary": entry_capture.scan_summary,
+            "bars": bars,
+            "future_counts": future_counts,
+        }
+
+    scan_started_wall = time.monotonic()
+    scan_report = scan_vipdata_target_quality(
+        package,
+        pool,
+        target_session=sessions[-1],
+        units=UnitContract("TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1", None, None),
+        budget=scan_budget,
+        on_candidate=collect_candidate,
+    )
+    scan_elapsed = time.monotonic() - scan_started_wall
+    if (scan_report.candidate_total != total or len(staged_entries) != total
+            or scan_report.evaluated != total or scan_report.not_evaluated != 0
+            or scan_report.target_present + scan_report.target_missing + scan_report.read_failed != total):
+        raise RawSourcePgError("TARGET_SCAN_INCOMPLETE", "历史单遍扫描候选分母没有闭合，拒绝持久化")
+
+    scan_started = min(observed_starts) if observed_starts else datetime.now(timezone.utc)
+    scan_finished = max(observed_finishes) if observed_finishes else datetime.now(timezone.utc)
+    scan_started, scan_finished = _aware(scan_started), _aware(scan_finished)
+    content, _last_capture_id, _catalog_digest = _source_identity(
+        namespace_id, package, sessions[-1], pool,
+    )
+    session_results: list[dict[str, Any]] = []
+    committed_total = 0
+
+    for session in sessions:
+        prior_state, prior_capture = prior_by_session[session]
+        content, capture_id, _catalog_digest = _source_identity(namespace_id, package, session, pool)
+        staged: list[dict[str, Any]] = []
+        status_counts = {"TARGET_PRESENT": 0, "TARGET_MISSING": 0, "READ_FAILED": 0, "NOT_EVALUATED": 0}
+        for source_index, candidate in enumerate(pool.candidates):
+            entry = staged_entries[candidate["symbol"]]
+            base_quality = entry["quality"]
+            scan_summary = entry["scan_summary"]
+            if scan_summary is None:
+                quality = replace(base_quality, target_session=session)
+                capture = None
+            else:
+                target_bar = entry["bars"].get(session)
+                capture = build_vipdata_entry_capture_for_target(
+                    package,
+                    candidate,
+                    scan_summary=scan_summary,
+                    target_session=session,
+                    target_bar=target_bar,
+                    future_source_rows_excluded=entry["future_counts"][session],
+                )
+                quality = _target_quality_row(
+                    candidate,
+                    package_sha256=package.sha256,
+                    target_session=session,
+                    source_index=source_index,
+                    page_offset=source_index,
+                    capture=capture,
+                    status="TARGET_PRESENT" if target_bar is not None else "TARGET_MISSING",
+                    reason=None if target_bar is not None else "TARGET_SESSION_BAR_MISSING",
+                    bytes_read=scan_summary.byte_count,
+                    record_count=scan_summary.record_count,
+                )
+            status_counts[quality.status] = status_counts.get(quality.status, 0) + 1
+            staged.append(_raw_candidate(
+                quality,
+                capture,
+                candidate=candidate,
+                namespace_id=namespace_id,
+                package_sha256=package.sha256,
+                content_id=content.content_id,
+                capture_id=capture_id,
+                target_session=session,
+            ))
+
+        if (len(staged) != total or status_counts["NOT_EVALUATED"]
+                or sum(status_counts.values()) != total):
+            raise RawSourcePgError("TARGET_SCAN_INCOMPLETE", f"{session.isoformat()}来源候选状态分母未闭合")
+        staged.sort(key=lambda row: row["source_symbol"])
+        if len({row["source_symbol"] for row in staged}) != total:
+            raise RawSourcePgError("CANDIDATE_DUPLICATE", "历史候选出现重复来源代码，拒绝写入PG")
+
+        effective_started = prior_capture.read_started_at if prior_capture is not None else scan_started
+        effective_finished = prior_capture.validated_at if prior_capture is not None else scan_finished
+        for row in staged:
+            row["observed_started_at"] = effective_started
+            row["observed_completed_at"] = effective_finished
+        row_digest = _row_digest(staged)
+        capture_candidate = SourceCaptureCandidate(
+            namespace_id=namespace_id,
+            capture_id=capture_id,
+            content_id=content.content_id,
+            parser_contract=_PARSER_CONTRACT,
+            read_started_at=effective_started,
+            validated_at=effective_finished,
+            source_available_at=None,
+            source_time_quality="NON_PIT_OBSERVED",
+            source_clock_role=_CLOCK_ROLE,
+            canonical_digest=row_digest,
+            normalized_count=total,
+        )
+        if prior_capture is not None and row_digest != prior_capture.canonical_digest:
+            raise RawSourcePgError(
+                "RAW_CAPTURE_DIGEST_CONFLICT",
+                f"{session.isoformat()}历史重扫与初次不可变捕获摘要不同，拒绝覆盖",
+            )
+
+        before = prior_state["row_count"] if prior_state is not None else 0
+        if before < total:
+            try:
+                for start in range(0, len(staged), chunk_size):
+                    committed_total += _insert_raw_batch(
+                        config,
+                        staged[start:start + chunk_size],
+                        chunk_size=chunk_size,
+                        content=content if start == 0 else None,
+                        capture=capture_candidate if start == 0 else None,
+                    )
+            except RawSourcePgError as error:
+                committed_rows = _existing_count(config, namespace_id, session, package.sha256)
+                committed_sessions = [
+                    item["target_session"] for item in session_results
+                    if item.get("row_count_after") == total
+                ]
+                raise RawSourcePgError(
+                    error.code,
+                    f"历史会话{session.isoformat()}写入失败；此前已完成会话={len(committed_sessions)}；"
+                    f"本会话PG现存行={committed_rows}/{total}；可按同包同窗幂等重试",
+                    committed_rows=committed_rows,
+                    metadata_committed=prior_capture is not None or committed_rows > 0,
+                ) from error
+        after = _existing_count(config, namespace_id, session, package.sha256)
+        if after != total:
+            raise RawSourcePgError(
+                "RAW_ROW_COUNT_INCOMPLETE",
+                f"{session.isoformat()}历史行数不完整：{after}/{total}",
+                committed_rows=after,
+                metadata_committed=True,
+            )
+        persisted = _complete_version_state(
+            config, package=package, target_session=session, pool=pool,
+        )[1]
+        if persisted is None or persisted["row_count"] != total or persisted["canonical_digest"] != row_digest:
+            raise RawSourcePgError(
+                "RAW_FINAL_READBACK_MISMATCH",
+                f"{session.isoformat()}历史Raw完整读回摘要不匹配",
+                committed_rows=after,
+                metadata_committed=True,
+            )
+        session_results.append({
+            "target_session": session.isoformat(),
+            "candidate_total": total,
+            "target_present": status_counts["TARGET_PRESENT"],
+            "target_missing": status_counts["TARGET_MISSING"],
+            "read_failed": status_counts["READ_FAILED"],
+            "not_evaluated": status_counts["NOT_EVALUATED"],
+            "row_count_before": before,
+            "row_count_after": after,
+            "new_rows_committed": max(0, after - before),
+            "canonical_digest": row_digest,
+            "source_capture_id": capture_id,
+            "source_content_id": content.content_id,
+            "status": "COMPLETE_WITH_READ_FAILURES" if status_counts["READ_FAILED"] else "COMPLETE",
+        })
+
+    return {
+        "status": "COMPLETE_WITH_READ_FAILURES" if scan_report.read_failed else "COMPLETE",
+        "namespace_id": namespace_id,
+        "target_session": sessions[-1].isoformat(),
+        "session_start": sessions[0].isoformat(),
+        "session_count": len(sessions),
+        "package_sha256": package.sha256,
+        "candidate_total": total,
+        "planned_raw_rows": planned_rows,
+        "source_scan_reused": False,
+        "source_package_parse_passes": 1,
+        "per_session_full_package_rescans": 0,
+        "source_bytes_read": scan_report.bytes_read,
+        "source_records_read": scan_report.records_read,
+        "source_scan_elapsed_seconds": round(scan_report.elapsed_seconds, 6),
+        "source_scan_wall_seconds": round(scan_elapsed, 6),
+        "database_committed_rows": committed_total,
+        "session_results": session_results,
+        "source_clock_role": _CLOCK_ROLE,
+        "source_available_at": None,
+        "unit_status": "UNIT_UNVERIFIED",
+        "stable_security_identity_issued": False,
+        "canonical_or_foundation_written": False,
+        "storage_location_status": "USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED",
+    }
+
+
 def read_raw_daily_stock(
     config: Mapping[str, Any], *, source_symbol: str, target_session: date, package_sha256: str,
 ) -> dict[str, Any] | None:
@@ -777,6 +1099,208 @@ WHERE r.namespace_id=%s::uuid AND r.source_symbol=%s AND r.session_date=%s AND r
         result["amount_unit_status"] = "UNIT_UNVERIFIED"
         result["volume_unit_status"] = "UNIT_UNVERIFIED"
         return result
+
+
+def _validate_history_query(
+    *, source_symbol: str | None, target_session: date, package_sha256: str, sessions: Sequence[date],
+) -> tuple[date, ...]:
+    if source_symbol is not None and (not isinstance(source_symbol, str) or _SYMBOL.fullmatch(source_symbol) is None):
+        raise RawSourcePgError("SOURCE_SYMBOL_INVALID", "PG历史查询证券须为SH./SZ.来源代码")
+    if (type(target_session) is not date or not isinstance(package_sha256, str)
+            or _SHA256.fullmatch(package_sha256) is None):
+        raise RawSourcePgError("PG_QUERY_KEY_INVALID", "PG历史查询必须显式绑定目标会话和64位包SHA")
+    if (not isinstance(sessions, (tuple, list)) or not 1 <= len(sessions) <= 75
+            or any(type(day) is not date for day in sessions)
+            or tuple(sorted(set(sessions))) != tuple(sessions)
+            or sessions[-1] != target_session):
+        raise RawSourcePgError("HISTORY_SESSION_WINDOW_INVALID", "PG历史查询会话须为1至75个递增会话并以目标日结束")
+    return tuple(sessions)
+
+
+def _read_history_rows(
+    cursor: Any,
+    *,
+    namespace_id: str,
+    source_symbols: Sequence[str],
+    sessions: Sequence[date],
+    package_sha256: str,
+) -> list[dict[str, Any]]:
+    if not source_symbols:
+        return []
+    cursor.execute(
+        f"""SELECT r.*, c.read_started_at AS capture_read_started_at,
+       c.validated_at AS capture_validated_at, c.source_time_quality AS capture_time_quality,
+       c.source_clock_role AS capture_clock_role, c.canonical_digest AS capture_digest,
+       c.normalized_count AS capture_normalized_count, s.dataset_id, s.byte_sha, s.byte_count
+FROM stock.source_raw_daily r
+JOIN stock.source_captures c ON c.namespace_id=r.namespace_id AND c.capture_id=r.source_capture_id
+JOIN stock.source_contents s ON s.namespace_id=r.namespace_id AND s.content_id=r.source_content_id
+WHERE r.namespace_id=%s::uuid AND r.source_symbol=ANY(%s) AND r.session_date=ANY(%s::date[])
+  AND r.package_sha256=%s
+ORDER BY r.source_symbol, r.session_date""",
+        (namespace_id, list(source_symbols), list(sessions), package_sha256),
+    )
+    names = [item.name for item in cursor.description]
+    result = [dict(zip(names, values, strict=True)) for values in cursor.fetchall()]
+    for row in result:
+        if (row["byte_sha"] != package_sha256 or row["dataset_id"] != _DATASET_ID
+                or row["source_symbol"] not in source_symbols
+                or row["session_date"] not in sessions
+                or row["source_entry_sha256"] is not None and _SHA256.fullmatch(row["source_entry_sha256"]) is None
+                or row["capture_normalized_count"] <= 0):
+            raise RawSourcePgError("SOURCE_REFERENCE_MISMATCH", "PG历史Raw行与显式包、来源捕获或内容元数据不匹配")
+        if row["bar_status"] not in _BAR_STATUSES:
+            raise RawSourcePgError("SOURCE_STATUS_INVALID", "PG历史Raw包含未登记的来源状态")
+        row["namespace_id"] = str(row["namespace_id"])
+        row["source_capture_id"] = str(row["source_capture_id"])
+        row["identity_status"] = "SOURCE_SYMBOL_ONLY"
+        row["pit_status"] = "NON_PIT_RETROSPECTIVE"
+        row["price_coordinate"] = "RAW_UNADJUSTED"
+        row["amount_unit_status"] = "UNIT_UNVERIFIED"
+        row["volume_unit_status"] = "UNIT_UNVERIFIED"
+    return result
+
+
+def read_raw_daily_history_stock(
+    config: Mapping[str, Any],
+    *,
+    source_symbol: str,
+    target_session: date,
+    package_sha256: str,
+    sessions: Sequence[date],
+) -> dict[str, Any]:
+    """从固定PG namespace读取单证券的精确包版本与官方会话窗口。"""
+    selected_sessions = _validate_history_query(
+        source_symbol=source_symbol, target_session=target_session,
+        package_sha256=package_sha256, sessions=sessions,
+    )
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        cursor.execute(
+            "SELECT count(*) FROM stock.source_raw_daily WHERE namespace_id=%s::uuid "
+            "AND source_symbol=%s AND session_date=%s AND package_sha256=%s",
+            (namespace_id, source_symbol, target_session, package_sha256),
+        )
+        target_count = int(cursor.fetchone()[0])
+        if target_count == 0:
+            raise RawSourcePgError("PG_SOURCE_NO_MATCH", "PG中没有该目标日与显式VIPDATA包SHA的Raw候选")
+        if target_count != 1:
+            raise RawSourcePgError("PG_SOURCE_DUPLICATE", "PG目标日来源代码存在重复Raw行")
+        rows = _read_history_rows(
+            cursor, namespace_id=namespace_id, source_symbols=(source_symbol,),
+            sessions=selected_sessions, package_sha256=package_sha256,
+        )
+    actual_sessions = tuple(row["session_date"] for row in rows)
+    if actual_sessions != selected_sessions:
+        missing = sorted(set(selected_sessions) - set(actual_sessions))
+        raise RawSourcePgError(
+            "PG_HISTORY_SESSION_MISSING",
+            "PG历史窗口未闭合；缺少明确交易会话：" + ",".join(day.isoformat() for day in missing),
+        )
+    return {
+        "status": "AVAILABLE",
+        "namespace_id": namespace_id,
+        "source_symbol": source_symbol,
+        "target_session": target_session.isoformat(),
+        "package_sha256": package_sha256,
+        "session_start": selected_sessions[0].isoformat(),
+        "session_end": selected_sessions[-1].isoformat(),
+        "session_count": len(selected_sessions),
+        "history_rows": rows,
+        "source_zip_opened": False,
+        "source_recalculated": False,
+        "ddl_executed": False,
+        "database_write": False,
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+    }
+
+
+def read_raw_daily_history_page(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    sessions: Sequence[date],
+    offset: int,
+    limit: int,
+    market: str,
+    board: str,
+) -> dict[str, Any]:
+    """SQL过滤并分页选候选，再以单个只读PG事务批量读取本页历史。"""
+    selected_sessions = _validate_history_query(
+        source_symbol=None, target_session=target_session,
+        package_sha256=package_sha256, sessions=sessions,
+    )
+    if (type(offset) is not int or not 0 <= offset <= 2**31 - 1
+            or type(limit) is not int or not 1 <= limit <= 100):
+        raise RawSourcePgError("PG_PAGE_INVALID", "PG历史分页offset须为非负整数且limit为1至100")
+    if market not in {"ALL", "SH", "SZ"} or board not in {"ALL", "MAIN_BOARD", "GEM"}:
+        raise RawSourcePgError("PG_FILTER_INVALID", "PG历史分页市场或板别过滤无效")
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        cursor.execute(
+            """SELECT bar_status, count(*) FROM stock.source_raw_daily
+WHERE namespace_id=%s::uuid AND session_date=%s AND package_sha256=%s
+  AND (%s='ALL' OR market=%s) AND (%s='ALL' OR board=%s)
+GROUP BY bar_status ORDER BY bar_status""",
+            (namespace_id, target_session, package_sha256, market, market, board, board),
+        )
+        by_status = {status: int(count) for status, count in cursor.fetchall()}
+        total = sum(by_status.values())
+        cursor.execute(
+            """SELECT source_symbol, market, board FROM stock.source_raw_daily
+WHERE namespace_id=%s::uuid AND session_date=%s AND package_sha256=%s
+  AND (%s='ALL' OR market=%s) AND (%s='ALL' OR board=%s)
+ORDER BY source_symbol LIMIT %s OFFSET %s""",
+            (namespace_id, target_session, package_sha256, market, market, board, board, limit, offset),
+        )
+        page = cursor.fetchall()
+        symbols = [row[0] for row in page]
+        history_rows = _read_history_rows(
+            cursor, namespace_id=namespace_id, source_symbols=symbols,
+            sessions=selected_sessions, package_sha256=package_sha256,
+        )
+    grouped: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in symbols}
+    for row in history_rows:
+        grouped[row["source_symbol"]].append(row)
+    candidates = []
+    for symbol, candidate_market, candidate_board in page:
+        rows = grouped[symbol]
+        actual_sessions = tuple(row["session_date"] for row in rows)
+        missing = sorted(set(selected_sessions) - set(actual_sessions))
+        candidates.append({
+            "source_symbol": symbol,
+            "market": candidate_market,
+            "board": candidate_board,
+            "history_rows": rows,
+            "history_complete": not missing,
+            "missing_sessions": [day.isoformat() for day in missing],
+        })
+    next_offset = offset + len(page)
+    return {
+        "status": "AVAILABLE" if page else "EMPTY_PAGE",
+        "namespace_id": namespace_id,
+        "target_session": target_session.isoformat(),
+        "package_sha256": package_sha256,
+        "session_start": selected_sessions[0].isoformat(),
+        "session_end": selected_sessions[-1].isoformat(),
+        "session_count": len(selected_sessions),
+        "offset": offset,
+        "limit": limit,
+        "page_count": len(page),
+        "total_count": total,
+        "next_offset": next_offset if next_offset < total else None,
+        "bar_status_counts": by_status,
+        "partition_closed": total == sum(by_status.values()),
+        "market_filter": market,
+        "board_filter": board,
+        "candidates": candidates,
+        "source_zip_opened": False,
+        "source_recalculated": False,
+        "ddl_executed": False,
+        "database_write": False,
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+    }
 
 
 def read_raw_daily_page(
