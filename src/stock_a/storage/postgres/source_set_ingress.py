@@ -14,21 +14,48 @@ _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 
 # 这是R01正式source_set关系的最小读取投影。没有这些typed列时失败关闭；
 # 正式表尚未由获准迁移创建时，只能报告首次观察或读者不可用。
+_SOURCE_SET_SELECT = (
+    "namespace_id::text AS namespace_id",
+    "target_session AS target_session",
+    "package_sha256 AS package_sha256",
+    "source_set_id::text AS source_set_id",
+    "revision_id AS revision_id",
+    "source_content_id AS source_content_id",
+    "source_capture_id::text AS source_capture_id",
+    "source_digest AS source_digest",
+    "seal_status AS seal_status",
+    "sealed_at AS sealed_at",
+    "durability_status AS durability_status",
+    "commit_ack_observed_at AS commit_ack_observed_at",
+    "durable_at AS durable_at",
+    "durability_source_capture_id::text AS durability_source_capture_id",
+    "durability_source_digest AS durability_source_digest",
+    "calendar_id AS calendar_id",
+    "calendar_revision AS calendar_revision",
+    "scope_id AS scope_id",
+    "scope_contract_version AS scope_contract_version",
+    "scope_contract_digest AS scope_contract_digest",
+    "scope_catalog_digest AS scope_catalog_digest",
+    "source_semantic_revision AS source_semantic_revision",
+    "business_input_digest AS business_input_digest",
+    "head_generation AS head_generation",
+    "plan_sha256 AS plan_sha256",
+)
 _SOURCE_SET_COLUMNS = (
-    "namespace_id::text",
+    "namespace_id",
     "target_session",
     "package_sha256",
-    "source_set_id::text",
+    "source_set_id",
     "revision_id",
     "source_content_id",
-    "source_capture_id::text",
+    "source_capture_id",
     "source_digest",
     "seal_status",
     "sealed_at",
     "durability_status",
     "commit_ack_observed_at",
     "durable_at",
-    "durability_source_capture_id::text",
+    "durability_source_capture_id",
     "durability_source_digest",
     "calendar_id",
     "calendar_revision",
@@ -50,6 +77,24 @@ _CAPABILITY_COLUMNS = (
     "network_accessed",
 )
 _CAPABILITY_ID = "BAOSTOCK_SUPPLEMENT"
+_POST_COMMIT_IDENTITY_COLUMNS = (
+    "namespace_id",
+    "target_session",
+    "source_set_id",
+    "revision_id",
+    "package_sha256",
+    "source_capture_id",
+    "source_digest",
+)
+_POST_COMMIT_EVIDENCE_COLUMNS = (
+    "xmin_text",
+    "xmin_age",
+    "observer_transaction_id",
+)
+_POST_COMMIT_COLUMNS = (
+    *_POST_COMMIT_IDENTITY_COLUMNS,
+    *_POST_COMMIT_EVIDENCE_COLUMNS,
+)
 
 
 class SourceSetIngressError(ValueError):
@@ -83,13 +128,52 @@ class _CommitAckReceipt:
 
 def _as_record(row: Any, columns: tuple[str, ...]) -> dict[str, Any]:
     if isinstance(row, Mapping):
-        return dict(row)
+        if set(row) != set(columns):
+            raise SourceSetIngressError(
+                "SOURCE_SET_ROW_SHAPE_INVALID", "正式来源集合映射列名不符合合同"
+            )
+        return {column: row[column] for column in columns}
     try:
         return dict(zip(columns, row, strict=True))
     except (TypeError, ValueError) as error:
         raise SourceSetIngressError(
             "SOURCE_SET_ROW_SHAPE_INVALID", "正式来源集合读回列数不符合合同"
         ) from error
+
+
+def _cursor_column_names(cursor: Any) -> tuple[str, ...]:
+    description = getattr(cursor, "description", None)
+    if not isinstance(description, (tuple, list)):
+        raise SourceSetIngressError(
+            "SOURCE_SET_CURSOR_DESCRIPTION_INVALID", "正式来源集合游标缺少列描述"
+        )
+    names = []
+    for column in description:
+        name = getattr(column, "name", None)
+        if name is None:
+            try:
+                name = column[0]
+            except (IndexError, TypeError):
+                name = None
+        if not isinstance(name, str) or not name:
+            raise SourceSetIngressError(
+                "SOURCE_SET_CURSOR_DESCRIPTION_INVALID",
+                "正式来源集合游标列名无效",
+            )
+        names.append(name)
+    return tuple(names)
+
+
+def _as_cursor_record(
+    cursor: Any, row: Any, columns: tuple[str, ...]
+) -> dict[str, Any]:
+    actual_columns = _cursor_column_names(cursor)
+    if actual_columns != columns:
+        raise SourceSetIngressError(
+            "SOURCE_SET_CURSOR_COLUMNS_MISMATCH",
+            "正式来源集合游标列名或顺序不符合合同",
+        )
+    return _as_record(row, columns)
 
 
 def _aware(value: Any, label: str) -> datetime:
@@ -214,7 +298,7 @@ def _read_capability(
             "SOURCE_SET_P02_BINDING_MISSING",
             "正式来源集合必须有且只有一条精确P02能力关系",
         )
-    capability = _as_record(rows[0], _CAPABILITY_COLUMNS)
+    capability = _as_cursor_record(cursor, rows[0], _CAPABILITY_COLUMNS)
     if (
         capability.get("plan_sha256") != row["plan_sha256"]
         or _SHA256.fullmatch(str(capability.get("policy_sha256", ""))) is None
@@ -307,19 +391,20 @@ def read_accepted_source_state(
                 "reason_code": "FORMAL_SOURCE_SET_RELATIONS_INCOMPLETE",
                 "database_write": False,
             }
-        columns = ", ".join(_SOURCE_SET_COLUMNS)
+        columns = ", ".join(_SOURCE_SET_SELECT)
         cursor.execute(
             f"SELECT {columns} FROM stock.source_sets "
-            "WHERE namespace_id=%s::uuid AND seal_status='SEALED' "
+            "WHERE namespace_id=%s::uuid AND target_session<=%s "
+            "AND seal_status='SEALED' "
             "ORDER BY target_session DESC, revision_id DESC, source_set_id DESC LIMIT 2",
-            (namespace_id,),
+            (namespace_id, target_session),
         )
         raw_rows = cursor.fetchall()
         if not raw_rows:
             cursor.execute(
                 "SELECT EXISTS (SELECT 1 FROM stock.source_sets "
-                "WHERE namespace_id=%s::uuid)",
-                (namespace_id,),
+                "WHERE namespace_id=%s::uuid AND target_session<=%s)",
+                (namespace_id, target_session),
             )
             has_unsealed_rows = bool(cursor.fetchone()[0])
             if has_unsealed_rows:
@@ -333,14 +418,15 @@ def read_accepted_source_state(
             return {
                 "status": "FIRST_OBSERVATION",
                 "previous": None,
-                "reason": "当前DEV namespace没有已封口的正式source_set；非封口行不作前态",
+                "reason": "目标会话及其之前没有已封口的正式source_set；未来行不作前态",
                 "database_write": False,
             }
         row = _validate_source_set(
-            _as_record(raw_rows[0], _SOURCE_SET_COLUMNS), namespace_id=str(namespace_id)
+            _as_cursor_record(cursor, raw_rows[0], _SOURCE_SET_COLUMNS),
+            namespace_id=str(namespace_id),
         )
         if len(raw_rows) > 1:
-            second = _as_record(raw_rows[1], _SOURCE_SET_COLUMNS)
+            second = _as_cursor_record(cursor, raw_rows[1], _SOURCE_SET_COLUMNS)
             if (
                 second.get("target_session") == row["target_session"]
                 and second.get("revision_id") == row["revision_id"]
@@ -385,7 +471,7 @@ def read_p04_source_input(
                 "candidate_fallback": False,
                 "reason_code": "FORMAL_SOURCE_SET_RELATIONS_NOT_PRESENT",
             }
-        columns = ", ".join(_SOURCE_SET_COLUMNS)
+        columns = ", ".join(_SOURCE_SET_SELECT)
         cursor.execute(
             f"SELECT {columns} FROM stock.source_sets "
             "WHERE namespace_id=%s::uuid AND target_session=%s "
@@ -424,7 +510,8 @@ def read_p04_source_input(
                 "reason_code": "NO_EXACT_SEALED_SOURCE_SET",
             }
         row = _validate_source_set(
-            _as_record(raw_rows[0], _SOURCE_SET_COLUMNS), namespace_id=str(namespace_id)
+            _as_cursor_record(cursor, raw_rows[0], _SOURCE_SET_COLUMNS),
+            namespace_id=str(namespace_id),
         )
         if (
             row["target_session"] != target_session
@@ -434,7 +521,7 @@ def read_p04_source_input(
                 "P04_SOURCE_SET_KEY_MISMATCH", "P04读回关系与显式日期或包SHA不一致"
             )
         if len(raw_rows) > 1:
-            second = _as_record(raw_rows[1], _SOURCE_SET_COLUMNS)
+            second = _as_cursor_record(cursor, raw_rows[1], _SOURCE_SET_COLUMNS)
             if second.get("revision_id") == row["revision_id"]:
                 raise SourceSetIngressError(
                     "P04_SOURCE_SET_AMBIGUOUS", "精确日期和SHA存在相同revision冲突"
@@ -621,9 +708,16 @@ def confirm_source_set_post_commit(
                 "COMMIT_ACK_NAMESPACE_MISMATCH", "提交后读回连接落在不同namespace"
             )
         cursor.execute(
-            """SELECT namespace_id::text, target_session, source_set_id::text,
-                      revision_id, package_sha256, source_capture_id::text, source_digest,
-                      xmin::text, age(xmin), txid_current()::text
+            """SELECT namespace_id::text AS namespace_id,
+                      target_session AS target_session,
+                      source_set_id::text AS source_set_id,
+                      revision_id AS revision_id,
+                      package_sha256 AS package_sha256,
+                      source_capture_id::text AS source_capture_id,
+                      source_digest AS source_digest,
+                      xmin::text AS xmin_text,
+                      age(xmin) AS xmin_age,
+                      txid_current()::text AS observer_transaction_id
                FROM stock.source_sets
                WHERE namespace_id=%s::uuid AND target_session=%s
                  AND source_set_id=%s::uuid AND revision_id=%s
@@ -638,10 +732,35 @@ def confirm_source_set_post_commit(
                 "新事务没有读回精确提交的来源集合主行",
             )
         try:
+            actual_columns = _cursor_column_names(cursor)
+        except SourceSetIngressError as error:
+            raise PostCommitEvidenceError(
+                "COMMIT_ACK_CURSOR_DESCRIPTION_INVALID",
+                "提交后读回游标缺少可验证的列描述",
+            ) from error
+        if actual_columns != _POST_COMMIT_COLUMNS:
+            raise PostCommitEvidenceError(
+                "COMMIT_ACK_CURSOR_COLUMNS_MISMATCH",
+                "提交后读回列名或顺序不符合7个业务字段和3个事务证据字段合同",
+            )
+        if not isinstance(row, (tuple, list)) or len(row) != len(_POST_COMMIT_COLUMNS):
+            raise PostCommitEvidenceError(
+                "COMMIT_ACK_ROW_SHAPE_INVALID",
+                "提交后读回必须恰有7个业务字段和3个事务证据字段",
+            )
+        try:
+            observed = _as_record(row[:7], _POST_COMMIT_IDENTITY_COLUMNS)
+            transaction_evidence = _as_record(row[7:], _POST_COMMIT_EVIDENCE_COLUMNS)
+        except SourceSetIngressError as error:
+            raise PostCommitEvidenceError(
+                "COMMIT_ACK_ROW_SHAPE_INVALID",
+                "提交后读回的业务列或事务证据列形状不符合合同",
+            ) from error
+        try:
             writer_txid = int(commit_ack.writer_transaction_id)
-            row_xmin = int(row[7])
-            xmin_age = int(row[8])
-            observer_txid = int(row[9])
+            row_xmin = int(transaction_evidence["xmin_text"])
+            xmin_age = int(transaction_evidence["xmin_age"])
+            observer_txid = int(transaction_evidence["observer_transaction_id"])
         except (TypeError, ValueError) as error:
             raise PostCommitEvidenceError(
                 "COMMIT_ACK_TRANSACTION_ID_INVALID",
@@ -657,18 +776,6 @@ def confirm_source_set_post_commit(
                 "SOURCE_SET_WRITER_TRANSACTION_MISMATCH",
                 "来源集合行的实际创建事务与提交确认事务不一致",
             )
-        observed = _as_record(
-            row,
-            (
-                "namespace_id",
-                "target_session",
-                "source_set_id",
-                "revision_id",
-                "package_sha256",
-                "source_capture_id",
-                "source_digest",
-            ),
-        )
         observer_transaction_id = str(observer_txid)
         observed_at = datetime.now(timezone.utc)
     return verify_post_commit_readback(
