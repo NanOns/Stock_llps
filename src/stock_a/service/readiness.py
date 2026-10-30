@@ -161,6 +161,44 @@ _STAGE_CAPABILITIES: dict[str, dict[str, str]] = {
 }
 
 
+def _formal_source_set_readback_matches(
+    source_ingress_result: Mapping[str, Any] | None,
+) -> bool:
+    """只把P00/P02/P03的精确typed封口读回视为正式消费者证据。"""
+    if not isinstance(source_ingress_result, Mapping):
+        return False
+    plan = source_ingress_result.get("plan")
+    bao = source_ingress_result.get("p02_baostock")
+    capture = source_ingress_result.get("p01_capture")
+    p04 = capture.get("p04_input") if isinstance(capture, Mapping) else None
+    capability = p04.get("p02_capability") if isinstance(p04, Mapping) else None
+    if not all(
+        isinstance(item, Mapping) for item in (plan, bao, capture, p04, capability)
+    ):
+        return False
+    plan_sha = plan.get("plan_sha256")
+    policy_sha = bao.get("policy_sha256")
+    requests = bao.get("actual_requests")
+    return bool(
+        p04.get("status") == "AVAILABLE"
+        and p04.get("seal_status") == "SEALED"
+        and p04.get("durability_status") == "VERIFIED_POST_COMMIT_READBACK"
+        and p04.get("candidate_fallback") is False
+        and p04.get("database_write") is False
+        and p04.get("ddl_executed") is False
+        and p04.get("target_session") == source_ingress_result.get("target_session")
+        and p04.get("package_sha256") == source_ingress_result.get("package_sha256")
+        and p04.get("source_capture_id") == capture.get("source_capture_id")
+        and p04.get("plan_sha256") == plan_sha
+        and capability.get("plan_sha256") == plan_sha
+        and capability.get("policy_sha256") == policy_sha
+        and capability.get("status") == bao.get("status")
+        and capability.get("actual_logins") == (requests or {}).get("logins")
+        and capability.get("actual_queries") == (requests or {}).get("queries")
+        and capability.get("network_accessed") is bao.get("network_accessed")
+    )
+
+
 def build_chain_readiness_payload(
     contract: Mapping[str, Any],
     source_version: Mapping[str, Any],
@@ -231,6 +269,9 @@ def build_chain_readiness_payload(
         if isinstance(source_set_candidate, Mapping)
         else "NO_MATCH"
     )
+    formal_source_set_readback = _formal_source_set_readback_matches(
+        source_ingress_result
+    )
 
     stage_rows: list[dict[str, Any]] = []
     by_id: dict[str, dict[str, Any]] = {}
@@ -252,6 +293,15 @@ def build_chain_readiness_payload(
         if stage_id == "P01":
             capability["data_status"] = source_data_status
             capability["evidence_type"] = "REAL_PG"
+            if formal_source_set_readback:
+                capability.update(
+                    {
+                        "implementation_level": "PG_SOURCE_FACT",
+                        "consumer_status": "CONNECTED",
+                        "evidence_type": "SEALED_TYPED_PG_READBACK",
+                        "status_reason": "P03正式source_set已按相同捕获与Raw摘要封口并由P04精确读回。",
+                    }
+                )
         if stage_id == "P05":
             capability["data_status"] = "SOURCE_RAW_ONLY"
             capability["evidence_type"] = "REAL_PG_SOURCE_OBSERVATION"
@@ -268,9 +318,13 @@ def build_chain_readiness_payload(
                     "implementation_level": "RUNNABLE_P00_PLAN",
                     "data_status": plan.get("status", "UNKNOWN"),
                     "consumer_status": (
-                        "CONNECTED_PREVIEW"
-                        if gate_status == "READY"
-                        else "BLOCKED_ENVIRONMENT"
+                        "CONNECTED"
+                        if formal_source_set_readback
+                        else (
+                            "CONNECTED_PREVIEW"
+                            if gate_status == "READY"
+                            else "BLOCKED_ENVIRONMENT"
+                        )
                     ),
                     "evidence_type": "REAL_PG_AND_CONTRACT",
                     "producer": "stock_a.application.source_ingress.build_source_ingress_plan → stock_a.application.planning.assemble_day_plan",
@@ -289,7 +343,11 @@ def build_chain_readiness_payload(
                 {
                     "implementation_level": "RUNNABLE_CAPABILITY_ACCOUNTING",
                     "data_status": bao.get("status", "UNKNOWN"),
-                    "consumer_status": "CONNECTED_PREVIEW",
+                    "consumer_status": (
+                        "CONNECTED"
+                        if formal_source_set_readback
+                        else "CONNECTED_PREVIEW"
+                    ),
                     "evidence_type": "REAL_POLICY_ACCOUNTING",
                     "producer": "stock_a.application.source_ingress.calculate_baostock_capability",
                     "consumer": "source-ingress-plan CLI、GET /api/preview/chain-readiness、预览页",
@@ -302,7 +360,27 @@ def build_chain_readiness_payload(
                     ),
                 }
             )
-        if stage_id == "P03" and candidate_status == "AVAILABLE":
+        if stage_id == "P03" and formal_source_set_readback:
+            p04_input = source_ingress_result["p01_capture"]["p04_input"]
+            capability.update(
+                {
+                    "implementation_level": "FORMAL_TYPED_SOURCE_SET",
+                    "data_status": "AVAILABLE_FORMAL_SOURCE_SET",
+                    "consumer_status": "CONNECTED",
+                    "candidate_consumer_status": "CONNECTED",
+                    "evidence_type": "SEALED_TYPED_PG_READBACK",
+                    "producer": "stock.source_sets + stock.source_set_capabilities typed rows",
+                    "consumer": "P04 exact source_set reader",
+                    "formal_source_set_status": "SEALED_AND_READ_BACK",
+                    "p04_input_status": p04_input["status"],
+                    "p02_binding_status": "EXACT_PLAN_AND_POLICY_SHA_MATCH",
+                    "status_reason": (
+                        f"精确封口{p04_input.get('source_set_id')}已由P04按目标日、包SHA、"
+                        "捕获、P00计划和P02策略摘要读回；稳定身份解析仍属于后续P04能力。"
+                    ),
+                }
+            )
+        elif stage_id == "P03" and candidate_status == "AVAILABLE":
             candidate = source_set_candidate.get("candidate", {})
             p02_binding = source_set_candidate.get("p02_binding", {})
             if isinstance(source_ingress_result, Mapping):
@@ -422,7 +500,7 @@ def build_chain_readiness_payload(
             stage_id not in source_bound_ids
             or row["implementation_level"] == "DESIGN_ONLY"
             or row["data_status"] in {"MISSING", "NOT_CHECKED"}
-            or not str(row["consumer_status"]).startswith("CONNECTED")
+            or row["consumer_status"] != "CONNECTED"
         ):
             first_break_row = row
             break
@@ -512,6 +590,7 @@ def build_chain_readiness_payload(
         "source_date": source_version["source_date"],
         "package_sha256": source_version["package_sha256"],
         "evidence_type": "REAL_PG_AND_STATIC_CODE_BINDINGS",
+        "formal_source_set_readback": formal_source_set_readback,
         "producer": source_version["producer"],
         "consumer": source_version["consumer"],
         "status_reason": "来源候选与研究预览可用范围已核实；正式source_set、identity/universe、Canonical/Owner/Publication/Head链及P25正式显示确认未接通。",

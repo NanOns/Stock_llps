@@ -321,7 +321,7 @@ def classify_incremental_mode(
         reasons.append("SEMANTIC_REVISION_SET_CHANGED")
     elif prior_revisions != current_revisions:
         reasons.append("SEMANTIC_REVISION_CHANGED")
-    if previous_digest != current_digest:
+    if target_session == previous.target_session and previous_digest != current_digest:
         reasons.append("BUSINESS_INPUT_IDENTITY_CHANGED")
 
     if reasons:

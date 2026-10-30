@@ -155,5 +155,12 @@ def persist_source_set_candidate(
         "source_ingress_plan": ingress["plan"],
         "environment_gate": ingress["environment_gate"],
         "p02_baostock": ingress["p02_baostock"],
+        "p02_binding": {
+            "status": "PREVIEW_BOUND_NOT_PERSISTED_TO_EXISTING_CANDIDATE_SCHEMA",
+            "binding_sha256": ingress["p02_baostock"]["binding_sha256"],
+            "plan_sha256": ingress["p02_baostock"]["plan_sha256"],
+            "policy_sha256": ingress["p02_baostock"]["policy_sha256"],
+            "historical_candidate_status": "NOT_BOUND_TO_P00_PLAN_OR_POLICY",
+        },
         "formal_p03_complete": False,
     }

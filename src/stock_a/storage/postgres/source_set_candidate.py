@@ -478,6 +478,10 @@ def persist_source_set_candidate(
         raise SourceSetCandidatePgError(
             "CALENDAR_EVIDENCE_INVALID", "缺少版本化官方日历证据"
         )
+    if not isinstance(bao_capability, Mapping):
+        raise SourceSetCandidatePgError(
+            "P02_CAPABILITY_UNBOUND", "P03写入必须绑定本日期/SHA的真实P02零请求核算"
+        )
     policy = config.get("source_policy", {}).get("baostock_supplement")
     policy_sha = (
         sha256(
@@ -491,9 +495,31 @@ def persist_source_set_candidate(
         if isinstance(policy, Mapping)
         else None
     )
+    p02_binding = {
+        key: bao_capability.get(key)
+        for key in (
+            "target_session",
+            "package_sha256",
+            "plan_sha256",
+            "policy_contract",
+            "policy_sha256",
+            "status",
+            "reason_code",
+            "actual_requests",
+            "network_accessed",
+            "data_quality",
+        )
+    }
+    expected_p02_binding_sha = sha256(
+        json.dumps(
+            p02_binding,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
     if (
-        not isinstance(bao_capability, Mapping)
-        or bao_capability.get("status") != "NOT_REQUESTED"
+        bao_capability.get("status") != "NOT_REQUESTED"
         or bao_capability.get("reason_code") != "OPTIONAL_SOURCE_NOT_REQUESTED"
         or bao_capability.get("target_session") != target_session.isoformat()
         or bao_capability.get("package_sha256") != package_sha256
@@ -513,6 +539,8 @@ def persist_source_set_candidate(
         or bao_capability.get("source_available_at") is not None
         or bao_capability.get("actual_requests") != {"logins": 0, "queries": 0}
         or bao_capability.get("network_accessed") is not False
+        or bao_capability.get("binding_sha256") != expected_p02_binding_sha
+        or bao_capability.get("binding_status") != "PREVIEW_COMPUTED_NOT_PERSISTED"
     ):
         raise SourceSetCandidatePgError(
             "P02_CAPABILITY_UNBOUND", "P03写入必须绑定本日期/SHA的真实P02零请求核算"
