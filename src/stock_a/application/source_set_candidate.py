@@ -102,18 +102,14 @@ def prepare_source_set_candidate(
     *,
     target_session: date,
     package_sha256: str,
-    persist: bool = False,
-    task_scope: str | None = None,
 ) -> dict[str, Any]:
-    """校验官方会话后预检或持久化一个真实PG来源集合候选。"""
+    """校验官方会话并只读计算临时来源集合候选。"""
     calendar = _official_calendar(target_session)
     return prepare_pg_candidate(
         config,
         target_session=target_session,
         package_sha256=package_sha256,
         calendar=calendar,
-        persist=persist,
-        task_scope=task_scope,
     )
 
 

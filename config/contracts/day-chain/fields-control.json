@@ -78,16 +78,10 @@
         "unit": "scope",
         "expression_ref": "FROZEN_DECLARED_SCOPE",
         "input_fields": [],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -98,14 +92,7 @@
           "namespace_id",
           "job_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "day_plan",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.application.plan:plan"
+        "output_artifact": "day_plan"
       }
     },
     {
@@ -117,16 +104,10 @@
         "unit": "session",
         "expression_ref": "VALIDATED_CALENDAR_TARGET",
         "input_fields": [],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "date",
           "nullable_only_with_quality": true,
@@ -137,14 +118,7 @@
           "namespace_id",
           "job_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "day_plan",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.application.plan:plan"
+        "output_artifact": "day_plan"
       }
     },
     {
@@ -156,17 +130,11 @@
         "unit": "generation",
         "expression_ref": "EXACT_ACCEPTED_HEAD_OR_FIRST_RUN",
         "input_fields": [],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P23"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "integer",
           "nullable_only_with_quality": true,
@@ -177,14 +145,7 @@
           "namespace_id",
           "job_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "day_plan",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.application.plan:plan"
+        "output_artifact": "day_plan"
       }
     },
     {
@@ -197,17 +158,11 @@
         "unit": "sha256",
         "expression_ref": "ACTUAL_BYTE_DIGEST",
         "input_fields": [],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P03"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -218,14 +173,7 @@
           "namespace_id",
           "capture_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "tdx_capture",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.sources.tdx.capture:capture"
+        "output_artifact": "tdx_capture"
       }
     },
     {
@@ -237,17 +185,11 @@
         "unit": "UTC",
         "expression_ref": "ACTUAL_DURABLE_CAPTURE_TIME",
         "input_fields": [],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P03"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "timestamp",
           "nullable_only_with_quality": true,
@@ -258,14 +200,7 @@
           "namespace_id",
           "capture_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "tdx_capture",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.sources.tdx.capture:capture"
+        "output_artifact": "tdx_capture"
       }
     },
     {
@@ -277,17 +212,11 @@
         "unit": "sha256",
         "expression_ref": "NORMALIZED_TYPED_ROWS_DIGEST",
         "input_fields": [],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P03"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -298,14 +227,7 @@
           "namespace_id",
           "capture_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "tdx_capture",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.sources.tdx.capture:capture"
+        "output_artifact": "tdx_capture"
       }
     },
     {
@@ -317,17 +239,11 @@
         "unit": "identity",
         "expression_ref": "ACTUAL_CONSUMED_DEPENDENCY_SUBVECTOR",
         "input_fields": [],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P20"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -338,14 +254,7 @@
           "namespace_id",
           "owner_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "owner_seals",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.publication.owner:owner"
+        "output_artifact": "owner_seals"
       }
     },
     {
@@ -357,17 +266,11 @@
         "unit": "sha256",
         "expression_ref": "CANONICAL_ORDERED_TYPED_ROWS_DIGEST",
         "input_fields": [],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P20"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -378,14 +281,7 @@
           "namespace_id",
           "owner_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "owner_seals",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.publication.owner:owner"
+        "output_artifact": "owner_seals"
       }
     },
     {
@@ -397,16 +293,10 @@
         "unit": "UTC",
         "expression_ref": "POST_VALIDATION_ATOMIC_SEAL",
         "input_fields": [],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "timestamp",
           "nullable_only_with_quality": true,
@@ -417,14 +307,7 @@
           "namespace_id",
           "owner_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "owner_seals",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.publication.owner:owner"
+        "output_artifact": "owner_seals"
       }
     },
     {
@@ -439,17 +322,11 @@
           "owner.id",
           "owner.content_digest"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P21"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -460,14 +337,7 @@
           "namespace_id",
           "manifest_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "business_manifest",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.publication.owner:manifest"
+        "output_artifact": "business_manifest"
       }
     },
     {
@@ -481,17 +351,11 @@
         "input_fields": [
           "manifest.id"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P21"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -502,14 +366,7 @@
           "namespace_id",
           "index_version"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "read_index",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.publication.index:read_index"
+        "output_artifact": "read_index"
       }
     },
     {
@@ -524,10 +381,6 @@
           "manifest.id",
           "read_index.version"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
@@ -535,8 +388,6 @@
           "P23",
           "P24"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -547,14 +398,7 @@
           "namespace_id",
           "publication_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "candidate_publication",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.publication.index:publication"
+        "output_artifact": "candidate_publication"
       }
     },
     {
@@ -568,17 +412,11 @@
         "input_fields": [
           "publication.id"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P23"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "bool",
           "nullable_only_with_quality": true,
@@ -590,14 +428,7 @@
           "publication_id",
           "validation_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "candidate_api_validation",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.service.validation:candidate"
+        "output_artifact": "candidate_api_validation"
       }
     },
     {
@@ -611,17 +442,11 @@
         "input_fields": [
           "publication.id"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P23"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "bool",
           "nullable_only_with_quality": true,
@@ -633,14 +458,7 @@
           "publication_id",
           "validation_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "client_contract_validation",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.service.validation:candidate"
+        "output_artifact": "client_contract_validation"
       }
     },
     {
@@ -657,18 +475,12 @@
           "candidate.api_verified",
           "candidate.ui_compatible"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P23",
           "P24"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "integer",
           "nullable_only_with_quality": true,
@@ -679,14 +491,7 @@
           "namespace_id",
           "head_role"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "research_head",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.publication.accept:head"
+        "output_artifact": "research_head"
       }
     },
     {
@@ -700,17 +505,11 @@
         "input_fields": [
           "head.generation"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P24"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -721,14 +520,7 @@
           "namespace_id",
           "request_key"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "accepted_receipt",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.publication.accept:receipt"
+        "output_artifact": "accepted_receipt"
       }
     },
     {
@@ -742,17 +534,11 @@
         "input_fields": [
           "receipt.request_key"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P25"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "bool",
           "nullable_only_with_quality": true,
@@ -763,14 +549,7 @@
           "namespace_id",
           "outbox_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "dispatch_accounting",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.application.readback:dispatch"
+        "output_artifact": "dispatch_accounting"
       }
     },
     {
@@ -785,17 +564,11 @@
           "publication.id",
           "head.generation"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P25"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "bool",
           "nullable_only_with_quality": true,
@@ -807,14 +580,7 @@
           "publication_id",
           "readback_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "accepted_api_readback",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.application.readback:readback"
+        "output_artifact": "accepted_api_readback"
       }
     },
     {
@@ -829,17 +595,11 @@
           "dispatch.accounted",
           "readback.accepted"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P25"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -851,14 +611,7 @@
           "job_id",
           "status_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "backend_chain_status",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.service.completion:completion"
+        "output_artifact": "backend_chain_status"
       }
     },
     {
@@ -872,16 +625,10 @@
         "input_fields": [
           "completion.backend"
         ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -893,15 +640,22 @@
           "job_id",
           "status_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "display_chain_status",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.service.completion:completion"
+        "output_artifact": "display_chain_status"
       }
     }
-  ]
+  ],
+  "defaults": {
+    "context_dependencies": [
+      "context.target_session",
+      "context.source_cutoff"
+    ],
+    "coordinate_role": "NONE",
+    "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+    "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+    "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+    "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+    "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+    "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
+    "window_contract": "NONE"
+  }
 }

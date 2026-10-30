@@ -39,6 +39,8 @@ from stock_a.sources.tdx.vipdata import (
     VipdataBudgets,
     VipdataError,
     VipdataSourceConfig,
+    cleanup_vipdata_extraction,
+    cleanup_vipdata_package,
     compare_vipdata_package_revisions,
     download_vipdata_package,
     extract_vipdata_day_entry,
@@ -848,14 +850,6 @@ def _parser() -> argparse.ArgumentParser:
     )
     source_set.add_argument(
         "--package-sha256", required=True, help="完整TDX来源包SHA-256"
-    )
-    source_set.add_argument(
-        "--persist", action="store_true", help="持久化本批授权的非PIT候选"
-    )
-    source_set.add_argument(
-        "--task-scope",
-        choices=("R01_R02_P03_SOURCE_SET_BROWSER_RULE_R1",),
-        help="持久化必须显式绑定唯一任务范围",
     )
     source_set_catalog = commands.add_parser(
         "source-set-catalog", help="按精确日期与TDX包SHA只读查询P03来源集合候选"
@@ -2171,38 +2165,23 @@ def _parse_source_set_date(value: str) -> date:
     return parsed
 
 
-def _run_source_set_candidate(args: argparse.Namespace, *, read_only: bool) -> int:
+def _run_source_set_candidate(
+    args: argparse.Namespace, *, compute_candidate: bool
+) -> int:
     config, config_path = _load_runtime_config()
     target_session = _parse_source_set_date(args.target_session)
     try:
-        if read_only:
-            result = read_source_set_candidate(
+        if compute_candidate:
+            result = prepare_source_set_candidate(
                 config,
                 target_session=target_session,
                 package_sha256=args.package_sha256,
             )
         else:
-            if (
-                args.persist
-                and args.task_scope != "R01_R02_P03_SOURCE_SET_BROWSER_RULE_R1"
-            ):
-                raise DiagnosticError(
-                    "TASK_SCOPE_REQUIRED",
-                    "持久化必须显式提供本批唯一授权任务范围",
-                    _EXIT_PERMISSION,
-                )
-            if not args.persist and args.task_scope is not None:
-                raise DiagnosticError(
-                    "TASK_SCOPE_UNEXPECTED",
-                    "只读预检不得附带PG写入任务范围",
-                    _EXIT_ARGUMENT,
-                )
-            result = prepare_source_set_candidate(
+            result = read_source_set_candidate(
                 config,
                 target_session=target_session,
                 package_sha256=args.package_sha256,
-                persist=args.persist,
-                task_scope=args.task_scope,
             )
     except (SourceSetCandidateApplicationError, SourceSetCandidatePgError) as error:
         code = getattr(error, "code", "SOURCE_SET_CANDIDATE_REJECTED")
@@ -4521,6 +4500,26 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
         result["download"] = {"status": error.code, "reason": str(error)}
         _emit(result, error=True)
         return _EXIT_UNAVAILABLE
+
+    return _consume_source_vipdata(args, package, result)
+
+
+def _consume_source_vipdata(
+    args: argparse.Namespace,
+    package: Any,
+    result: dict[str, Any],
+) -> int:
+    try:
+        return _consume_source_vipdata_inner(args, package, result)
+    finally:
+        cleanup_vipdata_package(package)
+
+
+def _consume_source_vipdata_inner(
+    args: argparse.Namespace,
+    package: Any,
+    result: dict[str, Any],
+) -> int:
     result["package"] = package_dict(package)
     result["validated_day_entry_count"] = len(package.day_entries)
     result["entry_count_by_market"] = dict(package.entry_count_by_market)
@@ -4572,25 +4571,28 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
                 units=units,
                 limits=limits,
             )
-            extraction_root, extracted_path = extract_vipdata_day_entry(
+            extraction_root, _extracted_path = extract_vipdata_day_entry(
                 package,
                 market=parts[0],
                 symbol=parts[1],
             )
-            consumer = research_stock(
-                symbol=symbol,
-                target_session=args.target_session,
-                source_roots=(str(extraction_root),),
-                units=units,
-                limits=limits,
-            )
+            try:
+                consumer = research_stock(
+                    symbol=symbol,
+                    target_session=args.target_session,
+                    source_roots=(str(extraction_root),),
+                    units=units,
+                    limits=limits,
+                )
+            finally:
+                cleanup_vipdata_extraction(extraction_root)
             result["core_consumer"] = {
                 "status": "CORE_CONSUMED"
                 if entry_scan.target_bar_present
                 else "CORE_CONSUMED_TARGET_BAR_MISSING",
                 "sample_symbol": symbol,
                 "archive_entry": entry_scan.entry.path,
-                "extracted_path": str(extracted_path),
+                "temporary_source_consumed": True,
                 "source_sha256": consumer["source"]["raw_byte_sha256"],
                 "zip_entry_first_date": entry_scan.first_date.isoformat(),
                 "zip_entry_last_date": entry_scan.last_date.isoformat(),
@@ -4661,9 +4663,9 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "source-raw-catalog":
             return _run_source_raw_catalog(args)
         if args.command == "source-set-candidate":
-            return _run_source_set_candidate(args, read_only=False)
+            return _run_source_set_candidate(args, compute_candidate=True)
         if args.command == "source-set-catalog":
-            return _run_source_set_candidate(args, read_only=True)
+            return _run_source_set_candidate(args, compute_candidate=False)
         if args.command == "preview-serve":
             from stock_a.service.preview_http import run_preview_server
 

@@ -205,11 +205,26 @@ def build_chain_readiness_payload(
         if source_version["version_status"] == "PARTIAL" or has_failed
         else "AVAILABLE"
     )
-    first_break_id = "P03"
-    first_break_reason = (
-        "真实捕获及来源代码级Raw观察之后，正式来源封口source_set尚无已接通生产者；"
-        "正式Canonical链从P03开始断开。来源观察自身的完整性单独显示，不改变此正式首断点。"
-    )
+    scopes = contract.get("scope_policy", {}).get("scopes", {})
+    source_ingress = scopes.get("SOURCE_INGRESS", {})
+    required_source_stages = source_ingress.get("required_stages", ())
+    source_binding = contract.get("scope_bindings", {}).get("SOURCE_INGRESS", {})
+    source_bindings = source_binding.get("stage_bindings", ())
+    source_bound_ids = {
+        row.get("stage_id") for row in source_bindings if isinstance(row, Mapping)
+    }
+    if (
+        not isinstance(required_source_stages, (list, tuple))
+        or not required_source_stages
+        or any(
+            stage_id not in {f"P{i:02d}" for i in range(26)}
+            for stage_id in required_source_stages
+        )
+    ):
+        raise DayChainContractError(
+            "DAY_CHAIN_SOURCE_INGRESS_SCOPE_INVALID",
+            "来源准入要求必须来自有效SOURCE_INGRESS阶段合同",
+        )
     candidate_status = (
         source_set_candidate.get("status", "NO_MATCH")
         if isinstance(source_set_candidate, Mapping)
@@ -290,9 +305,23 @@ def build_chain_readiness_payload(
             "name_zh": stage["name_zh"],
             "completion_role": stage.get("completion_role"),
             "scope_binding": (
-                bindings_by_id[stage_id].get("kernel_role", "FOUNDATION_BOUND")
-                if stage_id in bindings_by_id
-                else "OUTSIDE_FOUNDATION_EOD_FULL_CHAIN_DESIGN"
+                "SOURCE_INGRESS_BOUND"
+                if stage_id in source_bound_ids
+                else (
+                    "FOUNDATION_BOUND_SOURCE_INGRESS_UNBOUND"
+                    if stage_id in required_source_stages and stage_id in bindings_by_id
+                    else (
+                        "SOURCE_INGRESS_REQUIRED_UNBOUND"
+                        if stage_id in required_source_stages
+                        else (
+                            bindings_by_id[stage_id].get(
+                                "kernel_role", "FOUNDATION_BOUND"
+                            )
+                            if stage_id in bindings_by_id
+                            else "OUTSIDE_FOUNDATION_EOD_FULL_CHAIN_DESIGN"
+                        )
+                    )
+                )
             ),
             "implementation_level": capability["implementation_level"],
             "data_status": capability["data_status"],
@@ -310,10 +339,43 @@ def build_chain_readiness_payload(
             "package_sha256": source_version["package_sha256"],
             "status_reason": capability["status_reason"],
             "checked_at": checked_at,
-            "is_first_break": stage_id == first_break_id,
+            "is_first_break": False,
         }
         stage_rows.append(row)
         by_id[stage_id] = row
+
+    first_break_row = None
+    for stage_id in required_source_stages:
+        row = by_id[stage_id]
+        if (
+            stage_id not in source_bound_ids
+            or row["implementation_level"] == "DESIGN_ONLY"
+            or row["data_status"] in {"MISSING", "NOT_CHECKED"}
+            or not str(row["consumer_status"]).startswith("CONNECTED")
+        ):
+            first_break_row = row
+            break
+    first_break_id = (
+        first_break_row["stage_id"] if first_break_row is not None else None
+    )
+    for row in stage_rows:
+        row["is_first_break"] = row["stage_id"] == first_break_id
+    first_break_reason = (
+        first_break_row["status_reason"]
+        if first_break_row is not None
+        else "SOURCE_INGRESS全部要求阶段均已具备正式绑定、实际数据和连接消费者。"
+    )
+    if first_break_row is not None and first_break_id not in source_bound_ids:
+        first_break_reason = f"SOURCE_INGRESS要求阶段{first_break_id}尚无正式scope绑定；{first_break_reason}"
+    first_break_kind = (
+        "SOURCE_INGRESS_COMPLETE"
+        if first_break_row is None
+        else (
+            "SOURCE_INGRESS_STAGE_NOT_BOUND"
+            if first_break_id not in source_bound_ids
+            else "SOURCE_INGRESS_STAGE_NOT_READY"
+        )
+    )
 
     groups = []
     for group in _READINESS_GROUPS:
@@ -338,9 +400,9 @@ def build_chain_readiness_payload(
         )
     first_break = {
         "stage_id": first_break_id,
-        "name_zh": by_id[first_break_id]["name_zh"],
-        "kind": "FORMAL_SOURCE_SET_NOT_CONNECTED",
-        "scope": "现有来源观察之后的正式业务链",
+        "name_zh": by_id[first_break_id]["name_zh"] if first_break_id else None,
+        "kind": first_break_kind,
+        "scope": "SOURCE_INGRESS",
         "status_reason": first_break_reason,
     }
     return {

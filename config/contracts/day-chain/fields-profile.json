@@ -1797,14 +1797,11 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1825,9 +1822,7 @@
           "context.universe_ref_with_each_exact_endpoint"
         ],
         "output_artifact": "cross_section",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-        "intended_producer_symbol": "stock_a.factors.cross_section:cross"
+        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
       }
     },
     {
@@ -1848,14 +1843,11 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1876,9 +1868,7 @@
           "context.universe_ref_with_each_exact_endpoint"
         ],
         "output_artifact": "cross_section",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-        "intended_producer_symbol": "stock_a.factors.cross_section:cross"
+        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
       }
     },
     {
@@ -1899,15 +1889,12 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P09"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1928,9 +1915,7 @@
           "context.universe_ref_with_each_exact_endpoint"
         ],
         "output_artifact": "cross_section",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-        "intended_producer_symbol": "stock_a.factors.cross_section:cross"
+        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
       }
     },
     {
@@ -1948,15 +1933,12 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P09"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1977,9 +1959,7 @@
           "context.universe_ref_with_each_exact_endpoint"
         ],
         "output_artifact": "cross_section",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-        "intended_producer_symbol": "stock_a.factors.cross_section:cross"
+        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
       }
     },
     {
@@ -2000,14 +1980,11 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -2028,9 +2005,7 @@
           "context.universe_ref_with_each_exact_endpoint"
         ],
         "output_artifact": "cross_section",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-        "intended_producer_symbol": "stock_a.factors.cross_section:cross"
+        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
       }
     },
     {
@@ -2051,14 +2026,11 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -2079,9 +2051,7 @@
           "context.universe_ref_with_each_exact_endpoint"
         ],
         "output_artifact": "cross_section",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-        "intended_producer_symbol": "stock_a.factors.cross_section:cross"
+        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
       }
     },
     {
@@ -2099,15 +2069,12 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P09"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -2128,9 +2095,7 @@
           "context.universe_ref_with_each_exact_endpoint"
         ],
         "output_artifact": "cross_section",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-        "intended_producer_symbol": "stock_a.factors.cross_section:cross"
+        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
       }
     },
     {
@@ -2148,14 +2113,11 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -2176,9 +2138,7 @@
           "context.universe_ref_with_each_exact_endpoint"
         ],
         "output_artifact": "cross_section",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-        "intended_producer_symbol": "stock_a.factors.cross_section:cross"
+        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
       }
     },
     {
@@ -2196,14 +2156,11 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -2224,9 +2181,7 @@
           "context.universe_ref_with_each_exact_endpoint"
         ],
         "output_artifact": "cross_section",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-        "intended_producer_symbol": "stock_a.factors.cross_section:cross"
+        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
       }
     },
     {
@@ -2244,14 +2199,11 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -2272,9 +2224,7 @@
           "context.universe_ref_with_each_exact_endpoint"
         ],
         "output_artifact": "cross_section",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
-        "intended_producer_symbol": "stock_a.factors.cross_section:cross"
+        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
       }
     },
     {
@@ -2298,14 +2248,11 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2333,7 +2280,6 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2353,14 +2299,11 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2387,7 +2330,6 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2409,15 +2351,12 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P09"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2443,7 +2382,6 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2466,14 +2404,11 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2502,7 +2437,6 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2525,15 +2459,12 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P09"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2559,7 +2490,6 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2580,14 +2510,11 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2614,7 +2541,6 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2638,14 +2564,11 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2670,7 +2593,6 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2691,14 +2613,11 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2722,7 +2641,6 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2742,14 +2660,11 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2773,7 +2688,6 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2792,14 +2706,11 @@
         ],
         "window_contract": "CLOSED_WEEK_MA5_AND_PREVIOUS_MA5_REQUIRES_6_CLOSED_WEEKS",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2823,7 +2734,6 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
         "minimum_closed_period_count": 6,
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
@@ -2844,14 +2754,11 @@
         ],
         "window_contract": "CLOSED_MONTH_MA3_AND_PREVIOUS_MA3_REQUIRES_4_CLOSED_MONTHS",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -2875,12 +2782,17 @@
           "context.source_cutoff"
         ],
         "output_artifact": "core_profiles",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
         "minimum_closed_period_count": 4,
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
     }
-  ]
+  ],
+  "defaults": {
+    "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
+    "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+    "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
+    "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED"
+  }
 }

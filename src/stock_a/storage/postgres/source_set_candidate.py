@@ -1,4 +1,4 @@
-"""Stock A P03来源集合候选的固定PG读写。"""
+"""Stock A P03来源集合候选的精确PG只读核验。"""
 
 from __future__ import annotations
 
@@ -22,8 +22,6 @@ from . import source_raw
 
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_PERSIST_TASK_SCOPE = "R01_R02_P03_SOURCE_SET_BROWSER_RULE_R1"
-_PERSIST_TARGET_SESSIONS = frozenset({date(2026, 10, 28), date(2026, 10, 29)})
 _QUALITY_COUNT_FIELDS = (
     "raw_observed_count",
     "raw_unknown_count",
@@ -231,9 +229,8 @@ def _read_candidate_facts(
     target_session: date,
     package_sha256: str,
     calendar: Mapping[str, str],
-    write: bool,
 ) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    with source_raw._transaction(config, write=write) as (
+    with source_raw._transaction(config, write=False) as (
         _connection,
         cursor,
         namespace_id,
@@ -406,160 +403,6 @@ def _read_candidate_facts(
     return header, inputs
 
 
-def _verify_source_unchanged(
-    cursor: Any, namespace_id: str, header: Mapping[str, Any]
-) -> None:
-    """在写入候选的同一RR/serializable事务中复核真实输入。"""
-    target_session = header["target_session"]
-    package_sha256 = header["package_sha256"]
-    if namespace_id != header["namespace_id"]:
-        raise SourceSetCandidatePgError(
-            "NAMESPACE_CHANGED", "PG部署的DEV命名空间已变化"
-        )
-    summary = _quality_summary(cursor, namespace_id, target_session, package_sha256)
-    if (
-        summary["raw_row_count"] != header["raw_row_count"]
-        or summary["target_present_count"] != header["target_present_count"]
-        or summary["target_missing_count"] != header["target_missing_count"]
-        or summary["read_failed_count"] != 0
-        or summary["unknown_bar_status_count"] != 0
-        or summary["capture_count"] != 1
-        or summary["content_count"] != 1
-        or summary["expected_row_count"] != header["capture_expected_row_count"]
-        or summary["expected_row_count_max"] != header["capture_expected_row_count"]
-        or summary["broken_reference_count"] != 0
-        or summary["capture_ids"] != [header["source_capture_id"]]
-        or summary["content_ids"] != [header["source_content_id"]]
-    ):
-        raise SourceSetCandidatePgError(
-            "SOURCE_CHANGED", "候选写入前Raw分母或来源引用发生变化"
-        )
-
-    capture = source_raw._read_capture(
-        cursor, namespace_id, str(header["source_capture_id"])
-    )
-    cursor.execute(
-        """SELECT dataset_id,byte_sha,byte_count FROM stock.source_contents
- WHERE namespace_id=%s::uuid AND content_id=%s""",
-        (namespace_id, header["source_content_id"]),
-    )
-    content = cursor.fetchone()
-    raw_rows = source_raw._read_raw_rows(
-        cursor, namespace_id, target_session, package_sha256
-    )
-    if (
-        capture is None
-        or content
-        != (
-            header["source_dataset_id"],
-            header["source_byte_sha256"],
-            header["source_byte_count"],
-        )
-        or capture.content_id != header["source_content_id"]
-        or capture.parser_contract != header["parser_contract"]
-        or capture.normalized_count != header["capture_expected_row_count"]
-        or capture.canonical_digest != header["capture_canonical_digest"]
-        or capture.read_started_at != header["capture_read_started_at"]
-        or capture.validated_at != header["capture_validated_at"]
-        or capture.source_available_at != header["source_available_at"]
-        or capture.source_time_quality != header["source_time_quality"]
-        or capture.source_clock_role != header["source_clock_role"]
-        or len(raw_rows) != header["raw_row_count"]
-        or source_raw._row_digest(raw_rows) != header["raw_source_digest"]
-    ):
-        raise SourceSetCandidatePgError(
-            "SOURCE_CHANGED", "内容、捕获时钟或Raw行集在候选提交前发生变化"
-        )
-
-
-def _insert_candidate(
-    cursor: Any, header: Mapping[str, Any], inputs: list[Mapping[str, Any]]
-) -> dict[str, Any]:
-    cursor.execute(
-        """SELECT target_session, package_sha256 FROM stock.source_set_candidates
- WHERE namespace_id=%s::uuid AND target_session=ANY(%s::date[])
- ORDER BY target_session, package_sha256""",
-        (header["namespace_id"], sorted(_PERSIST_TARGET_SESSIONS)),
-    )
-    bounded_candidates = cursor.fetchall()
-    if len(bounded_candidates) > 2 or any(
-        session == header["target_session"] and package_sha != header["package_sha256"]
-        for session, package_sha in bounded_candidates
-    ):
-        raise SourceSetCandidatePgError(
-            "TASK_CANDIDATE_BOUND_EXCEEDED",
-            "本批每个获准交易日最多允许一个精确包SHA候选，合计最多两条主行",
-        )
-    current_exists = any(
-        session == header["target_session"] and package_sha == header["package_sha256"]
-        for session, package_sha in bounded_candidates
-    )
-    if not current_exists and len(bounded_candidates) >= 2:
-        raise SourceSetCandidatePgError(
-            "TASK_CANDIDATE_BOUND_EXCEEDED",
-            "本批候选主行已达到两个真实交易日的授权上限",
-        )
-    columns = [name for name in _CANDIDATE_COLUMNS if name != "created_at"]
-    cursor.execute(
-        f"INSERT INTO stock.source_set_candidates ({', '.join(columns)}) "
-        f"VALUES ({', '.join(['%s'] * len(columns))}) "
-        "ON CONFLICT (namespace_id, target_session, package_sha256) DO NOTHING",
-        tuple(header.get(name) for name in columns),
-    )
-    cursor.execute(
-        f"SELECT {', '.join(_CANDIDATE_COLUMNS)} FROM stock.source_set_candidates "
-        "WHERE namespace_id=%s::uuid AND target_session=%s AND package_sha256=%s",
-        (header["namespace_id"], header["target_session"], header["package_sha256"]),
-    )
-    current = cursor.fetchone()
-    if current is None:
-        raise SourceSetCandidatePgError(
-            "CANDIDATE_READBACK_MISSING", "候选主行插入后未读回"
-        )
-    current_header = dict(zip(_CANDIDATE_COLUMNS, current, strict=True))
-    if current_header["candidate_sha256"] != header["candidate_sha256"]:
-        raise SourceSetCandidatePgError(
-            "CANDIDATE_IDENTITY_CONFLICT",
-            "同一日期和来源SHA已有不同捕获或候选摘要；未覆盖现有值",
-        )
-
-    candidate_key = (
-        header["namespace_id"],
-        header["target_session"],
-        header["package_sha256"],
-    )
-    for item in inputs:
-        values = {name: item.get(name) for name in _INPUT_COLUMNS}
-        cursor.execute(
-            f"INSERT INTO stock.source_set_candidate_inputs "
-            f"(namespace_id,target_session,package_sha256,{', '.join(_INPUT_COLUMNS)}) "
-            f"VALUES (%s,%s,%s,{', '.join(['%s'] * len(_INPUT_COLUMNS))}) "
-            "ON CONFLICT (namespace_id, target_session, package_sha256, input_ordinal) DO NOTHING",
-            (*candidate_key, *(values[name] for name in _INPUT_COLUMNS)),
-        )
-    cursor.execute(
-        f"SELECT {', '.join(_INPUT_COLUMNS)} FROM stock.source_set_candidate_inputs "
-        "WHERE namespace_id=%s::uuid AND target_session=%s AND package_sha256=%s "
-        "ORDER BY input_ordinal",
-        candidate_key,
-    )
-    stored_inputs = [
-        dict(zip(_INPUT_COLUMNS, row, strict=True)) for row in cursor.fetchall()
-    ]
-    try:
-        stored_digest = source_set_candidate_digest(current_header, stored_inputs)
-    except SourceSetCandidateError as error:
-        raise SourceSetCandidatePgError(
-            "CANDIDATE_INPUT_CONFLICT", str(error)
-        ) from error
-    if len(stored_inputs) != len(inputs) or stored_digest != header["candidate_sha256"]:
-        raise SourceSetCandidatePgError(
-            "CANDIDATE_INPUT_CONFLICT",
-            "候选输入读回与真实来源或字段质量摘要不一致；未覆盖现有值",
-        )
-    return _public_candidate(current_header, stored_inputs)
-
-
 def _public_candidate(
     header: Mapping[str, Any], inputs: list[Mapping[str, Any]]
 ) -> dict[str, Any]:
@@ -589,10 +432,8 @@ def prepare_source_set_candidate(
     target_session: date,
     package_sha256: str,
     calendar: Mapping[str, str],
-    persist: bool = False,
-    task_scope: str | None = None,
 ) -> dict[str, Any]:
-    """核验精确PG来源并可选地幂等写入一个P03候选和七条输入引用。"""
+    """只读核验精确PG来源，计算临时候选；不写入候选关系。"""
     _date_and_sha(target_session, package_sha256)
     if not isinstance(calendar, Mapping) or any(
         not isinstance(calendar.get(key), str) or not calendar[key]
@@ -601,48 +442,18 @@ def prepare_source_set_candidate(
         raise SourceSetCandidatePgError(
             "CALENDAR_EVIDENCE_INVALID", "缺少版本化官方日历证据"
         )
-    if persist and task_scope != _PERSIST_TASK_SCOPE:
-        raise SourceSetCandidatePgError(
-            "TASK_SCOPE_REJECTED", "候选写入必须绑定本批唯一授权任务范围"
-        )
-    if persist and target_session not in _PERSIST_TARGET_SESSIONS:
-        raise SourceSetCandidatePgError(
-            "TASK_SESSION_REJECTED",
-            "本批持久化仅允许2026-10-28与2026-10-29两个真实交易日",
-        )
-    if not persist and task_scope is not None:
-        raise SourceSetCandidatePgError(
-            "TASK_SCOPE_REJECTED", "只读预检不得附带写入任务范围"
-        )
-
     header, inputs = _read_candidate_facts(
         config,
         target_session=target_session,
         package_sha256=package_sha256,
         calendar=calendar,
-        write=False,
     )
-    if not persist:
-        return {
-            "status": "READY_TO_PERSIST",
-            "candidate": _public_candidate(header, inputs),
-            "database_write_attempted": False,
-            "dml_executed": False,
-        }
-
-    with source_raw._transaction(config, write=True) as (
-        _connection,
-        cursor,
-        namespace_id,
-    ):
-        _verify_source_unchanged(cursor, namespace_id, header)
-        candidate = _insert_candidate(cursor, header, inputs)
     return {
-        "status": "PERSISTED",
-        "candidate": candidate,
-        "database_write_attempted": True,
-        "dml_executed": True,
-        "idempotent": True,
+        "status": "COMPUTED_READ_ONLY",
+        "candidate_state": "COMPUTED_TRANSIENT_NOT_PERSISTED",
+        "candidate": _public_candidate(header, inputs),
+        "database_write_attempted": False,
+        "dml_executed": False,
     }
 
 

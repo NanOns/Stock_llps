@@ -110,10 +110,10 @@ _SCOPE_KEYS = {
 }
 _CONTENT_KEYS = {
     "pipeline": frozenset({"top_level", "scope_fields"}),
-    "fields-source": frozenset({"fields"}),
-    "fields-core": frozenset({"fields"}),
-    "fields-profile": frozenset({"fields", "scope_fields"}),
-    "fields-control": frozenset({"fields", "scope_fields"}),
+    "fields-source": frozenset({"fields", "defaults"}),
+    "fields-core": frozenset({"fields", "defaults"}),
+    "fields-profile": frozenset({"fields", "scope_fields", "defaults"}),
+    "fields-control": frozenset({"fields", "scope_fields", "defaults"}),
     "research": frozenset({"top_level"}),
     "service": frozenset({"top_level"}),
     "policies": frozenset({"top_level", "scope_fields"}),
@@ -141,6 +141,24 @@ _FIELD_PREFIXES = {
         }
     ),
 }
+_FIELD_DEFAULT_KEYS = frozenset(
+    {
+        "business_key",
+        "context_dependencies",
+        "coordinate_role",
+        "dependency_identity_policy",
+        "output_artifact",
+        "parameter_policy",
+        "parameter_version",
+        "persistence_policy",
+        "producer_stage",
+        "producer_symbol",
+        "quality_policy",
+        "temporal_binding",
+        "window_contract",
+        "window_identity_ref",
+    }
+)
 _PROGRESS_KEYS = frozenset(
     {
         "implementation_state",
@@ -525,6 +543,7 @@ def load_day_chain_contract(configuration_root: Path | str) -> LoadedDayChainCon
 
     top_level: dict[str, Any] = {}
     scope_fields: dict[str, Any] = {}
+    field_rule_defaults: dict[str, dict[str, Any]] = {}
     field_rows: list[tuple[int, str, dict[str, Any]]] = []
     loaded_paths: list[str] = []
     for module_id, relative_path in _MODULES:
@@ -535,6 +554,21 @@ def load_day_chain_contract(configuration_root: Path | str) -> LoadedDayChainCon
             raise DayChainContractError(
                 "DAY_CHAIN_MODULE_INVALID", f"模块{module_id}内容区不符合固定格式"
             )
+        defaults: dict[str, Any] = {}
+        if module_id in _FIELD_PREFIXES:
+            raw_defaults = fragment.get("defaults")
+            if (
+                not isinstance(raw_defaults, dict)
+                or not raw_defaults
+                or not set(raw_defaults) <= _FIELD_DEFAULT_KEYS
+                or "intended_producer_symbol" in raw_defaults
+            ):
+                raise DayChainContractError(
+                    "DAY_CHAIN_FIELD_DEFAULTS_INVALID",
+                    f"字段模块{module_id}的公共默认缺失或包含不允许的键",
+                )
+            defaults = dict(raw_defaults)
+            field_rule_defaults[module_id] = defaults
         roots = fragment.get("top_level", {})
         if module_id in _ROOT_KEYS:
             roots = _require_mapping(roots, module_id + ".top_level")
@@ -604,7 +638,19 @@ def load_day_chain_contract(configuration_root: Path | str) -> LoadedDayChainCon
                         "DAY_CHAIN_FIELD_INVALID",
                         f"字段不属于模块{module_id}：{field_id}",
                     )
-                field_rows.append((order, module_id, definition))
+                if "intended_producer_symbol" in definition:
+                    raise DayChainContractError(
+                        "DAY_CHAIN_STALE_PRODUCER_SYMBOL",
+                        f"字段{field_id}仍声明未消费的intended_producer_symbol",
+                    )
+                repeated_defaults = set(definition).intersection(defaults)
+                if any(definition[key] == defaults[key] for key in repeated_defaults):
+                    raise DayChainContractError(
+                        "DAY_CHAIN_REDUNDANT_FIELD_DEFAULT",
+                        f"字段重复声明公共默认：{field_id}",
+                    )
+                effective_definition = {**defaults, **definition}
+                field_rows.append((order, module_id, effective_definition))
         loaded_paths.append(relative_path)
 
     expected_root_keys = set().union(*_ROOT_KEYS.values())
@@ -626,6 +672,11 @@ def load_day_chain_contract(configuration_root: Path | str) -> LoadedDayChainCon
         definition for _, _, definition in sorted(field_rows, key=lambda row: row[0])
     ]
     top_level["scope_bindings"] = {"FOUNDATION_EOD": scope_fields}
+    top_level["field_rule_defaults"] = {
+        "contract": "STOCK-A-DAY-CHAIN-FIELD-RULE-DEFAULTS/R1",
+        "application": "MODULE_DEFAULTS_THEN_FIELD_OVERRIDES",
+        "modules": field_rule_defaults,
+    }
     document = top_level
     _validate_progress_keys(document)
     _validate_business_structure(document)

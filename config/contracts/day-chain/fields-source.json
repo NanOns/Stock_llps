@@ -11,7 +11,6 @@
         "input_fields": [],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -20,8 +19,6 @@
           "P06",
           "P08"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -33,14 +30,12 @@
           "entity_id",
           "identity_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff"
         ],
         "output_artifact": "identity_calendar_universe",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.canonical.identity:identity"
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
     {
@@ -54,7 +49,6 @@
         "input_fields": [],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -63,8 +57,6 @@
           "P06",
           "P08"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "date",
           "nullable_only_with_quality": true,
@@ -76,14 +68,12 @@
           "calendar_version",
           "session_date"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff"
         ],
         "output_artifact": "identity_calendar_universe",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.canonical.identity:identity"
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
     {
@@ -101,7 +91,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -109,8 +98,6 @@
           "DATA_STATUS",
           "P06"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -123,15 +110,13 @@
           "session_date",
           "canonical_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
           "context.selected_raw_open"
         ],
         "output_artifact": "raw_bars",
-        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE",
-        "intended_producer_symbol": "stock_a.canonical.daily:raw"
+        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
     {
@@ -149,7 +134,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -157,8 +141,6 @@
           "DATA_STATUS",
           "P06"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -171,15 +153,13 @@
           "session_date",
           "canonical_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
           "context.selected_raw_high"
         ],
         "output_artifact": "raw_bars",
-        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE",
-        "intended_producer_symbol": "stock_a.canonical.daily:raw"
+        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
     {
@@ -197,7 +177,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -205,8 +184,6 @@
           "DATA_STATUS",
           "P06"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -219,15 +196,13 @@
           "session_date",
           "canonical_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
           "context.selected_raw_low"
         ],
         "output_artifact": "raw_bars",
-        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE",
-        "intended_producer_symbol": "stock_a.canonical.daily:raw"
+        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
     {
@@ -245,7 +220,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -253,8 +227,6 @@
           "DATA_STATUS",
           "P06"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -267,15 +239,13 @@
           "session_date",
           "canonical_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
           "context.selected_raw_close"
         ],
         "output_artifact": "raw_bars",
-        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE",
-        "intended_producer_symbol": "stock_a.canonical.daily:raw"
+        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
     {
@@ -293,7 +263,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -302,8 +271,6 @@
           "P06",
           "P07"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -316,15 +283,13 @@
           "session_date",
           "canonical_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
           "context.selected_raw_amount"
         ],
         "output_artifact": "raw_bars",
-        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE",
-        "intended_producer_symbol": "stock_a.canonical.daily:raw"
+        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
     {
@@ -342,7 +307,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -351,8 +315,6 @@
           "P06",
           "P07"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -365,15 +327,13 @@
           "session_date",
           "canonical_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
           "context.selected_raw_volume"
         ],
         "output_artifact": "raw_bars",
-        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE",
-        "intended_producer_symbol": "stock_a.canonical.daily:raw"
+        "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
     {
@@ -390,7 +350,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -400,8 +359,6 @@
           "P08",
           "P06"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -414,14 +371,12 @@
           "session_date",
           "status_revision"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff"
         ],
         "output_artifact": "bar_status",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.canonical.daily:raw"
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
     {
@@ -439,7 +394,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -447,8 +401,6 @@
           "P06",
           "P08"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -462,7 +414,6 @@
           "action_revision",
           "coordinate_contract_version"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
@@ -477,8 +428,7 @@
           "context.calendar_ref": "identity_calendar_universe",
           "context.coordinate_contract_version": "day_plan",
           "context.source_cutoff": "day_plan"
-        },
-        "intended_producer_symbol": "stock_a.canonical.adjustment_periods:coordinate"
+        }
       }
     },
     {
@@ -496,15 +446,12 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "CHART",
           "DATA_STATUS"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -516,15 +463,13 @@
           "bar_session",
           "field_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
           "context.sealed_actions_revision"
         ],
         "output_artifact": "adjusted_bars",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.canonical.adjustment_periods:adjusted"
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
     {
@@ -542,7 +487,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -550,8 +494,6 @@
           "DATA_STATUS",
           "P07"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -563,15 +505,13 @@
           "bar_session",
           "field_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
           "context.sealed_actions_revision"
         ],
         "output_artifact": "adjusted_bars",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.canonical.adjustment_periods:adjusted"
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
     {
@@ -589,7 +529,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -597,8 +536,6 @@
           "DATA_STATUS",
           "P07"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -610,15 +547,13 @@
           "bar_session",
           "field_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
           "context.sealed_actions_revision"
         ],
         "output_artifact": "adjusted_bars",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.canonical.adjustment_periods:adjusted"
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
     {
@@ -636,7 +571,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -646,8 +580,6 @@
           "P09",
           "P08"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -659,15 +591,13 @@
           "bar_session",
           "field_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
           "context.sealed_actions_revision"
         ],
         "output_artifact": "adjusted_bars",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.canonical.adjustment_periods:adjusted"
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
     {
@@ -691,7 +621,6 @@
         ],
         "window_contract": "CLOSED_PERIOD_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -699,8 +628,6 @@
           "DATA_STATUS",
           "P09"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "typed_bar_set_reference",
           "nullable_only_with_quality": true,
@@ -715,7 +642,6 @@
           "source_coordinate_version",
           "closed_asof_variant"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
@@ -734,8 +660,7 @@
           "fully_suspended_period": "KEEP_CALENDAR_SLOT_NO_CARRY_FORWARD_NO_PERIOD_SKIP",
           "partial_ipo_period": "NOT_COMPLETE_PERIOD_FOR_TREND",
           "component_quality": "PRICE_TREND_DOES_NOT_REQUIRE_KNOWN_AMOUNT_OR_VOLUME"
-        },
-        "intended_producer_symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars"
+        }
       }
     },
     {
@@ -759,7 +684,6 @@
         ],
         "window_contract": "CLOSED_PERIOD_R1",
         "coordinate_role": "TARGET_SESSION",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
@@ -767,8 +691,6 @@
           "DATA_STATUS",
           "P09"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "typed_bar_set_reference",
           "nullable_only_with_quality": true,
@@ -783,7 +705,6 @@
           "source_coordinate_version",
           "closed_asof_variant"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
@@ -802,8 +723,7 @@
           "fully_suspended_period": "KEEP_CALENDAR_SLOT_NO_CARRY_FORWARD_NO_PERIOD_SKIP",
           "partial_ipo_period": "NOT_COMPLETE_PERIOD_FOR_TREND",
           "component_quality": "PRICE_TREND_DOES_NOT_REQUIRE_KNOWN_AMOUNT_OR_VOLUME"
-        },
-        "intended_producer_symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars"
+        }
       }
     },
     {
@@ -817,15 +737,12 @@
         "input_fields": [],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS",
           "P03"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -837,14 +754,12 @@
           "job_id",
           "dataset_role"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff"
         ],
         "output_artifact": "bao_capability_status",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "intended_producer_symbol": "stock_a.sources.baostock.capability:bao"
+        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
     {
@@ -863,14 +778,11 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
         "consumers": [
           "BASE_STOCK_DETAIL",
           "DATA_STATUS"
         ],
-        "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
-        "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -881,7 +793,6 @@
           "namespace_id",
           "source_set_id"
         ],
-        "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA",
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
@@ -901,9 +812,14 @@
           "context.capture_parser_version",
           "context.capture_unit_version",
           "context.capture_binding_id"
-        ],
-        "intended_producer_symbol": "stock_a.sources.seal:source_set"
+        ]
       }
     }
-  ]
+  ],
+  "defaults": {
+    "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
+    "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
+    "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
+    "temporal_binding": "CURRENT_OR_EXACT_WINDOW_ENDPOINTS_PER_REGISTERED_FORMULA"
+  }
 }

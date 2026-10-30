@@ -160,7 +160,7 @@ function renderSourceSetCandidate(data) {
   appendText(
     root,
     "p",
-    `候选已保存 · ${candidate.target_session} · ${candidate.candidate_status}；正式P03=${candidate.formal_p03_status}，Foundation未完成。`,
+    `已保存的只读候选 · ${candidate.target_session} · ${candidate.candidate_status}；正式P03=${candidate.formal_p03_status}，Foundation未完成。`,
     "candidate-status",
   );
   const details = document.createElement("details");
@@ -252,7 +252,9 @@ function renderReadiness(data) {
     ],
     [
       "正式链首断点",
-      `${data.first_break.stage_id} ${data.first_break.name_zh} · ${data.first_break.scope}`,
+      data.first_break.stage_id
+        ? `${data.first_break.stage_id} ${data.first_break.name_zh} · ${data.first_break.scope}`
+        : `无 · ${data.first_break.status_reason}`,
     ],
     [
       "来源时钟与质量",

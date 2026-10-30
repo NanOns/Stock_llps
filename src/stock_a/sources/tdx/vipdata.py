@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timedelta, timezone
 from html.parser import HTMLParser
 import hashlib
@@ -180,6 +180,7 @@ class VipdataPackage:
     download_finished_at: datetime
     download_attempt_count: int = 1
     official_cookie_challenge_solved: bool = False
+    temporary_root: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -1043,6 +1044,46 @@ def _safe_temp_directory(path: str | Path) -> Path:
     except (OSError, ValueError) as error:
         raise VipdataError(
             "TEMP_ROOT_INVALID", "受控临时输入目录必须位于G:/codex_tmp"
+        ) from error
+
+
+def _cleanup_owned_temp_directory(
+    root_path: str | Path, *, parent_path: str | Path, prefixes: tuple[str, ...]
+) -> None:
+    root = Path(root_path)
+    parent = _safe_temp_directory(parent_path)
+    try:
+        resolved = root.resolve(strict=True)
+        resolved.relative_to(parent)
+        attributes = getattr(root.lstat(), "st_file_attributes", 0)
+        if (
+            root.is_symlink()
+            or attributes & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+            or resolved.parent != parent
+            or not any(
+                re.fullmatch(rf"{re.escape(prefix)}-[0-9a-f]{{32}}", resolved.name)
+                for prefix in prefixes
+            )
+        ):
+            raise VipdataError(
+                "TEMP_CLEANUP_REFUSED", "拒绝清理非本次创建的G盘临时目录"
+            )
+        for current, directories, files in os.walk(resolved, followlinks=False):
+            for name in (*directories, *files):
+                path = Path(current) / name
+                item_attributes = getattr(path.lstat(), "st_file_attributes", 0)
+                if path.is_symlink() or item_attributes & getattr(
+                    stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+                ):
+                    raise VipdataError(
+                        "TEMP_CLEANUP_REFUSED", "临时目录包含链接，拒绝递归清理"
+                    )
+        shutil.rmtree(resolved)
+    except VipdataError:
+        raise
+    except (OSError, ValueError) as error:
+        raise VipdataError(
+            "TEMP_CLEANUP_FAILED", "本次G盘临时目录未能安全清理"
         ) from error
 
 
@@ -2685,30 +2726,23 @@ def extract_vipdata_candidate_page(
         if _file_identity(path) != package.file_identity:
             raise VipdataError("PACKAGE_CHANGED", "分页抽取期间VIPDATA文件身份发生变化")
     except VipdataError:
-        if extraction_root.exists():
-            shutil.rmtree(extraction_root)
+        cleanup_vipdata_extraction(extraction_root)
         raise
     except (OSError, KeyError, zipfile.BadZipFile, RuntimeError) as error:
-        if extraction_root.exists():
-            shutil.rmtree(extraction_root)
+        cleanup_vipdata_extraction(extraction_root)
         raise VipdataError("ZIP_EXTRACT_INVALID", "分页ZIP条目未能安全抽取") from error
     return extraction_root, extracted
 
 
 def cleanup_vipdata_extraction(extraction_root: str | Path) -> None:
-    """仅移除本调用创建、位于G盘临时根内的唯一分页抽取目录。"""
+    """仅移除本调用创建、位于G盘临时根内的唯一解压或分页目录。"""
     root = Path(extraction_root)
     parent = _safe_temp_directory(root.parent)
-    resolved = root.resolve(strict=True)
-    if (
-        resolved.parent != parent
-        or not resolved.name.startswith("select-")
-        or root.is_symlink()
-    ):
-        raise VipdataError(
-            "EXTRACTION_CLEANUP_REFUSED", "拒绝清理非本次创建的VIPDATA临时目录"
-        )
-    shutil.rmtree(resolved)
+    _cleanup_owned_temp_directory(
+        root,
+        parent_path=parent,
+        prefixes=("select", "extract"),
+    )
 
 
 def _candidate_entry_destination(symbol: str) -> tuple[str, str]:
@@ -2729,6 +2763,42 @@ def download_vipdata_package(
     destination_root: str | Path | None = None,
     budgets: VipdataBudgets = VipdataBudgets(),
     transport: Callable[[str, float], Any] | None = None,
+) -> VipdataPackage:
+    if destination_root is not None:
+        return _download_vipdata_package_impl(
+            observation,
+            destination_root=destination_root,
+            budgets=budgets,
+            transport=transport,
+        )
+    parent = _safe_temp_directory(Path("G:/codex_tmp/stock_a_vipdata"))
+    owned_root = parent / f"run-{uuid.uuid4().hex}"
+    if owned_root.exists():
+        raise VipdataError("TEMP_ROOT_COLLISION", "临时下载目录已存在；拒绝复用")
+    owned_root.mkdir()
+    try:
+        package = _download_vipdata_package_impl(
+            observation,
+            destination_root=owned_root,
+            budgets=budgets,
+            transport=transport,
+        )
+    except BaseException:
+        _cleanup_owned_temp_directory(
+            owned_root,
+            parent_path=parent,
+            prefixes=("run",),
+        )
+        raise
+    return replace(package, temporary_root=owned_root)
+
+
+def _download_vipdata_package_impl(
+    observation: VipdataPageObservation,
+    *,
+    destination_root: str | Path | None,
+    budgets: VipdataBudgets,
+    transport: Callable[[str, float], Any] | None,
 ) -> VipdataPackage:
     if (
         observation.status != "PACKAGE_CANDIDATE_READY"
@@ -2845,7 +2915,7 @@ def download_vipdata_package(
             os.rename(final, rejected)
             raise VipdataError(
                 error.code,
-                f"{error}；完整原始ZIP保留于G盘临时目录，SHA-256={sha256}，文件={rejected}",
+                f"{error}；ZIP的SHA-256为{sha256}，调用结束时清理本次临时文件",
             ) from error
         return VipdataPackage(
             file_path=final,
@@ -2867,6 +2937,25 @@ def download_vipdata_package(
         opened.response.close()
         if partial.exists():
             partial.unlink()
+
+
+def cleanup_vipdata_package(package: VipdataPackage) -> None:
+    """仅移除下载器为本次调用创建的唯一运行目录；保留显式外部输入。"""
+    root = package.temporary_root
+    if root is None:
+        return
+    parent = _safe_temp_directory(Path("G:/codex_tmp/stock_a_vipdata"))
+    resolved_root = Path(root).resolve(strict=True)
+    package_path = Path(package.file_path).resolve(strict=True)
+    if package_path.parent != resolved_root:
+        raise VipdataError(
+            "PACKAGE_CLEANUP_REFUSED", "下载包路径不属于本次创建的运行目录"
+        )
+    _cleanup_owned_temp_directory(
+        resolved_root,
+        parent_path=parent,
+        prefixes=("run",),
+    )
 
 
 def _verify_package_file(
@@ -2998,12 +3087,18 @@ def extract_vipdata_day_entry(
     extraction_root.mkdir()
     extraction_root = extraction_root.resolve(strict=True)
     extraction_root.relative_to(parent)
-    parts = _safe_entry_path(entry.path)
-    normalized_parts = parts if parts[0].casefold() == "vipdoc" else ("vipdoc", *parts)
-    output_path = extraction_root.joinpath(*normalized_parts)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    output_path.parent.resolve(strict=True).relative_to(extraction_root)
-    partial = output_path.with_name(output_path.name + ".partial")
+    try:
+        parts = _safe_entry_path(entry.path)
+        normalized_parts = (
+            parts if parts[0].casefold() == "vipdoc" else ("vipdoc", *parts)
+        )
+        output_path = extraction_root.joinpath(*normalized_parts)
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        output_path.parent.resolve(strict=True).relative_to(extraction_root)
+        partial = output_path.with_name(output_path.name + ".partial")
+    except BaseException:
+        cleanup_vipdata_extraction(extraction_root)
+        raise
     try:
         with zipfile.ZipFile(package_path, "r") as archive:
             info = archive.getinfo(entry.path)
@@ -3029,8 +3124,10 @@ def extract_vipdata_day_entry(
                 )
             os.rename(partial, output_path)
     except VipdataError:
+        cleanup_vipdata_extraction(extraction_root)
         raise
     except (OSError, KeyError, zipfile.BadZipFile, RuntimeError) as error:
+        cleanup_vipdata_extraction(extraction_root)
         raise VipdataError(
             "ZIP_EXTRACT_INVALID", "已校验日线条目无法安全读取"
         ) from error
@@ -3067,7 +3164,6 @@ def observation_dict(observation: VipdataPageObservation) -> dict[str, Any]:
 def package_dict(package: VipdataPackage) -> dict[str, Any]:
     return {
         "file_name": package.file_name,
-        "file_path": str(package.file_path),
         "file_size": package.file_size,
         "sha256": package.sha256,
         "zip_entry_count": package.zip_entry_count,
