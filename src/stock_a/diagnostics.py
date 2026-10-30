@@ -34,6 +34,7 @@ from stock_a.sources.tdx.vipdata import (
     VipdataBudgets,
     VipdataError,
     VipdataSourceConfig,
+    compare_vipdata_package_revisions,
     download_vipdata_package,
     extract_vipdata_day_entry,
     inspect_vipdata_page,
@@ -487,6 +488,20 @@ def _parser() -> argparse.ArgumentParser:
     target_quality.add_argument("--max-candidate-records", type=int, default=1000000, help="单条目最多解析记录数，默认1000000")
     target_quality.add_argument("--max-candidate-seconds", type=float, default=30.0, help="单条目读取秒数上限，默认30")
     target_quality.add_argument("--chunk-records", type=int, default=1024, help="单次解码块记录数，默认1024")
+    revision_compare = commands.add_parser(
+        "source-vipdata-revision-compare",
+        help="只读对照两份已校验VIPDATA ZIP的同会话来源条目修订",
+    )
+    revision_compare.add_argument("--old-package", required=True, help="G盘现存旧版官方VIPDATA ZIP绝对路径")
+    revision_compare.add_argument("--old-package-sha256", required=True, help="旧包已知SHA-256")
+    revision_compare.add_argument("--new-package", required=True, help="G盘现存新版官方VIPDATA ZIP绝对路径")
+    revision_compare.add_argument("--new-package-sha256", required=True, help="新版已知SHA-256")
+    revision_compare.add_argument("--target-session", required=True, help="两包共同对照的目标交易会话，YYYY-MM-DD")
+    revision_compare.add_argument("--max-validation-seconds", type=float, default=300.0, help="每包SHA/CRC复验秒数上限，默认300")
+    revision_compare.add_argument("--max-total-bytes", type=int, default=4294967296, help="候选条目解压字节总上限，默认4GiB")
+    revision_compare.add_argument("--max-total-records", type=int, default=125000000, help="候选条目记录总上限，默认125000000")
+    revision_compare.add_argument("--max-total-seconds", type=float, default=1800.0, help="逐条目对照秒数上限，默认1800")
+    revision_compare.add_argument("--sample-limit", type=int, default=20, help="最多保留多少条变化样本，默认20")
     vipdata = commands.add_parser(
         "source-vipdata",
         help="显式检查通达信官网盘后ZIP，或在G盘临时目录下载并校验",
@@ -517,8 +532,8 @@ def _parser() -> argparse.ArgumentParser:
 def _add_research_arguments(command: argparse.ArgumentParser, *, include_vipdata: bool = False) -> None:
     command.add_argument("--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD")
     command.add_argument("--unit-version", required=True, help="本次研究使用的显式TDX单位合同版本")
-    command.add_argument("--amount-to-cny", required=True, help="金额到人民币元的精确十进制倍率")
-    command.add_argument("--volume-to-shares", required=True, type=int, help="数量到股的正整数倍率")
+    command.add_argument("--amount-to-cny", help="可选：金额到人民币元的研究倍率；省略则金额单位保持未知")
+    command.add_argument("--volume-to-shares", type=int, help="可选：数量到股的研究倍率；省略则数量单位保持未知")
     command.add_argument("--max-bytes", type=int, default=16777216, help="单文件最多读取字节数，默认16777216")
     command.add_argument("--max-records", type=int, default=200000, help="单文件最多读取记录数，默认200000")
     command.add_argument("--chunk-records", type=int, default=256, help="单次读取块记录数，默认256")
@@ -1065,7 +1080,11 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
     if target not in sessions:
         raise DiagnosticError("TARGET_DATE_INVALID", "目标日期不在已核验的官方交易日历内", _EXIT_ARGUMENT)
     try:
-        units = UnitContract(args.unit_version, Decimal(args.amount_to_cny), args.volume_to_shares)
+        units = UnitContract(
+            args.unit_version,
+            Decimal(args.amount_to_cny) if args.amount_to_cny is not None else None,
+            args.volume_to_shares,
+        )
         budget = VipdataTargetScanBudget(
             page_size=args.page_size,
             max_total_bytes=args.max_total_bytes,
@@ -1169,6 +1188,80 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
     return _EXIT_OK if payload["ok"] else _EXIT_UNAVAILABLE
 
 
+def _run_vipdata_revision_compare(args: argparse.Namespace) -> int:
+    started = time.monotonic()
+    try:
+        target = _parse_target(args.target_session)
+        budgets = VipdataBudgets(max_total_seconds=args.max_validation_seconds)
+        old_package = verify_existing_vipdata_package(
+            args.old_package,
+            expected_sha256=args.old_package_sha256,
+            budgets=budgets,
+        )
+        new_package = verify_existing_vipdata_package(
+            args.new_package,
+            expected_sha256=args.new_package_sha256,
+            budgets=budgets,
+        )
+        comparison = compare_vipdata_package_revisions(
+            old_package,
+            new_package,
+            target_session=target,
+            max_total_bytes=args.max_total_bytes,
+            max_total_records=args.max_total_records,
+            max_total_seconds=args.max_total_seconds,
+            sample_limit=args.sample_limit,
+        )
+    except (VipdataError, ResearchEntryError, ValueError) as error:
+        _emit({
+            "ok": False,
+            "code": getattr(error, "code", "VIPDATA_REVISION_COMPARE_INVALID"),
+            "message": str(error),
+            "target_session": args.target_session,
+            "source_fallback_attempted": False,
+            "database_io_attempted": False,
+            "database_write_attempted": False,
+        }, error=True)
+        return _EXIT_UNAVAILABLE
+    payload = {
+        "ok": comparison.comparison_complete and comparison.not_evaluated == 0,
+        "contract": "TDX_VIPDATA_SAME_SESSION_ENTRY_REVISION_COMPARISON_R1",
+        "target_session": comparison.target_session.isoformat(),
+        "old_package": {
+            "path": str(old_package.file_path),
+            "sha256": old_package.sha256,
+            "file_size": old_package.file_size,
+            "zip_crc": old_package.zip_crc,
+            "verified_at": old_package.verified_at.isoformat(),
+            "published_at": "UNKNOWN",
+            "first_available_at": "UNKNOWN",
+        },
+        "new_package": {
+            "path": str(new_package.file_path),
+            "sha256": new_package.sha256,
+            "file_size": new_package.file_size,
+            "zip_crc": new_package.zip_crc,
+            "verified_at": new_package.verified_at.isoformat(),
+            "published_at": "UNKNOWN",
+            "first_available_at": "UNKNOWN",
+        },
+        "scope": "DYNAMIC_SH_SZ_MAIN_BOARD_AND_GEM_SOURCE_SYMBOL_CANDIDATES",
+        "official_listing_denominator": "UNKNOWN_NOT_PROVED_BY_ZIP_FILENAMES",
+        "comparison": asdict(comparison),
+        "operation": {
+            "elapsed_seconds": round(time.monotonic() - started, 6),
+            "core_profile_recomputed": False,
+            "source_fallback_attempted": False,
+            "database_io_attempted": False,
+            "database_write_attempted": False,
+            "persistent_business_write_attempted": False,
+            "clock_disclosure": comparison.capture_clock_role,
+        },
+    }
+    _emit(payload, error=not payload["ok"])
+    return _EXIT_OK if payload["ok"] else _EXIT_UNAVAILABLE
+
+
 def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
     cli_started = time.perf_counter()
     stage_timings: dict[str, Any] = {}
@@ -1183,7 +1276,11 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
     if package is None and not roots:
         raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX来源保护根，拒绝读取行情")
     try:
-        units = UnitContract(args.unit_version, Decimal(args.amount_to_cny), args.volume_to_shares)
+        units = UnitContract(
+            args.unit_version,
+            Decimal(args.amount_to_cny) if args.amount_to_cny is not None else None,
+            args.volume_to_shares,
+        )
         limits = ReadLimits(
             args.max_bytes,
             args.max_records,
@@ -1192,13 +1289,16 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         )
     except (InvalidOperation, ValueError, ContractError) as error:
         raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或读取预算无效：{error}", _EXIT_ARGUMENT) from error
-    profile_contract = None
-    if not compare and getattr(args, "include_profile_preview", False):
+    foundation_contract = None
+    if not compare:
         try:
-            profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+            foundation_contract = load_day_chain_contract(_CONFIG_ROOT).document
         except DayChainContractError as error:
             _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
             return _EXIT_UNAVAILABLE
+    profile_contract = foundation_contract if (
+        not compare and getattr(args, "include_profile_preview", False)
+    ) else None
     identity_projection = None
     identity_snapshot: dict[str, Any] | None = None
     identity_query_status = "NOT_REQUESTED"
@@ -1277,6 +1377,7 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 units=units,
                 limits=limits,
                 profile_contract=profile_contract,
+                foundation_contract=foundation_contract,
                 include_baostock_evidence=getattr(args, "include_baostock_evidence", False),
                 vipdata_capture=vipdata_capture,
                 timing_sink=core_timings,
@@ -1289,6 +1390,7 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 units=units,
                 limits=limits,
                 profile_contract=profile_contract,
+                foundation_contract=foundation_contract,
                 include_baostock_evidence=getattr(args, "include_baostock_evidence", False),
                 timing_sink=core_timings,
             )
@@ -1536,6 +1638,32 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
         f"source SHA-256={str(canonical_source.get('raw_byte_sha256', '未知'))[:12]}…；"
         f"准入={canonical.get('production_admission', 'UNKNOWN')}；未持久接受。"
     )
+    handoff = result.get("foundation_handoff", {})
+    if isinstance(handoff, dict):
+        source_version = handoff.get("source_package_sha256") or handoff.get("source_byte_sha256") or "未知"
+        lines.append(
+            f"Foundation typed交接：目标日={handoff.get('target_session')}；来源版本={source_version}；"
+            f"价格坐标={handoff.get('price_coordinate')}；目标Bar={handoff.get('target_bar_status')}；"
+            f"价格研究={handoff.get('research_price_status')}。"
+        )
+        for group_name, label in (("price", "价格"), ("amount", "金额"), ("volume", "数量")):
+            group = handoff.get("quality_groups", {}).get(group_name, {})
+            lines.append(
+                f"Foundation {label}质量={group.get('quality', 'UNKNOWN_DATA')}；"
+                f"单位权威={group.get('unit_authority', '不适用')}；"
+                f"字段={group.get('field_quality', {})}；原因={group.get('field_reasons', {}) or '无'}。"
+            )
+        typed_reasons = handoff.get("typed_pg_admission_reason_explanations", {})
+        foundation_reasons = handoff.get("foundation_admission_reason_explanations", {})
+        lines.append(
+            f"正式PG typed准入={handoff.get('typed_pg_admission_status')}；"
+            f"原因={'；'.join(typed_reasons.values()) or '无'}。"
+        )
+        lines.append(
+            f"Foundation生产准入={handoff.get('foundation_admission_status')}；"
+            f"原因={'；'.join(foundation_reasons.values()) or '无'}；"
+            "未生成insert plan、未持久写入。"
+        )
     group_labels = (
         ("price_trend", "价格与趋势"),
         ("position_volatility", "位置与波动"),
@@ -1683,7 +1811,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
             f"发现={budget['discovery_elapsed_seconds']}秒，总耗时={budget['elapsed_seconds']}秒；"
             f"未复权、NON_PIT，不代表全候选池已读取或全部指标已知"
         ),
-        "代码 | 市场/板别 | 目标Bar状态 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | 未知原因/错误 | 单股回查",
+        "代码 | 市场/板别 | 目标Bar及逐字段质量 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | Foundation准入 | 未知原因/错误 | 单股回查",
     ]
     if isinstance(source_quality, dict):
         lines.insert(
@@ -1737,6 +1865,22 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
         reason_text = ";".join(f"{name}×{count}" for name, count in sorted(reasons.items()))
         if item.get("error_code"):
             reason_text = ";".join(filter(None, (reason_text, item["error_code"])))
+        source_quality_row = item.get("source_bar_quality") or {}
+        field_quality_text = ",".join(
+            f"{name}={source_quality_row.get(f'{name}_quality') or 'UNKNOWN'}"
+            for name in ("price", "amount", "volume")
+        ) if source_quality_row else "未评价"
+        bar_text = (
+            f"{item.get('source_bar_status') or '页内未评价'}:{item.get('source_bar_reason') or '—'}"
+            f"[{field_quality_text}]"
+        )
+        foundation = item.get("foundation_handoff") or {}
+        formal_reasons = foundation.get("foundation_admission_reason_explanations", {})
+        foundation_text = (
+            f"typed={foundation.get('typed_pg_admission_status', '未评价')};"
+            f"foundation={foundation.get('foundation_admission_status', '未评价')};"
+            + "；".join(formal_reasons.values())
+        ) if foundation else f"{item.get('status')}:{item.get('error_code') or '来源未评价'}"
         detail = item.get("detail_query", {})
         detail_command = "stock-a " + " ".join(
             _powershell_quote(value) for value in detail.get("arguments", [])
@@ -1744,7 +1888,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
         row = [
             item["symbol"],
             f"{item['market']}/{item['board']}",
-            f"{item.get('source_bar_status') or '页内未评价'}:{item.get('source_bar_reason') or '—'}",
+            bar_text,
             item.get("source_last_session") or "—",
             _summary_field(item.get("raw_close")),
             _summary_field(item.get("ma5")),
@@ -1757,6 +1901,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
             _summary_field(item.get("amount")),
             _summary_field(item.get("volume")),
             f"{raw_text}/{core_text}",
+            foundation_text,
             reason_text or "—",
             detail_command,
         ]
@@ -2173,7 +2318,11 @@ def _run_research_universe(args: argparse.Namespace) -> int:
     if package is None and not roots:
         raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX只读来源根，拒绝发现来源候选")
     try:
-        units = UnitContract(args.unit_version, Decimal(args.amount_to_cny), args.volume_to_shares)
+        units = UnitContract(
+            args.unit_version,
+            Decimal(args.amount_to_cny) if args.amount_to_cny is not None else None,
+            args.volume_to_shares,
+        )
         limits = ReadLimits(
             args.max_bytes,
             args.max_records,
@@ -2196,13 +2345,12 @@ def _run_research_universe(args: argparse.Namespace) -> int:
         )
     except (InvalidOperation, ValueError, ContractError, ResearchEntryError, VipdataError) as error:
         raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或预算合同无效：{error}", _EXIT_ARGUMENT) from error
-    profile_contract = None
-    if args.include_profile_preview or args.full_source_core_profile:
-        try:
-            profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
-        except DayChainContractError as error:
-            _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
-            return _EXIT_UNAVAILABLE
+    try:
+        foundation_contract = load_day_chain_contract(_CONFIG_ROOT).document
+    except DayChainContractError as error:
+        _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
+        return _EXIT_UNAVAILABLE
+    profile_contract = foundation_contract if args.include_profile_preview or args.full_source_core_profile else None
     try:
         if args.full_source_core_profile:
             candidate_index_started = time.monotonic()
@@ -2235,6 +2383,7 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 discovery_budget=discovery_budget,
                 budget=budget,
                 profile_contract=profile_contract,
+                foundation_contract=foundation_contract,
             )
         else:
             candidate_index_started = time.monotonic()
@@ -2285,6 +2434,7 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 discovery_budget=discovery_budget,
                 budget=budget,
                 profile_contract=profile_contract,
+                foundation_contract=foundation_contract,
                 source_candidate_pool=pool.candidates,
                 source_candidate_catalog=pool.catalog,
                 source_target_quality_report=target_quality_report,
@@ -2602,6 +2752,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_research_universe(args)
         if args.command == "source-vipdata-target-quality":
             return _run_vipdata_target_quality(args)
+        if args.command == "source-vipdata-revision-compare":
+            return _run_vipdata_revision_compare(args)
         if args.command == "source-vipdata":
             return _run_source_vipdata(args)
     except DiagnosticError as error:

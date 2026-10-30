@@ -184,6 +184,31 @@ class VipdataCandidatePool:
 
 
 @dataclass(frozen=True)
+class VipdataRevisionComparison:
+    """两个只读包的代码条目修订对照；不生成来源封口或PIT结论。"""
+
+    old_package_sha256: str
+    new_package_sha256: str
+    target_session: date
+    old_candidate_total: int
+    new_candidate_total: int
+    only_old: int
+    only_new: int
+    content_same: int
+    content_changed: int
+    not_evaluated: int
+    target_bar_changes: Mapping[str, int]
+    market_changes: Mapping[str, Mapping[str, int]]
+    changed_samples: tuple[Mapping[str, Any], ...]
+    not_evaluated_samples: tuple[Mapping[str, Any], ...]
+    bytes_read: int
+    records_read: int
+    elapsed_seconds: float
+    comparison_complete: bool
+    capture_clock_role: str = "LOCAL_REVALIDATION_OBSERVED_AT_NOT_FIRST_AVAILABLE"
+
+
+@dataclass(frozen=True)
 class VipdataDayScan:
     entry: VipdataDayEntry
     record_count: int
@@ -1023,6 +1048,292 @@ def vipdata_research_candidate_pool(package: VerifiedVipdataPackage) -> VipdataC
         "identity_disclosure": "ZIP文件名仅形成来源代码候选；不证明稳定实体、正式成员、上市、当日可交易或ST状态",
     }
     return VipdataCandidatePool(tuple(candidates), catalog, dict(sorted(classifications.items())))
+
+
+def compare_vipdata_package_revisions(
+    old_package: VerifiedVipdataPackage,
+    new_package: VerifiedVipdataPackage,
+    *,
+    target_session: date,
+    max_total_bytes: int = 4 * 1024 * 1024 * 1024,
+    max_total_records: int = 125_000_000,
+    max_total_seconds: float = 1800.0,
+    sample_limit: int = 20,
+) -> VipdataRevisionComparison:
+    """按来源代码对照两个已验ZIP的沪深主板/GEM条目内容和目标日Bar。
+
+    仅解压、摘要并轻量解码目标日记录，不调用Core/Profile，不保存包内容，
+    也不把本机重验时钟解释成来源首次可得或严格PIT时钟。
+    """
+    from stock_a.sources.tdx.day import DAY_STRUCT, UnitContract, decode_day_record
+
+    if not isinstance(old_package, VerifiedVipdataPackage) or not isinstance(new_package, VerifiedVipdataPackage):
+        raise VipdataError("REVISION_PACKAGE_INVALID", "修订对照必须使用两份本次完整重验的ZIP")
+    if type(target_session) is not date:
+        raise VipdataError("REVISION_TARGET_INVALID", "修订对照目标必须是显式date交易会话")
+    for name, value in (("max_total_bytes", max_total_bytes), ("max_total_records", max_total_records),
+                        ("sample_limit", sample_limit)):
+        if type(value) is not int or value <= 0:
+            raise VipdataError("REVISION_BUDGET_INVALID", f"{name}必须是拒绝bool的正整数")
+    if (isinstance(max_total_seconds, bool) or not isinstance(max_total_seconds, (int, float))
+            or not math.isfinite(float(max_total_seconds)) or max_total_seconds <= 0):
+        raise VipdataError("REVISION_BUDGET_INVALID", "max_total_seconds必须是有限正数")
+
+    old_path = _safe_temp_file(old_package.file_path)
+    new_path = _safe_temp_file(new_package.file_path)
+    if (_file_identity(old_path) != old_package.file_identity
+            or _file_identity(new_path) != new_package.file_identity):
+        raise VipdataError("PACKAGE_CHANGED", "修订对照开始前包文件身份已变化")
+    old_pool = vipdata_research_candidate_pool(old_package)
+    new_pool = vipdata_research_candidate_pool(new_package)
+    old_by_symbol = {item["symbol"]: item for item in old_pool.candidates}
+    new_by_symbol = {item["symbol"]: item for item in new_pool.candidates}
+    old_entries_by_path = {item.path: item for item in old_package.day_entries}
+    new_entries_by_path = {item.path: item for item in new_package.day_entries}
+    all_symbols = tuple(sorted(set(old_by_symbol) | set(new_by_symbol)))
+    only_old = only_new = content_same = content_changed = not_evaluated = 0
+    bytes_read = records_read = 0
+    started = time.monotonic()
+    target_changes = {
+        "comparable_entries": 0,
+        "target_presence_changed": 0,
+        "target_raw_record_changed": 0,
+        "target_prices_changed": 0,
+        "target_amount_raw_changed": 0,
+        "target_volume_raw_changed": 0,
+        "target_bar_added": 0,
+        "target_bar_removed": 0,
+        "invalid_target_price_group_old": 0,
+        "invalid_target_price_group_new": 0,
+    }
+    market_changes: dict[str, dict[str, int]] = {}
+    changed_samples: list[Mapping[str, Any]] = []
+    not_evaluated_samples: list[Mapping[str, Any]] = []
+    budget_exhausted = False
+    raw_only_units = UnitContract("VIPDATA_REVISION_RAW_ONLY_R1", None, None)
+    max_seconds = float(max_total_seconds)
+
+    def scan_entry(archive: zipfile.ZipFile, candidate: Mapping[str, Any]) -> dict[str, Any]:
+        nonlocal bytes_read, records_read
+        path = str(candidate["zip_entry_path"])
+        try:
+            info = archive.getinfo(path)
+        except KeyError as error:
+            raise VipdataError("REVISION_ENTRY_MISSING", "已验证目录中的日线条目读取时不存在") from error
+        expected_size = int(candidate["zip_entry_bytes"])
+        if info.file_size != expected_size or expected_size % 32 != 0:
+            raise VipdataError("REVISION_ENTRY_INVALID", "修订条目大小与已验证目录或32字节记录合同不符")
+        if expected_size == 0:
+            return {
+                "entry_sha256": hashlib.sha256(b"").hexdigest(),
+                "record_count": 0,
+                "target_bar": None,
+                "invalid_record_reason": None,
+                "future_rows": 0,
+            }
+        digest = hashlib.sha256()
+        target_record: bytes | None = None
+        target_decoded = None
+        record_count = 0
+        future_rows = 0
+        previous_day: int | None = None
+        invalid_record_reason: str | None = None
+        buffer = b""
+        with archive.open(info, "r") as member:
+            while True:
+                if time.monotonic() - started >= max_seconds:
+                    raise TimeoutError("REVISION_MAX_SECONDS_EXCEEDED")
+                block = member.read(1024 * 1024)
+                if not block:
+                    break
+                bytes_read += len(block)
+                digest.update(block)
+                buffer += block
+                complete_bytes = len(buffer) - (len(buffer) % DAY_STRUCT.size)
+                position = 0
+                while position < complete_bytes:
+                    raw_record = buffer[position:position + DAY_STRUCT.size]
+                    day_number = DAY_STRUCT.unpack(raw_record)[0]
+                    record_count += 1
+                    records_read += 1
+                    if previous_day is not None and day_number <= previous_day:
+                        invalid_record_reason = "NON_INCREASING_OR_DUPLICATE_SESSION"
+                    previous_day = day_number
+                    try:
+                        decoded = decode_day_record(raw_record, raw_only_units)
+                    except (ValueError, OverflowError):
+                        invalid_record_reason = invalid_record_reason or "INVALID_SESSION_DATE_OR_RECORD"
+                        decoded = None
+                    if decoded is not None:
+                        if decoded.session_date == target_session:
+                            if target_record is not None:
+                                invalid_record_reason = "DUPLICATE_TARGET_SESSION"
+                            else:
+                                target_record = raw_record
+                                target_decoded = decoded
+                        if decoded.session_date > target_session:
+                            future_rows += 1
+                    position += DAY_STRUCT.size
+                buffer = buffer[complete_bytes:]
+        if buffer:
+            raise VipdataError("REVISION_ENTRY_TAIL_INVALID", "日线条目尾部不足32字节")
+        if record_count != expected_size // DAY_STRUCT.size:
+            raise VipdataError("REVISION_ENTRY_COUNT_MISMATCH", "日线条目记录数与验证目录不一致")
+        if target_decoded is None:
+            rendered_target = None
+        else:
+            prices = target_decoded.prices
+            ohlc = tuple(prices.value) if prices.quality == "OBSERVED" else None
+            rendered_target = {
+                "raw_record_hex": target_record.hex() if target_record is not None else None,
+                "ohlc_cents": tuple(int(value * 100) for value in ohlc) if ohlc is not None else None,
+                "price_quality": prices.quality,
+                "price_reason": prices.reason,
+                "amount_float32_hex": target_record[20:24].hex() if target_record is not None else None,
+                "volume_raw": target_decoded.raw_volume.value if target_decoded.raw_volume else None,
+                "reserved": target_decoded.reserved,
+            }
+        return {
+            "entry_sha256": digest.hexdigest(),
+            "record_count": record_count,
+            "target_bar": rendered_target,
+            "invalid_record_reason": invalid_record_reason,
+            "future_rows": future_rows,
+        }
+
+    try:
+        with zipfile.ZipFile(old_path, "r") as old_archive, zipfile.ZipFile(new_path, "r") as new_archive:
+            for symbol in all_symbols:
+                old_candidate = old_by_symbol.get(symbol)
+                new_candidate = new_by_symbol.get(symbol)
+                market = str((old_candidate or new_candidate)["market"])
+                bucket = market_changes.setdefault(market, {
+                    "content_same": 0, "content_changed": 0, "not_evaluated": 0,
+                    "only_old": 0, "only_new": 0,
+                })
+                if old_candidate is None:
+                    only_new += 1
+                    bucket["only_new"] += 1
+                    continue
+                if new_candidate is None:
+                    only_old += 1
+                    bucket["only_old"] += 1
+                    continue
+                if budget_exhausted:
+                    not_evaluated += 1
+                    bucket["not_evaluated"] += 1
+                    if len(not_evaluated_samples) < sample_limit:
+                        not_evaluated_samples.append({"symbol": symbol, "reason": "REVISION_BUDGET_EXHAUSTED"})
+                    continue
+                old_entry = old_entries_by_path[old_candidate["zip_entry_path"]]
+                new_entry = new_entries_by_path[new_candidate["zip_entry_path"]]
+                required_bytes = old_entry.uncompressed_bytes + new_entry.uncompressed_bytes
+                required_records = required_bytes // 32
+                if (bytes_read + required_bytes > max_total_bytes
+                        or records_read + required_records > max_total_records
+                        or time.monotonic() - started >= max_seconds):
+                    budget_exhausted = True
+                    not_evaluated += 1
+                    bucket["not_evaluated"] += 1
+                    if len(not_evaluated_samples) < sample_limit:
+                        not_evaluated_samples.append({"symbol": symbol, "reason": "REVISION_BUDGET_EXHAUSTED"})
+                    continue
+                old_result = scan_entry(old_archive, old_candidate)
+                new_result = scan_entry(new_archive, new_candidate)
+                target_changes["comparable_entries"] += 1
+                changed = old_result["entry_sha256"] != new_result["entry_sha256"]
+                if changed:
+                    content_changed += 1
+                    bucket["content_changed"] += 1
+                else:
+                    content_same += 1
+                    bucket["content_same"] += 1
+                old_bar = old_result["target_bar"]
+                new_bar = new_result["target_bar"]
+                if (old_bar is None) != (new_bar is None):
+                    target_changes["target_presence_changed"] += 1
+                    if new_bar is None:
+                        target_changes["target_bar_removed"] += 1
+                    else:
+                        target_changes["target_bar_added"] += 1
+                if old_bar is not None and old_bar.get("price_quality") != "OBSERVED":
+                    target_changes["invalid_target_price_group_old"] += 1
+                if new_bar is not None and new_bar.get("price_quality") != "OBSERVED":
+                    target_changes["invalid_target_price_group_new"] += 1
+                if old_bar is not None and new_bar is not None:
+                    if old_bar.get("raw_record_hex") != new_bar.get("raw_record_hex"):
+                        target_changes["target_raw_record_changed"] += 1
+                    if (old_bar.get("ohlc_cents"), old_bar.get("price_quality"), old_bar.get("price_reason")) != (
+                            new_bar.get("ohlc_cents"), new_bar.get("price_quality"), new_bar.get("price_reason")):
+                        target_changes["target_prices_changed"] += 1
+                    if old_bar.get("amount_float32_hex") != new_bar.get("amount_float32_hex"):
+                        target_changes["target_amount_raw_changed"] += 1
+                    if old_bar.get("volume_raw") != new_bar.get("volume_raw"):
+                        target_changes["target_volume_raw_changed"] += 1
+                if changed and len(changed_samples) < sample_limit:
+                    changed_samples.append({
+                        "symbol": symbol,
+                        "market": market,
+                        "board": old_candidate["board"],
+                        "old_entry_path": old_candidate["zip_entry_path"],
+                        "new_entry_path": new_candidate["zip_entry_path"],
+                        "old_entry_sha256": old_result["entry_sha256"],
+                        "new_entry_sha256": new_result["entry_sha256"],
+                        "old_record_count": old_result["record_count"],
+                        "new_record_count": new_result["record_count"],
+                        "old_target_bar": old_bar,
+                        "new_target_bar": new_bar,
+                        "old_invalid_record_reason": old_result["invalid_record_reason"],
+                        "new_invalid_record_reason": new_result["invalid_record_reason"],
+                        "old_future_rows": old_result["future_rows"],
+                        "new_future_rows": new_result["future_rows"],
+                    })
+    except TimeoutError as error:
+        if str(error) != "REVISION_MAX_SECONDS_EXCEEDED":
+            raise
+        budget_exhausted = True
+    except (OSError, zipfile.BadZipFile, RuntimeError, NotImplementedError) as error:
+        raise VipdataError("REVISION_ENTRY_READ_FAILED", "修订对照解压或读取已校验条目失败") from error
+    if (_file_identity(old_path) != old_package.file_identity
+            or _file_identity(new_path) != new_package.file_identity):
+        raise VipdataError("PACKAGE_CHANGED", "修订对照期间ZIP文件身份或元数据发生变化")
+
+    # A timeout during a pair scan invalidates that partial pair and every following pair.
+    classified_overlap = content_same + content_changed + not_evaluated
+    expected_overlap = len(set(old_by_symbol) & set(new_by_symbol))
+    if classified_overlap < expected_overlap:
+        # A timeout may interrupt a pair before its digest is retained. Recheck the
+        # classified counter using the explicit overlap budget; residual entries stay
+        # untyped at the market level when only a partial pair was observed.
+        remaining = expected_overlap - classified_overlap
+        not_evaluated += remaining
+        market_changes.setdefault("UNKNOWN", {
+            "content_same": 0, "content_changed": 0,
+            "not_evaluated": 0, "only_old": 0, "only_new": 0,
+        })["not_evaluated"] += remaining
+    complete = only_old + only_new + content_same + content_changed + not_evaluated == len(all_symbols)
+    if not complete:
+        raise VipdataError("REVISION_PARTITION_INCOMPLETE", "来源修订候选分母未能互斥闭合")
+    return VipdataRevisionComparison(
+        old_package_sha256=old_package.sha256,
+        new_package_sha256=new_package.sha256,
+        target_session=target_session,
+        old_candidate_total=len(old_by_symbol),
+        new_candidate_total=len(new_by_symbol),
+        only_old=only_old,
+        only_new=only_new,
+        content_same=content_same,
+        content_changed=content_changed,
+        not_evaluated=not_evaluated,
+        target_bar_changes=target_changes,
+        market_changes=market_changes,
+        changed_samples=tuple(changed_samples),
+        not_evaluated_samples=tuple(not_evaluated_samples),
+        bytes_read=bytes_read,
+        records_read=records_read,
+        elapsed_seconds=round(time.monotonic() - started, 6),
+        comparison_complete=complete,
+    )
 
 
 def vipdata_candidate_pages(
