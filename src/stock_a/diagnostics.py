@@ -48,7 +48,7 @@ from stock_a.sources.tdx.vipdata import (
     vipdata_research_candidate_pool,
 )
 from stock_a.postgres_identity import inspect_postgres
-from stock_a.postgres_binding import BindingRefused, bind_stock_namespace
+from stock_a.postgres_binding import BindingCommittedConfigError, BindingRefused, bind_stock_namespace
 from stock_a.research.entry import (
     CompareBudget,
     ResearchEntryError,
@@ -412,7 +412,12 @@ def _parser() -> argparse.ArgumentParser:
     doctor.add_argument("--config", help="仅接受唯一登记配置runtime.defaults.json的绝对路径")
     pg = commands.add_parser("pg-identity", help="以只读事务核验stock_a登录、固定数据库/schema及项目迁移身份")
     pg.add_argument("--timeout-seconds", type=float, default=5.0, help="连接与每条查询的秒数上限，默认5秒，最大30秒")
-    bind = commands.add_parser("pg-bind", help="以stock_a账号应用待执行的Stock A集中前向迁移")
+    bind = commands.add_parser("pg-bind", help="在明确任务范围内以stock_a账号应用指定集中迁移")
+    bind.add_argument("--task-scope", required=True,
+                      choices=("R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1",),
+                      help="必填：已批准且受限的PG任务范围")
+    bind.add_argument("--migration-id", required=True, type=int, choices=(3,),
+                      help="必填：本任务唯一允许的迁移ID 3")
     bind.add_argument("--timeout-seconds", type=float, default=20.0, help="身份绑定总耗时上限，默认20秒，最大30秒")
     phase0 = commands.add_parser(
         "source-phase0",
@@ -958,10 +963,11 @@ def _run_pg_identity(args: argparse.Namespace) -> int:
     result = inspect_postgres(config, timeout_seconds=args.timeout_seconds)
     result.update({
         "ok": result.get("status") == "DB_MIGRATION_READY",
-        "message": "PG目标与账号核验结束；数据库状态不代表业务流水线已完成",
+        "message": "PG只读连接、账号迁移身份与物理存储核验状态分别返回；数据库状态不代表业务流水线已完成",
         "package": package,
         "configuration_path": str(config_path),
-        "business_write_admission": "ALLOW_DATABASE_CAPABILITY" if result.get("status") == "DB_MIGRATION_READY" else "DENY",
+        "business_write_admission": "DENY_GENERAL_WRITE_AND_PUBLISH",
+        "task_scoped_migration_admission": "REQUIRES_EXPLICIT_TASK_SCOPE",
         "production_switched": False,
     })
     _emit(result, error=result.get("status") != "DB_MIGRATION_READY")
@@ -984,11 +990,24 @@ def _run_pg_bind(args: argparse.Namespace) -> int:
         raise DiagnosticError("BIND_MODE_REJECTED", "固定身份迁移仅允许从批准源码包的显式开发CLI执行", _EXIT_PERMISSION)
     config, config_path = _load_runtime_config()
     try:
-        result = bind_stock_namespace(config, config_path, timeout_seconds=args.timeout_seconds)
+        result = bind_stock_namespace(
+            config, config_path, task_scope=args.task_scope, migration_id=args.migration_id,
+            timeout_seconds=args.timeout_seconds,
+        )
+    except BindingCommittedConfigError as error:
+        _emit({"ok": False, "status": "CONFIG_SYNC_REQUIRED", "code": "PG_BIND_CONFIG_SYNC_REQUIRED",
+               "message": str(error), "business_write_admission": "DENY",
+               "task_scope": args.task_scope, "migration_id": args.migration_id,
+               "database_transaction_outcome": "COMMITTED",
+               "database_write_attempted": "YES",
+               "configuration_path": str(config_path), "production_switched": False}, error=True)
+        return _EXIT_ENGINEERING
     except BindingRefused as error:
         _emit({"ok": False, "status": "REJECTED", "code": "PG_BIND_REFUSED",
                "message": str(error), "business_write_admission": "DENY",
-               "database_write_attempted": "UNKNOWN_IF_FAILURE_AFTER_COMMIT",
+               "task_scope": args.task_scope, "migration_id": args.migration_id,
+               "database_transaction_outcome": "ROLLED_BACK_OR_NOT_STARTED",
+               "database_write_attempted": "NO_COMMITTED_CHANGE",
                "configuration_path": str(config_path), "production_switched": False}, error=True)
         return _EXIT_PERMISSION
     result.update({"ok": result.get("status") == "BOUND", "package": package,

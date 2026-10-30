@@ -233,11 +233,11 @@ def _resolved_deployment_path(value: str, *, data_directory: Path) -> Path:
 
 def _deployment_storage_checks(config: dict[str, Any], business: dict[str, Any],
                                *, timeout_seconds: float) -> tuple[list[IdentityCheck], dict[str, Any] | None]:
-    """以独立超级用户连接核验实际簇、运行存储及其与业务socket的绑定。"""
+    """独立核验实际簇与运行存储；此结果与业务账号/迁移身份分开。"""
     dsn = os.environ.get("STOCK_A_PG_DEPLOYMENT_DSN")
     if not dsn:
         return [IdentityCheck("deployment_storage_proof", "BLOCKED",
-                              reason="缺少独立部署核验连接；拒绝写入、发布和迁移")], None
+                              reason="缺少独立部署核验连接；物理存储位置未独立验证")], None
     try:
         import psycopg
         from psycopg.conninfo import conninfo_to_dict
@@ -326,7 +326,7 @@ def _deployment_storage_checks(config: dict[str, Any], business: dict[str, Any],
         return checks, proof
     except Exception as error:
         return [IdentityCheck("deployment_storage_proof", "BLOCKED",
-                              reason=f"独立部署/存储核验未完成（{type(error).__name__}）；拒绝写入、发布和迁移")], None
+                              reason=f"独立部署/存储核验未完成（{type(error).__name__}）；物理存储位置未独立验证")], None
 
 
 def _check_deadline(deadline: float) -> None:
@@ -706,7 +706,6 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                 checks.extend(evaluate_identity(config, actual))
             deployment_checks, deployment_proof = _deployment_storage_checks(
                 config, physical, timeout_seconds=max(1.0, min(float(timeout_seconds), _MAX_INSPECTION_SECONDS)))
-            checks.extend(deployment_checks)
             with conn.cursor() as cursor:
                 _check_deadline(deadline)
                 cursor.execute("COMMIT")
@@ -716,6 +715,12 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
             physical_summary["deployment_storage_checks"] = "PASS" if deployment_proof is not None and all(
                 item.status == "PASS" for item in deployment_checks) else "NOT_VERIFIED"
             physical_summary["deployment_proof"] = deployment_proof
+            storage_location_status = (
+                "INDEPENDENTLY_VERIFIED" if physical_summary["deployment_storage_checks"] == "PASS"
+                else "INDEPENDENT_VERIFICATION_REJECTED"
+                if any(item.status == "REJECT" for item in deployment_checks)
+                else "NOT_INDEPENDENTLY_VERIFIED"
+            )
             if len(checks) > _MAX_CHECKS:
                 raise OverflowError("PG核验检查项超过输出预算")
             statuses = {item.status for item in checks}
@@ -726,6 +731,10 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
             account_ready = all(item.status == "PASS" for item in checks if item.check in account_checks)
             result = {"status": "DB_MIGRATION_READY" if overall == "READY" else overall,
                       "database_account_status": "DB_ACCOUNT_READY" if account_ready else "NOT_READY",
+                      "database_connection_status": "READ_ONLY_CONNECTED",
+                      "database_migration_identity_status": "DB_MIGRATION_READY" if overall == "READY" else overall,
+                      "storage_location_status": storage_location_status,
+                      "storage_checks": [item.__dict__ for item in deployment_checks],
                       "business_pipeline_status": "BUSINESS_PIPELINE_PENDING",
                       "connection_attempted": True,
                       "elapsed_seconds": round(time.monotonic() - start, 6),
@@ -738,15 +747,17 @@ def inspect_postgres(config: dict[str, Any], *, timeout_seconds: float = 5.0) ->
                 result.update({"inspection_context": context,
                                "configuration_identity": config_identity,
                                "deployment_proof_expires_in_seconds": _DEPLOYMENT_PROOF_MAX_AGE_SECONDS,
-                               "admission_actions": ["WRITE", "PUBLISH"]})
-                _DEPLOYMENT_PROOFS[context] = (
-                    config_identity, proof_expiry,
-                    _deployment_fingerprint(physical_summary, result["checks"]))
-                now = time.monotonic()
-                for stale_context in [key for key, value in _DEPLOYMENT_PROOFS.items() if value[1] < now]:
-                    _DEPLOYMENT_PROOFS.pop(stale_context, None)
-                while len(_DEPLOYMENT_PROOFS) > _MAX_DEPLOYMENT_PROOFS:
-                    _DEPLOYMENT_PROOFS.pop(next(iter(_DEPLOYMENT_PROOFS)))
+                               "admission_actions": []})
+                if physical_summary["deployment_storage_checks"] == "PASS":
+                    result["admission_actions"] = ["WRITE", "PUBLISH"]
+                    _DEPLOYMENT_PROOFS[context] = (
+                        config_identity, proof_expiry,
+                        _deployment_fingerprint(physical_summary, result["checks"]))
+                    now = time.monotonic()
+                    for stale_context in [key for key, value in _DEPLOYMENT_PROOFS.items() if value[1] < now]:
+                        _DEPLOYMENT_PROOFS.pop(stale_context, None)
+                    while len(_DEPLOYMENT_PROOFS) > _MAX_DEPLOYMENT_PROOFS:
+                        _DEPLOYMENT_PROOFS.pop(next(iter(_DEPLOYMENT_PROOFS)))
             return result
     except Exception as error:
         # Do not include exception text: drivers can embed DSNs or server-provided private details.
