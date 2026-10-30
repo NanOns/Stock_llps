@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Stock A · 来源级研究预览</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <header class="top">
+      <div>
+        <p class="eyebrow">STOCK A / 本机开发研究</p>
+        <h1>来源级研究预览</h1>
+        <p class="sub">
+          只读读取已保存的 PG Raw；显式选择日期、来源包版本和研究窗口。
+        </p>
+      </div>
+      <span class="badge">非正式发布 · NON_PIT</span>
+    </header>
+    <main>
+      <section class="notice">
+        <strong>数据边界</strong
+        ><span
+          >当前页面展示来源候选，不代表官方上市总体、稳定证券身份、交易状态或选股结论。入选、行业和名称能力尚未接通。</span
+        >
+      </section>
+      <section class="panel">
+        <div class="panel-head">
+          <div>
+            <h2>预览范围</h2>
+            <p>日期和包SHA都来自真实PG目录；任何查询都不会回退到最新版本。</p>
+          </div>
+          <button id="reloadCatalog" class="quiet">刷新目录</button>
+        </div>
+        <div class="controls">
+          <label
+            >目标交易日与来源包版本<select id="versionSelect" disabled>
+              <option>正在读取PG目录…</option>
+            </select></label
+          ><label
+            >市场筛选<select id="marketSelect">
+              <option value="ALL">沪深全部来源候选</option>
+              <option value="SH">上海来源候选</option>
+              <option value="SZ">深圳来源候选</option>
+            </select></label
+          ><label
+            >板别筛选<select id="boardSelect">
+              <option value="ALL">主板与创业板</option>
+              <option value="MAIN_BOARD">主板</option>
+              <option value="GEM">创业板</option>
+            </select></label
+          >
+        </div>
+        <div id="population" class="population" role="status">
+          等待读取PG来源目录。
+        </div>
+      </section>
+      <section class="panel chain-panel" aria-labelledby="chainTitle">
+        <div class="panel-head">
+          <div>
+            <h2 id="chainTitle">当前数据链准备状态</h2>
+            <p>
+              使用当前明确选择的日期和完整SHA；仅做有界PG只读汇总，不计算Core/Profile或切换正式Head。
+            </p>
+          </div>
+          <span id="chainChecked" class="count">尚未查询</span>
+        </div>
+        <div id="chainState" class="chain-state" role="status">
+          请先从PG目录选择目标日期和来源包版本。
+        </div>
+        <div id="chainOverview" class="chain-overview"></div>
+        <div id="chainGroups" class="chain-groups"></div>
+      </section>
+      <div class="columns">
+        <section class="panel">
+          <div class="panel-head">
+            <div>
+              <h2>来源候选</h2>
+              <p>
+                按代码稳定排序；每页最多50行。缺Bar只说明来源缺值，不推断停牌或退市。
+              </p>
+            </div>
+            <span id="pageCount" class="count">—</span>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>来源代码</th>
+                  <th>市场 / 板别</th>
+                  <th>目标日Bar</th>
+                  <th>身份</th>
+                  <th></th>
+                </tr>
+              </thead>
+              <tbody id="candidateRows">
+                <tr>
+                  <td colspan="5" class="muted">等待选择PG版本。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button id="prevPage" class="quiet" disabled>上一页</button
+            ><span id="pageStatus">—</span>
+            <div class="pager-actions">
+              <button id="nextPage" class="quiet" disabled>下一页</button
+              ><button id="lastPage" class="quiet" disabled>末页</button>
+            </div>
+          </div>
+        </section>
+        <section class="panel search-panel">
+          <div class="panel-head">
+            <div>
+              <h2>单股研究预览</h2>
+              <p>
+                查询动作仅读取所选目标日的PG历史和运行现役内核，不保存计算结果。
+              </p>
+            </div>
+          </div>
+          <form id="stockForm">
+            <label
+              >来源代码<input
+                id="symbolInput"
+                name="symbol"
+                placeholder="SH.600000"
+                autocomplete="off"
+                maxlength="9"
+                required /></label
+            ><label
+              >目标日前官方交易会话数<input
+                id="windowInput"
+                name="session_count"
+                type="number"
+                min="1"
+                max="75"
+                value="75"
+                required /></label
+            ><button id="queryStock" type="submit">查询研究预览</button>
+          </form>
+          <div id="stockError" class="message" hidden></div>
+          <div id="stockResult" hidden>
+            <div class="identity-box">
+              <strong id="resultTitle"></strong><span id="resultMode"></span
+              ><code id="snapshotId"></code><span id="windowText"></span>
+            </div>
+            <h3>原始行情与来源质量</h3>
+            <div id="rawSummary" class="raw-grid"></div>
+            <h3>Core 价格观察</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>字段</th>
+                    <th>值</th>
+                    <th>质量</th>
+                    <th>原因</th>
+                  </tr>
+                </thead>
+                <tbody id="coreRows"></tbody>
+              </table>
+            </div>
+            <details>
+              <summary>查看全部43项 Core 字段</summary>
+              <div class="table-wrap">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>字段</th>
+                      <th>值</th>
+                      <th>质量</th>
+                      <th>原因</th>
+                    </tr>
+                  </thead>
+                  <tbody id="allCoreRows"></tbody>
+                </table>
+              </div>
+            </details>
+            <h3>Profile 组件状态（11项）</h3>
+            <div class="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>组件</th>
+                    <th>状态</th>
+                    <th>值</th>
+                    <th>原因</th>
+                  </tr>
+                </thead>
+                <tbody id="profileRows"></tbody>
+              </table>
+            </div>
+            <div class="unavailable">
+              <strong>当前未连接能力</strong
+              ><span
+                >官方上市总体、行业、中文名称、入选 / 未入选与Near-Miss：<code
+                  >NOT_CONNECTED / NOT_EVALUATED</code
+                >。本页不以搜索不到或缺Bar代表不合格。</span
+              >
+            </div>
+          </div>
+        </section>
+      </div>
+      <footer>
+        Stock A 本机来源级研究预览 · PostgreSQL只读 · RAW_UNADJUSTED ·
+        NON_PIT_RETROSPECTIVE
+      </footer>
+    </main>
+  </body>
+</html>

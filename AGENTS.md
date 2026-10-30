@@ -1,6 +1,6 @@
-# Stock A AGENTS.md：开发、目录与Git准入约束 R9
+# Stock A AGENTS.md：开发、目录与Git准入约束 R10
 
-合同：`STOCK-A-AGENT-RULES/R9`。适用于用户批准的唯一工作空间`G:/codex work/Stock A`。本根规则已放入新项目；目录与Git政策按用户2026-10-25最新指令执行，优先替代旧交接稿中的路径、测试入Git和证据提交要求。R8补充数据库表/字段中文注释及项目中文表达规则；R9明确新旧项目均禁止Git LFS。完整业务设计与候选参数仍需相应实施、采用和验收，不因放置文件获得PASS。
+合同：`STOCK-A-AGENT-RULES/R10`。适用于用户批准的唯一工作空间`G:/codex work/Stock A`。本根规则已放入新项目；目录与Git政策按用户2026-10-25最新指令执行，优先替代旧交接稿中的路径、测试入Git和证据提交要求。R8补充数据库表/字段中文注释及项目中文表达规则；R9明确新旧项目均禁止Git LFS；R10将业务源码职责分包、前后端分离和代码格式检查设为持续准入约束。完整业务设计与候选参数仍需相应实施、采用和验收，不因放置文件获得PASS。
 
 ## A01 项目身份与旧项目边界
 
@@ -29,6 +29,9 @@
 ## A04 一个生产实现与清晰分层
 
 - 只有来源S、规范事实C、计算F、发布P、读取/页面V五个责任层；依赖以字段和时间角色建图。页面阅读顺序不等于强制所有计算串行。
+- 业务源码必须按实际职责放入`application/`、`storage/`、`service/`、`domain/`、`contracts/`等子包；既有`sources/`、`canonical/`、`research/`等领域包保留其唯一正确实现。`src/stock_a/`包根只保留包初始化、正式模块入口和被现行机器合同引用的精简兼容导出；兼容导出必须委托单一实现并记录唯一消费者/退出条件。职责分包缺失、重复业务实现、巨型兼容入口或根目录继续堆业务模块均不准入。
+- 前后端必须拆分：HTML、CSS、JavaScript独立维护在`web/`产品资源目录，Python `service/`只承担HTTP路由、数据接口及固定静态资源交付；Python不得嵌入HTML/CSS/JavaScript源码，前端不得复制正式业务计算。源码运行和隔离安装包都必须验证资源可加载。
+- 所有现役Python、JavaScript、CSS及页面HTML必须遵守仓库统一格式；Python使用`ruff format --check src/stock_a`和`ruff check --select E701,E702 src/stock_a`，Web资源使用`prettier --check web/preview/index.html web/preview/app.css web/preview/app.js`。修整超长行与多语句单行；仅为保持SQL/合同字面量、精确数值或协议兼容而必要的内容可保留原字节，并在检查结果中说明。格式检查在提交前执行，结果放外部过程证据，不把测试文件或日志提交Git。
 - 每域只有一个当前实现和受控适配边界；不保留两代Reader/Builder/Risk/Profile平行兜底。过渡适配器必须有唯一消费者、退出条件和移除任务。
 - 正式业务不能导入外部测试、一次性脚本、阶段产物或历史证据生成器；唯一正式CLI归入src业务包，禁止依赖仓外过程工具；禁止FunctionType替换函数全局变量、运行时源码覆盖、SQL正则改写当长期架构。
 - 日更不得生成持久业务文件，包括Owner/Profile/ReadIndex/Forward、DayPlan、回执和恢复检查点文件；必要事实、引用、运行状态和恢复游标全部存PG类型化表。禁止PG保存源包二进制、压缩包、Base64、整业务对象JSON或万能payload。外部来源只在采集时读取，入库后普通查询、前态和恢复不依赖源文件。

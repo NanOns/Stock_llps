@@ -27,7 +27,11 @@ def _nonempty(value: object, name: str) -> str:
 
 
 def _aware(value: object, name: str) -> datetime:
-    if not isinstance(value, datetime) or value.tzinfo is None or value.utcoffset() is None:
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
         raise ContractError(f"{name}必须是带时区的datetime")
     return value
 
@@ -62,7 +66,9 @@ class AdjustmentContext:
             raise ContractError("coordinate_mode仅支持TICKED或EXACT_RESEARCH")
         if source_basis == target_basis:
             raise ContractError("源坐标与目标坐标必须不同")
-        if not isinstance(self.target_session, date) or isinstance(self.target_session, datetime):
+        if not isinstance(self.target_session, date) or isinstance(
+            self.target_session, datetime
+        ):
             raise ContractError("target_session必须是date会话")
         _aware(self.source_cutoff, "source_cutoff")
         try:
@@ -113,7 +119,9 @@ class XrxdEvent:
         _nonempty(self.event_ref, "event_ref")
         _nonempty(self.source_ref, "source_ref")
         _nonempty(self.security_id, "security_id")
-        if not isinstance(self.effective_session, date) or isinstance(self.effective_session, datetime):
+        if not isinstance(self.effective_session, date) or isinstance(
+            self.effective_session, datetime
+        ):
             raise ContractError("effective_session必须是date会话")
         _aware(self.available_at, "available_at")
         if self.parameter_version != PARAMETER_VERSION:
@@ -125,7 +133,9 @@ class XrxdEvent:
         ):
             raise ContractError("same_day_order必须为非负整数或None")
         if (self.source_record_index is None) != (self.source_byte_offset is None):
-            raise ContractError("source_record_index与source_byte_offset必须同时提供或同时缺省")
+            raise ContractError(
+                "source_record_index与source_byte_offset必须同时提供或同时缺省"
+            )
         if self.source_record_index is not None and (
             isinstance(self.source_record_index, bool)
             or not isinstance(self.source_record_index, int)
@@ -146,7 +156,9 @@ class XrxdEvent:
             try:
                 number = exact_number(value)
             except (ValueError, TypeError, OverflowError) as exc:
-                raise ContractError(f"{name}必须是有限精确数且不能为bool/float") from exc
+                raise ContractError(
+                    f"{name}必须是有限精确数且不能为bool/float"
+                ) from exc
             if number < 0:
                 raise ContractError(f"{name}不能为负数")
         if self.m <= 0:
@@ -154,7 +166,9 @@ class XrxdEvent:
 
     @property
     def m(self) -> Fraction:
-        return (10 + exact_number(self.bonus_per_10) + exact_number(self.rights_per_10)) / 10
+        return (
+            10 + exact_number(self.bonus_per_10) + exact_number(self.rights_per_10)
+        ) / 10
 
     @property
     def c(self) -> Fraction:
@@ -179,10 +193,16 @@ class UnsupportedAction:
         _nonempty(self.event_ref, "event_ref")
         _nonempty(self.source_ref, "source_ref")
         _nonempty(self.security_id, "security_id")
-        if not isinstance(self.effective_session, date) or isinstance(self.effective_session, datetime):
+        if not isinstance(self.effective_session, date) or isinstance(
+            self.effective_session, datetime
+        ):
             raise ContractError("effective_session必须是date会话")
         _aware(self.available_at, "available_at")
-        if isinstance(self.category, bool) or not isinstance(self.category, int) or self.category == 1:
+        if (
+            isinstance(self.category, bool)
+            or not isinstance(self.category, int)
+            or self.category == 1
+        ):
             raise ContractError("UnsupportedAction.category必须是非类别1整数")
         if not 2 <= self.category <= 14:
             raise ContractError("UnsupportedAction.category必须是已知未支持类别2到14")
@@ -240,9 +260,13 @@ class AdjustmentFactor:
             raise ContractError("source_basis必须是RAW:开头的原生价格坐标")
         if source_basis == target_basis:
             raise ContractError("源坐标与目标坐标必须不同")
-        if not isinstance(self.source_session, date) or isinstance(self.source_session, datetime):
+        if not isinstance(self.source_session, date) or isinstance(
+            self.source_session, datetime
+        ):
             raise ContractError("source_session必须是date会话")
-        if not isinstance(self.target_session, date) or isinstance(self.target_session, datetime):
+        if not isinstance(self.target_session, date) or isinstance(
+            self.target_session, datetime
+        ):
             raise ContractError("target_session必须是date会话")
         if self.source_session > self.target_session:
             raise ContractError("source_session不能晚于target_session")
@@ -250,7 +274,9 @@ class AdjustmentFactor:
             raise ContractError("alpha和beta必须是精确Fraction")
         if self.alpha <= 0:
             raise ContractError("仿射尺度alpha必须为正")
-        if not isinstance(self.event_refs, tuple) or any(not isinstance(ref, str) or not ref for ref in self.event_refs):
+        if not isinstance(self.event_refs, tuple) or any(
+            not isinstance(ref, str) or not ref for ref in self.event_refs
+        ):
             raise ContractError("event_refs必须是非空字符串组成的tuple")
         if not isinstance(self.event_source_refs, tuple) or any(
             not isinstance(pair, tuple)
@@ -259,11 +285,18 @@ class AdjustmentFactor:
             or not pair[0]
             or not isinstance(pair[1], str)
             or not pair[1]
-            or any(value is not None and (isinstance(value, bool) or not isinstance(value, int) or value < 0) for value in pair[2:])
+            or any(
+                value is not None
+                and (isinstance(value, bool) or not isinstance(value, int) or value < 0)
+                for value in pair[2:]
+            )
             for pair in self.event_source_refs
         ):
             raise ContractError("event_source_refs必须是事件引用与来源引用组成的tuple")
-        if tuple(event_ref for event_ref, _, _, _ in self.event_source_refs) != self.event_refs:
+        if (
+            tuple(event_ref for event_ref, _, _, _ in self.event_source_refs)
+            != self.event_refs
+        ):
             raise ContractError("event_source_refs必须与event_refs逐项对应")
         _aware(self.source_cutoff, "source_cutoff")
         _nonempty(self.parameter_version, "parameter_version")
@@ -276,9 +309,15 @@ class AdjustmentFactor:
             raise ContractError("factor.tick必须是正Fraction")
         if self.coordinate_mode not in (TICKED_COORDINATE, EXACT_RESEARCH_COORDINATE):
             raise ContractError("factor.coordinate_mode不受支持")
-        if self.coordinate_mode == TICKED_COORDINATE and not self.target_basis.startswith("ADJ:"):
+        if (
+            self.coordinate_mode == TICKED_COORDINATE
+            and not self.target_basis.startswith("ADJ:")
+        ):
             raise ContractError("TICKED factor目标坐标必须使用ADJ:标识")
-        if self.coordinate_mode == EXACT_RESEARCH_COORDINATE and not self.target_basis.startswith("RESEARCH:"):
+        if (
+            self.coordinate_mode == EXACT_RESEARCH_COORDINATE
+            and not self.target_basis.startswith("RESEARCH:")
+        ):
             raise ContractError("精确研究 factor目标坐标必须使用RESEARCH:标识")
 
     @property
@@ -291,7 +330,9 @@ class AdjustmentFactor:
         )
 
     @property
-    def source_dependency_identity(self) -> tuple[tuple[str, str, int | None, int | None], ...]:
+    def source_dependency_identity(
+        self,
+    ) -> tuple[tuple[str, str, int | None, int | None], ...]:
         """只引用实际参与事件及其来源，不声称已计算内容digest。"""
         return self.event_source_refs
 
@@ -337,7 +378,9 @@ def _validate_event_set(
     refs: dict[str, XrxdEvent | UnsupportedAction | UnresolvedAction] = {}
     for event in events:
         if not isinstance(event, (XrxdEvent, UnsupportedAction, UnresolvedAction)):
-            raise ContractError("events只能包含已解释、已知不支持或作用范围未确认的事件")
+            raise ContractError(
+                "events只能包含已解释、已知不支持或作用范围未确认的事件"
+            )
         if event.security_id is not None and event.security_id != context.security_id:
             if not isinstance(event, UnresolvedAction):
                 raise ContractError("事件security_id与调整上下文不匹配")
@@ -345,8 +388,13 @@ def _validate_event_set(
         if previous is not None:
             raise ContractError("重复event_ref；事件身份冲突或重复输入")
         refs[event.event_ref] = event
-        if isinstance(event, XrxdEvent) and event.parameter_version != context.parameter_version:
+        if (
+            isinstance(event, XrxdEvent)
+            and event.parameter_version != context.parameter_version
+        ):
             raise ContractError("事件parameter_version与调整上下文不匹配")
+
+
 def build_affine_factor(
     events: tuple[XrxdEvent | UnsupportedAction | UnresolvedAction, ...]
     | list[XrxdEvent | UnsupportedAction | UnresolvedAction],
@@ -363,7 +411,11 @@ def build_affine_factor(
         raise ContractError("source_session必须是date会话")
     if source_session > context.target_session:
         raise ContractError("source_session不能晚于target_session")
-    if isinstance(max_events, bool) or not isinstance(max_events, int) or not 1 <= max_events <= MAX_EVENT_BUDGET:
+    if (
+        isinstance(max_events, bool)
+        or not isinstance(max_events, int)
+        or not 1 <= max_events <= MAX_EVENT_BUDGET
+    ):
         raise ContractError(f"max_events必须是1到{MAX_EVENT_BUDGET}的整数")
     if not isinstance(events, (tuple, list)):
         raise ContractError("events必须是tuple或list有界输入")
@@ -376,7 +428,10 @@ def build_affine_factor(
         if event.available_at > context.source_cutoff:
             continue
         if isinstance(event, UnresolvedAction):
-            if event.security_id is not None and event.security_id != context.security_id:
+            if (
+                event.security_id is not None
+                and event.security_id != context.security_id
+            ):
                 continue
             if event.effective_session is not None and not (
                 source_session < event.effective_session <= context.target_session
@@ -387,7 +442,9 @@ def build_affine_factor(
             eligible.append(event)
     unresolved = [event for event in eligible if isinstance(event, UnresolvedAction)]
     if unresolved:
-        raise ContractError(f"公司行为存在{len(unresolved)}个实体或有效会话未确认的事件，阻断实际依赖窗口")
+        raise ContractError(
+            f"公司行为存在{len(unresolved)}个实体或有效会话未确认的事件，阻断实际依赖窗口"
+        )
     active_dates: dict[date, list[XrxdEvent]] = {}
     for event in eligible:
         if isinstance(event, XrxdEvent):
@@ -395,13 +452,18 @@ def build_affine_factor(
     for same_day in active_dates.values():
         if len(same_day) > 1:
             orders = [event.same_day_order for event in same_day]
-            if any(order is None for order in orders) or len(set(orders)) != len(orders):
+            if any(order is None for order in orders) or len(set(orders)) != len(
+                orders
+            ):
                 raise ContractError("同一有效会话的多个事件必须有唯一注册顺序")
     unsupported = [event for event in eligible if isinstance(event, UnsupportedAction)]
     if unsupported:
         raise ContractError(f"跨越{len(unsupported)}个未支持公司行为，不能确定坐标")
     eligible_xrxd = [event for event in eligible if isinstance(event, XrxdEvent)]
-    eligible_xrxd.sort(key=lambda event: (event.effective_session, event.same_day_order or 0), reverse=True)
+    eligible_xrxd.sort(
+        key=lambda event: (event.effective_session, event.same_day_order or 0),
+        reverse=True,
+    )
     alpha, beta = Fraction(1), Fraction(0)
     for event in eligible_xrxd:
         alpha = alpha / event.m
@@ -418,7 +480,12 @@ def build_affine_factor(
         coordinate_mode=context.coordinate_mode,
         event_refs=tuple(event.event_ref for event in eligible_xrxd),
         event_source_refs=tuple(
-            (event.event_ref, event.source_ref, event.source_record_index, event.source_byte_offset)
+            (
+                event.event_ref,
+                event.source_ref,
+                event.source_record_index,
+                event.source_byte_offset,
+            )
             for event in eligible_xrxd
         ),
         source_cutoff=context.source_cutoff,
@@ -427,7 +494,9 @@ def build_affine_factor(
     )
 
 
-def affine_price(value: object, factor: AdjustmentFactor, *, tick: object | None = None) -> Fraction:
+def affine_price(
+    value: object, factor: AdjustmentFactor, *, tick: object | None = None
+) -> Fraction:
     """按factor绑定坐标转换；兼容参数tick只能重复声明已绑定tick。"""
     if not isinstance(factor, AdjustmentFactor):
         raise ContractError("factor必须是AdjustmentFactor")
@@ -489,12 +558,16 @@ def adjust_ohlc(
         try:
             raw_price = exact_number(value)
         except (ValueError, TypeError, OverflowError) as exc:
-            raise ContractError("RAW OHLC价格必须是有限精确数且不能为bool/float") from exc
+            raise ContractError(
+                "RAW OHLC价格必须是有限精确数且不能为bool/float"
+            ) from exc
         if raw_price <= 0:
             raise ContractError("RAW OHLC价格必须大于0")
         raw_values.append(raw_price)
     raw_open, raw_high, raw_low, raw_close = raw_values
-    if raw_high < max(raw_open, raw_low, raw_close) or raw_low > min(raw_open, raw_high, raw_close):
+    if raw_high < max(raw_open, raw_low, raw_close) or raw_low > min(
+        raw_open, raw_high, raw_close
+    ):
         raise ContractError("RAW OHLC包络不合法")
 
     if tick is not None:
@@ -507,7 +580,9 @@ def adjust_ohlc(
 
     values = tuple(factor.alpha * value + factor.beta for value in raw_values)
     rounded = tuple(
-        value if factor.coordinate_mode == EXACT_RESEARCH_COORDINATE else round_to_tick(value, factor.tick)
+        value
+        if factor.coordinate_mode == EXACT_RESEARCH_COORDINATE
+        else round_to_tick(value, factor.tick)
         for value in values
     )
     return rounded  # type: ignore[return-value]
@@ -549,9 +624,14 @@ def adjust_ohlc_field(
         raise ContractError("OHLC字段必须包含值和质量")
     if not isinstance(factor, AdjustmentFactor):
         raise ContractError("factor必须是AdjustmentFactor")
-    if not isinstance(source_coordinate_id, str) or source_coordinate_id != factor.source_basis:
+    if (
+        not isinstance(source_coordinate_id, str)
+        or source_coordinate_id != factor.source_basis
+    ):
         raise ContractError("OHLC源坐标与factor.source_basis不匹配")
-    coordinate_id = semantic_digest(("PRICE_COORDINATE_R1", factor.target_coordinate_id))
+    coordinate_id = semantic_digest(
+        ("PRICE_COORDINATE_R1", factor.target_coordinate_id)
+    )
     if field.quality != "OBSERVED":
         return AdjustedOHLC(field, coordinate_id)
     adjusted = adjust_ohlc(field.value, factor)

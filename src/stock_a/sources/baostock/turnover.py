@@ -1,4 +1,5 @@
 """Bao换手历史分位的纯计算；输入由调用方完成窗口及绑定核验。"""
+
 from dataclasses import dataclass
 from datetime import date, datetime
 from fractions import Fraction
@@ -28,12 +29,26 @@ def classify_turnover_percentile(value: object) -> str:
         raise ContractError("换手百分位必须是精确有限数") from error
     if not 0 <= pct <= 100:
         raise ContractError("换手百分位必须在0至100之间")
-    return ("LOW" if pct < 20 else "NORMAL" if pct < 70 else
-            "ELEVATED" if pct < 90 else "HIGH" if pct < 97 else "EXTREME")
+    return (
+        "LOW"
+        if pct < 20
+        else "NORMAL"
+        if pct < 70
+        else "ELEVATED"
+        if pct < 90
+        else "HIGH"
+        if pct < 97
+        else "EXTREME"
+    )
 
 
-def turnover_pct60(current: TurnoverObservation, prior: tuple[TurnoverObservation, ...],
-                   *, binding_ready: bool, window_complete: bool) -> TurnoverPercentile:
+def turnover_pct60(
+    current: TurnoverObservation,
+    prior: tuple[TurnoverObservation, ...],
+    *,
+    binding_ready: bool,
+    window_complete: bool,
+) -> TurnoverPercentile:
     """前60个已确认有效观察按日期升序传入；完整性和绑定须显式声明。
 
     窗口完整性包括同一实体、无未知缺口以及恰为最近60个有效观察；
@@ -44,11 +59,17 @@ def turnover_pct60(current: TurnoverObservation, prior: tuple[TurnoverObservatio
     if not isinstance(current, TurnoverObservation) or not isinstance(prior, tuple):
         raise ContractError("换手观察及历史窗口类型非法")
     rows = (*prior, current)
-    if any(not isinstance(row, TurnoverObservation) or not isinstance(row.session_date, date)
-           or isinstance(row.session_date, datetime) or not isinstance(row.turn, FieldValue)
-           for row in rows):
+    if any(
+        not isinstance(row, TurnoverObservation)
+        or not isinstance(row.session_date, date)
+        or isinstance(row.session_date, datetime)
+        or not isinstance(row.turn, FieldValue)
+        for row in rows
+    ):
         raise ContractError("换手观察日期或字段类型非法")
-    if any(left.session_date >= right.session_date for left, right in zip(rows, rows[1:])):
+    if any(
+        left.session_date >= right.session_date for left, right in zip(rows, rows[1:])
+    ):
         raise ContractError("换手历史必须按日期严格递增且排除当前日")
 
     def unavailable(reason: str) -> TurnoverPercentile:

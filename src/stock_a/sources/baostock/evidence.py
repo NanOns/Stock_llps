@@ -1,4 +1,5 @@
 """BaoStock单日补充证据投影与TDX字段的只读对照。"""
+
 from __future__ import annotations
 
 from datetime import date
@@ -40,7 +41,10 @@ def _render_value(value: object) -> object:
         with localcontext() as context:
             context.prec = 24
             decimal_value = Decimal(value.numerator) / Decimal(value.denominator)
-        return {"exact": f"{value.numerator}/{value.denominator}", "decimal": format(decimal_value, "f")}
+        return {
+            "exact": f"{value.numerator}/{value.denominator}",
+            "decimal": format(decimal_value, "f"),
+        }
     return value
 
 
@@ -69,12 +73,22 @@ def _quality_field(mapping: object, key: str) -> FieldValue:
         return unknown("TDX字段容器不可用")
     item = mapping.get(key)
     if not isinstance(item, dict) or item.get("quality") != "OBSERVED":
-        return unknown((item or {}).get("reason", "TDX字段未知") if isinstance(item, dict) else "TDX字段缺失")
+        return unknown(
+            (item or {}).get("reason", "TDX字段未知")
+            if isinstance(item, dict)
+            else "TDX字段缺失"
+        )
     value = _as_fraction(item.get("value"))
-    return FieldValue(value) if value is not None else unknown("TDX数值格式不可用于精确对照")
+    return (
+        FieldValue(value)
+        if value is not None
+        else unknown("TDX数值格式不可用于精确对照")
+    )
 
 
-def _comparison(bao: FieldValue, tdx: FieldValue, *, units_unverified: bool = False) -> dict[str, Any]:
+def _comparison(
+    bao: FieldValue, tdx: FieldValue, *, units_unverified: bool = False
+) -> dict[str, Any]:
     if bao.quality != "OBSERVED" or tdx.quality != "OBSERVED":
         status = "NOT_COMPARABLE"
         relation = None
@@ -85,7 +99,11 @@ def _comparison(bao: FieldValue, tdx: FieldValue, *, units_unverified: bool = Fa
         tdx_number = exact_number(tdx.value)
         difference = bao_number - tdx_number
         relation = "MATCH" if difference == 0 else "DIFFERENT"
-        status = "UNIT_ASSUMPTION_UNVERIFIED" if units_unverified else "SYMBOL_DATE_ONLY_COMPARISON"
+        status = (
+            "UNIT_ASSUMPTION_UNVERIFIED"
+            if units_unverified
+            else "SYMBOL_DATE_ONLY_COMPARISON"
+        )
         reason = "金额/数量的TDX倍率仍是调用方声明假设；关系仅描述该假设下的数值差"
         if not units_unverified:
             reason = "仅按来源代码和交易日对照；未绑定稳定security_id或来源权威"
@@ -94,11 +112,15 @@ def _comparison(bao: FieldValue, tdx: FieldValue, *, units_unverified: bool = Fa
         "observed_relation_under_declared_units": relation,
         "baostock_value": _field(bao),
         "tdx_value": _field(tdx),
-        "difference_baostock_minus_tdx": _render_value(difference) if difference is not None else None,
+        "difference_baostock_minus_tdx": _render_value(difference)
+        if difference is not None
+        else None,
         "reason": reason,
     }
     if difference is not None and units_unverified and exact_number(tdx.value) != 0:
-        payload["relative_difference_over_tdx"] = _render_value(difference / exact_number(tdx.value))
+        payload["relative_difference_over_tdx"] = _render_value(
+            difference / exact_number(tdx.value)
+        )
     else:
         payload["relative_difference_over_tdx"] = None
     return payload
@@ -132,10 +154,18 @@ def _float32_ulp(value: Fraction) -> Fraction | None:
     return Fraction.from_float(following) - encoded
 
 
-def _price_comparison(bao: FieldValue, tdx: FieldValue, *, raw_response_confirmed: bool) -> dict[str, Any]:
+def _price_comparison(
+    bao: FieldValue, tdx: FieldValue, *, raw_response_confirmed: bool
+) -> dict[str, Any]:
     comparison = _comparison(bao, tdx)
     relation = comparison["observed_relation_under_declared_units"]
-    status = "NOT_COMPARABLE" if relation is None else "EXACT_MATCH" if relation == "MATCH" else "PRICE_DIFFERENCE_UNEXPLAINED"
+    status = (
+        "NOT_COMPARABLE"
+        if relation is None
+        else "EXACT_MATCH"
+        if relation == "MATCH"
+        else "PRICE_DIFFERENCE_UNEXPLAINED"
+    )
     return {
         "status": status,
         "coordinate": "RAW_UNADJUSTED" if raw_response_confirmed else None,
@@ -161,20 +191,32 @@ def _amount_precision_explanation(
         tdx_cny = exact_number(tdx_amount.value)
         known_difference = bao_cny - tdx_cny
         known_relative_difference = known_difference / tdx_cny if tdx_cny != 0 else None
-    if (bao_amount.quality != "OBSERVED" or tdx_amount.quality != "OBSERVED"
-            or amount_scale is None or amount_scale <= 0):
-        reason = bao_amount.reason if bao_amount.quality != "OBSERVED" else tdx_amount.reason
+    if (
+        bao_amount.quality != "OBSERVED"
+        or tdx_amount.quality != "OBSERVED"
+        or amount_scale is None
+        or amount_scale <= 0
+    ):
+        reason = (
+            bao_amount.reason if bao_amount.quality != "OBSERVED" else tdx_amount.reason
+        )
         return {
             "status": "NOT_COMPARABLE/UNIT_UNVERIFIED",
             "unit_basis": "CALLER_DECLARED_TDX_AMOUNT_TO_CNY; NOT_INDEPENDENTLY_BOUND",
-            "tdx_amount_to_cny": _render_value(amount_scale) if amount_scale is not None else None,
+            "tdx_amount_to_cny": _render_value(amount_scale)
+            if amount_scale is not None
+            else None,
             "bao_amount_cny": _field(bao_amount),
             "tdx_amount_cny": _field(tdx_amount),
             "difference_bao_minus_tdx_cny": (
-                _render_value(known_difference) if known_difference is not None else None
+                _render_value(known_difference)
+                if known_difference is not None
+                else None
             ),
             "relative_difference_over_tdx": (
-                _render_value(known_relative_difference) if known_relative_difference is not None else None
+                _render_value(known_relative_difference)
+                if known_relative_difference is not None
+                else None
             ),
             "reason": reason or "金额或单位倍率未知，不能作float32量化判断",
         }
@@ -194,10 +236,14 @@ def _amount_precision_explanation(
             "tdx_amount_cny": _field(tdx_amount),
             "difference_bao_minus_tdx_cny": _render_value(known_difference),
             "relative_difference_over_tdx": (
-                _render_value(known_relative_difference) if known_relative_difference is not None else None
+                _render_value(known_relative_difference)
+                if known_relative_difference is not None
+                else None
             ),
             "bao_amount_in_tdx_storage_units": _render_value(bao_storage_unit),
-            "tdx_float32_stored_value_in_tdx_storage_units": _render_value(tdx_storage_unit),
+            "tdx_float32_stored_value_in_tdx_storage_units": _render_value(
+                tdx_storage_unit
+            ),
             "reason": "金额不是有限float32范围内的可比较值，或TDX值不能还原为其float32存储坐标",
         }
 
@@ -217,29 +263,40 @@ def _amount_precision_explanation(
         "bao_amount_cny": _field(bao_amount),
         "tdx_amount_cny": _field(tdx_amount),
         "difference_bao_minus_tdx_cny": _render_value(difference),
-        "relative_difference_over_tdx": _render_value(difference / tdx_cny) if tdx_cny != 0 else None,
+        "relative_difference_over_tdx": _render_value(difference / tdx_cny)
+        if tdx_cny != 0
+        else None,
         "bao_amount_in_tdx_storage_units": _render_value(bao_storage_unit),
-        "tdx_float32_stored_value_in_tdx_storage_units": _render_value(tdx_storage_unit),
+        "tdx_float32_stored_value_in_tdx_storage_units": _render_value(
+            tdx_storage_unit
+        ),
         "bao_amount_float32_projection_in_tdx_storage_units": _render_value(projected),
         "tdx_float32_ulp_cny": _render_value(ulp_cny) if ulp_cny is not None else None,
-        "difference_in_tdx_float32_ulps": _render_value(difference / ulp_cny) if ulp_cny not in (None, 0) else None,
+        "difference_in_tdx_float32_ulps": _render_value(difference / ulp_cny)
+        if ulp_cny not in (None, 0)
+        else None,
         "explanation": (
             "Bao金额在相同调用方单位假设下编码为TDX float32后与TDX存储值相等；这是格式量化解释，不证明来源单位权威。"
             if status == "FLOAT32_QUANTIZATION_EQUIVALENT_UNDER_DECLARED_UNITS"
-            else "Bao与TDX金额的精确值相同。" if status == "EXACT_MATCH"
+            else "Bao与TDX金额的精确值相同。"
+            if status == "EXACT_MATCH"
             else "float32投影仍不能解释该金额差异；保留为未解释差异。"
         ),
     }
 
 
-def _volume_difference(bao_volume: FieldValue, tdx_volume: FieldValue, tdx_volume_raw: FieldValue) -> dict[str, Any]:
+def _volume_difference(
+    bao_volume: FieldValue, tdx_volume: FieldValue, tdx_volume_raw: FieldValue
+) -> dict[str, Any]:
     if bao_volume.quality != "OBSERVED" or tdx_volume.quality != "OBSERVED":
         return {
             "status": "NOT_COMPARABLE",
             "baostock_value_shares": _field(bao_volume),
             "tdx_value_shares": _field(tdx_volume),
             "difference_bao_minus_tdx_shares": None,
-            "reason": bao_volume.reason if bao_volume.quality != "OBSERVED" else tdx_volume.reason,
+            "reason": bao_volume.reason
+            if bao_volume.quality != "OBSERVED"
+            else tdx_volume.reason,
         }
     difference = exact_number(bao_volume.value) - exact_number(tdx_volume.value)
     return {
@@ -249,27 +306,60 @@ def _volume_difference(bao_volume: FieldValue, tdx_volume: FieldValue, tdx_volum
         "tdx_stored_integer_before_declared_multiplier": _field(tdx_volume_raw),
         "difference_bao_minus_tdx_shares": _render_value(difference),
         "unit_basis": "TDX_VOLUME_TO_SHARES_CALLER_DECLARED_NOT_INDEPENDENTLY_BOUND",
-        "reason": None if difference == 0 else "成交量是独立整数来源字段；差值原因未证实，不归因于float32金额精度或复权。",
+        "reason": None
+        if difference == 0
+        else "成交量是独立整数来源字段；差值原因未证实，不归因于float32金额精度或复权。",
     }
 
 
 def _unknown_daily(reason: str) -> dict[str, FieldValue]:
     return {
         key: unknown(reason)
-        for key in ("open", "high", "low", "close", "volume", "amount", "turn", "tradestatus", "isST")
+        for key in (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "amount",
+            "turn",
+            "tradestatus",
+            "isST",
+        )
     }
 
 
-def _semantic_status(value: FieldValue, *, true_label: str, false_label: str) -> dict[str, Any]:
+def _semantic_status(
+    value: FieldValue, *, true_label: str, false_label: str
+) -> dict[str, Any]:
     if value.quality != "OBSERVED":
-        return {"quality": "UNKNOWN_DATA", "status": "UNKNOWN", "raw_value": None, "reason": value.reason}
+        return {
+            "quality": "UNKNOWN_DATA",
+            "status": "UNKNOWN",
+            "raw_value": None,
+            "reason": value.reason,
+        }
     raw = str(value.value)
     if raw == "1":
-        return {"quality": "OBSERVED", "status": true_label, "raw_value": value.value, "reason": None}
+        return {
+            "quality": "OBSERVED",
+            "status": true_label,
+            "raw_value": value.value,
+            "reason": None,
+        }
     if raw == "0":
-        return {"quality": "OBSERVED", "status": false_label, "raw_value": value.value, "reason": None}
-    return {"quality": "UNKNOWN_DATA", "status": "UNKNOWN", "raw_value": value.value,
-            "reason": "BaoStock状态枚举值不在已知合同范围"}
+        return {
+            "quality": "OBSERVED",
+            "status": false_label,
+            "raw_value": value.value,
+            "reason": None,
+        }
+    return {
+        "quality": "UNKNOWN_DATA",
+        "status": "UNKNOWN",
+        "raw_value": value.value,
+        "reason": "BaoStock状态枚举值不在已知合同范围",
+    }
 
 
 def project_baostock_evidence(
@@ -305,13 +395,20 @@ def project_baostock_evidence(
         else:
             row = rows[0]
             try:
-                if date.fromisoformat(str(row.get("date"))) != date.fromisoformat(target_session):
+                if date.fromisoformat(str(row.get("date"))) != date.fromisoformat(
+                    target_session
+                ):
                     raise ValueError("响应日期与目标交易日不符")
                 if str(row.get("code", "")).lower() != expected_source_code:
                     raise ValueError("响应来源证券代码与请求不符")
-                if "adjustflag" not in response_fields or str(row.get("adjustflag")) != "3":
+                if (
+                    "adjustflag" not in response_fields
+                    or str(row.get("adjustflag")) != "3"
+                ):
                     raise ValueError("响应未确认adjustflag=3原始未复权坐标")
-                observation = normalize_daily_row(row, response_fields, _FIELD_MAP, _UNITS)
+                observation = normalize_daily_row(
+                    row, response_fields, _FIELD_MAP, _UNITS
+                )
                 accepted_row = row
                 coordinate_status = "RAW_UNADJUSTED_RESPONSE_CONFIRMED"
                 row_validation_reason = "响应日期、来源代码及adjustflag=3符合请求"
@@ -335,12 +432,23 @@ def project_baostock_evidence(
         }
 
     tdx_fields = tdx_result.get("target_raw_fields", {})
-    tdx_prices = {name: _quality_field(tdx_fields, name) for name in ("open", "high", "low", "close")}
+    tdx_prices = {
+        name: _quality_field(tdx_fields, name)
+        for name in ("open", "high", "low", "close")
+    }
     tdx_amount = _quality_field(tdx_fields, "amount")
     tdx_volume = _quality_field(tdx_fields, "volume")
     tdx_units = tdx_result.get("unit_contract", {})
-    amount_scale = _as_fraction(tdx_units.get("amount_to_cny", "")) if isinstance(tdx_units, dict) else None
-    volume_scale = _as_fraction(tdx_units.get("volume_to_shares", "")) if isinstance(tdx_units, dict) else None
+    amount_scale = (
+        _as_fraction(tdx_units.get("amount_to_cny", ""))
+        if isinstance(tdx_units, dict)
+        else None
+    )
+    volume_scale = (
+        _as_fraction(tdx_units.get("volume_to_shares", ""))
+        if isinstance(tdx_units, dict)
+        else None
+    )
     if tdx_amount.quality == "OBSERVED" and amount_scale and amount_scale > 0:
         tdx_amount_raw = FieldValue(exact_number(tdx_amount.value) / amount_scale)
     else:
@@ -352,12 +460,24 @@ def project_baostock_evidence(
 
     row_is_target = observation is not None and status == "RESPONSE_RECEIVED"
     raw_values = {
-        key: (accepted_row.get(column) if accepted_row is not None and column in response_fields else None)
+        key: (
+            accepted_row.get(column)
+            if accepted_row is not None and column in response_fields
+            else None
+        )
         for key, column in (
-            ("session_date", "date"), ("source_code", "code"),
-            ("open", "open"), ("high", "high"), ("low", "low"), ("close", "close"),
-            ("volume", "volume"), ("amount", "amount"), ("adjustflag", "adjustflag"),
-            ("turn", "turn"), ("tradestatus", "tradestatus"), ("isST", "isST"),
+            ("session_date", "date"),
+            ("source_code", "code"),
+            ("open", "open"),
+            ("high", "high"),
+            ("low", "low"),
+            ("close", "close"),
+            ("volume", "volume"),
+            ("amount", "amount"),
+            ("adjustflag", "adjustflag"),
+            ("turn", "turn"),
+            ("tradestatus", "tradestatus"),
+            ("isST", "isST"),
         )
     }
     bao_amount_raw = _as_fraction(raw_values["amount"])
@@ -386,7 +506,10 @@ def project_baostock_evidence(
         "rows_seen": query.get("rows_seen", len(rows)),
         "response_rows": rows,
         "raw_source_values": raw_values,
-        "row_validation": {"status": "VALID" if row_is_target else status, "reason": row_validation_reason},
+        "row_validation": {
+            "status": "VALID" if row_is_target else status,
+            "reason": row_validation_reason,
+        },
         "coordinate": {
             "status": coordinate_status,
             "adjustflag": "3" if row_is_target else None,
@@ -410,14 +533,21 @@ def project_baostock_evidence(
             "volume": _field(fields["volume"]),
             "amount": _field(fields["amount"]),
             "turn": _field(fields["turn"]),
-            "tradestatus": _semantic_status(fields["tradestatus"],
-                                             true_label="BAOSTOCK_REPORTED_TRADING",
-                                             false_label="BAOSTOCK_REPORTED_SUSPENSION"),
-            "isST": _semantic_status(fields["isST"], true_label="BAOSTOCK_REPORTED_ST",
-                                      false_label="BAOSTOCK_REPORTED_NOT_ST"),
+            "tradestatus": _semantic_status(
+                fields["tradestatus"],
+                true_label="BAOSTOCK_REPORTED_TRADING",
+                false_label="BAOSTOCK_REPORTED_SUSPENSION",
+            ),
+            "isST": _semantic_status(
+                fields["isST"],
+                true_label="BAOSTOCK_REPORTED_ST",
+                false_label="BAOSTOCK_REPORTED_NOT_ST",
+            ),
         },
         "price_comparisons": {
-            name: _price_comparison(fields[name], tdx_prices[name], raw_response_confirmed=row_is_target)
+            name: _price_comparison(
+                fields[name], tdx_prices[name], raw_response_confirmed=row_is_target
+            )
             for name in ("open", "high", "low", "close")
         },
         "comparisons": {
@@ -428,16 +558,26 @@ def project_baostock_evidence(
             "volume": _comparison(fields["volume"], tdx_volume, units_unverified=True),
             "amount": _comparison(fields["amount"], tdx_amount, units_unverified=True),
             "volume_raw_as_returned": _comparison(
-                FieldValue(bao_volume_raw) if bao_volume_raw is not None else unknown(fields["volume"].reason or "Bao原始成交量不可用"),
-                tdx_volume_raw, units_unverified=True,
+                FieldValue(bao_volume_raw)
+                if bao_volume_raw is not None
+                else unknown(fields["volume"].reason or "Bao原始成交量不可用"),
+                tdx_volume_raw,
+                units_unverified=True,
             ),
             "amount_raw_as_returned": _comparison(
-                FieldValue(bao_amount_raw) if bao_amount_raw is not None else unknown(fields["amount"].reason or "Bao原始金额不可用"),
-                tdx_amount_raw, units_unverified=True,
+                FieldValue(bao_amount_raw)
+                if bao_amount_raw is not None
+                else unknown(fields["amount"].reason or "Bao原始金额不可用"),
+                tdx_amount_raw,
+                units_unverified=True,
             ),
         },
-        "amount_precision_explanation": _amount_precision_explanation(fields["amount"], tdx_amount, amount_scale),
-        "volume_difference": _volume_difference(fields["volume"], tdx_volume, tdx_volume_raw),
+        "amount_precision_explanation": _amount_precision_explanation(
+            fields["amount"], tdx_amount, amount_scale
+        ),
+        "volume_difference": _volume_difference(
+            fields["volume"], tdx_volume, tdx_volume_raw
+        ),
         "turnover_percentile": {
             "status": "NOT_EVALUATED",
             "reason": "仅查询目标日一行，未验证同一身份前60个有效交易日，不能计算历史分位",
@@ -447,5 +587,7 @@ def project_baostock_evidence(
         "source_writes_attempted": False,
         "database_io_attempted": False,
         "database_write_attempted": False,
-        "reason": row_validation_reason if row_is_target else query.get("reason") or row_validation_reason,
+        "reason": row_validation_reason
+        if row_is_target
+        else query.get("reason") or row_validation_reason,
     }

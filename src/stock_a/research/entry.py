@@ -1,4 +1,5 @@
 """只读TDX研究入口；复用日线解码和Core，不写数据库或业务文件。"""
+
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
@@ -99,10 +100,19 @@ _PROFILE_NOT_IMPLEMENTED = {
 }
 _RAW_FIELDS = ("open", "high", "low", "close", "amount", "volume")
 _COMPARE_FIELDS = (
-    "core.ma5", "core.ma10", "core.ma20", "core.ma60",
-    "core.atr5", "core.atr20", "core.ret1", "core.ret5", "core.ret20",
-    "core.amount_ratio5", "core.amount_ratio20",
-    "core.volume_ratio5", "core.volume_ratio20",
+    "core.ma5",
+    "core.ma10",
+    "core.ma20",
+    "core.ma60",
+    "core.atr5",
+    "core.atr20",
+    "core.ret1",
+    "core.ret5",
+    "core.ret20",
+    "core.amount_ratio5",
+    "core.amount_ratio20",
+    "core.volume_ratio5",
+    "core.volume_ratio20",
 )
 
 
@@ -164,7 +174,9 @@ class FoundationTypedHandoff:
 class ResearchEntryError(ValueError):
     """研究入口输入或已声明能力不可用。"""
 
-    def __init__(self, code: str, message: str, *, context: dict[str, Any] | None = None):
+    def __init__(
+        self, code: str, message: str, *, context: dict[str, Any] | None = None
+    ):
         super().__init__(message)
         self.code = code
         self.context = dict(context or {})
@@ -180,17 +192,29 @@ class CompareBudget:
 
     def __post_init__(self) -> None:
         if type(self.max_total_bytes) is not int or self.max_total_bytes <= 0:
-            raise ResearchEntryError("COMPARE_BUDGET_INVALID", "全批最大字节数必须为正整数")
+            raise ResearchEntryError(
+                "COMPARE_BUDGET_INVALID", "全批最大字节数必须为正整数"
+            )
         if type(self.max_total_records) is not int or self.max_total_records <= 0:
-            raise ResearchEntryError("COMPARE_BUDGET_INVALID", "全批最大记录数必须为正整数")
-        if isinstance(self.max_total_seconds, bool) or not isinstance(self.max_total_seconds, (int, float)):
-            raise ResearchEntryError("COMPARE_BUDGET_INVALID", "全批最大耗时必须为有限正数")
+            raise ResearchEntryError(
+                "COMPARE_BUDGET_INVALID", "全批最大记录数必须为正整数"
+            )
+        if isinstance(self.max_total_seconds, bool) or not isinstance(
+            self.max_total_seconds, (int, float)
+        ):
+            raise ResearchEntryError(
+                "COMPARE_BUDGET_INVALID", "全批最大耗时必须为有限正数"
+            )
         try:
             seconds = float(self.max_total_seconds)
         except (OverflowError, TypeError, ValueError) as error:
-            raise ResearchEntryError("COMPARE_BUDGET_INVALID", "全批最大耗时必须可表示为有限正数") from error
+            raise ResearchEntryError(
+                "COMPARE_BUDGET_INVALID", "全批最大耗时必须可表示为有限正数"
+            ) from error
         if not math.isfinite(seconds) or seconds <= 0:
-            raise ResearchEntryError("COMPARE_BUDGET_INVALID", "全批最大耗时必须为有限正数")
+            raise ResearchEntryError(
+                "COMPARE_BUDGET_INVALID", "全批最大耗时必须为有限正数"
+            )
         object.__setattr__(self, "max_total_seconds", seconds)
 
 
@@ -202,40 +226,67 @@ class UniverseDiscoveryBudget:
     max_seconds: float = _DEFAULT_MAX_DISCOVERY_SECONDS
 
     def __post_init__(self) -> None:
-        if type(self.max_directory_entries) is not int or self.max_directory_entries <= 0:
-            raise ResearchEntryError("UNIVERSE_BUDGET_INVALID", "来源目录项上限必须为正整数")
-        if isinstance(self.max_seconds, bool) or not isinstance(self.max_seconds, (int, float)):
-            raise ResearchEntryError("UNIVERSE_BUDGET_INVALID", "来源发现耗时必须为有限正数")
+        if (
+            type(self.max_directory_entries) is not int
+            or self.max_directory_entries <= 0
+        ):
+            raise ResearchEntryError(
+                "UNIVERSE_BUDGET_INVALID", "来源目录项上限必须为正整数"
+            )
+        if isinstance(self.max_seconds, bool) or not isinstance(
+            self.max_seconds, (int, float)
+        ):
+            raise ResearchEntryError(
+                "UNIVERSE_BUDGET_INVALID", "来源发现耗时必须为有限正数"
+            )
         try:
             seconds = float(self.max_seconds)
         except (OverflowError, TypeError, ValueError) as error:
-            raise ResearchEntryError("UNIVERSE_BUDGET_INVALID", "来源发现耗时必须可表示为有限正数") from error
+            raise ResearchEntryError(
+                "UNIVERSE_BUDGET_INVALID", "来源发现耗时必须可表示为有限正数"
+            ) from error
         if not math.isfinite(seconds) or seconds <= 0:
-            raise ResearchEntryError("UNIVERSE_BUDGET_INVALID", "来源发现耗时必须为有限正数")
+            raise ResearchEntryError(
+                "UNIVERSE_BUDGET_INVALID", "来源发现耗时必须为有限正数"
+            )
         object.__setattr__(self, "max_seconds", seconds)
 
 
-def _calendar_payload(resource_name: str, year: int) -> tuple[dict[str, Any], str, tuple[date, ...]]:
+def _calendar_payload(
+    resource_name: str, year: int
+) -> tuple[dict[str, Any], str, tuple[date, ...]]:
     try:
         raw = files("stock_a.research.calendars").joinpath(resource_name).read_bytes()
     except OSError as error:
-        raise ResearchEntryError("CALENDAR_RESOURCE_UNAVAILABLE", "随包日历资源不可读取") from error
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_UNAVAILABLE", "随包日历资源不可读取"
+        ) from error
     canonical_raw = raw.replace(b"\r\n", b"\n")
     try:
         payload = json.loads(canonical_raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "内置日历资源无法解析") from error
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", "内置日历资源无法解析"
+        ) from error
     if not isinstance(payload, dict) or not isinstance(payload.get("sessions"), list):
         raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "内置日历结构无效")
     if payload.get("evidence_status") != _CALENDAR_EVIDENCE_VERIFIED:
-        raise ResearchEntryError("CALENDAR_UNVERIFIED", f"{year}年度日历证据未核验，已阻止计算")
+        raise ResearchEntryError(
+            "CALENDAR_UNVERIFIED", f"{year}年度日历证据未核验，已阻止计算"
+        )
     if payload.get("weekday_policy") != "WEEKDAYS_EXCEPT_LISTED_OFFICIAL_CLOSURES":
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", f"{year}年度日历缺少已登记的工作日规则")
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", f"{year}年度日历缺少已登记的工作日规则"
+        )
     if payload.get("weekend_policy") != "周六周日休市；不因补班推断周末开市":
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", f"{year}年度日历缺少周末休市合同")
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", f"{year}年度日历缺少周末休市合同"
+        )
     revision = payload.get("revision")
     if not isinstance(revision, str) or not revision:
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", f"{year}年度日历缺少版本标识")
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", f"{year}年度日历缺少版本标识"
+        )
     try:
         first = date.fromisoformat(payload["valid_from"])
         last = date.fromisoformat(payload["valid_through"])
@@ -245,30 +296,58 @@ def _calendar_payload(resource_name: str, year: int) -> tuple[dict[str, Any], st
         closures = payload["closed_weekday_ranges"]
         source_urls = payload["source_urls"]
     except (KeyError, TypeError, ValueError) as error:
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "内置日历日期内容无效") from error
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", "内置日历日期内容无效"
+        ) from error
     if first != date(year, 1, 1) or last != date(year, 12, 31):
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "年度日历覆盖边界必须完整且与文件年份一致")
-    if not isinstance(source_urls, list) or not source_urls or any(
-        not isinstance(url, str) or not url.startswith("https://") for url in source_urls
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", "年度日历覆盖边界必须完整且与文件年份一致"
+        )
+    if (
+        not isinstance(source_urls, list)
+        or not source_urls
+        or any(
+            not isinstance(url, str) or not url.startswith("https://")
+            for url in source_urls
+        )
     ):
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "年度日历必须列出可追溯的HTTPS证据来源")
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", "年度日历必须列出可追溯的HTTPS证据来源"
+        )
     closed: set[date] = set()
     previous_end: date | None = None
     if not isinstance(closures, list):
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "年度休市区间必须是有序列表")
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", "年度休市区间必须是有序列表"
+        )
     for item in closures:
         if not isinstance(item, list) or len(item) != 2:
-            raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "年度休市区间必须包含起止日期")
+            raise ResearchEntryError(
+                "CALENDAR_RESOURCE_INVALID", "年度休市区间必须包含起止日期"
+            )
         try:
             start, end = (date.fromisoformat(value) for value in item)
         except (TypeError, ValueError) as error:
-            raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "年度休市区间日期无效") from error
-        if start > end or start < first or end > last or (previous_end is not None and start <= previous_end):
-            raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "年度休市区间越界、重叠或错序")
-        closed.update(start + timedelta(days=offset) for offset in range((end - start).days + 1))
+            raise ResearchEntryError(
+                "CALENDAR_RESOURCE_INVALID", "年度休市区间日期无效"
+            ) from error
+        if (
+            start > end
+            or start < first
+            or end > last
+            or (previous_end is not None and start <= previous_end)
+        ):
+            raise ResearchEntryError(
+                "CALENDAR_RESOURCE_INVALID", "年度休市区间越界、重叠或错序"
+            )
+        closed.update(
+            start + timedelta(days=offset) for offset in range((end - start).days + 1)
+        )
         previous_end = end
     if tuple(sorted(set(sessions))) != sessions:
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "内置日历会话必须唯一且按日期递增")
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", "内置日历会话必须唯一且按日期递增"
+        )
     expected = tuple(
         first + timedelta(days=offset)
         for offset in range((last - first).days + 1)
@@ -276,7 +355,9 @@ def _calendar_payload(resource_name: str, year: int) -> tuple[dict[str, Any], st
         and (first + timedelta(days=offset)) not in closed
     )
     if sessions != expected:
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "内置会话与官方休市区间不闭合")
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", "内置会话与官方休市区间不闭合"
+        )
     if payload.get("calendar_id") != "CN_SSE_SZSE_EQUITY":
         raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "内置日历市场身份不匹配")
     return payload, hashlib.sha256(canonical_raw).hexdigest(), sessions
@@ -286,13 +367,19 @@ def _parse_target(value: str) -> date:
     try:
         result = date.fromisoformat(value)
     except (TypeError, ValueError) as error:
-        raise ResearchEntryError("TARGET_DATE_INVALID", "目标会话必须使用YYYY-MM-DD有效日期") from error
+        raise ResearchEntryError(
+            "TARGET_DATE_INVALID", "目标会话必须使用YYYY-MM-DD有效日期"
+        ) from error
     if result.isoformat() != value:
-        raise ResearchEntryError("TARGET_DATE_INVALID", "目标会话必须使用规范YYYY-MM-DD格式")
+        raise ResearchEntryError(
+            "TARGET_DATE_INVALID", "目标会话必须使用规范YYYY-MM-DD格式"
+        )
     return result
 
 
-def _load_calendar(target: date) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], str, tuple[date, ...]]:
+def _load_calendar(
+    target: date,
+) -> tuple[dict[str, Any], tuple[dict[str, Any], ...], str, tuple[date, ...]]:
     calendar_package = files("stock_a.research.calendars")
     resources: dict[int, str] = {}
     for item in calendar_package.iterdir():
@@ -300,7 +387,9 @@ def _load_calendar(target: date) -> tuple[dict[str, Any], tuple[dict[str, Any], 
         if match:
             resources[int(match.group(1))] = item.name
     if target.year not in resources:
-        raise ResearchEntryError("CALENDAR_NOT_COVERED", "没有已核验的年度资源覆盖目标日期；本次不推断交易日")
+        raise ResearchEntryError(
+            "CALENDAR_NOT_COVERED", "没有已核验的年度资源覆盖目标日期；本次不推断交易日"
+        )
     available_years = sorted(year for year in resources if year <= target.year)
     selected_years_descending: list[int] = []
     year = target.year
@@ -315,15 +404,20 @@ def _load_calendar(target: date) -> tuple[dict[str, Any], tuple[dict[str, Any], 
     target_item = next(item for item in loaded if item[0] == target.year)
     target_sessions = target_item[3]
     if target not in target_sessions:
-        raise ResearchEntryError("TARGET_NOT_TRADING_SESSION", "目标日期不是资源中已核验的交易会话")
+        raise ResearchEntryError(
+            "TARGET_NOT_TRADING_SESSION", "目标日期不是资源中已核验的交易会话"
+        )
     sessions = tuple(day for _, _, _, year_sessions in loaded for day in year_sessions)
     if any(left >= right for left, right in zip(sessions, sessions[1:])):
-        raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "跨年度日历资源重叠或错序")
+        raise ResearchEntryError(
+            "CALENDAR_RESOURCE_INVALID", "跨年度日历资源重叠或错序"
+        )
     current_year_sessions_to_target = sum(
         day.year == target.year and day <= target for day in target_sessions
     )
     missing_intermediate_years = tuple(
-        missing_year for missing_year in range(available_years[0], target.year)
+        missing_year
+        for missing_year in range(available_years[0], target.year)
         if missing_year not in resources
     )
     prior_calendar_available = target.year - 1 in selected_years
@@ -335,26 +429,33 @@ def _load_calendar(target: date) -> tuple[dict[str, Any], tuple[dict[str, Any], 
         "known_resource_years": available_years,
         "calculation_years": selected_years,
         "missing_intermediate_years": missing_intermediate_years,
-        "resource_continuity_status": "GAP_DETECTED" if missing_intermediate_years else "CONTIGUOUS",
+        "resource_continuity_status": "GAP_DETECTED"
+        if missing_intermediate_years
+        else "CONTIGUOUS",
         "required_actual_sessions": CORE_MAX_ACTUAL_LOOKBACK,
         "current_year_sessions_to_target": current_year_sessions_to_target,
         "available_calendar_sessions_to_target": sum(day <= target for day in sessions),
         "prior_year_resource_available": prior_calendar_available,
         "core_lookback_complete": core_lookback_complete,
-        "core_lookback_reason": None if core_lookback_complete else "CALENDAR_LOOKBACK_NOT_COVERED",
+        "core_lookback_reason": None
+        if core_lookback_complete
+        else "CALENDAR_LOOKBACK_NOT_COVERED",
     }
-    metadata = tuple({
-        "calendar_id": payload["calendar_id"],
-        "revision": payload["revision"],
-        "year": year,
-        "evidence_status": payload["evidence_status"],
-        "evidence_reviewed_at": payload["evidence_reviewed_at"],
-        "source_snapshot_as_of": payload["source_snapshot_as_of"],
-        "coverage": [payload["valid_from"], payload["valid_through"]],
-        "session_count": len(year_sessions),
-        "resource_sha256": digest,
-        "source_urls": payload["source_urls"],
-    } for year, payload, digest, year_sessions in loaded)
+    metadata = tuple(
+        {
+            "calendar_id": payload["calendar_id"],
+            "revision": payload["revision"],
+            "year": year,
+            "evidence_status": payload["evidence_status"],
+            "evidence_reviewed_at": payload["evidence_reviewed_at"],
+            "source_snapshot_as_of": payload["source_snapshot_as_of"],
+            "coverage": [payload["valid_from"], payload["valid_through"]],
+            "session_count": len(year_sessions),
+            "resource_sha256": digest,
+            "source_urls": payload["source_urls"],
+        }
+        for year, payload, digest, year_sessions in loaded
+    )
     metadata = (*metadata[:-1], {**metadata[-1], "coverage_context": coverage_context})
     revisions = "+".join(f"{item['year']}:{item['revision']}" for item in metadata)
     return target_item[1], metadata, revisions, sessions
@@ -365,7 +466,9 @@ def _normalize_symbol(value: str) -> tuple[str, str, str]:
         raise ResearchEntryError("SYMBOL_INVALID", "证券代码必须带SH或SZ市场前缀")
     match = _SYMBOL_PATTERN.fullmatch(value.strip())
     if not match:
-        raise ResearchEntryError("SYMBOL_INVALID", "证券代码格式必须是SH.六位代码或SZ.六位代码")
+        raise ResearchEntryError(
+            "SYMBOL_INVALID", "证券代码格式必须是SH.六位代码或SZ.六位代码"
+        )
     market, code = match.groups()
     market = market.upper()
     if market == "SH":
@@ -380,7 +483,9 @@ def _normalize_symbol(value: str) -> tuple[str, str, str]:
             board = None
         directory = "sz"
     if board is None:
-        raise ResearchEntryError("SYMBOL_OUT_OF_SCOPE", "代码类别不属于本入口的沪深主板/创业板范围")
+        raise ResearchEntryError(
+            "SYMBOL_OUT_OF_SCOPE", "代码类别不属于本入口的沪深主板/创业板范围"
+        )
     symbol = f"{market}.{code}"
     return symbol, directory, board
 
@@ -413,7 +518,9 @@ def _availability_record(fields: dict[str, Any], *, subject: str) -> dict[str, A
     return result
 
 
-def _aggregate_availability(results: list[dict[str, Any]], field_name: str) -> dict[str, Any]:
+def _aggregate_availability(
+    results: list[dict[str, Any]], field_name: str
+) -> dict[str, Any]:
     counts = {
         "AVAILABLE": 0,
         "PARTIAL_UNKNOWN": 0,
@@ -452,7 +559,9 @@ def _discover_source_candidates(
     try:
         configured_roots = tuple(source_roots)
     except TypeError as error:
-        raise ResearchEntryError("SOURCE_PATH_INVALID", "source_roots必须是根路径序列") from error
+        raise ResearchEntryError(
+            "SOURCE_PATH_INVALID", "source_roots必须是根路径序列"
+        ) from error
     if not configured_roots:
         raise ResearchEntryError("SOURCE_NOT_CONFIGURED", "没有配置只读TDX保护根")
 
@@ -462,13 +571,21 @@ def _discover_source_candidates(
         try:
             root = Path(value).resolve(strict=True)
         except FileNotFoundError as error:
-            raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根不存在") from error
+            raise ResearchEntryError(
+                "SOURCE_ROOT_INVALID", "配置的TDX来源根不存在"
+            ) from error
         except PermissionError as error:
-            raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验配置的TDX来源根") from error
+            raise ResearchEntryError(
+                "SOURCE_ACCESS_DENIED", "操作系统拒绝核验配置的TDX来源根"
+            ) from error
         except (RuntimeError, RecursionError, ValueError) as error:
-            raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根无法安全解析") from error
+            raise ResearchEntryError(
+                "SOURCE_ROOT_INVALID", "配置的TDX来源根无法安全解析"
+            ) from error
         except (OSError, TypeError) as error:
-            raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根无法核验") from error
+            raise ResearchEntryError(
+                "SOURCE_ROOT_INVALID", "配置的TDX来源根无法核验"
+            ) from error
         if not root.is_dir():
             raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根不是目录")
         roots.append(root)
@@ -492,37 +609,57 @@ def _discover_source_candidates(
                 raise ResearchEntryError(
                     "SOURCE_DIRECTORY_UNAVAILABLE",
                     f"缺少必需的TDX来源目录vipdoc/{directory}/lday；无法给出完整候选分母",
-                    context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                    context={
+                        "directory": f"vipdoc/{directory}/lday",
+                        "discovery_complete": False,
+                    },
                 ) from error
             except PermissionError as error:
-                raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验TDX来源目录") from error
+                raise ResearchEntryError(
+                    "SOURCE_ACCESS_DENIED", "操作系统拒绝核验TDX来源目录"
+                ) from error
             except (RuntimeError, RecursionError, ValueError) as error:
                 raise ResearchEntryError(
                     "SOURCE_PATH_INVALID",
                     f"TDX来源目录vipdoc/{directory}/lday无法安全解析",
-                    context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                    context={
+                        "directory": f"vipdoc/{directory}/lday",
+                        "discovery_complete": False,
+                    },
                 ) from error
             except OSError as error:
-                raise ResearchEntryError("SOURCE_IO_ERROR", "核验TDX来源目录时发生I/O错误") from error
+                raise ResearchEntryError(
+                    "SOURCE_IO_ERROR", "核验TDX来源目录时发生I/O错误"
+                ) from error
             try:
                 resolved_directory.relative_to(root)
             except ValueError as error:
                 raise ResearchEntryError(
                     "SOURCE_PATH_OUTSIDE_ROOT",
                     "TDX行情目录最终路径离开已配置来源保护根",
-                    context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                    context={
+                        "directory": f"vipdoc/{directory}/lday",
+                        "discovery_complete": False,
+                    },
                 ) from error
             try:
                 directory_stat_before = resolved_directory.stat()
             except PermissionError as error:
-                raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝读取TDX来源目录") from error
+                raise ResearchEntryError(
+                    "SOURCE_ACCESS_DENIED", "操作系统拒绝读取TDX来源目录"
+                ) from error
             except OSError as error:
-                raise ResearchEntryError("SOURCE_IO_ERROR", "读取TDX来源目录状态时发生I/O错误") from error
+                raise ResearchEntryError(
+                    "SOURCE_IO_ERROR", "读取TDX来源目录状态时发生I/O错误"
+                ) from error
             if not stat.S_ISDIR(directory_stat_before.st_mode):
                 raise ResearchEntryError(
                     "SOURCE_DIRECTORY_UNAVAILABLE",
                     f"TDX来源路径vipdoc/{directory}/lday不是目录",
-                    context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                    context={
+                        "directory": f"vipdoc/{directory}/lday",
+                        "discovery_complete": False,
+                    },
                 )
 
             entry_count = 0
@@ -546,7 +683,10 @@ def _discover_source_candidates(
                                     "max_directory_entries": budget.max_directory_entries,
                                 },
                             )
-                        if entry_count % 256 == 0 and time.monotonic() - started >= budget.max_seconds:
+                        if (
+                            entry_count % 256 == 0
+                            and time.monotonic() - started >= budget.max_seconds
+                        ):
                             raise ResearchEntryError(
                                 "UNIVERSE_DISCOVERY_BUDGET_EXCEEDED",
                                 "来源候选发现超过耗时预算；已停止且不声明完整候选总数",
@@ -569,31 +709,47 @@ def _discover_source_candidates(
                             raise ResearchEntryError(
                                 "SOURCE_CANDIDATE_CHANGED",
                                 "枚举期间TDX日线来源文件消失；候选总分母不完整",
-                                context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                                context={
+                                    "directory": f"vipdoc/{directory}/lday",
+                                    "discovery_complete": False,
+                                },
                             ) from error
                         except PermissionError as error:
-                            raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验TDX日线文件") from error
+                            raise ResearchEntryError(
+                                "SOURCE_ACCESS_DENIED", "操作系统拒绝核验TDX日线文件"
+                            ) from error
                         except (RuntimeError, RecursionError, ValueError) as error:
                             raise ResearchEntryError(
                                 "SOURCE_PATH_INVALID",
                                 "TDX日线候选最终路径无法安全解析",
-                                context={"filename": entry.name, "discovery_complete": False},
+                                context={
+                                    "filename": entry.name,
+                                    "discovery_complete": False,
+                                },
                             ) from error
                         except OSError as error:
-                            raise ResearchEntryError("SOURCE_IO_ERROR", "核验TDX日线文件时发生I/O错误") from error
+                            raise ResearchEntryError(
+                                "SOURCE_IO_ERROR", "核验TDX日线文件时发生I/O错误"
+                            ) from error
                         try:
                             resolved_entry.relative_to(root)
                         except ValueError as error:
                             raise ResearchEntryError(
                                 "SOURCE_PATH_OUTSIDE_ROOT",
                                 "TDX日线候选最终路径离开已配置来源保护根",
-                                context={"filename": entry.name, "discovery_complete": False},
+                                context={
+                                    "filename": entry.name,
+                                    "discovery_complete": False,
+                                },
                             ) from error
                         if not stat.S_ISREG(entry_stat.st_mode):
                             raise ResearchEntryError(
                                 "SOURCE_CANDIDATE_INVALID",
                                 "后缀为.day的来源候选不是普通文件",
-                                context={"filename": entry.name, "discovery_complete": False},
+                                context={
+                                    "filename": entry.name,
+                                    "discovery_complete": False,
+                                },
                             )
                         match = _DAY_FILENAME_PATTERN.fullmatch(entry.name)
                         if match is None or match.group(1).upper() != market:
@@ -606,7 +762,9 @@ def _discover_source_candidates(
                             continue
                         code = match.group(2)
                         try:
-                            symbol, _resolved_market_dir, board = _normalize_symbol(f"{market}.{code}")
+                            symbol, _resolved_market_dir, board = _normalize_symbol(
+                                f"{market}.{code}"
+                            )
                         except ResearchEntryError as error:
                             if error.code != "SYMBOL_OUT_OF_SCOPE":
                                 raise
@@ -629,39 +787,62 @@ def _discover_source_candidates(
                             "market": market,
                             "board": board,
                         }
-                        candidate_sources[symbol] = f"vipdoc/{directory}/lday/{entry.name}"
+                        candidate_sources[symbol] = (
+                            f"vipdoc/{directory}/lday/{entry.name}"
+                        )
                         directory_candidates += 1
                         by_market[market] += 1
                         by_board[board] += 1
             except ResearchEntryError:
                 raise
             except PermissionError as error:
-                raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝枚举TDX来源目录") from error
+                raise ResearchEntryError(
+                    "SOURCE_ACCESS_DENIED", "操作系统拒绝枚举TDX来源目录"
+                ) from error
             except OSError as error:
-                raise ResearchEntryError("SOURCE_IO_ERROR", "枚举TDX来源目录时发生I/O错误") from error
+                raise ResearchEntryError(
+                    "SOURCE_IO_ERROR", "枚举TDX来源目录时发生I/O错误"
+                ) from error
             try:
                 directory_stat_after = resolved_directory.stat()
             except PermissionError as error:
-                raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝复核TDX来源目录") from error
+                raise ResearchEntryError(
+                    "SOURCE_ACCESS_DENIED", "操作系统拒绝复核TDX来源目录"
+                ) from error
             except OSError as error:
-                raise ResearchEntryError("SOURCE_IO_ERROR", "复核TDX来源目录时发生I/O错误") from error
-            identity_before = (directory_stat_before.st_dev, directory_stat_before.st_ino, directory_stat_before.st_mtime_ns)
-            identity_after = (directory_stat_after.st_dev, directory_stat_after.st_ino, directory_stat_after.st_mtime_ns)
+                raise ResearchEntryError(
+                    "SOURCE_IO_ERROR", "复核TDX来源目录时发生I/O错误"
+                ) from error
+            identity_before = (
+                directory_stat_before.st_dev,
+                directory_stat_before.st_ino,
+                directory_stat_before.st_mtime_ns,
+            )
+            identity_after = (
+                directory_stat_after.st_dev,
+                directory_stat_after.st_ino,
+                directory_stat_after.st_mtime_ns,
+            )
             if identity_before != identity_after:
                 raise ResearchEntryError(
                     "SOURCE_DIRECTORY_CHANGED",
                     "候选发现期间TDX目录发生变化；拒绝声明稳定分母",
-                    context={"directory": f"vipdoc/{directory}/lday", "discovery_complete": False},
+                    context={
+                        "directory": f"vipdoc/{directory}/lday",
+                        "discovery_complete": False,
+                    },
                 )
-            directory_summaries.append({
-                "market": market,
-                "directory": f"vipdoc/{directory}/lday",
-                "directory_entries": entry_count,
-                "day_file_entries": day_count,
-                "in_scope_candidates": directory_candidates,
-                "excluded_out_of_scope": directory_excluded,
-                "invalid_day_filenames": directory_invalid_names,
-            })
+            directory_summaries.append(
+                {
+                    "market": market,
+                    "directory": f"vipdoc/{directory}/lday",
+                    "directory_entries": entry_count,
+                    "day_file_entries": day_count,
+                    "in_scope_candidates": directory_candidates,
+                    "excluded_out_of_scope": directory_excluded,
+                    "invalid_day_filenames": directory_invalid_names,
+                }
+            )
             if time.monotonic() - started >= budget.max_seconds:
                 raise ResearchEntryError(
                     "UNIVERSE_DISCOVERY_BUDGET_EXCEEDED",
@@ -674,7 +855,9 @@ def _discover_source_candidates(
                     },
                 )
 
-    candidates = tuple(candidates_by_symbol[name] for name in sorted(candidates_by_symbol))
+    candidates = tuple(
+        candidates_by_symbol[name] for name in sorted(candidates_by_symbol)
+    )
     return candidates, {
         "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
         "complete": True,
@@ -699,7 +882,10 @@ def _render_value(value: Any) -> Any:
         with localcontext() as context:
             context.prec = 24
             decimal_value = Decimal(value.numerator) / Decimal(value.denominator)
-        return {"exact": f"{value.numerator}/{value.denominator}", "decimal": format(decimal_value, "f")}
+        return {
+            "exact": f"{value.numerator}/{value.denominator}",
+            "decimal": format(decimal_value, "f"),
+        }
     if isinstance(value, Decimal):
         return format(value, "f")
     if isinstance(value, (str, int, bool)) or value is None:
@@ -711,17 +897,25 @@ def _render_value(value: Any) -> Any:
 
 def _render_field(value: FieldValue) -> dict[str, Any]:
     if value.quality == "OBSERVED":
-        return {"value": _render_value(value.value), "quality": value.quality, "reason": None}
+        return {
+            "value": _render_value(value.value),
+            "quality": value.quality,
+            "reason": None,
+        }
     return {"value": None, "quality": value.quality, "reason": value.reason}
 
 
 def _unit_trust_status(scale: object) -> str:
-    return "CALLER_DECLARED_ASSUMPTION" if scale is not None else "UNKNOWN_UNIT_AUTHORITY"
+    return (
+        "CALLER_DECLARED_ASSUMPTION" if scale is not None else "UNKNOWN_UNIT_AUTHORITY"
+    )
 
 
 def _render_raw(decoded: DecodedDay | None, units: UnitContract) -> dict[str, Any]:
     if decoded is None:
-        fields = {name: _render_field(unknown("TARGET_BAR_MISSING")) for name in _RAW_FIELDS}
+        fields = {
+            name: _render_field(unknown("TARGET_BAR_MISSING")) for name in _RAW_FIELDS
+        }
         raw_amount = unknown("TARGET_BAR_MISSING")
         raw_volume = unknown("TARGET_BAR_MISSING")
     else:
@@ -746,12 +940,18 @@ def _render_raw(decoded: DecodedDay | None, units: UnitContract) -> dict[str, An
         "unit": "UNVERIFIED_RAW_STORAGE_COORDINATE",
     }
     fields["amount"]["unit_trust"] = {
-        "status": "CALLER_DECLARED_ASSUMPTION" if units.amount_to_cny is not None else "UNKNOWN",
+        "status": "CALLER_DECLARED_ASSUMPTION"
+        if units.amount_to_cny is not None
+        else "UNKNOWN",
         "unit_version": units.version,
-        "amount_to_cny": str(units.amount_to_cny) if units.amount_to_cny is not None else None,
+        "amount_to_cny": str(units.amount_to_cny)
+        if units.amount_to_cny is not None
+        else None,
     }
     fields["volume"]["unit_trust"] = {
-        "status": "CALLER_DECLARED_ASSUMPTION" if units.volume_to_shares is not None else "UNKNOWN",
+        "status": "CALLER_DECLARED_ASSUMPTION"
+        if units.volume_to_shares is not None
+        else "UNKNOWN",
         "unit_version": units.version,
         "volume_to_shares": units.volume_to_shares,
     }
@@ -769,7 +969,9 @@ def _build_foundation_typed_handoff(
     target_session = str(result["target_session"])
     source = result.get("source", {})
     source_package = result.get("source_package", {})
-    source_identity = source_package if source_package else source.get("source_identity", {})
+    source_identity = (
+        source_package if source_package else source.get("source_identity", {})
+    )
     unit_contract = result.get("unit_contract", {})
     identity = result.get("identity", {})
     adjustment = result.get("adjustment", {})
@@ -777,29 +979,50 @@ def _build_foundation_typed_handoff(
 
     scope: Mapping[str, Any] = {}
     if isinstance(foundation_contract, Mapping):
-        candidate_scope = foundation_contract.get("scope_bindings", {}).get("FOUNDATION_EOD", {})
+        candidate_scope = foundation_contract.get("scope_bindings", {}).get(
+            "FOUNDATION_EOD", {}
+        )
         if isinstance(candidate_scope, Mapping):
             scope = candidate_scope
     registry_rows = scope.get("field_registry", ())
-    field_specs = {
-        item["field_id"]: item for item in registry_rows
-        if isinstance(item, Mapping) and isinstance(item.get("field_id"), str)
-    } if isinstance(registry_rows, (list, tuple)) else {}
+    field_specs = (
+        {
+            item["field_id"]: item
+            for item in registry_rows
+            if isinstance(item, Mapping) and isinstance(item.get("field_id"), str)
+        }
+        if isinstance(registry_rows, (list, tuple))
+        else {}
+    )
     profile_rules = scope.get("profile_expression_registry", {})
-    profile_rule_by_field = {
-        rule.get("field_id"): rule for rule in profile_rules.values()
-        if isinstance(profile_rules, Mapping) and isinstance(rule, Mapping)
-        and isinstance(rule.get("field_id"), str)
-    } if isinstance(profile_rules, Mapping) else {}
-    preview_components = {
-        item.get("field_id"): item for item in profile_preview.get("components", ())
-        if isinstance(profile_preview, Mapping) and isinstance(item, Mapping)
-        and isinstance(item.get("field_id"), str)
-    } if isinstance(profile_preview, Mapping) else {}
+    profile_rule_by_field = (
+        {
+            rule.get("field_id"): rule
+            for rule in profile_rules.values()
+            if isinstance(profile_rules, Mapping)
+            and isinstance(rule, Mapping)
+            and isinstance(rule.get("field_id"), str)
+        }
+        if isinstance(profile_rules, Mapping)
+        else {}
+    )
+    preview_components = (
+        {
+            item.get("field_id"): item
+            for item in profile_preview.get("components", ())
+            if isinstance(profile_preview, Mapping)
+            and isinstance(item, Mapping)
+            and isinstance(item.get("field_id"), str)
+        }
+        if isinstance(profile_preview, Mapping)
+        else {}
+    )
     raw_fields = result.get("target_raw_fields", {})
     core_fields = result.get("core_fields", {})
     target_bar_present = result.get("target_bar_present") is True
-    actual_history = [row.session.isoformat() for row in history if row.state == "ACTUAL"]
+    actual_history = [
+        row.session.isoformat() for row in history if row.state == "ACTUAL"
+    ]
     history_window = {
         "calendar_revision": calendar_revision,
         "first_selected_session": history[0].session.isoformat() if history else None,
@@ -826,12 +1049,22 @@ def _build_foundation_typed_handoff(
             uses_volume = uses_volume or "volume" in name
             spec = field_specs.get(name)
             if isinstance(spec, Mapping):
-                pending.extend(item for item in spec.get("input_fields", ()) if isinstance(item, str))
+                pending.extend(
+                    item
+                    for item in spec.get("input_fields", ())
+                    if isinstance(item, str)
+                )
         authorities: list[str] = []
         if uses_amount:
-            authorities.append("amount=" + str(unit_contract.get("amount_authority", "UNKNOWN_UNIT_AUTHORITY")))
+            authorities.append(
+                "amount="
+                + str(unit_contract.get("amount_authority", "UNKNOWN_UNIT_AUTHORITY"))
+            )
         if uses_volume:
-            authorities.append("volume=" + str(unit_contract.get("volume_authority", "UNKNOWN_UNIT_AUTHORITY")))
+            authorities.append(
+                "volume="
+                + str(unit_contract.get("volume_authority", "UNKNOWN_UNIT_AUTHORITY"))
+            )
         if field_id == "raw.amount":
             authorities.append("raw_storage=TDX_FLOAT32_UNVERIFIED")
         if field_id == "raw.volume":
@@ -847,61 +1080,128 @@ def _build_foundation_typed_handoff(
         payload = payload if isinstance(payload, Mapping) else {}
         unit = spec.get("unit") if isinstance(spec, Mapping) else None
         consumers = spec.get("consumers", ()) if isinstance(spec, Mapping) else ()
-        fields.append(FoundationTypedFieldHandoff(
-            field_id=field_id,
-            value=payload.get("value"),
-            value_type=str(spec.get("value_type", "number")) if isinstance(spec, Mapping) else "number",
-            unit=unit if isinstance(unit, str) else None,
-            quality=str(payload.get("quality", "UNKNOWN_DATA")),
-            reason=payload.get("reason"),
-            status="OBSERVED" if payload.get("quality") == "OBSERVED" else "UNKNOWN_DATA",
-            producer_symbol=str(spec.get("producer_symbol")) if isinstance(spec, Mapping) and spec.get("producer_symbol") else "stock_a.sources.tdx.day:decode_day_record",
-            intended_producer_symbol=str(spec.get("producer_symbol")) if isinstance(spec, Mapping) and spec.get("producer_symbol") else None,
-            input_fields=tuple(spec.get("input_fields", ())) if isinstance(spec, Mapping) else (),
-            consumers=tuple(consumers) if isinstance(consumers, (list, tuple)) else (),
-            window_contract=str(spec.get("window_contract", "TARGET_SESSION_R1")) if isinstance(spec, Mapping) else "TARGET_SESSION_R1",
-            window_identity_ref=str(spec.get("window_identity_ref")) if isinstance(spec, Mapping) and spec.get("window_identity_ref") else None,
-            window={
-                "target_session": target_session,
-                "source_session": target_session if target_bar_present else None,
-                "selected_rows": 1 if target_bar_present else 0,
-                "future_rows_used": False,
-            },
-            unit_authority=unit_authority_for(field_id, tuple(spec.get("input_fields", ())) if isinstance(spec, Mapping) else ()),
-        ))
+        fields.append(
+            FoundationTypedFieldHandoff(
+                field_id=field_id,
+                value=payload.get("value"),
+                value_type=str(spec.get("value_type", "number"))
+                if isinstance(spec, Mapping)
+                else "number",
+                unit=unit if isinstance(unit, str) else None,
+                quality=str(payload.get("quality", "UNKNOWN_DATA")),
+                reason=payload.get("reason"),
+                status="OBSERVED"
+                if payload.get("quality") == "OBSERVED"
+                else "UNKNOWN_DATA",
+                producer_symbol=str(spec.get("producer_symbol"))
+                if isinstance(spec, Mapping) and spec.get("producer_symbol")
+                else "stock_a.sources.tdx.day:decode_day_record",
+                intended_producer_symbol=str(spec.get("producer_symbol"))
+                if isinstance(spec, Mapping) and spec.get("producer_symbol")
+                else None,
+                input_fields=tuple(spec.get("input_fields", ()))
+                if isinstance(spec, Mapping)
+                else (),
+                consumers=tuple(consumers)
+                if isinstance(consumers, (list, tuple))
+                else (),
+                window_contract=str(spec.get("window_contract", "TARGET_SESSION_R1"))
+                if isinstance(spec, Mapping)
+                else "TARGET_SESSION_R1",
+                window_identity_ref=str(spec.get("window_identity_ref"))
+                if isinstance(spec, Mapping) and spec.get("window_identity_ref")
+                else None,
+                window={
+                    "target_session": target_session,
+                    "source_session": target_session if target_bar_present else None,
+                    "selected_rows": 1 if target_bar_present else 0,
+                    "future_rows_used": False,
+                },
+                unit_authority=unit_authority_for(
+                    field_id,
+                    tuple(spec.get("input_fields", ()))
+                    if isinstance(spec, Mapping)
+                    else (),
+                ),
+            )
+        )
 
-    for field_id, payload in sorted(core_fields.items()) if isinstance(core_fields, Mapping) else ():
+    for field_id, payload in (
+        sorted(core_fields.items()) if isinstance(core_fields, Mapping) else ()
+    ):
         field_spec = field_specs.get(field_id, {})
-        inputs = tuple(field_spec.get("input_fields", ())) if isinstance(field_spec, Mapping) else ()
-        registered_window = field_spec.get("window_contract") if isinstance(field_spec, Mapping) else None
-        window_payload: dict[str, Any] = {**history_window, "field_window_contract": registered_window}
+        inputs = (
+            tuple(field_spec.get("input_fields", ()))
+            if isinstance(field_spec, Mapping)
+            else ()
+        )
+        registered_window = (
+            field_spec.get("window_contract")
+            if isinstance(field_spec, Mapping)
+            else None
+        )
+        window_payload: dict[str, Any] = {
+            **history_window,
+            "field_window_contract": registered_window,
+        }
         if field_id in _PROFILE_CORE_WINDOW_SPECS:
             _window_identity, window_payload = _profile_window(
                 field_id,
                 history,
-                window_contract=registered_window if isinstance(registered_window, str) else "TECH_ACTUAL_R1",
+                window_contract=registered_window
+                if isinstance(registered_window, str)
+                else "TECH_ACTUAL_R1",
                 calendar_revision=calendar_revision,
-                quality=str(payload.get("quality", "UNKNOWN_DATA")) if isinstance(payload, Mapping) else "UNKNOWN_DATA",
+                quality=str(payload.get("quality", "UNKNOWN_DATA"))
+                if isinstance(payload, Mapping)
+                else "UNKNOWN_DATA",
             )
-        fields.append(FoundationTypedFieldHandoff(
-            field_id=field_id,
-            value=payload.get("value") if isinstance(payload, Mapping) else None,
-            value_type=str(field_spec.get("value_type", "number")) if isinstance(field_spec, Mapping) else "number",
-            unit=field_spec.get("unit") if isinstance(field_spec, Mapping) and isinstance(field_spec.get("unit"), str) else None,
-            quality=str(payload.get("quality", "UNKNOWN_DATA")) if isinstance(payload, Mapping) else "UNKNOWN_DATA",
-            reason=payload.get("reason") if isinstance(payload, Mapping) else "CORE_FIELD_NOT_PRODUCED",
-            status="OBSERVED" if isinstance(payload, Mapping) and payload.get("quality") == "OBSERVED" else "UNKNOWN_DATA",
-            producer_symbol=str(field_spec.get("producer_symbol")) if isinstance(field_spec, Mapping) and field_spec.get("producer_symbol") else "stock_a.research.core:calculate_core",
-            intended_producer_symbol=str(field_spec.get("producer_symbol")) if isinstance(field_spec, Mapping) and field_spec.get("producer_symbol") else None,
-            input_fields=inputs,
-            consumers=tuple(field_spec.get("consumers", ())) if isinstance(field_spec, Mapping) and isinstance(field_spec.get("consumers", ()), (list, tuple)) else (),
-            window_contract=registered_window if isinstance(registered_window, str) else None,
-            window_identity_ref=str(field_spec.get("window_identity_ref")) if isinstance(field_spec, Mapping) and field_spec.get("window_identity_ref") else None,
-            window=window_payload,
-            unit_authority=unit_authority_for(field_id, inputs),
-        ))
+        fields.append(
+            FoundationTypedFieldHandoff(
+                field_id=field_id,
+                value=payload.get("value") if isinstance(payload, Mapping) else None,
+                value_type=str(field_spec.get("value_type", "number"))
+                if isinstance(field_spec, Mapping)
+                else "number",
+                unit=field_spec.get("unit")
+                if isinstance(field_spec, Mapping)
+                and isinstance(field_spec.get("unit"), str)
+                else None,
+                quality=str(payload.get("quality", "UNKNOWN_DATA"))
+                if isinstance(payload, Mapping)
+                else "UNKNOWN_DATA",
+                reason=payload.get("reason")
+                if isinstance(payload, Mapping)
+                else "CORE_FIELD_NOT_PRODUCED",
+                status="OBSERVED"
+                if isinstance(payload, Mapping) and payload.get("quality") == "OBSERVED"
+                else "UNKNOWN_DATA",
+                producer_symbol=str(field_spec.get("producer_symbol"))
+                if isinstance(field_spec, Mapping) and field_spec.get("producer_symbol")
+                else "stock_a.research.core:calculate_core",
+                intended_producer_symbol=str(field_spec.get("producer_symbol"))
+                if isinstance(field_spec, Mapping) and field_spec.get("producer_symbol")
+                else None,
+                input_fields=inputs,
+                consumers=tuple(field_spec.get("consumers", ()))
+                if isinstance(field_spec, Mapping)
+                and isinstance(field_spec.get("consumers", ()), (list, tuple))
+                else (),
+                window_contract=registered_window
+                if isinstance(registered_window, str)
+                else None,
+                window_identity_ref=str(field_spec.get("window_identity_ref"))
+                if isinstance(field_spec, Mapping)
+                and field_spec.get("window_identity_ref")
+                else None,
+                window=window_payload,
+                unit_authority=unit_authority_for(field_id, inputs),
+            )
+        )
 
-    for field_id in sorted(field_id for field_id in field_specs if field_id.startswith("profile.")):
+    for field_id in sorted(
+        field_id for field_id in field_specs if field_id.startswith("profile.")
+    ):
         spec = field_specs[field_id]
         component = preview_components.get(field_id)
         rule = profile_rule_by_field.get(field_id, {})
@@ -910,68 +1210,102 @@ def _build_foundation_typed_handoff(
             quality = str(component.get("quality", status))
             value = component.get("value")
             reason = component.get("reason")
-            actual_inputs = tuple(component.get("calculation_basis", {}).get("input_fields", rule.get("input_fields", ())))
+            actual_inputs = tuple(
+                component.get("calculation_basis", {}).get(
+                    "input_fields", rule.get("input_fields", ())
+                )
+            )
             input_windows = [
                 {"field_id": item.get("source_field_id"), "window": item.get("window")}
-                for item in component.get("inputs", ()) if isinstance(item, Mapping)
+                for item in component.get("inputs", ())
+                if isinstance(item, Mapping)
             ]
         else:
             status = "NOT_REQUESTED"
             quality = "NOT_EVALUATED"
             value = None
             reason = "PROFILE_PREVIEW_NOT_REQUESTED"
-            actual_inputs = tuple(rule.get("input_fields", ())) if isinstance(rule, Mapping) else ()
+            actual_inputs = (
+                tuple(rule.get("input_fields", ())) if isinstance(rule, Mapping) else ()
+            )
             input_windows = []
-        fields.append(FoundationTypedFieldHandoff(
-            field_id=field_id,
-            value=value,
-            value_type=str(spec.get("value_type", "enum")),
-            unit=spec.get("unit") if isinstance(spec.get("unit"), str) else None,
-            quality=quality,
-            reason=reason,
-            status=status,
-            producer_symbol="stock_a.research.profile:evaluate_profile_kernel" if component is not None else None,
-            intended_producer_symbol=str(spec.get("producer_symbol")) if spec.get("producer_symbol") else "stock_a.research.profile:profile",
-            input_fields=actual_inputs,
-            consumers=tuple(spec.get("consumers", ())) if isinstance(spec.get("consumers", ()), (list, tuple)) else (),
-            window_contract=str(spec.get("window_contract")) if spec.get("window_contract") else None,
-            window_identity_ref=str(spec.get("window_identity_ref")) if spec.get("window_identity_ref") else None,
-            window={
-                "target_session": target_session,
-                "input_windows": input_windows,
-                "history_policy_ref": spec.get("window_identity_ref"),
-                "profile_preview_only": True,
-            },
-            unit_authority=unit_authority_for(field_id, actual_inputs),
-        ))
+        fields.append(
+            FoundationTypedFieldHandoff(
+                field_id=field_id,
+                value=value,
+                value_type=str(spec.get("value_type", "enum")),
+                unit=spec.get("unit") if isinstance(spec.get("unit"), str) else None,
+                quality=quality,
+                reason=reason,
+                status=status,
+                producer_symbol="stock_a.research.profile:evaluate_profile_kernel"
+                if component is not None
+                else None,
+                intended_producer_symbol=str(spec.get("producer_symbol"))
+                if spec.get("producer_symbol")
+                else "stock_a.research.profile:profile",
+                input_fields=actual_inputs,
+                consumers=tuple(spec.get("consumers", ()))
+                if isinstance(spec.get("consumers", ()), (list, tuple))
+                else (),
+                window_contract=str(spec.get("window_contract"))
+                if spec.get("window_contract")
+                else None,
+                window_identity_ref=str(spec.get("window_identity_ref"))
+                if spec.get("window_identity_ref")
+                else None,
+                window={
+                    "target_session": target_session,
+                    "input_windows": input_windows,
+                    "history_policy_ref": spec.get("window_identity_ref"),
+                    "profile_preview_only": True,
+                },
+                unit_authority=unit_authority_for(field_id, actual_inputs),
+            )
+        )
 
     def group_quality(field_ids: tuple[str, ...]) -> dict[str, Any]:
         by_id = {field.field_id: field for field in fields}
         selected = [by_id[field_id] for field_id in field_ids]
         if all(field.quality == "OBSERVED" for field in selected):
             quality = "OBSERVED"
-        elif any(field.reason and field.reason.startswith("DATA_INVALID_") for field in selected):
+        elif any(
+            field.reason and field.reason.startswith("DATA_INVALID_")
+            for field in selected
+        ):
             quality = "UNKNOWN_DATA"
         else:
             quality = "UNKNOWN_DATA"
         return {
             "quality": quality,
             "field_quality": {field.field_id: field.quality for field in selected},
-            "field_reasons": {field.field_id: field.reason for field in selected if field.reason},
+            "field_reasons": {
+                field.field_id: field.reason for field in selected if field.reason
+            },
         }
 
     price_quality = group_quality(price_field_ids)
-    amount_authority = str(unit_contract.get("amount_authority", "UNKNOWN_UNIT_AUTHORITY"))
-    volume_authority = str(unit_contract.get("volume_authority", "UNKNOWN_UNIT_AUTHORITY"))
+    amount_authority = str(
+        unit_contract.get("amount_authority", "UNKNOWN_UNIT_AUTHORITY")
+    )
+    volume_authority = str(
+        unit_contract.get("volume_authority", "UNKNOWN_UNIT_AUTHORITY")
+    )
     amount_group = group_quality(("raw.amount",))
     amount_group["unit_authority"] = amount_authority
-    amount_group["formal_typed_quality"] = "OBSERVED" if amount_authority == "VERIFIED" else "UNKNOWN_DATA"
+    amount_group["formal_typed_quality"] = (
+        "OBSERVED" if amount_authority == "VERIFIED" else "UNKNOWN_DATA"
+    )
     volume_group = group_quality(("raw.volume",))
     volume_group["unit_authority"] = volume_authority
-    volume_group["formal_typed_quality"] = "OBSERVED" if volume_authority == "VERIFIED" else "UNKNOWN_DATA"
+    volume_group["formal_typed_quality"] = (
+        "OBSERVED" if volume_authority == "VERIFIED" else "UNKNOWN_DATA"
+    )
 
     typed_reasons: list[str] = []
-    stable_identity = identity.get("stable_security_id_issued") is True and bool(identity.get("security_id"))
+    stable_identity = identity.get("stable_security_id_issued") is True and bool(
+        identity.get("security_id")
+    )
     if not stable_identity:
         typed_reasons.append("IDENTITY_NOT_VERIFIED")
     if amount_authority != "VERIFIED":
@@ -985,7 +1319,12 @@ def _build_foundation_typed_handoff(
     foundation_reasons = list(typed_reasons)
     if result.get("research_mode") != "STRICT_PIT":
         foundation_reasons.append("PIT_SOURCE_AVAILABILITY_UNVERIFIED")
-    if source_identity.get("first_available_at", source.get("first_available_at", "UNKNOWN")) == "UNKNOWN":
+    if (
+        source_identity.get(
+            "first_available_at", source.get("first_available_at", "UNKNOWN")
+        )
+        == "UNKNOWN"
+    ):
         if "PIT_SOURCE_AVAILABILITY_UNVERIFIED" not in foundation_reasons:
             foundation_reasons.append("PIT_SOURCE_AVAILABILITY_UNVERIFIED")
     if identity.get("membership_status", "UNKNOWN") in {None, "UNKNOWN", "UNBOUND"}:
@@ -1010,22 +1349,50 @@ def _build_foundation_typed_handoff(
         "TARGET_BAR_MISSING": "该来源代码在目标交易日没有可用Bar；缺Bar不等于停牌或上市前。",
     }
     typed_explanations = {code: reason_explanations[code] for code in typed_reasons}
-    foundation_explanations = {code: reason_explanations[code] for code in foundation_reasons}
+    foundation_explanations = {
+        code: reason_explanations[code] for code in foundation_reasons
+    }
     consumers = {
         "research_stock": ("raw", "canonical_selection", "core", "profile_preview"),
-        "research_universe_preview": ("page_quality", "raw", "core", "profile_preview", "foundation_admission"),
-        "postgres_typed.prepare_canonical_daily_candidate": ("CanonicalReadSelection", "StableIdentityBinding", "UnitAuthority"),
-        "future_foundation_typed_pg": ("typed field rows; not implemented or persisted"),
+        "research_universe_preview": (
+            "page_quality",
+            "raw",
+            "core",
+            "profile_preview",
+            "foundation_admission",
+        ),
+        "postgres_typed.prepare_canonical_daily_candidate": (
+            "CanonicalReadSelection",
+            "StableIdentityBinding",
+            "UnitAuthority",
+        ),
+        "future_foundation_typed_pg": (
+            "typed field rows; not implemented or persisted"
+        ),
     }
     return FoundationTypedHandoff(
         contract="STOCK-A-FOUNDATION-TYPED-HANDOFF/R1",
         source_symbol=str(result["requested_symbol"]),
         target_session=target_session,
-        source_package_id=source_identity.get("package_id") if isinstance(source_identity, Mapping) else None,
-        source_package_sha256=source_identity.get("package_sha256", source_identity.get("sha256")) if isinstance(source_identity, Mapping) else None,
-        source_entry_sha256=source_identity.get("entry_sha256", source_identity.get("zip_entry_sha256")) if isinstance(source_identity, Mapping) else None,
+        source_package_id=source_identity.get("package_id")
+        if isinstance(source_identity, Mapping)
+        else None,
+        source_package_sha256=source_identity.get(
+            "package_sha256", source_identity.get("sha256")
+        )
+        if isinstance(source_identity, Mapping)
+        else None,
+        source_entry_sha256=source_identity.get(
+            "entry_sha256", source_identity.get("zip_entry_sha256")
+        )
+        if isinstance(source_identity, Mapping)
+        else None,
         source_byte_sha256=source.get("raw_byte_sha256"),
-        source_clock_role=str(source.get("read_clock_role", source_identity.get("source_clock_role", "UNKNOWN"))),
+        source_clock_role=str(
+            source.get(
+                "read_clock_role", source_identity.get("source_clock_role", "UNKNOWN")
+            )
+        ),
         published_at=str(source_identity.get("published_at", "UNKNOWN")),
         first_available_at=str(source_identity.get("first_available_at", "UNKNOWN")),
         price_coordinate=str(adjustment.get("coordinate", "RAW_UNADJUSTED")),
@@ -1034,12 +1401,22 @@ def _build_foundation_typed_handoff(
         identity_status=str(identity.get("status", "SOURCE_SYMBOL_ONLY")),
         stable_security_id_issued=stable_identity,
         target_bar_status="PRESENT" if target_bar_present else "TARGET_MISSING",
-        research_price_status="AVAILABLE" if result.get("target_prices_usable") is True else "UNKNOWN_DATA",
-        quality_groups={"price": price_quality, "amount": amount_group, "volume": volume_group},
-        typed_pg_admission_status="BLOCKED" if typed_reasons else "READY_FOR_TYPED_ADAPTER_REVIEW",
+        research_price_status="AVAILABLE"
+        if result.get("target_prices_usable") is True
+        else "UNKNOWN_DATA",
+        quality_groups={
+            "price": price_quality,
+            "amount": amount_group,
+            "volume": volume_group,
+        },
+        typed_pg_admission_status="BLOCKED"
+        if typed_reasons
+        else "READY_FOR_TYPED_ADAPTER_REVIEW",
         typed_pg_admission_reasons=tuple(typed_reasons),
         typed_pg_admission_reason_explanations=typed_explanations,
-        foundation_admission_status="BLOCKED" if foundation_reasons else "READY_FOR_FOUNDATION_REVIEW",
+        foundation_admission_status="BLOCKED"
+        if foundation_reasons
+        else "READY_FOR_FOUNDATION_REVIEW",
         foundation_admission_reasons=tuple(foundation_reasons),
         foundation_admission_reason_explanations=foundation_explanations,
         fields=tuple(fields),
@@ -1047,7 +1424,9 @@ def _build_foundation_typed_handoff(
     )
 
 
-def _core_history_from_selection(selection: CanonicalReadSelection) -> tuple[CoreObservation, ...]:
+def _core_history_from_selection(
+    selection: CanonicalReadSelection,
+) -> tuple[CoreObservation, ...]:
     """让既有Core直接消费本次规范选择的typed字段行。"""
     return tuple(
         CoreObservation(
@@ -1072,20 +1451,27 @@ def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, 
     target_fields: dict[str, Any] = {}
     for fact in selection.target_fields:
         payload = _render_field(fact.value)
-        payload.update({
-            "field_id": fact.field_id,
-            "target_session": fact.target_session.isoformat(),
-            "source_session": fact.source_session.isoformat() if fact.source_session else None,
-            "unit": fact.unit,
-            "unit_basis": fact.unit_basis,
-            "source_sha256": fact.source_sha256,
-            "field_digest": None,
-            "field_digest_status": "BLOCKED_STABLE_SECURITY_ID_UNBOUND",
-        })
+        payload.update(
+            {
+                "field_id": fact.field_id,
+                "target_session": fact.target_session.isoformat(),
+                "source_session": fact.source_session.isoformat()
+                if fact.source_session
+                else None,
+                "unit": fact.unit,
+                "unit_basis": fact.unit_basis,
+                "source_sha256": fact.source_sha256,
+                "field_digest": None,
+                "field_digest_status": "BLOCKED_STABLE_SECURITY_ID_UNBOUND",
+            }
+        )
         target_fields[fact.field_id.removeprefix("raw.")] = payload
     actual_rows = sum(row.state == "ACTUAL" for row in selection.rows)
     missing_rows = len(selection.rows) - actual_rows
-    target_present = any(fact.source_session == selection.target_session for fact in selection.target_fields)
+    target_present = any(
+        fact.source_session == selection.target_session
+        for fact in selection.target_fields
+    )
     return {
         "contract": "STOCK-A-TDX-CANONICAL-READ-SELECTION/R1",
         "selection_status": "EPHEMERAL_READ_ONLY_SELECTION_COMPLETE",
@@ -1108,52 +1494,67 @@ def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, 
             "raw_byte_sha256": capture.content_sha256,
             "record_count": capture.record_count,
             "byte_count": capture.byte_count,
-            "record_date_range": [capture.first_date.isoformat(), capture.last_date.isoformat()],
+            "record_date_range": [
+                capture.first_date.isoformat(),
+                capture.last_date.isoformat(),
+            ],
             "complete_read": True,
             "source_authority": (
                 "VIPDATA_OFFICIAL_ENDPOINT_LOCAL_PACKAGE_AND_ENTRY_BYTES_REVALIDATED"
-                if package_entry is not None else "UNVERIFIED_LOCAL_TDX_INSTALLATION"
+                if package_entry is not None
+                else "UNVERIFIED_LOCAL_TDX_INSTALLATION"
             ),
-            "source_identity": ({
-                "kind": "VERIFIED_TDX_ZIP_ENTRY",
-                "package_id": package_entry.package_id,
-                "package_sha256": package_entry.package_sha256,
-                "official_package_url": package_entry.official_package_url,
-                "package_file_size": package_entry.package_file_size,
-                "zip_entry_count": package_entry.zip_entry_count,
-                "zip_crc": package_entry.zip_crc,
-                "package_verified_at": package_entry.package_verified_at.isoformat(),
-                "zip_entry_path": package_entry.zip_entry_path,
-                "entry_sha256": package_entry.entry_sha256,
-                "entry_byte_count": package_entry.entry_byte_count,
-                "source_symbol": package_entry.source_symbol,
-                "target_session": package_entry.target_session.isoformat(),
-                "source_clock_role": package_entry.source_clock_role,
-                "published_at": "UNKNOWN",
-                "first_available_at": "UNKNOWN",
-            } if package_entry is not None else {
-                "kind": "READONLY_LOCAL_FILE_HANDLE",
-                "requested_access": source_identity.requested_access,
-                "path_binding_verified": source_identity.path_binding_verified,
-                "handle_path_verified": source_identity.handle_path_verified,
-                "size_stable_during_read": source_identity.size_before == source_identity.size_after,
-                "mtime_stable_during_read": source_identity.mtime_ns_before == source_identity.mtime_ns_after,
-            }),
+            "source_identity": (
+                {
+                    "kind": "VERIFIED_TDX_ZIP_ENTRY",
+                    "package_id": package_entry.package_id,
+                    "package_sha256": package_entry.package_sha256,
+                    "official_package_url": package_entry.official_package_url,
+                    "package_file_size": package_entry.package_file_size,
+                    "zip_entry_count": package_entry.zip_entry_count,
+                    "zip_crc": package_entry.zip_crc,
+                    "package_verified_at": package_entry.package_verified_at.isoformat(),
+                    "zip_entry_path": package_entry.zip_entry_path,
+                    "entry_sha256": package_entry.entry_sha256,
+                    "entry_byte_count": package_entry.entry_byte_count,
+                    "source_symbol": package_entry.source_symbol,
+                    "target_session": package_entry.target_session.isoformat(),
+                    "source_clock_role": package_entry.source_clock_role,
+                    "published_at": "UNKNOWN",
+                    "first_available_at": "UNKNOWN",
+                }
+                if package_entry is not None
+                else {
+                    "kind": "READONLY_LOCAL_FILE_HANDLE",
+                    "requested_access": source_identity.requested_access,
+                    "path_binding_verified": source_identity.path_binding_verified,
+                    "handle_path_verified": source_identity.handle_path_verified,
+                    "size_stable_during_read": source_identity.size_before
+                    == source_identity.size_after,
+                    "mtime_stable_during_read": source_identity.mtime_ns_before
+                    == source_identity.mtime_ns_after,
+                }
+            ),
             "observed_started_at": capture.observed_started_at.isoformat(),
             "observed_completed_at": capture.observed_completed_at.isoformat(),
             "observation_clock_role": (
-                package_entry.source_clock_role if package_entry is not None else "LOCAL_FILE_READ_TIME_ONLY"
+                package_entry.source_clock_role
+                if package_entry is not None
+                else "LOCAL_FILE_READ_TIME_ONLY"
             ),
             "first_available_at": "UNKNOWN",
             "published_at": "UNKNOWN",
         },
         "identity": (
-            {**selection.identity_projection.as_dict(),
-             "status": selection.identity_projection.identity_status,
-             "security_entity_id": selection.identity_projection.entity_id,
-             "membership_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
-             "listing_lifecycle_status": selection.identity_projection.classification}
-            if selection.identity_projection is not None else {
+            {
+                **selection.identity_projection.as_dict(),
+                "status": selection.identity_projection.identity_status,
+                "security_entity_id": selection.identity_projection.entity_id,
+                "membership_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
+                "listing_lifecycle_status": selection.identity_projection.classification,
+            }
+            if selection.identity_projection is not None
+            else {
                 "source_symbol": selection.source_symbol,
                 "status": "SOURCE_SYMBOL_ONLY",
                 "security_entity_id": None,
@@ -1185,7 +1586,9 @@ def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, 
             "calendar_session_count": len(selection.rows),
             "actual_source_rows_selected": actual_rows,
             "missing_bar_sessions_unknown": missing_rows,
-            "maximum_selected_session": selection.rows[-1].session.isoformat() if selection.rows else None,
+            "maximum_selected_session": selection.rows[-1].session.isoformat()
+            if selection.rows
+            else None,
             "future_source_rows_excluded": selection.future_source_rows_excluded,
             "future_rows_used_by_core": False,
             "field_window_digest_status": "BLOCKED_STABLE_SECURITY_ID_UNBOUND",
@@ -1198,12 +1601,14 @@ def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, 
         "unit_contract": {
             "version": selection.units.version,
             "amount_to_cny": str(selection.units.amount_to_cny)
-            if selection.units.amount_to_cny is not None else None,
+            if selection.units.amount_to_cny is not None
+            else None,
             "volume_to_shares": selection.units.volume_to_shares,
             "amount_authority": _unit_trust_status(selection.units.amount_to_cny),
             "volume_authority": _unit_trust_status(selection.units.volume_to_shares),
             "binding_status": "CALLER_DECLARED_RESEARCH_ASSUMPTION"
-            if selection.units.amount_to_cny is not None or selection.units.volume_to_shares is not None
+            if selection.units.amount_to_cny is not None
+            or selection.units.volume_to_shares is not None
             else "UNKNOWN_UNIT_AUTHORITY",
         },
         "fields": target_fields,
@@ -1246,7 +1651,10 @@ def _apply_calendar_coverage_to_core(
     if any(row.state != "ACTUAL" for row in history):
         return
     for name, field in tuple(core.items()):
-        if field.quality != "OBSERVED" and field.reason in {"SHORT_HISTORY", "SHORT_SESSION_HISTORY"}:
+        if field.quality != "OBSERVED" and field.reason in {
+            "SHORT_HISTORY",
+            "SHORT_SESSION_HISTORY",
+        }:
             core[name] = unknown("CALENDAR_LOOKBACK_NOT_COVERED")
 
 
@@ -1289,8 +1697,12 @@ def _observation_summary(
                 "close_vs_ma60": _render_field(
                     _field_relation(raw_close, core["core.ma60"])
                 ),
-                "ma5_vs_ma20": _render_field(_field_relation(core["core.ma5"], core["core.ma20"])),
-                "ma20_vs_ma60": _render_field(_field_relation(core["core.ma20"], core["core.ma60"])),
+                "ma5_vs_ma20": _render_field(
+                    _field_relation(core["core.ma5"], core["core.ma20"])
+                ),
+                "ma20_vs_ma60": _render_field(
+                    _field_relation(core["core.ma20"], core["core.ma60"])
+                ),
             },
         },
     }
@@ -1334,14 +1746,25 @@ def _basic_fact_dimensions(
     raw_coordinate = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
     raw_specs = {
         "raw.close": ("close", "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00", "RAW_UNADJUSTED"),
-        "raw.amount": ("amount", "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00", "SOURCE_RAW_ENCODING"),
-        "raw.volume": ("volume", "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00", "SOURCE_RAW_ENCODING"),
+        "raw.amount": (
+            "amount",
+            "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00",
+            "SOURCE_RAW_ENCODING",
+        ),
+        "raw.volume": (
+            "volume",
+            "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00",
+            "SOURCE_RAW_ENCODING",
+        ),
     }
     core_specs = {
         "core.ma5": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
         "core.ma20": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
         "core.ma60": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
-        "core.ma_slope20_atr": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.ma_slope20_atr": (
+            "stock_a.research.core:calculate_core",
+            "DIMENSIONLESS",
+        ),
         "core.ret5": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
         "core.ret20": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
         "core.atr20": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
@@ -1349,11 +1772,23 @@ def _basic_fact_dimensions(
         "core.prior_high20": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
         "core.prior_low20": ("stock_a.research.core:calculate_core", "RAW_UNADJUSTED"),
         "core.bias20_atr": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
-        "core.dist_high20_atr": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
+        "core.dist_high20_atr": (
+            "stock_a.research.core:calculate_core",
+            "DIMENSIONLESS",
+        ),
         "core.price_damage": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
-        "core.amount_ratio20": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
-        "core.volume_ratio20": ("stock_a.research.core:calculate_core", "DIMENSIONLESS"),
-        "core.liquidity_mean20": ("stock_a.research.core:calculate_core", "SOURCE_AMOUNT_UNIT_ASSUMPTION"),
+        "core.amount_ratio20": (
+            "stock_a.research.core:calculate_core",
+            "DIMENSIONLESS",
+        ),
+        "core.volume_ratio20": (
+            "stock_a.research.core:calculate_core",
+            "DIMENSIONLESS",
+        ),
+        "core.liquidity_mean20": (
+            "stock_a.research.core:calculate_core",
+            "SOURCE_AMOUNT_UNIT_ASSUMPTION",
+        ),
     }
     comparison_specs = {
         "close_vs_ma20": "core.ma20",
@@ -1374,12 +1809,30 @@ def _basic_fact_dimensions(
             coordinate_id=raw_coordinate if coordinate == "RAW_UNADJUSTED" else None,
         )
     for field_id, (formula, coordinate) in core_specs.items():
-        target = trend if field_id in {
-            "core.ma5", "core.ma20", "core.ma60", "core.ma_slope20_atr", "core.ret5", "core.ret20"
-        } else position if field_id in {
-            "core.atr20", "core.pos60", "core.prior_high20", "core.prior_low20",
-            "core.bias20_atr", "core.dist_high20_atr", "core.price_damage",
-        } else participation
+        target = (
+            trend
+            if field_id
+            in {
+                "core.ma5",
+                "core.ma20",
+                "core.ma60",
+                "core.ma_slope20_atr",
+                "core.ret5",
+                "core.ret20",
+            }
+            else position
+            if field_id
+            in {
+                "core.atr20",
+                "core.pos60",
+                "core.prior_high20",
+                "core.prior_low20",
+                "core.bias20_atr",
+                "core.dist_high20_atr",
+                "core.price_damage",
+            }
+            else participation
+        )
         fact = _annotated_fact(
             field_id=field_id,
             value=_render_field(core[field_id]),
@@ -1387,12 +1840,18 @@ def _basic_fact_dimensions(
             coordinate_role=coordinate,
             coordinate_id=raw_coordinate if coordinate == "RAW_UNADJUSTED" else None,
         )
-        if field_id in {"core.amount_ratio20", "core.volume_ratio20", "core.liquidity_mean20"}:
+        if field_id in {
+            "core.amount_ratio20",
+            "core.volume_ratio20",
+            "core.liquidity_mean20",
+        }:
             fact["unit_trust"] = {
                 "status": "CALLER_DECLARED_ASSUMPTION",
                 "interpretation": (
-                    "金额比率要求窗口内金额倍率一致" if field_id == "core.amount_ratio20"
-                    else "数量比率要求窗口内数量倍率一致" if field_id == "core.volume_ratio20"
+                    "金额比率要求窗口内金额倍率一致"
+                    if field_id == "core.amount_ratio20"
+                    else "数量比率要求窗口内数量倍率一致"
+                    if field_id == "core.volume_ratio20"
                     else "绝对金额均值依赖调用方声明的金额倍率"
                 ),
             }
@@ -1415,7 +1874,9 @@ def _basic_fact_dimensions(
             if fact["value"].get("quality") != "OBSERVED"
         }
         for group, fields in (
-            ("price_trend", trend), ("position_volatility", position), ("participation", participation)
+            ("price_trend", trend),
+            ("position_volatility", position),
+            ("participation", participation),
         )
     }
     dimensions = {
@@ -1446,14 +1907,18 @@ def _basic_fact_dimensions(
     }
     availability = {
         "contract": "STOCK-A-BASIC-FACT-AVAILABILITY/R1",
-        "compatibility_status": "AVAILABLE" if target_prices_usable else "PARTIAL_UNKNOWN",
+        "compatibility_status": "AVAILABLE"
+        if target_prices_usable
+        else "PARTIAL_UNKNOWN",
         "compatibility_status_scope": "仅按目标日原始价格组判断；不代表所有Core字段已知",
         "target_bar_present": target_bar_present,
         "raw": raw_availability,
         "core": core_availability,
         "unknown_facts_by_dimension": unknown_facts,
         "missing_target_bar_explanation": (
-            None if target_bar_present else "目标日没有可用bar；不据此推断停牌、上市前或退市。"
+            None
+            if target_bar_present
+            else "目标日没有可用bar；不据此推断停牌、上市前或退市。"
         ),
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "price_coordinate": "RAW_UNADJUSTED",
@@ -1469,11 +1934,17 @@ def _source_path(roots: Iterable[str], directory: str, code: str) -> tuple[Path,
         try:
             root = Path(value).resolve(strict=True)
         except FileNotFoundError as error:
-            raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根不存在") from error
+            raise ResearchEntryError(
+                "SOURCE_ROOT_INVALID", "配置的TDX来源根不存在"
+            ) from error
         except PermissionError as error:
-            raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝访问配置的TDX来源根") from error
+            raise ResearchEntryError(
+                "SOURCE_ACCESS_DENIED", "操作系统拒绝访问配置的TDX来源根"
+            ) from error
         except OSError as error:
-            raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根无法核验") from error
+            raise ResearchEntryError(
+                "SOURCE_ROOT_INVALID", "配置的TDX来源根无法核验"
+            ) from error
         if not root.is_dir():
             raise ResearchEntryError("SOURCE_ROOT_INVALID", "配置的TDX来源根不是目录")
         resolved_roots.append(root)
@@ -1483,20 +1954,30 @@ def _source_path(roots: Iterable[str], directory: str, code: str) -> tuple[Path,
         except FileNotFoundError:
             continue
         except PermissionError as error:
-            raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验TDX日线最终路径") from error
+            raise ResearchEntryError(
+                "SOURCE_ACCESS_DENIED", "操作系统拒绝核验TDX日线最终路径"
+            ) from error
         except OSError as error:
-            raise ResearchEntryError("SOURCE_IO_ERROR", "TDX日线最终路径核验发生I/O错误") from error
+            raise ResearchEntryError(
+                "SOURCE_IO_ERROR", "TDX日线最终路径核验发生I/O错误"
+            ) from error
         try:
             source.relative_to(root)
         except ValueError as error:
-            raise ResearchEntryError("SOURCE_PATH_OUTSIDE_ROOT", "TDX日线最终路径离开配置保护根") from error
+            raise ResearchEntryError(
+                "SOURCE_PATH_OUTSIDE_ROOT", "TDX日线最终路径离开配置保护根"
+            ) from error
         candidates.append((root, source))
     if not resolved_roots:
         raise ResearchEntryError("SOURCE_NOT_CONFIGURED", "没有配置只读TDX保护根")
     if not candidates:
-        raise ResearchEntryError("SOURCE_NOT_FOUND", "配置保护根中没有该代码的TDX日线文件")
+        raise ResearchEntryError(
+            "SOURCE_NOT_FOUND", "配置保护根中没有该代码的TDX日线文件"
+        )
     if len(candidates) != 1:
-        raise ResearchEntryError("SOURCE_ROOT_AMBIGUOUS", "多个配置来源根均含同一代码文件，拒绝自行选择")
+        raise ResearchEntryError(
+            "SOURCE_ROOT_AMBIGUOUS", "多个配置来源根均含同一代码文件，拒绝自行选择"
+        )
     return candidates[0]
 
 
@@ -1515,7 +1996,9 @@ def _unknown_observation(session: date, reason: str) -> CoreObservation:
     )
 
 
-def _observation(session: date, symbol: str, decoded: DecodedDay | None) -> CoreObservation:
+def _observation(
+    session: date, symbol: str, decoded: DecodedDay | None
+) -> CoreObservation:
     if decoded is None:
         return _unknown_observation(session, "NO_TDX_BAR_FOR_OFFICIAL_SESSION")
     return CoreObservation(
@@ -1557,9 +2040,13 @@ def _profile_window(
         raise ContractError("Profile预览未登记Core窗口：" + field_id)
     count, exclude_current = spec
     end = len(history) - (1 if exclude_current else 0)
-    selected = history[max(0, end - count):end] if end > 0 else ()
+    selected = history[max(0, end - count) : end] if end > 0 else ()
     payload = [_profile_row_payload(row) for row in selected]
-    digest = sha256(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")).hexdigest()
+    digest = sha256(
+        json.dumps(
+            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+    ).hexdigest()
     if selected:
         first_endpoint: date | None = selected[0].session
         last_endpoint: date | None = selected[-1].session
@@ -1579,8 +2066,11 @@ def _profile_window(
         "last_endpoint": last_endpoint.isoformat() if last_endpoint else None,
         "requested_sessions": count,
         "selected_sessions": len(selected),
-        "window_complete": len(selected) == count and all(row.state == "ACTUAL" for row in selected),
-        "unknown_session_dates": [row.session.isoformat() for row in selected if row.state == "UNKNOWN"],
+        "window_complete": len(selected) == count
+        and all(row.state == "ACTUAL" for row in selected),
+        "unknown_session_dates": [
+            row.session.isoformat() for row in selected if row.state == "UNKNOWN"
+        ],
         "selected_rows_digest": digest,
         "calendar_revision": calendar_revision,
         "status_revision": "TDX_NO_BAR_UNKNOWN_STATUS_R1",
@@ -1614,62 +2104,104 @@ def _build_profile_preview(
 ) -> dict[str, Any]:
     """把本次真实Raw/Core读取接到既有规则；显式限于未复权NON_PIT预览。"""
     if not isinstance(contract, dict):
-        raise ResearchEntryError("PROFILE_PREVIEW_CONTRACT_REQUIRED", "Profile预览必须使用固定配置槽位装配的day-chain合同")
-    if len(source_sha256) != 64 or any(ch not in "0123456789abcdef" for ch in source_sha256):
-        raise ResearchEntryError("PROFILE_PREVIEW_SOURCE_ID_INVALID", "Profile预览缺少本次完整TDX字节摘要")
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CONTRACT_REQUIRED",
+            "Profile预览必须使用固定配置槽位装配的day-chain合同",
+        )
+    if len(source_sha256) != 64 or any(
+        ch not in "0123456789abcdef" for ch in source_sha256
+    ):
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_SOURCE_ID_INVALID", "Profile预览缺少本次完整TDX字节摘要"
+        )
     try:
         scope = contract["scope_bindings"]["FOUNDATION_EOD"]
         rules = scope["profile_expression_registry"]
         canonical_registry = scope["field_registry"]
     except (KeyError, TypeError) as error:
-        raise ResearchEntryError("PROFILE_PREVIEW_CONTRACT_INVALID", "Profile预览合同缺少FOUNDATION规则或字段登记") from error
-    if not isinstance(rules, dict) or len(rules) != 11 or not isinstance(canonical_registry, list):
-        raise ResearchEntryError("PROFILE_PREVIEW_CONTRACT_INVALID", "Profile预览必须保留唯一11条规则和字段登记")
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CONTRACT_INVALID",
+            "Profile预览合同缺少FOUNDATION规则或字段登记",
+        ) from error
+    if (
+        not isinstance(rules, dict)
+        or len(rules) != 11
+        or not isinstance(canonical_registry, list)
+    ):
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CONTRACT_INVALID",
+            "Profile预览必须保留唯一11条规则和字段登记",
+        )
 
-    registry_by_id = {item["field_id"]: item for item in canonical_registry if isinstance(item, dict) and isinstance(item.get("field_id"), str)}
+    registry_by_id = {
+        item["field_id"]: item
+        for item in canonical_registry
+        if isinstance(item, dict) and isinstance(item.get("field_id"), str)
+    }
     if len(registry_by_id) != len(canonical_registry):
-        raise ResearchEntryError("PROFILE_PREVIEW_CONTRACT_INVALID", "Profile字段登记存在重复或非法field_id")
+        raise ResearchEntryError(
+            "PROFILE_PREVIEW_CONTRACT_INVALID", "Profile字段登记存在重复或非法field_id"
+        )
 
     package_root = Path(__file__).resolve().parent.parent
-    core_sha = _profile_preview_source_digest(Path(__file__).with_name("core.py"), "calculate_core")
-    decoder_sha = _profile_preview_source_digest(package_root / "sources" / "tdx" / "day.py", "decode_day_record")
+    core_sha = _profile_preview_source_digest(
+        Path(__file__).with_name("core.py"), "calculate_core"
+    )
+    decoder_sha = _profile_preview_source_digest(
+        package_root / "sources" / "tdx" / "day.py", "decode_day_record"
+    )
     entry_sha = _profile_preview_source_digest(Path(__file__), "_build_profile_preview")
     normalized = _normalize_symbol(symbol)[0]
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
-    snapshot_id = source_snapshot_id or "TDX_LOCAL_FILE_SNAPSHOT_SHA256:" + source_sha256
-    target_close = target_bar.raw_close if target_bar is not None else unknown("TARGET_BAR_MISSING")
+    snapshot_id = (
+        source_snapshot_id or "TDX_LOCAL_FILE_SNAPSHOT_SHA256:" + source_sha256
+    )
+    target_close = (
+        target_bar.raw_close
+        if target_bar is not None
+        else unknown("TARGET_BAR_MISSING")
+    )
 
     components: list[dict[str, Any]] = []
     for rule_id, rule in rules.items():
         field_id = rule.get("field_id") if isinstance(rule, dict) else None
         if not isinstance(field_id, str):
-            raise ResearchEntryError("PROFILE_PREVIEW_CONTRACT_INVALID", "Profile规则缺少field_id")
+            raise ResearchEntryError(
+                "PROFILE_PREVIEW_CONTRACT_INVALID", "Profile规则缺少field_id"
+            )
         unavailable = _PROFILE_NOT_IMPLEMENTED.get(field_id)
         if unavailable is not None:
             missing_inputs = []
             for missing_id in unavailable["missing_inputs"]:
                 field_spec = registry_by_id.get(missing_id, {})
-                missing_inputs.append({
-                    "field_id": missing_id,
-                    "producer_stage": field_spec.get("producer_stage"),
-                    "producer_symbol": field_spec.get("producer_symbol"),
+                missing_inputs.append(
+                    {
+                        "field_id": missing_id,
+                        "producer_stage": field_spec.get("producer_stage"),
+                        "producer_symbol": field_spec.get("producer_symbol"),
+                        "reason": unavailable["reason"],
+                    }
+                )
+            components.append(
+                {
+                    "field_id": field_id,
+                    "rule_id": rule_id,
+                    "expression_ref": rule.get("expression_ref"),
+                    "status": unavailable["status"],
+                    "production_eligibility": "NOT_ELIGIBLE",
                     "reason": unavailable["reason"],
-                })
-            components.append({
-                "field_id": field_id,
-                "rule_id": rule_id,
-                "expression_ref": rule.get("expression_ref"),
-                "status": unavailable["status"],
-                "production_eligibility": "NOT_ELIGIBLE",
-                "reason": unavailable["reason"],
-                "missing_inputs": missing_inputs,
-                "input_fields": list(rule.get("input_fields", [])),
-            })
+                    "missing_inputs": missing_inputs,
+                    "input_fields": list(rule.get("input_fields", [])),
+                }
+            )
             continue
 
         input_fields = rule.get("input_fields")
         if not isinstance(input_fields, list) or not input_fields:
-            raise ResearchEntryError("PROFILE_PREVIEW_CONTRACT_INVALID", "Profile规则没有明确输入字段：" + field_id)
+            raise ResearchEntryError(
+                "PROFILE_PREVIEW_CONTRACT_INVALID",
+                "Profile规则没有明确输入字段：" + field_id,
+            )
         inputs: dict[str, ProfileInput] = {}
         expected_context: dict[str, dict[str, Any]] = {}
         expected_windows: dict[str, WindowIdentity] = {}
@@ -1680,37 +2212,53 @@ def _build_profile_preview(
         for input_id in input_fields:
             registered = registry_by_id.get(input_id)
             if registered is None:
-                raise ResearchEntryError("PROFILE_PREVIEW_CONTRACT_INVALID", "Profile输入未登记：" + str(input_id))
+                raise ResearchEntryError(
+                    "PROFILE_PREVIEW_CONTRACT_INVALID",
+                    "Profile输入未登记：" + str(input_id),
+                )
             field_registry = dict(registered)
             if input_id == "adjusted.close":
                 # 仅本预览局部把同目标、同Raw坐标的source close映射到规则输入名。
                 # 不改正式合同，也不宣称执行了P06复权生产者。
-                field_registry.update({
-                    "unit": "CNY",
-                    "producer_stage": "RESEARCH_PREVIEW",
-                    "producer_symbol": "stock_a.research.entry:_build_profile_preview",
-                    "producer_source_sha256": entry_sha,
-                    "expression_ref": "TDX_RAW_CLOSE_PREVIEW_ALIAS_R1",
-                    "algorithm_version": None,
-                    "parameter_version": "TDX_RAW_UNADJUSTED_PREVIEW_R1",
-                    "context_dependencies": ["context.target_session", "context.source_cutoff"],
-                    "window_contract": "NONE",
-                    "input_fields": ["raw.close"],
-                })
+                field_registry.update(
+                    {
+                        "unit": "CNY",
+                        "producer_stage": "RESEARCH_PREVIEW",
+                        "producer_symbol": "stock_a.research.entry:_build_profile_preview",
+                        "producer_source_sha256": entry_sha,
+                        "expression_ref": "TDX_RAW_CLOSE_PREVIEW_ALIAS_R1",
+                        "algorithm_version": None,
+                        "parameter_version": "TDX_RAW_UNADJUSTED_PREVIEW_R1",
+                        "context_dependencies": [
+                            "context.target_session",
+                            "context.source_cutoff",
+                        ],
+                        "window_contract": "NONE",
+                        "input_fields": ["raw.close"],
+                    }
+                )
                 source_field_id = "raw.close"
                 source_producer = "stock_a.sources.tdx.day:decode_day_record"
                 source_code_sha = decoder_sha
                 input_value = target_close
                 input_window = {
                     "contract": "TARGET_SESSION_R1",
-                    "first_endpoint": target_session.isoformat() if target_bar is not None else None,
-                    "last_endpoint": target_session.isoformat() if target_bar is not None else None,
+                    "first_endpoint": target_session.isoformat()
+                    if target_bar is not None
+                    else None,
+                    "last_endpoint": target_session.isoformat()
+                    if target_bar is not None
+                    else None,
                     "requested_sessions": 1,
                     "selected_sessions": 1 if target_bar is not None else 0,
                     "selected_rows_digest": sha256(
                         json.dumps(
-                            [_profile_row_payload(history[-1])] if target_bar is not None else [],
-                            ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                            [_profile_row_payload(history[-1])]
+                            if target_bar is not None
+                            else [],
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            separators=(",", ":"),
                         ).encode("utf-8")
                     ).hexdigest(),
                 }
@@ -1719,12 +2267,16 @@ def _build_profile_preview(
                 source_producer = "stock_a.research.core:calculate_core"
                 source_code_sha = core_sha
                 if input_id not in core:
-                    raise ResearchEntryError("PROFILE_PREVIEW_CORE_FIELD_MISSING", "本次Core结果缺少画像输入：" + input_id)
+                    raise ResearchEntryError(
+                        "PROFILE_PREVIEW_CORE_FIELD_MISSING",
+                        "本次Core结果缺少画像输入：" + input_id,
+                    )
                 input_value = core[input_id]
                 window_contract = field_registry.get("window_contract", "NONE")
                 if window_contract != "NONE":
                     window_identity, input_window = _profile_window(
-                        input_id, history,
+                        input_id,
+                        history,
                         window_contract=window_contract,
                         calendar_revision=calendar_revision,
                         quality=input_value.quality,
@@ -1735,7 +2287,10 @@ def _build_profile_preview(
 
             producer_symbol = field_registry.get("producer_symbol")
             if not isinstance(producer_symbol, str) or not producer_symbol:
-                raise ResearchEntryError("PROFILE_PREVIEW_PRODUCER_UNBOUND", "画像输入缺少实际生产者：" + input_id)
+                raise ResearchEntryError(
+                    "PROFILE_PREVIEW_PRODUCER_UNBOUND",
+                    "画像输入缺少实际生产者：" + input_id,
+                )
             field_registry["producer_source_sha256"] = source_code_sha
             used_registry.append(field_registry)
 
@@ -1775,24 +2330,29 @@ def _build_profile_preview(
                 coordinate_id=coordinate_id,
                 context=contexts,
             )
-            input_provenance.append({
-                "rule_input_field": input_id,
-                "source_field_id": source_field_id,
-                "value": _render_field(input_value),
-                "unit": field_registry.get("unit"),
-                "producer_symbol": producer_symbol,
-                "source_producer": source_producer,
-                "producer_source_sha256": source_code_sha,
-                "expression_ref": field_registry.get("expression_ref"),
-                "parameter_version": field_registry.get("parameter_version"),
-                "window": input_window,
-                "coordinate_role": field_registry.get("coordinate_role"),
-                "coordinate_id": coordinate_id,
-                "context": {key: value.isoformat() if isinstance(value, date) else value for key, value in contexts.items()},
-                "unit_trust": "CALLER_DECLARED_ASSUMPTION" if input_id in {
-                    "core.amount_ratio20", "core.liquidity_mean20"
-                } else None,
-            })
+            input_provenance.append(
+                {
+                    "rule_input_field": input_id,
+                    "source_field_id": source_field_id,
+                    "value": _render_field(input_value),
+                    "unit": field_registry.get("unit"),
+                    "producer_symbol": producer_symbol,
+                    "source_producer": source_producer,
+                    "producer_source_sha256": source_code_sha,
+                    "expression_ref": field_registry.get("expression_ref"),
+                    "parameter_version": field_registry.get("parameter_version"),
+                    "window": input_window,
+                    "coordinate_role": field_registry.get("coordinate_role"),
+                    "coordinate_id": coordinate_id,
+                    "context": {
+                        key: value.isoformat() if isinstance(value, date) else value
+                        for key, value in contexts.items()
+                    },
+                    "unit_trust": "CALLER_DECLARED_ASSUMPTION"
+                    if input_id in {"core.amount_ratio20", "core.liquidity_mean20"}
+                    else None,
+                }
+            )
 
         handoff = ProfileHandoff(
             inputs=inputs,
@@ -1804,30 +2364,36 @@ def _build_profile_preview(
             runtime_producers=runtime_producers,
         )
         result = evaluate_profile_kernel(field_id, handoff, rules, used_registry)
-        components.append({
-            "field_id": field_id,
-            "rule_id": rule_id,
-            "expression_ref": rule.get("expression_ref"),
-            "status": "EVALUATED",
-            "quality": result.quality,
-            "value": _render_field(result)["value"],
-            "reason": result.reason,
-            "production_eligibility": "PREVIEW_ONLY_RAW_UNADJUSTED_NON_PIT",
-            "calculation_basis": {
-                "input_fields": list(rule["input_fields"]),
-                "operands": rule.get("operands", {}),
-                "parameters": rule.get("parameters", {}),
-                "ordered_branches": rule.get("ordered_branches", []),
-            },
-            "inputs": input_provenance,
-        })
+        components.append(
+            {
+                "field_id": field_id,
+                "rule_id": rule_id,
+                "expression_ref": rule.get("expression_ref"),
+                "status": "EVALUATED",
+                "quality": result.quality,
+                "value": _render_field(result)["value"],
+                "reason": result.reason,
+                "production_eligibility": "PREVIEW_ONLY_RAW_UNADJUSTED_NON_PIT",
+                "calculation_basis": {
+                    "input_fields": list(rule["input_fields"]),
+                    "operands": rule.get("operands", {}),
+                    "parameters": rule.get("parameters", {}),
+                    "ordered_branches": rule.get("ordered_branches", []),
+                },
+                "inputs": input_provenance,
+            }
+        )
 
     return {
         "contract": "STOCK-A-PROFILE-COMPONENT-PREVIEW/R1",
         "scope": "REAL_TDX_RAW_CORE_READONLY_COMPONENT_PREVIEW",
         "target_session": target_session.isoformat(),
         "source_last_session": source_last_session.isoformat(),
-        "identity": {"status": "SOURCE_SYMBOL_ONLY", "symbol": normalized, "security_id": None},
+        "identity": {
+            "status": "SOURCE_SYMBOL_ONLY",
+            "symbol": normalized,
+            "security_id": None,
+        },
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "price_coordinate": "RAW_UNADJUSTED",
         "source": {
@@ -1845,9 +2411,15 @@ def _build_profile_preview(
             "total": len(components),
             "evaluated": sum(item["status"] == "EVALUATED" for item in components),
             "observed": sum(item.get("quality") == "OBSERVED" for item in components),
-            "unknown_data": sum(item.get("quality") == "UNKNOWN_DATA" for item in components),
-            "not_implemented": sum(item["status"] == "NOT_IMPLEMENTED" for item in components),
-            "contract_unbound": sum(item["status"] == "CONTRACT_UNBOUND" for item in components),
+            "unknown_data": sum(
+                item.get("quality") == "UNKNOWN_DATA" for item in components
+            ),
+            "not_implemented": sum(
+                item["status"] == "NOT_IMPLEMENTED" for item in components
+            ),
+            "contract_unbound": sum(
+                item["status"] == "CONTRACT_UNBOUND" for item in components
+            ),
         },
     }
 
@@ -1859,17 +2431,29 @@ def apply_identity_observation(
     identity_query_status: str,
 ) -> dict[str, Any]:
     """将一次Bao观察附加到已完成的TDX/Core结果，不触发重读或重算。"""
-    if not isinstance(result, dict) or not isinstance(identity_query_status, str) or not identity_query_status:
-        raise ResearchEntryError("IDENTITY_QUERY_STATUS_INVALID", "Bao身份结果或来源状态无效")
+    if (
+        not isinstance(result, dict)
+        or not isinstance(identity_query_status, str)
+        or not identity_query_status
+    ):
+        raise ResearchEntryError(
+            "IDENTITY_QUERY_STATUS_INVALID", "Bao身份结果或来源状态无效"
+        )
     if identity_projection is not None and (
-            identity_projection.source_symbol != result.get("requested_symbol")
-            or identity_projection.target_session.isoformat() != result.get("target_session")):
-        raise ResearchEntryError("IDENTITY_PROJECTION_MISMATCH", "BaoStock身份投影与已计算TDX/Core结果不匹配")
+        identity_projection.source_symbol != result.get("requested_symbol")
+        or identity_projection.target_session.isoformat()
+        != result.get("target_session")
+    ):
+        raise ResearchEntryError(
+            "IDENTITY_PROJECTION_MISMATCH", "BaoStock身份投影与已计算TDX/Core结果不匹配"
+        )
     if identity_projection is None:
-        result.setdefault("identity", {}).update({
-            "status": "UNAVAILABLE",
-            "reason": f"BAOSTOCK_IDENTITY_SOURCE_{identity_query_status}",
-        })
+        result.setdefault("identity", {}).update(
+            {
+                "status": "UNAVAILABLE",
+                "reason": f"BAOSTOCK_IDENTITY_SOURCE_{identity_query_status}",
+            }
+        )
     else:
         result["identity"] = {
             **identity_projection.as_dict(),
@@ -1877,13 +2461,24 @@ def apply_identity_observation(
             "stable_security_id_issued": False,
         }
     selection = result.get("canonical_selection")
-    target_bar_status = selection.get("target_bar_status") if isinstance(selection, dict) else None
-    if target_bar_status not in {"PRESENT", "TARGET_MISSING", "READ_FAILED", "NOT_EVALUATED"}:
-        target_bar_status = "PRESENT" if result.get("target_bar_present") is True else "TARGET_MISSING"
+    target_bar_status = (
+        selection.get("target_bar_status") if isinstance(selection, dict) else None
+    )
+    if target_bar_status not in {
+        "PRESENT",
+        "TARGET_MISSING",
+        "READ_FAILED",
+        "NOT_EVALUATED",
+    }:
+        target_bar_status = (
+            "PRESENT" if result.get("target_bar_present") is True else "TARGET_MISSING"
+        )
     result["identity_reconciliation"] = reconcile_identity_bar_status(
         identity_projection,
         target_bar_status=target_bar_status,
-        source_status="RESPONSE_RECEIVED" if identity_projection is not None else identity_query_status,
+        source_status="RESPONSE_RECEIVED"
+        if identity_projection is not None
+        else identity_query_status,
     )
     return result
 
@@ -1905,18 +2500,25 @@ def research_stock(
 ) -> dict[str, Any]:
     """验证目标会话后保留可读Raw；仅在可用前态上调用现有Core。"""
     target = _parse_target(target_session)
-    calendar_payload, calendar_metadata, calendar_revision, calendar_sessions = _load_calendar(target)
+    calendar_payload, calendar_metadata, calendar_revision, calendar_sessions = (
+        _load_calendar(target)
+    )
     coverage_context = calendar_metadata[-1]["coverage_context"]
     calendar_years = {item["year"] for item in calendar_metadata}
     session_set = set(calendar_sessions)
     normalized, market_directory, board = _normalize_symbol(symbol)
     if identity_projection is not None and (
-            not isinstance(identity_projection, IdentityLifecycleProjection)
-            or identity_projection.source_symbol != normalized
-            or identity_projection.target_session != target):
-        raise ResearchEntryError("IDENTITY_PROJECTION_MISMATCH", "BaoStock身份投影与研究代码或目标日期不匹配")
+        not isinstance(identity_projection, IdentityLifecycleProjection)
+        or identity_projection.source_symbol != normalized
+        or identity_projection.target_session != target
+    ):
+        raise ResearchEntryError(
+            "IDENTITY_PROJECTION_MISMATCH", "BaoStock身份投影与研究代码或目标日期不匹配"
+        )
     if not isinstance(identity_query_status, str) or not identity_query_status:
-        raise ResearchEntryError("IDENTITY_QUERY_STATUS_INVALID", "Bao身份查询状态必须为非空文本")
+        raise ResearchEntryError(
+            "IDENTITY_QUERY_STATUS_INVALID", "Bao身份查询状态必须为非空文本"
+        )
     code = normalized.split(".")[1]
     selected: dict[date, DecodedDay] = {}
     future_source_rows_excluded = 0
@@ -1924,14 +2526,20 @@ def research_stock(
     root: Path | None = None
     path: Path | None = None
     if vipdata_capture is not None:
-        if (not isinstance(vipdata_capture, VipdataEntryCapture)
-                or vipdata_capture.source_symbol != normalized
-                or vipdata_capture.target_session != target
-                or vipdata_capture.capture.source_package_entry is None):
-            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获与请求代码或目标日不匹配")
+        if (
+            not isinstance(vipdata_capture, VipdataEntryCapture)
+            or vipdata_capture.source_symbol != normalized
+            or vipdata_capture.target_session != target
+            or vipdata_capture.capture.source_package_entry is None
+        ):
+            raise ResearchEntryError(
+                "VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获与请求代码或目标日不匹配"
+            )
         scan_summary = vipdata_capture.scan_summary
         if not scan_summary.complete:
-            raise ResearchEntryError("VIPDATA_CAPTURE_INCOMPLETE", "官网ZIP条目尚未完成只读扫描")
+            raise ResearchEntryError(
+                "VIPDATA_CAPTURE_INCOMPLETE", "官网ZIP条目尚未完成只读扫描"
+            )
         for decoded in vipdata_capture.rows:
             day = decoded.session_date
             if day.year in calendar_years and day not in session_set:
@@ -1944,7 +2552,9 @@ def research_stock(
             elif day in session_set:
                 selected[day] = decoded
         if future_source_rows_excluded != vipdata_capture.future_source_rows_excluded:
-            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "来源捕获的未来行计数与读取行不一致")
+            raise ResearchEntryError(
+                "VIPDATA_CAPTURE_MISMATCH", "来源捕获的未来行计数与读取行不一致"
+            )
         capture_envelope = vipdata_capture.capture
     else:
         root, path = _source_path(source_roots, market_directory, code)
@@ -1956,7 +2566,10 @@ def research_stock(
                         raise ResearchEntryError(
                             "SOURCE_SESSION_NOT_IN_CALENDAR",
                             f"TDX来源在已核验年度包含非交易会话记录：{day.isoformat()}",
-                            context={"byte_count": scan.progress[0], "record_count": scan.progress[1]},
+                            context={
+                                "byte_count": scan.progress[0],
+                                "record_count": scan.progress[1],
+                            },
                         )
                     if day > target:
                         future_source_rows_excluded += 1
@@ -1966,9 +2579,13 @@ def research_stock(
         except DayReadError:
             raise
         except PermissionError as error:
-            raise ResearchEntryError("SOURCE_ACCESS_DENIED", "操作系统拒绝读取配置的TDX日线文件") from error
+            raise ResearchEntryError(
+                "SOURCE_ACCESS_DENIED", "操作系统拒绝读取配置的TDX日线文件"
+            ) from error
         except OSError as error:
-            raise ResearchEntryError("SOURCE_IO_ERROR", "只读TDX扫描遇到操作系统I/O错误") from error
+            raise ResearchEntryError(
+                "SOURCE_IO_ERROR", "只读TDX扫描遇到操作系统I/O错误"
+            ) from error
         scan_summary = file_summary.scan
 
     session_slice = tuple(day for day in calendar_sessions if day <= target)
@@ -2010,17 +2627,27 @@ def research_stock(
     history_started = time.perf_counter()
     history = _core_history_from_selection(canonical_selection)
     if timing_sink is not None:
-        timing_sink["core_history_build_elapsed_ms"] = round((time.perf_counter() - history_started) * 1000, 3)
+        timing_sink["core_history_build_elapsed_ms"] = round(
+            (time.perf_counter() - history_started) * 1000, 3
+        )
     core_started = time.perf_counter()
     core = calculate_core(history, official_calendar=bounded_calendar)
     if timing_sink is not None:
-        timing_sink["core_calculation_elapsed_ms"] = round((time.perf_counter() - core_started) * 1000, 3)
+        timing_sink["core_calculation_elapsed_ms"] = round(
+            (time.perf_counter() - core_started) * 1000, 3
+        )
     _apply_calendar_coverage_to_core(core, history, coverage_context)
     target_bar = selected.get(target)
     unknown_core = sum(field.quality != "OBSERVED" for field in core.values())
     raw_fields = _render_raw(target_bar, units)
-    raw_close = target_bar.raw_close if target_bar is not None else unknown("TARGET_BAR_MISSING")
-    rendered_core_fields = {name: _render_field(value) for name, value in sorted(core.items())}
+    raw_close = (
+        target_bar.raw_close
+        if target_bar is not None
+        else unknown("TARGET_BAR_MISSING")
+    )
+    rendered_core_fields = {
+        name: _render_field(value) for name, value in sorted(core.items())
+    }
     raw_availability = _availability_record(raw_fields, subject="Raw")
     core_availability = _availability_record(rendered_core_fields, subject="Core")
     observation_summary = _observation_summary(
@@ -2054,7 +2681,9 @@ def research_stock(
             "interpretation": "同一窗口内的数量比率；数量单位倍率需在窗口内保持一致",
         },
     }
-    target_prices_usable = target_bar is not None and target_bar.prices.quality == "OBSERVED"
+    target_prices_usable = (
+        target_bar is not None and target_bar.prices.quality == "OBSERVED"
+    )
     basic_fact_dimensions, availability_explanation = _basic_fact_dimensions(
         symbol=normalized,
         target_session=target,
@@ -2064,15 +2693,18 @@ def research_stock(
             "completed_at": scan_summary.read_completed_at.isoformat(),
             "clock_role": (
                 vipdata_capture.capture.source_package_entry.source_clock_role
-                if vipdata_capture is not None else "LOCAL_FILE_READ_TIME_ONLY"
+                if vipdata_capture is not None
+                else "LOCAL_FILE_READ_TIME_ONLY"
             ),
         },
-        source={"budgets": {
-            "max_bytes": limits.max_bytes,
-            "max_records": limits.max_records,
-            "chunk_records": limits.chunk_records,
-            "max_seconds": limits.max_seconds,
-        }},
+        source={
+            "budgets": {
+                "max_bytes": limits.max_bytes,
+                "max_records": limits.max_records,
+                "chunk_records": limits.chunk_records,
+                "max_seconds": limits.max_seconds,
+            }
+        },
         raw_fields=raw_fields,
         core=core,
         observation_summary=observation_summary,
@@ -2106,57 +2738,64 @@ def research_stock(
             "completed_at": scan_summary.read_completed_at.isoformat(),
             "clock_role": (
                 vipdata_capture.capture.source_package_entry.source_clock_role
-                if vipdata_capture is not None else "LOCAL_FILE_READ_TIME_ONLY"
+                if vipdata_capture is not None
+                else "LOCAL_FILE_READ_TIME_ONLY"
             ),
         },
-        "source": ({
-            "configured_root": None,
-            "final_path": None,
-            "format_contract": "TDX_HSJDAY_ZIP_ENTRY_32_BYTE_LAYOUT_R1",
-            "source_contract_status": "OFFICIAL_PACKAGE_BYTES_REVALIDATED; MEMBERSHIP_PIT_AND_UNIT_AUTHORITY_UNBOUND",
-            "package_id": vipdata_capture.capture.source_package_entry.package_id,
-            "package_sha256": vipdata_capture.capture.source_package_entry.package_sha256,
-            "official_package_url": vipdata_capture.capture.source_package_entry.official_package_url,
-            "package_verified_at": vipdata_capture.capture.source_package_entry.package_verified_at.isoformat(),
-            "zip_entry_path": vipdata_capture.capture.source_package_entry.zip_entry_path,
-            "zip_entry_sha256": vipdata_capture.capture.source_package_entry.entry_sha256,
-            "raw_byte_sha256": scan_summary.raw_byte_sha256,
-            "record_count": scan_summary.record_count,
-            "byte_count": scan_summary.byte_count,
-            "read_started_at": scan_summary.read_started_at.isoformat(),
-            "read_completed_at": scan_summary.read_completed_at.isoformat(),
-            "read_clock_role": vipdata_capture.capture.source_package_entry.source_clock_role,
-            "published_at": "UNKNOWN",
-            "first_available_at": "UNKNOWN",
-            "complete_read": scan_summary.complete,
-            "budgets": {
-                "max_bytes": limits.max_bytes,
-                "max_records": limits.max_records,
-                "chunk_records": limits.chunk_records,
-                "max_seconds": limits.max_seconds,
-            },
-        } if vipdata_capture is not None else {
-            "configured_root": str(root),
-            "final_path": file_summary.source.handle_path,
-            "format_contract": "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00",
-            "source_contract_status": "RESEARCH_LAYOUT_ONLY_AUTHORITY_AND_CAPTURE_CLOCK_UNRESOLVED",
-            "raw_byte_sha256": scan_summary.raw_byte_sha256,
-            "record_count": scan_summary.record_count,
-            "byte_count": scan_summary.byte_count,
-            "read_started_at": scan_summary.read_started_at.isoformat(),
-            "read_completed_at": scan_summary.read_completed_at.isoformat(),
-            "read_clock_role": "LOCAL_FILE_READ_TIME_ONLY",
-            "complete_read": scan_summary.complete,
-            "budgets": {
-                "max_bytes": limits.max_bytes,
-                "max_records": limits.max_records,
-                "chunk_records": limits.chunk_records,
-                "max_seconds": limits.max_seconds,
-            },
-        }),
+        "source": (
+            {
+                "configured_root": None,
+                "final_path": None,
+                "format_contract": "TDX_HSJDAY_ZIP_ENTRY_32_BYTE_LAYOUT_R1",
+                "source_contract_status": "OFFICIAL_PACKAGE_BYTES_REVALIDATED; MEMBERSHIP_PIT_AND_UNIT_AUTHORITY_UNBOUND",
+                "package_id": vipdata_capture.capture.source_package_entry.package_id,
+                "package_sha256": vipdata_capture.capture.source_package_entry.package_sha256,
+                "official_package_url": vipdata_capture.capture.source_package_entry.official_package_url,
+                "package_verified_at": vipdata_capture.capture.source_package_entry.package_verified_at.isoformat(),
+                "zip_entry_path": vipdata_capture.capture.source_package_entry.zip_entry_path,
+                "zip_entry_sha256": vipdata_capture.capture.source_package_entry.entry_sha256,
+                "raw_byte_sha256": scan_summary.raw_byte_sha256,
+                "record_count": scan_summary.record_count,
+                "byte_count": scan_summary.byte_count,
+                "read_started_at": scan_summary.read_started_at.isoformat(),
+                "read_completed_at": scan_summary.read_completed_at.isoformat(),
+                "read_clock_role": vipdata_capture.capture.source_package_entry.source_clock_role,
+                "published_at": "UNKNOWN",
+                "first_available_at": "UNKNOWN",
+                "complete_read": scan_summary.complete,
+                "budgets": {
+                    "max_bytes": limits.max_bytes,
+                    "max_records": limits.max_records,
+                    "chunk_records": limits.chunk_records,
+                    "max_seconds": limits.max_seconds,
+                },
+            }
+            if vipdata_capture is not None
+            else {
+                "configured_root": str(root),
+                "final_path": file_summary.source.handle_path,
+                "format_contract": "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00",
+                "source_contract_status": "RESEARCH_LAYOUT_ONLY_AUTHORITY_AND_CAPTURE_CLOCK_UNRESOLVED",
+                "raw_byte_sha256": scan_summary.raw_byte_sha256,
+                "record_count": scan_summary.record_count,
+                "byte_count": scan_summary.byte_count,
+                "read_started_at": scan_summary.read_started_at.isoformat(),
+                "read_completed_at": scan_summary.read_completed_at.isoformat(),
+                "read_clock_role": "LOCAL_FILE_READ_TIME_ONLY",
+                "complete_read": scan_summary.complete,
+                "budgets": {
+                    "max_bytes": limits.max_bytes,
+                    "max_records": limits.max_records,
+                    "chunk_records": limits.chunk_records,
+                    "max_seconds": limits.max_seconds,
+                },
+            }
+        ),
         "unit_contract": {
             "version": units.version,
-            "amount_to_cny": str(units.amount_to_cny) if units.amount_to_cny is not None else None,
+            "amount_to_cny": str(units.amount_to_cny)
+            if units.amount_to_cny is not None
+            else None,
             "volume_to_shares": units.volume_to_shares,
             "amount_authority": _unit_trust_status(units.amount_to_cny),
             "volume_authority": _unit_trust_status(units.volume_to_shares),
@@ -2172,25 +2811,37 @@ def research_stock(
             "resources": list(calendar_metadata),
             "coverage": [calendar_metadata[0]["coverage"][0], target.isoformat()],
             "evidence_status": _CALENDAR_EVIDENCE_VERIFIED,
-            "resource_continuity_status": coverage_context["resource_continuity_status"],
+            "resource_continuity_status": coverage_context[
+                "resource_continuity_status"
+            ],
             "known_resource_years": list(coverage_context["known_resource_years"]),
             "calculation_years": list(coverage_context["calculation_years"]),
-            "missing_intermediate_years": list(coverage_context["missing_intermediate_years"]),
+            "missing_intermediate_years": list(
+                coverage_context["missing_intermediate_years"]
+            ),
             "core_lookback_complete": coverage_context["core_lookback_complete"],
             "core_lookback_reason": coverage_context["core_lookback_reason"],
             "required_actual_sessions": coverage_context["required_actual_sessions"],
-            "available_calendar_sessions_to_target": coverage_context["available_calendar_sessions_to_target"],
+            "available_calendar_sessions_to_target": coverage_context[
+                "available_calendar_sessions_to_target"
+            ],
             "session_count_in_calculation": len(session_slice),
             "calculation_first_session": session_slice[0].isoformat(),
-            "missing_bar_session_count": sum(day not in selected for day in session_slice),
+            "missing_bar_session_count": sum(
+                day not in selected for day in session_slice
+            ),
             "missing_bar_state": "UNKNOWN; 不推断为停牌或上市前",
         },
         "identity": {
-            **(identity_projection.as_dict() if identity_projection is not None else {
-                "status": "SOURCE_SYMBOL_ONLY",
-                "security_id": None,
-                "reason": "OFFICIAL_STABLE_SECURITY_ID_SOURCE_NOT_BOUND",
-            }),
+            **(
+                identity_projection.as_dict()
+                if identity_projection is not None
+                else {
+                    "status": "SOURCE_SYMBOL_ONLY",
+                    "security_id": None,
+                    "reason": "OFFICIAL_STABLE_SECURITY_ID_SOURCE_NOT_BOUND",
+                }
+            ),
             "security_id": None,
             "stable_security_id_issued": False,
         },
@@ -2264,7 +2915,9 @@ def research_stock(
             "profile_admission": "DENY_TRUSTED_FOUNDATION_SELECTOR_REQUIRED",
         }
     if type(include_baostock_evidence) is not bool:
-        raise ResearchEntryError("BAOSTOCK_OPTION_INVALID", "BaoStock证据开关必须为布尔值")
+        raise ResearchEntryError(
+            "BAOSTOCK_OPTION_INVALID", "BaoStock证据开关必须为布尔值"
+        )
     if include_baostock_evidence:
         # 可选SDK仅在用户显式请求research-stock补充证据时延迟导入。
         from stock_a.sources.baostock.client import query_daily_rows
@@ -2277,12 +2930,14 @@ def research_stock(
             target_session=target.isoformat(),
             tdx_result=result,
         )
-    result["foundation_handoff"] = asdict(_build_foundation_typed_handoff(
-        result=result,
-        foundation_contract=foundation_contract or profile_contract,
-        history=history,
-        calendar_revision=calendar_revision,
-    ))
+    result["foundation_handoff"] = asdict(
+        _build_foundation_typed_handoff(
+            result=result,
+            foundation_contract=foundation_contract or profile_contract,
+            history=history,
+            calendar_revision=calendar_revision,
+        )
+    )
     return result
 
 
@@ -2304,19 +2959,31 @@ def research_compare(
         raise ResearchEntryError("COMPARE_BUDGET_INVALID", "缺少有效的全批累计预算")
     requested = tuple(symbols)
     if not requested or len(requested) > _MAX_COMPARE_SYMBOLS:
-        raise ResearchEntryError("COMPARE_SIZE_INVALID", f"对比代码数必须为1至{_MAX_COMPARE_SYMBOLS}只")
+        raise ResearchEntryError(
+            "COMPARE_SIZE_INVALID", f"对比代码数必须为1至{_MAX_COMPARE_SYMBOLS}只"
+        )
     normalized = tuple(_normalize_symbol(item)[0] for item in requested)
     if len(set(normalized)) != len(normalized):
         raise ResearchEntryError("DUPLICATE_SYMBOL", "对比代码重复；拒绝静默去重")
     if source_captures is not None:
-        if (not isinstance(source_captures, Mapping)
-                or any(not isinstance(key, str) or not isinstance(value, VipdataEntryCapture)
-                       for key, value in source_captures.items())
-                or not set(normalized).issubset(source_captures)):
-            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获没有覆盖本次对比请求")
-        if any(source_captures[symbol].target_session.isoformat() != target_session
-               for symbol in normalized):
-            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获目标日与本次对比不一致")
+        if (
+            not isinstance(source_captures, Mapping)
+            or any(
+                not isinstance(key, str) or not isinstance(value, VipdataEntryCapture)
+                for key, value in source_captures.items()
+            )
+            or not set(normalized).issubset(source_captures)
+        ):
+            raise ResearchEntryError(
+                "VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获没有覆盖本次对比请求"
+            )
+        if any(
+            source_captures[symbol].target_session.isoformat() != target_session
+            for symbol in normalized
+        ):
+            raise ResearchEntryError(
+                "VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获目标日与本次对比不一致"
+            )
     roots = tuple(source_roots)
     target = _parse_target(target_session)
     started = time.monotonic()
@@ -2328,13 +2995,15 @@ def research_compare(
 
     def mark_not_evaluated(items: Iterable[str], code: str) -> None:
         for symbol in items:
-            results.append({
-                "status": "NOT_EVALUATED",
-                "requested_symbol": symbol,
-                "error_code": code,
-                "message": "全批读取预算已耗尽；该请求保留在分母中且未读取",
-                "read_usage": {"bytes": 0, "records": 0},
-            })
+            results.append(
+                {
+                    "status": "NOT_EVALUATED",
+                    "requested_symbol": symbol,
+                    "error_code": code,
+                    "message": "全批读取预算已耗尽；该请求保留在分母中且未读取",
+                    "read_usage": {"bytes": 0, "records": 0},
+                }
+            )
 
     def usage_from_error(error: ResearchEntryError | DayReadError) -> tuple[int, int]:
         context = getattr(error, "context", {})
@@ -2358,14 +3027,14 @@ def research_compare(
     for item in normalized:
         stop_code = exhausted_code()
         if stop_code:
-            mark_not_evaluated((item, *normalized[len(results) + 1:]), stop_code)
+            mark_not_evaluated((item, *normalized[len(results) + 1 :]), stop_code)
             break
         remaining_bytes = budget.max_total_bytes - total_bytes
         remaining_records = budget.max_total_records - total_records
         remaining_seconds = budget.max_total_seconds - (time.monotonic() - started)
         if remaining_seconds <= 0:
             stop_code = "MAX_TOTAL_SECONDS_EXCEEDED"
-            mark_not_evaluated((item, *normalized[len(results) + 1:]), stop_code)
+            mark_not_evaluated((item, *normalized[len(results) + 1 :]), stop_code)
             break
         per_symbol_limits = ReadLimits(
             min(limits.max_bytes, remaining_bytes),
@@ -2382,7 +3051,9 @@ def research_compare(
                 limits=per_symbol_limits,
                 profile_contract=profile_contract,
                 foundation_contract=foundation_contract,
-                vipdata_capture=source_captures.get(item) if source_captures is not None else None,
+                vipdata_capture=source_captures.get(item)
+                if source_captures is not None
+                else None,
             )
             item_bytes = result["source"]["byte_count"]
             item_records = result["source"]["record_count"]
@@ -2410,13 +3081,19 @@ def research_compare(
                 source_record_limit = error.context.get("source_record_limit_bytes", 0)
                 if per_symbol_limits.max_bytes < limits.max_bytes and (
                     item_bytes >= per_symbol_limits.max_bytes
-                    or (type(source_size) is int and source_size > per_symbol_limits.max_bytes)
+                    or (
+                        type(source_size) is int
+                        and source_size > per_symbol_limits.max_bytes
+                    )
                 ):
                     global_limit_code = "MAX_TOTAL_BYTES_EXCEEDED"
                 elif per_symbol_limits.max_records < limits.max_records and (
                     item_records >= per_symbol_limits.max_records
-                    or (type(source_record_limit) is int and type(source_size) is int
-                        and source_size > source_record_limit)
+                    or (
+                        type(source_record_limit) is int
+                        and type(source_size) is int
+                        and source_size > source_record_limit
+                    )
                 ):
                     global_limit_code = "MAX_TOTAL_RECORDS_EXCEEDED"
             elif isinstance(error, DayReadError) and error.code == "READ_TIMEOUT":
@@ -2434,7 +3111,7 @@ def research_compare(
                 stop_code = global_limit_code
             results.append(result)
         if stop_code:
-            remaining = normalized[len(results):]
+            remaining = normalized[len(results) :]
             mark_not_evaluated(remaining, stop_code)
             break
     available = sum(item["status"] == "AVAILABLE" for item in results)
@@ -2477,8 +3154,10 @@ def research_compare(
             "not_evaluated": not_evaluated,
             "unknown": sum(
                 item.get("status") == "PARTIAL_UNKNOWN"
-                or (item.get("status") not in ("FAILED", "NOT_EVALUATED")
-                    and item.get("identity", {}).get("status") != "RESOLVED")
+                or (
+                    item.get("status") not in ("FAILED", "NOT_EVALUATED")
+                    and item.get("identity", {}).get("status") != "RESOLVED"
+                )
                 for item in results
             ),
             "partial_unknown": unknown_symbols,
@@ -2513,7 +3192,12 @@ def research_compare(
         "comparison_fields": {
             name: {
                 item["requested_symbol"]: item.get("core_fields", {}).get(
-                    name, {"value": None, "quality": "UNKNOWN_DATA", "reason": item.get("error_code", "NOT_AVAILABLE")}
+                    name,
+                    {
+                        "value": None,
+                        "quality": "UNKNOWN_DATA",
+                        "reason": item.get("error_code", "NOT_AVAILABLE"),
+                    },
                 )
                 for item in results
             }
@@ -2549,11 +3233,25 @@ def research_universe_preview(
     if type(offset) is not int or offset < 0:
         raise ResearchEntryError("UNIVERSE_PAGE_INVALID", "分页offset必须为非负整数")
     if type(limit) is not int or not 1 <= limit <= _MAX_UNIVERSE_PAGE_SIZE:
-        raise ResearchEntryError("UNIVERSE_PAGE_INVALID", f"每页limit必须为1至{_MAX_UNIVERSE_PAGE_SIZE}只")
-    if not isinstance(market_filter, str) or market_filter.upper() not in {"ALL", "SH", "SZ"}:
-        raise ResearchEntryError("UNIVERSE_FILTER_INVALID", "market过滤只接受ALL、SH或SZ")
-    if not isinstance(board_filter, str) or board_filter.upper() not in {"ALL", "MAIN_BOARD", "GEM"}:
-        raise ResearchEntryError("UNIVERSE_FILTER_INVALID", "board过滤只接受ALL、MAIN_BOARD或GEM")
+        raise ResearchEntryError(
+            "UNIVERSE_PAGE_INVALID", f"每页limit必须为1至{_MAX_UNIVERSE_PAGE_SIZE}只"
+        )
+    if not isinstance(market_filter, str) or market_filter.upper() not in {
+        "ALL",
+        "SH",
+        "SZ",
+    }:
+        raise ResearchEntryError(
+            "UNIVERSE_FILTER_INVALID", "market过滤只接受ALL、SH或SZ"
+        )
+    if not isinstance(board_filter, str) or board_filter.upper() not in {
+        "ALL",
+        "MAIN_BOARD",
+        "GEM",
+    }:
+        raise ResearchEntryError(
+            "UNIVERSE_FILTER_INVALID", "board过滤只接受ALL、MAIN_BOARD或GEM"
+        )
     market_filter = market_filter.upper()
     board_filter = board_filter.upper()
     discovery_budget = discovery_budget or UniverseDiscoveryBudget()
@@ -2566,40 +3264,66 @@ def research_universe_preview(
     try:
         roots = tuple(source_roots)
     except TypeError as error:
-        raise ResearchEntryError("SOURCE_PATH_INVALID", "source_roots必须是根路径序列") from error
+        raise ResearchEntryError(
+            "SOURCE_PATH_INVALID", "source_roots必须是根路径序列"
+        ) from error
     if source_target_quality_report is not None:
         if not isinstance(source_target_quality_report, VipdataTargetQualityReport):
-            raise ResearchEntryError("VIPDATA_QUALITY_REPORT_INVALID", "目标日来源质量报告类型无效")
+            raise ResearchEntryError(
+                "VIPDATA_QUALITY_REPORT_INVALID", "目标日来源质量报告类型无效"
+            )
 
     if source_candidate_pool is None:
-        if source_candidate_catalog is not None or source_captures is not None or source_target_quality_report is not None:
-            raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "候选目录摘要必须与候选池同时提供")
+        if (
+            source_candidate_catalog is not None
+            or source_captures is not None
+            or source_target_quality_report is not None
+        ):
+            raise ResearchEntryError(
+                "UNIVERSE_CANDIDATE_OVERRIDE_INVALID",
+                "候选目录摘要必须与候选池同时提供",
+            )
         candidates, catalog = _discover_source_candidates(roots, discovery_budget)
     else:
-        if (not isinstance(source_candidate_catalog, Mapping)
-                or (not roots and source_captures is None and source_target_quality_report is None)):
-            raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "显式候选池必须绑定来源根和目录摘要")
+        if not isinstance(source_candidate_catalog, Mapping) or (
+            not roots
+            and source_captures is None
+            and source_target_quality_report is None
+        ):
+            raise ResearchEntryError(
+                "UNIVERSE_CANDIDATE_OVERRIDE_INVALID",
+                "显式候选池必须绑定来源根和目录摘要",
+            )
         try:
             candidates = tuple(dict(item) for item in source_candidate_pool)
         except (TypeError, ValueError) as error:
-            raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "显式候选池格式无效") from error
-        if (source_candidate_catalog.get("complete") is not True
-                or source_candidate_catalog.get("candidate_count") != len(candidates)
-                or any(not isinstance(item.get("symbol"), str)
-                       or item.get("market") not in {"SH", "SZ"}
-                       or item.get("board") not in {"MAIN_BOARD", "GEM"}
-                       for item in candidates)
-                or len({item["symbol"] for item in candidates}) != len(candidates)):
-            raise ResearchEntryError("UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "显式候选池与目录摘要不一致")
+            raise ResearchEntryError(
+                "UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "显式候选池格式无效"
+            ) from error
+        if (
+            source_candidate_catalog.get("complete") is not True
+            or source_candidate_catalog.get("candidate_count") != len(candidates)
+            or any(
+                not isinstance(item.get("symbol"), str)
+                or item.get("market") not in {"SH", "SZ"}
+                or item.get("board") not in {"MAIN_BOARD", "GEM"}
+                for item in candidates
+            )
+            or len({item["symbol"] for item in candidates}) != len(candidates)
+        ):
+            raise ResearchEntryError(
+                "UNIVERSE_CANDIDATE_OVERRIDE_INVALID", "显式候选池与目录摘要不一致"
+            )
         candidates = tuple(sorted(candidates, key=lambda item: item["symbol"]))
         catalog = dict(source_candidate_catalog)
     selected = tuple(
-        candidate for candidate in candidates
+        candidate
+        for candidate in candidates
         if (market_filter == "ALL" or candidate["market"] == market_filter)
         and (board_filter == "ALL" or candidate["board"] == board_filter)
     )
     candidate_total = len(selected)
-    page_candidates = selected[offset:offset + limit]
+    page_candidates = selected[offset : offset + limit]
     candidate_by_symbol = {item["symbol"]: item for item in page_candidates}
     quality_by_symbol: dict[str, Any] = {}
     if source_target_quality_report is not None:
@@ -2609,66 +3333,105 @@ def research_universe_preview(
         source_symbols = {item["symbol"] for item in candidates}
         report_counts = {
             status: sum(item.status == status for item in report_rows)
-            for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED", "NOT_EVALUATED")
+            for status in (
+                "TARGET_PRESENT",
+                "TARGET_MISSING",
+                "READ_FAILED",
+                "NOT_EVALUATED",
+            )
         }
-        if (report.target_session != target
-                or report.package_sha256 != catalog.get("source_package_sha256")
-                or report.package_id != catalog.get("source_package_id")
-                or report.candidate_total != len(candidates)
-                or len(report_rows) != len(candidates)
-                or set(report_symbols) != source_symbols
-                or len(report_symbols) != len(set(report_symbols))
-                or report_counts["TARGET_PRESENT"] != report.target_present
-                or report_counts["TARGET_MISSING"] != report.target_missing
-                or report_counts["READ_FAILED"] != report.read_failed
-                or report_counts["NOT_EVALUATED"] != report.not_evaluated
-                or report.evaluated != report.target_present + report.target_missing + report.read_failed
-                or report.candidate_total != report.evaluated + report.not_evaluated):
-            raise ResearchEntryError("VIPDATA_QUALITY_REPORT_MISMATCH", "目标日来源质量报告与候选池/目标日/分母不一致")
+        if (
+            report.target_session != target
+            or report.package_sha256 != catalog.get("source_package_sha256")
+            or report.package_id != catalog.get("source_package_id")
+            or report.candidate_total != len(candidates)
+            or len(report_rows) != len(candidates)
+            or set(report_symbols) != source_symbols
+            or len(report_symbols) != len(set(report_symbols))
+            or report_counts["TARGET_PRESENT"] != report.target_present
+            or report_counts["TARGET_MISSING"] != report.target_missing
+            or report_counts["READ_FAILED"] != report.read_failed
+            or report_counts["NOT_EVALUATED"] != report.not_evaluated
+            or report.evaluated
+            != report.target_present + report.target_missing + report.read_failed
+            or report.candidate_total != report.evaluated + report.not_evaluated
+        ):
+            raise ResearchEntryError(
+                "VIPDATA_QUALITY_REPORT_MISMATCH",
+                "目标日来源质量报告与候选池/目标日/分母不一致",
+            )
         quality_by_symbol = {item.symbol: item for item in report_rows}
         source_candidate_by_symbol = {item["symbol"]: item for item in candidates}
         if any(
             symbol not in source_symbols
-            or quality_by_symbol[symbol].status not in {"TARGET_PRESENT", "TARGET_MISSING"}
+            or quality_by_symbol[symbol].status
+            not in {"TARGET_PRESENT", "TARGET_MISSING"}
             or source_candidate_by_symbol[symbol].get("empty_placeholder") is True
             for symbol in report.consumer_captures
         ):
-            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "来源质量报告保留了不属于可读取候选的Capture")
+            raise ResearchEntryError(
+                "VIPDATA_CAPTURE_MISMATCH",
+                "来源质量报告保留了不属于可读取候选的Capture",
+            )
         if source_captures is None:
             page_symbols = {item["symbol"] for item in page_candidates}
             source_captures = {
-                symbol: capture for symbol, capture in report.consumer_captures.items()
+                symbol: capture
+                for symbol, capture in report.consumer_captures.items()
                 if symbol in page_symbols
             }
         expected_captures = {
-            item["symbol"] for item in page_candidates
+            item["symbol"]
+            for item in page_candidates
             if item.get("empty_placeholder") is not True
-            and quality_by_symbol[item["symbol"]].status in {"TARGET_PRESENT", "TARGET_MISSING"}
+            and quality_by_symbol[item["symbol"]].status
+            in {"TARGET_PRESENT", "TARGET_MISSING"}
         }
         if set(source_captures) != expected_captures:
-            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "同一扫描交给分页消费者的Capture未精确覆盖可读取本页候选")
+            raise ResearchEntryError(
+                "VIPDATA_CAPTURE_MISMATCH",
+                "同一扫描交给分页消费者的Capture未精确覆盖可读取本页候选",
+            )
 
     scannable_candidates = tuple(
-        item for item in page_candidates
+        item
+        for item in page_candidates
         if item.get("empty_placeholder") is not True
-        and (not quality_by_symbol or quality_by_symbol[item["symbol"]].status in {"TARGET_PRESENT", "TARGET_MISSING"})
+        and (
+            not quality_by_symbol
+            or quality_by_symbol[item["symbol"]].status
+            in {"TARGET_PRESENT", "TARGET_MISSING"}
+        )
     )
     if source_captures is not None:
         if not isinstance(source_captures, Mapping):
-            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获必须是按代码索引的映射")
+            raise ResearchEntryError(
+                "VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获必须是按代码索引的映射"
+            )
         if set(source_captures) != {item["symbol"] for item in scannable_candidates}:
-            raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获未精确覆盖本页非空条目")
+            raise ResearchEntryError(
+                "VIPDATA_CAPTURE_MISMATCH", "官网ZIP来源捕获未精确覆盖本页非空条目"
+            )
         for candidate in scannable_candidates:
             symbol = candidate["symbol"]
             capture = source_captures.get(symbol)
-            source_ref = capture.capture.source_package_entry if isinstance(capture, VipdataEntryCapture) else None
-            if (not isinstance(capture, VipdataEntryCapture)
-                    or capture.target_session != target
-                    or capture.source_symbol != symbol
-                    or source_ref is None
-                    or source_ref.package_sha256 != catalog.get("source_package_sha256")
-                    or source_ref.zip_entry_path != candidate.get("zip_entry_path")):
-                raise ResearchEntryError("VIPDATA_CAPTURE_MISMATCH", "ZIP候选页与Capture的包/条目/目标日身份不一致")
+            source_ref = (
+                capture.capture.source_package_entry
+                if isinstance(capture, VipdataEntryCapture)
+                else None
+            )
+            if (
+                not isinstance(capture, VipdataEntryCapture)
+                or capture.target_session != target
+                or capture.source_symbol != symbol
+                or source_ref is None
+                or source_ref.package_sha256 != catalog.get("source_package_sha256")
+                or source_ref.zip_entry_path != candidate.get("zip_entry_path")
+            ):
+                raise ResearchEntryError(
+                    "VIPDATA_CAPTURE_MISMATCH",
+                    "ZIP候选页与Capture的包/条目/目标日身份不一致",
+                )
     page_results: list[dict[str, Any]] = []
     total_bytes = 0
     total_records = 0
@@ -2676,47 +3439,64 @@ def research_universe_preview(
     next_position = 0
     for candidate in page_candidates:
         if candidate.get("empty_placeholder") is True:
-            page_results.append({
-                "status": "FAILED",
-                "requested_symbol": candidate["symbol"],
-                "error_code": "ZIP_DAY_ENTRY_EMPTY",
-                "message": "官方ZIP将此证券作为零字节占位；未向Core提供行情",
-                "read_usage": {"bytes": 0, "records": 0},
-                "source_candidate": {**candidate, "contract": "TDX_SOURCE_CANDIDATES_NON_PIT"},
-            })
+            page_results.append(
+                {
+                    "status": "FAILED",
+                    "requested_symbol": candidate["symbol"],
+                    "error_code": "ZIP_DAY_ENTRY_EMPTY",
+                    "message": "官方ZIP将此证券作为零字节占位；未向Core提供行情",
+                    "read_usage": {"bytes": 0, "records": 0},
+                    "source_candidate": {
+                        **candidate,
+                        "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
+                    },
+                }
+            )
         elif quality_by_symbol:
             quality = quality_by_symbol[candidate["symbol"]]
             if quality.status in {"READ_FAILED", "NOT_EVALUATED"}:
-                page_results.append({
-                    "status": "FAILED" if quality.status == "READ_FAILED" else "NOT_EVALUATED",
-                    "requested_symbol": candidate["symbol"],
-                    "target_bar_present": None,
-                    "source_bar_status": quality.status,
-                    "source_bar_reason": quality.reason,
-                    "error_code": quality.reason,
-                    "message": (
-                        "VIPDATA条目读取失败；未向Core提供行情"
+                page_results.append(
+                    {
+                        "status": "FAILED"
                         if quality.status == "READ_FAILED"
-                        else "来源候选保留在全市场分母中，但本次目标日预算未评价"
-                    ),
-                    "read_usage": {"bytes": quality.bytes_read, "records": quality.record_count},
-                    "source_candidate": {**candidate, "contract": "TDX_SOURCE_CANDIDATES_NON_PIT"},
-                })
+                        else "NOT_EVALUATED",
+                        "requested_symbol": candidate["symbol"],
+                        "target_bar_present": None,
+                        "source_bar_status": quality.status,
+                        "source_bar_reason": quality.reason,
+                        "error_code": quality.reason,
+                        "message": (
+                            "VIPDATA条目读取失败；未向Core提供行情"
+                            if quality.status == "READ_FAILED"
+                            else "来源候选保留在全市场分母中，但本次目标日预算未评价"
+                        ),
+                        "read_usage": {
+                            "bytes": quality.bytes_read,
+                            "records": quality.record_count,
+                        },
+                        "source_candidate": {
+                            **candidate,
+                            "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
+                        },
+                    }
+                )
 
     def mark_page_not_evaluated(symbols: Iterable[str], code: str) -> None:
         for symbol in symbols:
             candidate = candidate_by_symbol[symbol]
-            page_results.append({
-                "status": "NOT_EVALUATED",
-                "requested_symbol": symbol,
-                "error_code": code,
-                "message": "本页累计读取预算耗尽；对象保留在分页分母且未扫描",
-                "read_usage": {"bytes": 0, "records": 0},
-                "source_candidate": {
-                    **candidate,
-                    "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
-                },
-            })
+            page_results.append(
+                {
+                    "status": "NOT_EVALUATED",
+                    "requested_symbol": symbol,
+                    "error_code": code,
+                    "message": "本页累计读取预算耗尽；对象保留在分页分母且未扫描",
+                    "read_usage": {"bytes": 0, "records": 0},
+                    "source_candidate": {
+                        **candidate,
+                        "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
+                    },
+                }
+            )
 
     while next_position < len(scannable_candidates):
         elapsed = time.monotonic() - started
@@ -2731,11 +3511,14 @@ def research_universe_preview(
             stop_code = "MAX_TOTAL_RECORDS_EXCEEDED"
         if stop_code is not None:
             mark_page_not_evaluated(
-                (item["symbol"] for item in scannable_candidates[next_position:]), stop_code
+                (item["symbol"] for item in scannable_candidates[next_position:]),
+                stop_code,
             )
             break
 
-        chunk_candidates = scannable_candidates[next_position:next_position + _MAX_COMPARE_SYMBOLS]
+        chunk_candidates = scannable_candidates[
+            next_position : next_position + _MAX_COMPARE_SYMBOLS
+        ]
         chunk = research_compare(
             symbols=tuple(item["symbol"] for item in chunk_candidates),
             target_session=target.isoformat(),
@@ -2746,15 +3529,22 @@ def research_universe_preview(
             profile_contract=profile_contract,
             foundation_contract=foundation_contract,
             source_captures=(
-                {item["symbol"]: source_captures[item["symbol"]] for item in chunk_candidates}
-                if source_captures is not None else None
+                {
+                    item["symbol"]: source_captures[item["symbol"]]
+                    for item in chunk_candidates
+                }
+                if source_captures is not None
+                else None
             ),
         )
         total_bytes += chunk["budget"]["used_bytes"]
         total_records += chunk["budget"]["used_records"]
         for result in chunk["results"]:
             candidate = candidate_by_symbol[result["requested_symbol"]]
-            if candidate.get("empty_placeholder") is True and result.get("status") == "FAILED":
+            if (
+                candidate.get("empty_placeholder") is True
+                and result.get("status") == "FAILED"
+            ):
                 result["error_code"] = "ZIP_DAY_ENTRY_EMPTY"
                 result["message"] = "官方ZIP将此证券作为零字节占位；未向Core提供行情"
             result["source_candidate"] = {
@@ -2766,7 +3556,8 @@ def research_universe_preview(
         stop_code = chunk["budget"]["exhausted_by"]
         if stop_code is not None and next_position < len(scannable_candidates):
             mark_page_not_evaluated(
-                (item["symbol"] for item in scannable_candidates[next_position:]), stop_code
+                (item["symbol"] for item in scannable_candidates[next_position:]),
+                stop_code,
             )
             break
 
@@ -2782,7 +3573,9 @@ def research_universe_preview(
 
     available = sum(item.get("status") == "AVAILABLE" for item in page_results)
     failed = sum(item.get("status") == "FAILED" for item in page_results)
-    partial_unknown = sum(item.get("status") == "PARTIAL_UNKNOWN" for item in page_results)
+    partial_unknown = sum(
+        item.get("status") == "PARTIAL_UNKNOWN" for item in page_results
+    )
     not_evaluated = sum(item.get("status") == "NOT_EVALUATED" for item in page_results)
     classified = available + failed + partial_unknown + not_evaluated
     if classified != len(page_candidates):
@@ -2794,7 +3587,11 @@ def research_universe_preview(
 
     profile_preview_denominators: dict[str, Any] | None = None
     if profile_contract is not None:
-        preview_results = [item for item in page_results if isinstance(item.get("profile_preview"), dict)]
+        preview_results = [
+            item
+            for item in page_results
+            if isinstance(item.get("profile_preview"), dict)
+        ]
         component_counts = {
             "total": 0,
             "evaluated": 0,
@@ -2815,7 +3612,8 @@ def research_universe_preview(
             "objects_failed": failed,
             "objects_not_evaluated": not_evaluated,
             "objects_without_profile_preview": failed + not_evaluated,
-            "object_partition_complete": len(preview_results) + failed + not_evaluated == len(page_candidates),
+            "object_partition_complete": len(preview_results) + failed + not_evaluated
+            == len(page_candidates),
             "components": component_counts,
         }
 
@@ -2826,22 +3624,32 @@ def research_universe_preview(
         fields = observation.get("fields", {})
         positions = fields.get("moving_average_position", {})
         detail_arguments = [
-            "research-stock", candidate["symbol"],
-            "--target-session", target.isoformat(),
-            "--unit-version", units.version,
+            "research-stock",
+            candidate["symbol"],
+            "--target-session",
+            target.isoformat(),
+            "--unit-version",
+            units.version,
         ]
         if units.amount_to_cny is not None:
             detail_arguments.extend(("--amount-to-cny", str(units.amount_to_cny)))
         if units.volume_to_shares is not None:
             detail_arguments.extend(("--volume-to-shares", str(units.volume_to_shares)))
-        detail_arguments.extend((
-            "--max-bytes", str(limits.max_bytes),
-            "--max-records", str(limits.max_records),
-            "--chunk-records", str(limits.chunk_records),
-            "--max-seconds", str(limits.max_seconds),
-            "--format", "summary",
-            "--include-profile-preview",
-        ))
+        detail_arguments.extend(
+            (
+                "--max-bytes",
+                str(limits.max_bytes),
+                "--max-records",
+                str(limits.max_records),
+                "--chunk-records",
+                str(limits.chunk_records),
+                "--max-seconds",
+                str(limits.max_seconds),
+                "--format",
+                "summary",
+                "--include-profile-preview",
+            )
+        )
         summary_item = {
             "symbol": candidate["symbol"],
             "market": candidate["market"],
@@ -2864,7 +3672,9 @@ def research_universe_preview(
             "close_vs_ma20": positions.get("close_vs_ma20"),
             "raw_availability": item.get("raw_availability"),
             "core_availability": item.get("core_availability"),
-            "source_bar_quality": asdict(quality_by_symbol[candidate["symbol"]]) if candidate["symbol"] in quality_by_symbol else None,
+            "source_bar_quality": asdict(quality_by_symbol[candidate["symbol"]])
+            if candidate["symbol"] in quality_by_symbol
+            else None,
             "foundation_handoff": item.get("foundation_handoff"),
             "basic_fact_dimensions": item.get("basic_fact_dimensions"),
             "availability_explanation": item.get("availability_explanation"),
@@ -2886,8 +3696,15 @@ def research_universe_preview(
                     {
                         key: component[key]
                         for key in (
-                            "field_id", "rule_id", "expression_ref", "status", "quality",
-                            "value", "reason", "missing_inputs", "input_fields",
+                            "field_id",
+                            "rule_id",
+                            "expression_ref",
+                            "status",
+                            "quality",
+                            "value",
+                            "reason",
+                            "missing_inputs",
+                            "input_fields",
                             "production_eligibility",
                         )
                         if key in component
@@ -2897,27 +3714,54 @@ def research_universe_preview(
             }
         short_summary.append(summary_item)
 
-    page_remaining = max(0, candidate_total - min(offset + len(page_candidates), candidate_total))
+    page_remaining = max(
+        0, candidate_total - min(offset + len(page_candidates), candidate_total)
+    )
     evaluated_page = available + failed + partial_unknown
-    status = "COMPLETE_WITH_DISCLOSURES" if failed == 0 and partial_unknown == 0 and not_evaluated == 0 else "PARTIAL"
-    completed_reads = [item for item in page_results if isinstance(item.get("source_last_session"), str)]
+    status = (
+        "COMPLETE_WITH_DISCLOSURES"
+        if failed == 0 and partial_unknown == 0 and not_evaluated == 0
+        else "PARTIAL"
+    )
+    completed_reads = [
+        item
+        for item in page_results
+        if isinstance(item.get("source_last_session"), str)
+    ]
     source_last_session_counts: dict[str, int] = {}
     for item in completed_reads:
         last_session = item["source_last_session"]
-        source_last_session_counts[last_session] = source_last_session_counts.get(last_session, 0) + 1
+        source_last_session_counts[last_session] = (
+            source_last_session_counts.get(last_session, 0) + 1
+        )
     latest_source_session = max(source_last_session_counts, default=None)
     page_coverage_by_market: dict[str, dict[str, int]] = {}
     page_coverage_by_board: dict[str, dict[str, int]] = {}
-    for dimension, key in ((page_coverage_by_market, "market"), (page_coverage_by_board, "board")):
+    for dimension, key in (
+        (page_coverage_by_market, "market"),
+        (page_coverage_by_board, "board"),
+    ):
         for value in sorted({item["source_candidate"][key] for item in page_results}):
-            matching = [item for item in page_results if item["source_candidate"][key] == value]
+            matching = [
+                item for item in page_results if item["source_candidate"][key] == value
+            ]
             dimension[value] = {
                 "candidate_count": len(matching),
-                "evaluated_count": sum(item.get("status") != "NOT_EVALUATED" for item in matching),
-                "not_evaluated_count": sum(item.get("status") == "NOT_EVALUATED" for item in matching),
-                "actual_bar_on_target_count": sum(item.get("target_bar_present") is True for item in matching),
-                "missing_target_bar_count": sum(item.get("target_bar_present") is False for item in matching),
-                "source_read_failed_count": sum(item.get("status") == "FAILED" for item in matching),
+                "evaluated_count": sum(
+                    item.get("status") != "NOT_EVALUATED" for item in matching
+                ),
+                "not_evaluated_count": sum(
+                    item.get("status") == "NOT_EVALUATED" for item in matching
+                ),
+                "actual_bar_on_target_count": sum(
+                    item.get("target_bar_present") is True for item in matching
+                ),
+                "missing_target_bar_count": sum(
+                    item.get("target_bar_present") is False for item in matching
+                ),
+                "source_read_failed_count": sum(
+                    item.get("status") == "FAILED" for item in matching
+                ),
             }
     coverage_summary = {
         "candidate_contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
@@ -2925,8 +3769,12 @@ def research_universe_preview(
         "page_candidate_count": len(page_candidates),
         "evaluated_count": evaluated_page,
         "not_evaluated_count": not_evaluated,
-        "actual_bar_on_target_count": sum(item.get("target_bar_present") is True for item in page_results),
-        "missing_target_bar_count": sum(item.get("target_bar_present") is False for item in page_results),
+        "actual_bar_on_target_count": sum(
+            item.get("target_bar_present") is True for item in page_results
+        ),
+        "missing_target_bar_count": sum(
+            item.get("target_bar_present") is False for item in page_results
+        ),
         "source_read_failed_count": failed,
         "latest_source_session": latest_source_session,
         "latest_source_session_scope": "本页已完整读到EOF并核验句柄的来源文件末条日期最大值；不是全市场正式可得时钟",
@@ -2934,20 +3782,29 @@ def research_universe_preview(
         "by_market": page_coverage_by_market,
         "by_board": page_coverage_by_board,
         "page_partition_complete": classified == len(page_candidates),
-        "filtered_pool_complete": offset == 0 and page_remaining == 0 and not_evaluated == 0,
+        "filtered_pool_complete": offset == 0
+        and page_remaining == 0
+        and not_evaluated == 0,
         "pool_completion_note": "本入口只知道当前页；只有offset=0且单页覆盖完整过滤池时才标true。多页汇总须由调用方确认每一计划页均已实际完成；不代表官方上市总体",
     }
     if quality_by_symbol:
         page_quality_counts = {
             status: sum(
-                quality_by_symbol[item["symbol"]].status == status for item in page_candidates
+                quality_by_symbol[item["symbol"]].status == status
+                for item in page_candidates
             )
-            for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED", "NOT_EVALUATED")
+            for status in (
+                "TARGET_PRESENT",
+                "TARGET_MISSING",
+                "READ_FAILED",
+                "NOT_EVALUATED",
+            )
         }
         coverage_summary["source_target_quality"] = {
             "candidate_total": source_target_quality_report.candidate_total,
             "candidate_partition_complete": source_target_quality_report.candidate_total
-            == source_target_quality_report.evaluated + source_target_quality_report.not_evaluated,
+            == source_target_quality_report.evaluated
+            + source_target_quality_report.not_evaluated,
             "page_status_counts": page_quality_counts,
         }
     result = {
@@ -2973,7 +3830,9 @@ def research_universe_preview(
             "unselected_by_this_page": candidate_total - len(page_candidates),
             "unselected_before_offset": min(offset, candidate_total),
             "remaining_after_page": page_remaining,
-            "not_evaluated_in_filtered_candidate_set": max(0, candidate_total - evaluated_page),
+            "not_evaluated_in_filtered_candidate_set": max(
+                0, candidate_total - evaluated_page
+            ),
         },
         "page": {
             "offset": offset,
@@ -3003,17 +3862,23 @@ def research_universe_preview(
     if source_target_quality_report is not None:
         report = source_target_quality_report
         fast_page_only = any(
-            item.status == "NOT_EVALUATED" and item.reason == "NOT_EVALUATED_FOR_FAST_PAGE"
+            item.status == "NOT_EVALUATED"
+            and item.reason == "NOT_EVALUATED_FOR_FAST_PAGE"
             for item in report.candidates
         )
         reported_quality_candidates = (
-            tuple(item for item in report.candidates if item.symbol in candidate_by_symbol)
-            if fast_page_only else tuple(report.candidates)
+            tuple(
+                item for item in report.candidates if item.symbol in candidate_by_symbol
+            )
+            if fast_page_only
+            else tuple(report.candidates)
         )
         not_evaluated_reason_counts: dict[str, int] = {}
         for item in report.candidates:
             if item.status == "NOT_EVALUATED" and item.reason is not None:
-                not_evaluated_reason_counts[item.reason] = not_evaluated_reason_counts.get(item.reason, 0) + 1
+                not_evaluated_reason_counts[item.reason] = (
+                    not_evaluated_reason_counts.get(item.reason, 0) + 1
+                )
         result["source_target_quality"] = {
             "contract": "TDX_VIPDATA_TARGET_SESSION_SOURCE_QUALITY_NON_PIT_R1",
             "target_session": report.target_session.isoformat(),
@@ -3025,18 +3890,28 @@ def research_universe_preview(
             "target_missing": report.target_missing,
             "read_failed": report.read_failed,
             "not_evaluated": report.not_evaluated,
-            "candidate_partition_complete": report.candidate_total == report.evaluated + report.not_evaluated,
+            "candidate_partition_complete": report.candidate_total
+            == report.evaluated + report.not_evaluated,
             "evaluation_partition_complete": report.evaluated
             == report.target_present + report.target_missing + report.read_failed,
-            "evaluation_mode": "FAST_PAGE_ONLY" if fast_page_only else "FULL_TARGET_QUALITY",
-            "candidate_rows_scope": "REQUESTED_PAGE" if fast_page_only else "FULL_CANDIDATE_POOL",
+            "evaluation_mode": "FAST_PAGE_ONLY"
+            if fast_page_only
+            else "FULL_TARGET_QUALITY",
+            "candidate_rows_scope": "REQUESTED_PAGE"
+            if fast_page_only
+            else "FULL_CANDIDATE_POOL",
             "candidate_rows_returned": len(reported_quality_candidates),
-            "candidate_rows_omitted": report.candidate_total - len(reported_quality_candidates),
-            "not_evaluated_reason_counts": dict(sorted(not_evaluated_reason_counts.items())),
+            "candidate_rows_omitted": report.candidate_total
+            - len(reported_quality_candidates),
+            "not_evaluated_reason_counts": dict(
+                sorted(not_evaluated_reason_counts.items())
+            ),
             "official_valid_listing_denominator": "UNKNOWN_NOT_PROVED_BY_ZIP_FILENAMES",
             "by_market": {key: dict(value) for key, value in report.by_market.items()},
             "by_board": {key: dict(value) for key, value in report.by_board.items()},
-            "field_quality": {key: dict(value) for key, value in report.field_quality.items()},
+            "field_quality": {
+                key: dict(value) for key, value in report.field_quality.items()
+            },
             "pages": [asdict(item) for item in report.pages],
             "candidates": [asdict(item) for item in reported_quality_candidates],
             "read_usage": {
@@ -3054,11 +3929,21 @@ def research_universe_preview(
     return result
 
 
-def _field_from_pg_raw(row: Mapping[str, Any], name: str, quality_column: str,
-                       reason_column: str, *, raw_quality: bool = False) -> FieldValue:
+def _field_from_pg_raw(
+    row: Mapping[str, Any],
+    name: str,
+    quality_column: str,
+    reason_column: str,
+    *,
+    raw_quality: bool = False,
+) -> FieldValue:
     value = row.get(name)
     quality = row.get(quality_column)
-    if quality in ({"RAW_SOURCE_VALUE_OBSERVED", "OBSERVED"} if raw_quality else {"OBSERVED"}) and value is not None:
+    if (
+        quality
+        in ({"RAW_SOURCE_VALUE_OBSERVED", "OBSERVED"} if raw_quality else {"OBSERVED"})
+        and value is not None
+    ):
         return FieldValue(value)
     reason = row.get(reason_column)
     if not isinstance(reason, str) or not reason:
@@ -3079,17 +3964,36 @@ def _decoded_day_from_pg_raw(row: Mapping[str, Any]) -> DecodedDay | None:
     if all(item.quality == "OBSERVED" for item in fields):
         prices = FieldValue(tuple(item.value for item in fields))
     else:
-        prices = unknown(next((item.reason for item in fields if item.quality != "OBSERVED"), "PRICE_QUALITY_UNKNOWN"))
+        prices = unknown(
+            next(
+                (item.reason for item in fields if item.quality != "OBSERVED"),
+                "PRICE_QUALITY_UNKNOWN",
+            )
+        )
     raw_amount = _field_from_pg_raw(
-        row, "raw_amount", "raw_amount_quality", "raw_amount_reason", raw_quality=True,
+        row,
+        "raw_amount",
+        "raw_amount_quality",
+        "raw_amount_reason",
+        raw_quality=True,
     )
     raw_volume = _field_from_pg_raw(
-        row, "raw_volume", "raw_volume_quality", "raw_volume_reason", raw_quality=True,
+        row,
+        "raw_volume",
+        "raw_volume_quality",
+        "raw_volume_reason",
+        raw_quality=True,
     )
-    amount = (unknown("UNIT_AUTHORITY_NOT_VERIFIED") if raw_amount.quality == "OBSERVED"
-              else unknown(raw_amount.reason or "DATA_INVALID_AMOUNT"))
-    volume = (unknown("UNIT_AUTHORITY_NOT_VERIFIED") if raw_volume.quality == "OBSERVED"
-              else unknown(raw_volume.reason or "DATA_INVALID_VOLUME"))
+    amount = (
+        unknown("UNIT_AUTHORITY_NOT_VERIFIED")
+        if raw_amount.quality == "OBSERVED"
+        else unknown(raw_amount.reason or "DATA_INVALID_AMOUNT")
+    )
+    volume = (
+        unknown("UNIT_AUTHORITY_NOT_VERIFIED")
+        if raw_volume.quality == "OBSERVED"
+        else unknown(raw_volume.reason or "DATA_INVALID_VOLUME")
+    )
     return DecodedDay(
         session_date=session,
         prices=prices,
@@ -3119,25 +4023,44 @@ def research_stock_pg_history_preview(
     """把明确PG Raw窗口适配至现役Core和Profile11研究预览。"""
     target = _parse_target(target_session)
     normalized = _normalize_symbol(symbol)[0]
-    if (not isinstance(package_sha256, str) or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
-            or not isinstance(namespace_id, str) or not namespace_id):
-        raise ResearchEntryError("PG_HISTORY_BINDING_INVALID", "PG历史预览缺少包SHA或namespace身份")
-    calendar_payload, calendar_metadata, calendar_revision, all_calendar_sessions = _load_calendar(target)
+    if (
+        not isinstance(package_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
+        or not isinstance(namespace_id, str)
+        or not namespace_id
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_BINDING_INVALID", "PG历史预览缺少包SHA或namespace身份"
+        )
+    calendar_payload, calendar_metadata, calendar_revision, all_calendar_sessions = (
+        _load_calendar(target)
+    )
     coverage_context = calendar_metadata[-1]["coverage_context"]
     expected_sessions = tuple(session_dates)
-    if (not expected_sessions or len(expected_sessions) > 75
-            or any(type(day) is not date for day in expected_sessions)
-            or tuple(sorted(set(expected_sessions))) != expected_sessions
-            or expected_sessions[-1] != target
-            or any(day not in all_calendar_sessions for day in expected_sessions)):
-        raise ResearchEntryError("PG_HISTORY_CALENDAR_INVALID", "PG历史窗口未与版本化官方日历严格绑定")
-    official_window = tuple(day for day in all_calendar_sessions if expected_sessions[0] <= day <= target)
+    if (
+        not expected_sessions
+        or len(expected_sessions) > 75
+        or any(type(day) is not date for day in expected_sessions)
+        or tuple(sorted(set(expected_sessions))) != expected_sessions
+        or expected_sessions[-1] != target
+        or any(day not in all_calendar_sessions for day in expected_sessions)
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_CALENDAR_INVALID", "PG历史窗口未与版本化官方日历严格绑定"
+        )
+    official_window = tuple(
+        day for day in all_calendar_sessions if expected_sessions[0] <= day <= target
+    )
     if expected_sessions != official_window:
-        raise ResearchEntryError("CALENDAR_SESSION_GAP", "PG历史窗口遗漏版本化官方日历中的交易会话")
+        raise ResearchEntryError(
+            "CALENDAR_SESSION_GAP", "PG历史窗口遗漏版本化官方日历中的交易会话"
+        )
 
     rows = tuple(history_rows)
     if len(rows) != len(expected_sessions):
-        missing = sorted(set(expected_sessions) - {row.get("session_date") for row in rows})
+        missing = sorted(
+            set(expected_sessions) - {row.get("session_date") for row in rows}
+        )
         return {
             "ok": False,
             "status": "HISTORY_WINDOW_INCOMPLETE",
@@ -3148,11 +4071,19 @@ def research_stock_pg_history_preview(
             "expected_session_count": len(expected_sessions),
             "actual_session_count": len(rows),
         }
-    if any(row.get("source_symbol") != normalized or row.get("package_sha256") != package_sha256
-           or row.get("namespace_id") != namespace_id for row in rows):
-        raise ResearchEntryError("PG_HISTORY_REVISION_MISMATCH", "PG历史行混入不同来源代码、包SHA或namespace")
+    if any(
+        row.get("source_symbol") != normalized
+        or row.get("package_sha256") != package_sha256
+        or row.get("namespace_id") != namespace_id
+        for row in rows
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_REVISION_MISMATCH", "PG历史行混入不同来源代码、包SHA或namespace"
+        )
     if tuple(row.get("session_date") for row in rows) != expected_sessions:
-        raise ResearchEntryError("PG_HISTORY_SESSION_ORDER_INVALID", "PG历史行会话与请求日历序列不一致")
+        raise ResearchEntryError(
+            "PG_HISTORY_SESSION_ORDER_INVALID", "PG历史行会话与请求日历序列不一致"
+        )
 
     target_row = rows[-1]
     target_bar = _decoded_day_from_pg_raw(target_row)
@@ -3175,32 +4106,45 @@ def research_stock_pg_history_preview(
         if state == "TARGET_PRESENT":
             decoded = _decoded_day_from_pg_raw(row)
             assert decoded is not None
-            history.append(CoreObservation(
-                session=row["session_date"],
-                state="ACTUAL",
-                coordinate_id=coordinate_id,
-                open=decoded.raw_open,
-                high=decoded.raw_high,
-                low=decoded.raw_low,
-                close=decoded.raw_close,
-                amount=decoded.amount,
-                volume=decoded.volume,
-            ))
+            history.append(
+                CoreObservation(
+                    session=row["session_date"],
+                    state="ACTUAL",
+                    coordinate_id=coordinate_id,
+                    open=decoded.raw_open,
+                    high=decoded.raw_high,
+                    low=decoded.raw_low,
+                    close=decoded.raw_close,
+                    amount=decoded.amount,
+                    volume=decoded.volume,
+                )
+            )
         elif state in {"TARGET_MISSING", "READ_FAILED"}:
             reason = row.get("bar_reason") or (
-                "TARGET_SESSION_BAR_MISSING" if state == "TARGET_MISSING" else "SOURCE_ENTRY_READ_FAILED"
+                "TARGET_SESSION_BAR_MISSING"
+                if state == "TARGET_MISSING"
+                else "SOURCE_ENTRY_READ_FAILED"
             )
-            history.append(CoreObservation(
-                session=row["session_date"],
-                state="UNKNOWN",
-                open=unknown(reason), high=unknown(reason), low=unknown(reason), close=unknown(reason),
-                amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-                volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
-            ))
+            history.append(
+                CoreObservation(
+                    session=row["session_date"],
+                    state="UNKNOWN",
+                    open=unknown(reason),
+                    high=unknown(reason),
+                    low=unknown(reason),
+                    close=unknown(reason),
+                    amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+                    volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+                )
+            )
         else:
-            raise ResearchEntryError("PG_HISTORY_STATUS_INVALID", "PG历史行含未登记的Raw来源状态")
+            raise ResearchEntryError(
+                "PG_HISTORY_STATUS_INVALID", "PG历史行含未登记的Raw来源状态"
+            )
     if sum(status_counts.values()) != len(expected_sessions):
-        raise ResearchEntryError("PG_HISTORY_PARTITION_INCOMPLETE", "PG历史目标行状态分母未闭合")
+        raise ResearchEntryError(
+            "PG_HISTORY_PARTITION_INCOMPLETE", "PG历史目标行状态分母未闭合"
+        )
 
     bounded_calendar = MarketSessionCalendar(
         calendar_id=calendar_payload["calendar_id"],
@@ -3216,24 +4160,38 @@ def research_stock_pg_history_preview(
             reason = value.reason or "UNKNOWN_REASON_NOT_PROVIDED"
             unknown_reasons[reason] = unknown_reasons.get(reason, 0) + 1
     if len(core) != 43:
-        raise ResearchEntryError("PG_CORE_FIELD_COUNT_INVALID", f"Core现役字段数异常：{len(core)}")
+        raise ResearchEntryError(
+            "PG_CORE_FIELD_COUNT_INVALID", f"Core现役字段数异常：{len(core)}"
+        )
 
-    entry_shas = sorted({row.get("source_entry_sha256") for row in rows if row.get("source_entry_sha256")})
+    entry_shas = sorted(
+        {
+            row.get("source_entry_sha256")
+            for row in rows
+            if row.get("source_entry_sha256")
+        }
+    )
     if len(entry_shas) > 1:
-        raise ResearchEntryError("PG_HISTORY_ENTRY_SHA_CONFLICT", "同包同来源代码的跨日条目SHA不一致")
+        raise ResearchEntryError(
+            "PG_HISTORY_ENTRY_SHA_CONFLICT", "同包同来源代码的跨日条目SHA不一致"
+        )
     captures_by_session = []
     for row in rows:
-        captures_by_session.append({
-            "session_date": row["session_date"].isoformat(),
-            "source_capture_id": row["source_capture_id"],
-            "capture_digest": row["capture_digest"],
-            "capture_read_started_at": row["capture_read_started_at"].isoformat(),
-            "capture_validated_at": row["capture_validated_at"].isoformat(),
-            "capture_normalized_count": row["capture_normalized_count"],
-            "source_entry_sha256": row.get("source_entry_sha256"),
-        })
+        captures_by_session.append(
+            {
+                "session_date": row["session_date"].isoformat(),
+                "source_capture_id": row["source_capture_id"],
+                "capture_digest": row["capture_digest"],
+                "capture_read_started_at": row["capture_read_started_at"].isoformat(),
+                "capture_validated_at": row["capture_validated_at"].isoformat(),
+                "capture_normalized_count": row["capture_normalized_count"],
+                "source_entry_sha256": row.get("source_entry_sha256"),
+            }
+        )
 
-    source_snapshot_id = f"STOCK_A_PG_RAW_HISTORY:{namespace_id}:{package_sha256}:{target.isoformat()}"
+    source_snapshot_id = (
+        f"STOCK_A_PG_RAW_HISTORY:{namespace_id}:{package_sha256}:{target.isoformat()}"
+    )
     profile_preview = _build_profile_preview(
         symbol=normalized,
         target_session=target,
@@ -3249,7 +4207,9 @@ def research_stock_pg_history_preview(
     )
     profile_components = profile_preview.get("components", [])
     if len(profile_components) != 11:
-        raise ResearchEntryError("PG_PROFILE_RULE_COUNT_INVALID", "Profile现役规则数异常")
+        raise ResearchEntryError(
+            "PG_PROFILE_RULE_COUNT_INVALID", "Profile现役规则数异常"
+        )
     actual_bars = status_counts["TARGET_PRESENT"]
     gaps = status_counts["TARGET_MISSING"] + status_counts["READ_FAILED"]
     return {
@@ -3287,23 +4247,36 @@ def research_stock_pg_history_preview(
             "gap_count": gaps,
             "session_status_counts": status_counts,
             "unknown_session_dates": [
-                row["session_date"].isoformat() for row in rows if row["bar_status"] != "TARGET_PRESENT"
+                row["session_date"].isoformat()
+                for row in rows
+                if row["bar_status"] != "TARGET_PRESENT"
             ],
             "future_session_rows_used": 0,
         },
-        "raw": _render_raw(target_bar, UnitContract("TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1", None, None)),
+        "raw": _render_raw(
+            target_bar,
+            UnitContract("TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1", None, None),
+        ),
         "quality": {
             "price_quality_counts": dict(sorted(price_quality_counts.items())),
-            "raw_amount_quality_counts": dict(sorted(raw_amount_quality_counts.items())),
-            "raw_volume_quality_counts": dict(sorted(raw_volume_quality_counts.items())),
+            "raw_amount_quality_counts": dict(
+                sorted(raw_amount_quality_counts.items())
+            ),
+            "raw_volume_quality_counts": dict(
+                sorted(raw_volume_quality_counts.items())
+            ),
             "amount_unit_status": "UNIT_UNVERIFIED",
             "volume_unit_status": "UNIT_UNVERIFIED",
             "unit_dependent_core_reason": "UNIT_AUTHORITY_NOT_VERIFIED",
         },
         "core": {
             "field_count": len(core),
-            "unknown_count": sum(value.quality != "OBSERVED" for value in core.values()),
-            "unknown_field_count": sum(value.quality != "OBSERVED" for value in core.values()),
+            "unknown_count": sum(
+                value.quality != "OBSERVED" for value in core.values()
+            ),
+            "unknown_field_count": sum(
+                value.quality != "OBSERVED" for value in core.values()
+            ),
             "unknown_reason_counts": dict(sorted(unknown_reasons.items())),
             "fields": rendered_core,
         },
@@ -3332,12 +4305,14 @@ def research_universe_pg_history_preview(
     for candidate in page.get("candidates", ()):
         symbol = candidate["source_symbol"]
         if not candidate["history_complete"]:
-            results.append({
-                "symbol": symbol,
-                "status": "HISTORY_WINDOW_INCOMPLETE",
-                "reason": "PG_HISTORY_SESSION_MISSING",
-                "missing_sessions": candidate["missing_sessions"],
-            })
+            results.append(
+                {
+                    "symbol": symbol,
+                    "status": "HISTORY_WINDOW_INCOMPLETE",
+                    "reason": "PG_HISTORY_SESSION_MISSING",
+                    "missing_sessions": candidate["missing_sessions"],
+                }
+            )
             continue
         preview = research_stock_pg_history_preview(
             symbol=symbol,
@@ -3354,36 +4329,54 @@ def research_universe_pg_history_preview(
         profile_unavailable = []
         for component in components:
             status = str(component.get("status", "UNKNOWN"))
-            quality = str(component.get("quality", status)) if status == "EVALUATED" else status
+            quality = (
+                str(component.get("quality", status))
+                if status == "EVALUATED"
+                else status
+            )
             profile_status_counts[quality] = profile_status_counts.get(quality, 0) + 1
             if quality != "OBSERVED":
-                profile_unavailable.append({
-                    "field_id": component.get("field_id"),
-                    "status": status,
-                    "quality": component.get("quality"),
-                    "reason": component.get("reason"),
-                })
+                profile_unavailable.append(
+                    {
+                        "field_id": component.get("field_id"),
+                        "status": status,
+                        "quality": component.get("quality"),
+                        "reason": component.get("reason"),
+                    }
+                )
         selected_fields = {
             name: fields[name]
             for name in (
-                "core.ma20", "core.ma60", "core.atr20", "core.ret20", "core.pos60",
+                "core.ma20",
+                "core.ma60",
+                "core.atr20",
+                "core.ret20",
+                "core.pos60",
             )
             if name in fields
         }
-        results.append({
-            "symbol": symbol,
-            "status": preview.get("status"),
-            "identity_status": preview.get("identity_status"),
-            "pit_status": preview.get("pit_status"),
-            "window": preview.get("window"),
-            "price_quality_counts": preview.get("quality", {}).get("price_quality_counts"),
-            "core_price_fields": selected_fields,
-            "core_unknown_field_count": preview.get("core", {}).get("unknown_field_count"),
-            "core_unknown_reason_counts": preview.get("core", {}).get("unknown_reason_counts"),
-            "profile_rule_count": len(components),
-            "profile_status_counts": dict(sorted(profile_status_counts.items())),
-            "profile_unavailable": profile_unavailable,
-        })
+        results.append(
+            {
+                "symbol": symbol,
+                "status": preview.get("status"),
+                "identity_status": preview.get("identity_status"),
+                "pit_status": preview.get("pit_status"),
+                "window": preview.get("window"),
+                "price_quality_counts": preview.get("quality", {}).get(
+                    "price_quality_counts"
+                ),
+                "core_price_fields": selected_fields,
+                "core_unknown_field_count": preview.get("core", {}).get(
+                    "unknown_field_count"
+                ),
+                "core_unknown_reason_counts": preview.get("core", {}).get(
+                    "unknown_reason_counts"
+                ),
+                "profile_rule_count": len(components),
+                "profile_status_counts": dict(sorted(profile_status_counts.items())),
+                "profile_unavailable": profile_unavailable,
+            }
+        )
     return {
         "ok": True,
         "contract": "STOCK_A_PG_SOURCE_SYMBOL_UNIVERSE_CORE_PROFILE_PREVIEW_R1",

@@ -1,4 +1,5 @@
 """绑定显式来源根并以Windows只读句柄扫描TDX日线文件。"""
+
 from __future__ import annotations
 
 import ctypes
@@ -113,7 +114,9 @@ def _path_value(value: object, label: str) -> Path:
             raise ValueError("路径为空")
         path = Path(rendered)
     except (TypeError, ValueError, OSError) as error:
-        raise _failure("SOURCE_PATH_INVALID", "PATH", detail=f"{label}格式无效", cause=error)
+        raise _failure(
+            "SOURCE_PATH_INVALID", "PATH", detail=f"{label}格式无效", cause=error
+        )
     if not path.is_absolute():
         raise _failure("SOURCE_PATH_INVALID", "PATH", detail=f"{label}必须是绝对路径")
     return path
@@ -127,7 +130,9 @@ def _resolved(path: Path, *, missing_code: str, label: str) -> Path:
     except PermissionError as error:
         raise _failure("SOURCE_ACCESS_DENIED", "PERMISSION", cause=error)
     except (OSError, RuntimeError, RecursionError, ValueError) as error:
-        raise _failure("SOURCE_PATH_INVALID", "PATH", detail=f"{label}无法解析", cause=error)
+        raise _failure(
+            "SOURCE_PATH_INVALID", "PATH", detail=f"{label}无法解析", cause=error
+        )
 
 
 def _inside_roots(candidate: Path, roots: tuple[Path, ...]) -> bool:
@@ -140,21 +145,32 @@ def _inside_roots(candidate: Path, roots: tuple[Path, ...]) -> bool:
     return False
 
 
-def _resolved_roots(source_roots: Iterable[str | os.PathLike[str]] | None) -> tuple[Path, ...]:
+def _resolved_roots(
+    source_roots: Iterable[str | os.PathLike[str]] | None,
+) -> tuple[Path, ...]:
     if source_roots is None:
         raise _failure("SOURCE_NOT_CONFIGURED", "CONFIGURATION")
     if isinstance(source_roots, (str, bytes, os.PathLike)):
-        raise _failure("SOURCE_PATH_INVALID", "PATH", detail="source_roots必须是根路径序列")
+        raise _failure(
+            "SOURCE_PATH_INVALID", "PATH", detail="source_roots必须是根路径序列"
+        )
     try:
         roots_input = tuple(source_roots)
     except TypeError as error:
-        raise _failure("SOURCE_PATH_INVALID", "PATH", detail="source_roots必须是可读序列", cause=error)
+        raise _failure(
+            "SOURCE_PATH_INVALID",
+            "PATH",
+            detail="source_roots必须是可读序列",
+            cause=error,
+        )
     if not roots_input:
         raise _failure("SOURCE_NOT_CONFIGURED", "CONFIGURATION")
     roots: list[Path] = []
     for value in roots_input:
         root = _path_value(value, "来源保护根")
-        resolved = _resolved(root, missing_code="SOURCE_PATH_INVALID", label="来源保护根")
+        resolved = _resolved(
+            root, missing_code="SOURCE_PATH_INVALID", label="来源保护根"
+        )
         try:
             mode = resolved.stat().st_mode
         except PermissionError as error:
@@ -169,11 +185,20 @@ def _resolved_roots(source_roots: Iterable[str | os.PathLike[str]] | None) -> tu
 
 def _windows_kernel32():
     if os.name != "nt":
-        raise _failure("SOURCE_HANDLE_UNVERIFIED", "HANDLE", detail="当前平台没有受支持的Windows句柄核验")
+        raise _failure(
+            "SOURCE_HANDLE_UNVERIFIED",
+            "HANDLE",
+            detail="当前平台没有受支持的Windows句柄核验",
+        )
     try:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     except (AttributeError, OSError) as error:
-        raise _failure("SOURCE_HANDLE_UNVERIFIED", "HANDLE", detail="无法载入Windows句柄API", cause=error)
+        raise _failure(
+            "SOURCE_HANDLE_UNVERIFIED",
+            "HANDLE",
+            detail="无法载入Windows句柄API",
+            cause=error,
+        )
     kernel32.CreateFileW.argtypes = (
         wintypes.LPCWSTR,
         wintypes.DWORD,
@@ -240,7 +265,12 @@ def _open_readonly(path: Path):
                 add_note(f"关闭未接管的Windows来源句柄时另有错误：{close_error}")
         if not isinstance(error, (ImportError, OSError, OverflowError, TypeError)):
             raise
-        raise _failure("SOURCE_HANDLE_UNVERIFIED", "HANDLE", detail="只读句柄无法接入受控流", cause=error)
+        raise _failure(
+            "SOURCE_HANDLE_UNVERIFIED",
+            "HANDLE",
+            detail="只读句柄无法接入受控流",
+            cause=error,
+        )
     try:
         stream = os.fdopen(descriptor, "rb", buffering=0)
     except BaseException as error:
@@ -261,7 +291,12 @@ def _final_path(kernel32, handle: int) -> Path:
         length = kernel32.GetFinalPathNameByHandleW(handle, buffer, capacity, 0)
         if length == 0:
             error = ctypes.WinError(ctypes.get_last_error())
-            raise _failure("SOURCE_HANDLE_UNVERIFIED", "HANDLE", detail="无法取得句柄最终路径", cause=error)
+            raise _failure(
+                "SOURCE_HANDLE_UNVERIFIED",
+                "HANDLE",
+                detail="无法取得句柄最终路径",
+                cause=error,
+            )
         if length < capacity:
             value = buffer.value
             if value.startswith("\\\\?\\UNC\\"):
@@ -271,9 +306,16 @@ def _final_path(kernel32, handle: int) -> Path:
             try:
                 return Path(value)
             except (OSError, ValueError) as error:
-                raise _failure("SOURCE_HANDLE_UNVERIFIED", "HANDLE", detail="句柄最终路径格式无效", cause=error)
+                raise _failure(
+                    "SOURCE_HANDLE_UNVERIFIED",
+                    "HANDLE",
+                    detail="句柄最终路径格式无效",
+                    cause=error,
+                )
         capacity = length + 1
-    raise _failure("SOURCE_HANDLE_UNVERIFIED", "HANDLE", detail="句柄最终路径超出平台上限")
+    raise _failure(
+        "SOURCE_HANDLE_UNVERIFIED", "HANDLE", detail="句柄最终路径超出平台上限"
+    )
 
 
 def _handle_version(stream, kernel32) -> _HandleVersion:
@@ -282,18 +324,30 @@ def _handle_version(stream, kernel32) -> _HandleVersion:
     try:
         handle = msvcrt.get_osfhandle(stream.fileno())
     except (OSError, ValueError) as error:
-        raise _failure("SOURCE_HANDLE_UNVERIFIED", "HANDLE", detail="实际文件句柄不可用", cause=error)
+        raise _failure(
+            "SOURCE_HANDLE_UNVERIFIED",
+            "HANDLE",
+            detail="实际文件句柄不可用",
+            cause=error,
+        )
     if kernel32.GetFileType(handle) != _FILE_TYPE_DISK:
         raise _failure("SOURCE_PATH_INVALID", "PATH", detail="来源目标不是普通磁盘文件")
     info = _BY_HANDLE_FILE_INFORMATION()
     if not kernel32.GetFileInformationByHandle(handle, ctypes.byref(info)):
         error = ctypes.WinError(ctypes.get_last_error())
-        raise _failure("SOURCE_HANDLE_UNVERIFIED", "HANDLE", detail="无法读取句柄文件身份", cause=error)
+        raise _failure(
+            "SOURCE_HANDLE_UNVERIFIED",
+            "HANDLE",
+            detail="无法读取句柄文件身份",
+            cause=error,
+        )
     if info.dwFileAttributes & _FILE_ATTRIBUTE_DIRECTORY:
         raise _failure("SOURCE_PATH_INVALID", "PATH", detail="来源目标是目录")
     size = (int(info.nFileSizeHigh) << 32) | int(info.nFileSizeLow)
     file_id = (int(info.nFileIndexHigh) << 32) | int(info.nFileIndexLow)
-    write_ticks = (int(info.ftLastWriteTime.dwHighDateTime) << 32) | int(info.ftLastWriteTime.dwLowDateTime)
+    write_ticks = (int(info.ftLastWriteTime.dwHighDateTime) << 32) | int(
+        info.ftLastWriteTime.dwLowDateTime
+    )
     final_path = _final_path(kernel32, handle)
     return _HandleVersion(
         final_path=final_path,
@@ -308,7 +362,12 @@ def _stat_version(path: Path) -> os.stat_result:
     try:
         result = path.stat()
     except FileNotFoundError as error:
-        raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="扫描期间来源路径消失", cause=error)
+        raise _failure(
+            "SOURCE_CHANGED",
+            "SOURCE_VERSION",
+            detail="扫描期间来源路径消失",
+            cause=error,
+        )
     except PermissionError as error:
         raise _failure("SOURCE_ACCESS_DENIED", "PERMISSION", cause=error)
     except OSError as error:
@@ -368,7 +427,9 @@ class _FileDayScan(Iterator[LocatedDay]):
                 self._stream.close()
             except OSError as error:
                 self._scan._invalidate()
-                raise _failure("SOURCE_IO_ERROR", "IO", detail="关闭来源句柄失败", cause=error)
+                raise _failure(
+                    "SOURCE_IO_ERROR", "IO", detail="关闭来源句柄失败", cause=error
+                )
 
 
 class _DayFileContext:
@@ -394,20 +455,31 @@ class _DayFileContext:
         if self._entered:
             raise ContractError("同一文件扫描上下文不能重复进入")
         self._entered = True
-        if not isinstance(self._units, UnitContract) or not isinstance(self._limits, ReadLimits):
+        if not isinstance(self._units, UnitContract) or not isinstance(
+            self._limits, ReadLimits
+        ):
             raise ContractError("文件扫描需要有效单位合同和显式读取预算")
         started_at = _clock_value(self._monotonic)
         started_wall = datetime.now().astimezone()
-        if self._roots_value is None or isinstance(self._roots_value, (str, bytes, os.PathLike)):
+        if self._roots_value is None or isinstance(
+            self._roots_value, (str, bytes, os.PathLike)
+        ):
             root_values = self._roots_value
         else:
             try:
                 root_values = tuple(self._roots_value)
             except TypeError as error:
-                raise _failure("SOURCE_PATH_INVALID", "PATH", detail="source_roots必须是可读序列", cause=error)
+                raise _failure(
+                    "SOURCE_PATH_INVALID",
+                    "PATH",
+                    detail="source_roots必须是可读序列",
+                    cause=error,
+                )
         roots = _resolved_roots(root_values)
         requested_path = _path_value(self._source_value, "来源文件")
-        initial_path = _resolved(requested_path, missing_code="SOURCE_NOT_FOUND", label="来源文件")
+        initial_path = _resolved(
+            requested_path, missing_code="SOURCE_NOT_FOUND", label="来源文件"
+        )
         if not _inside_roots(initial_path, roots):
             raise _failure("SOURCE_PATH_OUTSIDE_ROOT", "PATH")
         initial_stat = _stat_version(initial_path)
@@ -436,7 +508,9 @@ class _DayFileContext:
                 },
             )
         if any(":" in part for part in initial_path.parts[1:]):
-            raise _failure("SOURCE_PATH_INVALID", "PATH", detail="不接受NTFS备用数据流路径")
+            raise _failure(
+                "SOURCE_PATH_INVALID", "PATH", detail="不接受NTFS备用数据流路径"
+            )
         if _clock_value(self._monotonic) - started_at > self._limits.max_seconds:
             raise DayReadError("READ_TIMEOUT", "BUDGET")
         stream = None
@@ -445,30 +519,60 @@ class _DayFileContext:
             self._stream = stream
             before_handle = _handle_version(stream, kernel32)
             if not _inside_roots(before_handle.final_path, roots):
-                raise _failure("SOURCE_PATH_OUTSIDE_ROOT", "PATH", detail="实际句柄最终目标在保护根外")
+                raise _failure(
+                    "SOURCE_PATH_OUTSIDE_ROOT",
+                    "PATH",
+                    detail="实际句柄最终目标在保护根外",
+                )
             if before_handle.final_path != initial_path:
-                raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="打开时句柄目标与预检查路径不一致")
+                raise _failure(
+                    "SOURCE_CHANGED",
+                    "SOURCE_VERSION",
+                    detail="打开时句柄目标与预检查路径不一致",
+                )
             if (
                 int(initial_stat.st_ino) != before_handle.file_id
                 or int(initial_stat.st_size) != before_handle.size
                 or int(initial_stat.st_mtime_ns) != before_handle.mtime_ns
             ):
-                raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="打开窗口内文件身份或版本发生变化")
-            current_path = _resolved(requested_path, missing_code="SOURCE_CHANGED", label="来源文件")
+                raise _failure(
+                    "SOURCE_CHANGED",
+                    "SOURCE_VERSION",
+                    detail="打开窗口内文件身份或版本发生变化",
+                )
+            current_path = _resolved(
+                requested_path, missing_code="SOURCE_CHANGED", label="来源文件"
+            )
             if current_path != initial_path:
-                raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="来源别名在打开窗口内改变目标")
+                raise _failure(
+                    "SOURCE_CHANGED",
+                    "SOURCE_VERSION",
+                    detail="来源别名在打开窗口内改变目标",
+                )
             current_stat = _stat_version(current_path)
             if not _path_identity_matches(current_stat, before_handle):
-                raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="当前路径未绑定到已打开句柄")
+                raise _failure(
+                    "SOURCE_CHANGED",
+                    "SOURCE_VERSION",
+                    detail="当前路径未绑定到已打开句柄",
+                )
             if _clock_value(self._monotonic) - started_at > self._limits.max_seconds:
                 raise DayReadError("READ_TIMEOUT", "BUDGET")
 
             def final_check() -> FileSourceIdentity:
                 current_handle = _handle_version(stream, kernel32)
                 if not _inside_roots(current_handle.final_path, roots):
-                    raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="最终句柄路径离开保护根")
+                    raise _failure(
+                        "SOURCE_CHANGED",
+                        "SOURCE_VERSION",
+                        detail="最终句柄路径离开保护根",
+                    )
                 if _resolved_roots(root_values) != roots:
-                    raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="来源保护根别名在扫描期间改变目标")
+                    raise _failure(
+                        "SOURCE_CHANGED",
+                        "SOURCE_VERSION",
+                        detail="来源保护根别名在扫描期间改变目标",
+                    )
                 try:
                     current_final_path = _resolved(
                         requested_path,
@@ -477,15 +581,32 @@ class _DayFileContext:
                     )
                 except DayReadError as error:
                     if error.code == "SOURCE_NOT_FOUND":
-                        raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="扫描期间来源路径消失", cause=error)
+                        raise _failure(
+                            "SOURCE_CHANGED",
+                            "SOURCE_VERSION",
+                            detail="扫描期间来源路径消失",
+                            cause=error,
+                        )
                     raise
-                if current_final_path != initial_path or current_handle.final_path != initial_path:
-                    raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="扫描期间来源路径绑定发生变化")
+                if (
+                    current_final_path != initial_path
+                    or current_handle.final_path != initial_path
+                ):
+                    raise _failure(
+                        "SOURCE_CHANGED",
+                        "SOURCE_VERSION",
+                        detail="扫描期间来源路径绑定发生变化",
+                    )
                 current_stat = _stat_version(current_final_path)
                 if not _path_identity_matches(current_stat, current_handle):
-                    raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="当前路径不再指向扫描句柄")
+                    raise _failure(
+                        "SOURCE_CHANGED",
+                        "SOURCE_VERSION",
+                        detail="当前路径不再指向扫描句柄",
+                    )
                 if (
-                    current_handle.volume_serial_number != before_handle.volume_serial_number
+                    current_handle.volume_serial_number
+                    != before_handle.volume_serial_number
                     or current_handle.file_id != before_handle.file_id
                     or current_handle.size != before_handle.size
                     or current_handle.mtime_ns != before_handle.mtime_ns
@@ -574,10 +695,17 @@ def read_protected_bytes(
         try:
             root_values = tuple(source_roots)
         except TypeError as error:
-            raise _failure("SOURCE_PATH_INVALID", "PATH", detail="source_roots必须是可读序列", cause=error)
+            raise _failure(
+                "SOURCE_PATH_INVALID",
+                "PATH",
+                detail="source_roots必须是可读序列",
+                cause=error,
+            )
     roots = _resolved_roots(root_values)
     requested = _path_value(source_path, "来源文件")
-    initial_path = _resolved(requested, missing_code="SOURCE_NOT_FOUND", label="来源文件")
+    initial_path = _resolved(
+        requested, missing_code="SOURCE_NOT_FOUND", label="来源文件"
+    )
     if not _inside_roots(initial_path, roots):
         raise _failure("SOURCE_PATH_OUTSIDE_ROOT", "PATH")
     if any(":" in part for part in initial_path.parts[1:]):
@@ -590,9 +718,17 @@ def read_protected_bytes(
         stream, kernel32 = _open_readonly(requested)
         before = _handle_version(stream, kernel32)
         if not _inside_roots(before.final_path, roots):
-            raise _failure("SOURCE_PATH_OUTSIDE_ROOT", "PATH", detail="实际句柄最终目标在保护根外")
-        if before.final_path != initial_path or not _path_identity_matches(initial_stat, before):
-            raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="打开时来源路径与只读句柄身份不一致")
+            raise _failure(
+                "SOURCE_PATH_OUTSIDE_ROOT", "PATH", detail="实际句柄最终目标在保护根外"
+            )
+        if before.final_path != initial_path or not _path_identity_matches(
+            initial_stat, before
+        ):
+            raise _failure(
+                "SOURCE_CHANGED",
+                "SOURCE_VERSION",
+                detail="打开时来源路径与只读句柄身份不一致",
+            )
         data = bytearray()
         while True:
             if time.monotonic() - started > float(max_seconds):
@@ -606,7 +742,9 @@ def read_protected_bytes(
                 raise DayReadError("READ_LIMIT_EXCEEDED", "BUDGET")
         after = _handle_version(stream, kernel32)
         current_roots = _resolved_roots(root_values)
-        current_path = _resolved(requested, missing_code="SOURCE_CHANGED", label="来源文件")
+        current_path = _resolved(
+            requested, missing_code="SOURCE_CHANGED", label="来源文件"
+        )
         current_stat = _stat_version(current_path)
         if (
             current_roots != roots
@@ -619,7 +757,9 @@ def read_protected_bytes(
             or before.mtime_ns != after.mtime_ns
             or len(data) != before.size
         ):
-            raise _failure("SOURCE_CHANGED", "SOURCE_VERSION", detail="来源在完整读取期间发生变化")
+            raise _failure(
+                "SOURCE_CHANGED", "SOURCE_VERSION", detail="来源在完整读取期间发生变化"
+            )
         if time.monotonic() - started > float(max_seconds):
             raise DayReadError("READ_TIMEOUT", "BUDGET")
         identity = FileSourceIdentity(
@@ -652,5 +792,7 @@ def read_protected_bytes(
         try:
             stream.close()
         except OSError as error:
-            raise _failure("SOURCE_IO_ERROR", "IO", detail="关闭来源句柄失败", cause=error)
+            raise _failure(
+                "SOURCE_IO_ERROR", "IO", detail="关闭来源句柄失败", cause=error
+            )
     return bytes(data), identity

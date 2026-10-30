@@ -17,8 +17,11 @@ dependencies = [
 baostock = ["baostock==0.9.3"]
 
 [project.scripts]
-stock-a = "stock_a.diagnostics:main"
+stock-a = "stock_a.application.cli:main"
 
 [tool.flit.module]
 name = "stock_a"
 directory = "src"
+
+[tool.flit.external-data]
+directory = "web"

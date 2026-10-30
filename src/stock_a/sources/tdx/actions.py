@@ -164,9 +164,16 @@ def _validate_metadata(
     protocol_version: object,
     unit_version: object,
 ) -> tuple[str, str, str]:
-    if not isinstance(source_ref, str) or not source_ref.strip() or len(source_ref) > 1024:
+    if (
+        not isinstance(source_ref, str)
+        or not source_ref.strip()
+        or len(source_ref) > 1024
+    ):
         raise ContractError("source_ref 必须是非空且不超过1024字符的引用")
-    if not isinstance(protocol_version, str) or protocol_version != GBBQ_PROTOCOL_VERSION:
+    if (
+        not isinstance(protocol_version, str)
+        or protocol_version != GBBQ_PROTOCOL_VERSION
+    ):
         raise ContractError("protocol_version 缺失或不受支持")
     if not isinstance(unit_version, str) or unit_version != GBBQ_UNIT_VERSION:
         raise ContractError("unit_version 缺失或不受支持")
@@ -267,7 +274,11 @@ def decode_record(
             reasons.append("INVALID_SOURCE_CODE")
     if market_code is None:
         reasons.append("INVALID_MARKET")
-    source_symbol = f"{market_code}.{raw_code}" if market_code is not None and raw_code is not None else None
+    source_symbol = (
+        f"{market_code}.{raw_code}"
+        if market_code is not None and raw_code is not None
+        else None
+    )
 
     event_date_value = _UINT32.unpack_from(clear, 8)[0]
     event_date = _parse_date(event_date_value)
@@ -282,7 +293,9 @@ def decode_record(
     else:
         semantic_status = "UNKNOWN_CATEGORY"
 
-    parameters = tuple(_decode_parameter(clear, offset) for offset in _CATEGORY1_FIELD_OFFSETS)
+    parameters = tuple(
+        _decode_parameter(clear, offset) for offset in _CATEGORY1_FIELD_OFFSETS
+    )
     parameter_reasons: list[str | None] = []
     for index, parameter in enumerate(parameters):
         reason = None if parameter is not None else f"C{index + 1}_NON_FINITE"
@@ -306,7 +319,8 @@ def decode_record(
     data_quality = "INVALID_DATA" if reasons else "VALID"
     # OBSERVED表示有限值已从float32解码，不单独表示该值通过类别语义约束。
     parameter_quality = tuple(
-        "OBSERVED" if parameter is not None else "UNKNOWN_DATA" for parameter in parameters
+        "OBSERVED" if parameter is not None else "UNKNOWN_DATA"
+        for parameter in parameters
     )
     return GbbqRecord(
         source_ref=source_ref,
@@ -332,7 +346,11 @@ def decode_record(
         parameter_reasons=tuple(parameter_reasons),  # type: ignore[arg-type]
         data_quality=data_quality,
         reasons=tuple(reasons),
-        identity_status=("SOURCE_IDENTITY_ONLY" if source_symbol is not None else "UNRESOLVED_SOURCE_IDENTITY"),
+        identity_status=(
+            "SOURCE_IDENTITY_ONLY"
+            if source_symbol is not None
+            else "UNRESOLVED_SOURCE_IDENTITY"
+        ),
         pit_status="NOT_ASSERTED",
     )
 

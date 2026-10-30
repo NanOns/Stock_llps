@@ -1,4 +1,5 @@
 """TDX日线单遍流扫描；不拥有调用方传入的流。"""
+
 from __future__ import annotations
 
 from collections import Counter
@@ -57,7 +58,9 @@ class ReadLimits:
         if self.chunk_records > _MAX_CHUNK_RECORDS:
             raise ContractError("chunk_records不得超过32768条")
         value = self.max_seconds
-        if isinstance(value, bool) or not isinstance(value, (int, float, Decimal, Fraction)):
+        if isinstance(value, bool) or not isinstance(
+            value, (int, float, Decimal, Fraction)
+        ):
             raise ContractError("max_seconds必须是有限正数")
         if isinstance(value, Decimal):
             finite = value.is_finite()
@@ -194,7 +197,12 @@ class DayRecordScan(Iterator[LocatedDay]):
         self._previous_index: int | None = None
         self._sha256 = hashlib.sha256()
         self._group_quality = {
-            name: {"observed": 0, "unknown": 0, "not_applicable": 0, "reasons": Counter()}
+            name: {
+                "observed": 0,
+                "unknown": 0,
+                "not_applicable": 0,
+                "reasons": Counter(),
+            }
             for name in _GROUP_NAMES
         }
         self._complete = False
@@ -241,7 +249,9 @@ class DayRecordScan(Iterator[LocatedDay]):
     def _read_size(self) -> int:
         chunk_room = self._limits.chunk_records * _RECORD_BYTES - len(self._tail)
         byte_room_with_probe = self._limits.max_bytes + 1 - self._byte_count
-        record_room_with_probe = self._limits.max_records * _RECORD_BYTES + 1 - self._byte_count
+        record_room_with_probe = (
+            self._limits.max_records * _RECORD_BYTES + 1 - self._byte_count
+        )
         return min(chunk_room, byte_room_with_probe, record_room_with_probe)
 
     def _read_block(self) -> None:
@@ -266,7 +276,10 @@ class DayRecordScan(Iterator[LocatedDay]):
                 "STREAM_CONTRACT",
                 record_index=self._record_count,
                 byte_offset=self._record_count * _RECORD_BYTES,
-                context={"requested_bytes": request_size, "returned_type": type(data).__name__},
+                context={
+                    "requested_bytes": request_size,
+                    "returned_type": type(data).__name__,
+                },
             )
         if not data:
             self._block = b""
@@ -282,7 +295,10 @@ class DayRecordScan(Iterator[LocatedDay]):
                 "BUDGET",
                 record_index=self._record_count,
                 byte_offset=self._record_count * _RECORD_BYTES,
-                context={"byte_count": self._byte_count, "max_bytes": self._limits.max_bytes},
+                context={
+                    "byte_count": self._byte_count,
+                    "max_bytes": self._limits.max_bytes,
+                },
             )
         self._block = data
         self._block_pos = 0
@@ -293,15 +309,18 @@ class DayRecordScan(Iterator[LocatedDay]):
             required = _RECORD_BYTES - len(self._tail)
             if available >= required:
                 if self._tail:
-                    record = self._tail + self._block[self._block_pos:self._block_pos + required]
+                    record = (
+                        self._tail
+                        + self._block[self._block_pos : self._block_pos + required]
+                    )
                     self._tail = b""
                     self._block_pos += required
                     return record
-                record = self._block[self._block_pos:self._block_pos + _RECORD_BYTES]
+                record = self._block[self._block_pos : self._block_pos + _RECORD_BYTES]
                 self._block_pos += _RECORD_BYTES
                 return record
             if available:
-                self._tail += self._block[self._block_pos:]
+                self._tail += self._block[self._block_pos :]
                 self._block_pos = len(self._block)
                 if len(self._tail) >= _RECORD_BYTES:
                     raise AssertionError("尾部缓冲超过一条记录")
@@ -342,13 +361,19 @@ class DayRecordScan(Iterator[LocatedDay]):
     def _located(self, raw: bytes) -> LocatedDay:
         index = self._record_count
         offset = index * _RECORD_BYTES
-        if index >= self._limits.max_records or offset + _RECORD_BYTES > self._limits.max_bytes:
+        if (
+            index >= self._limits.max_records
+            or offset + _RECORD_BYTES > self._limits.max_bytes
+        ):
             raise DayReadError(
                 "READ_LIMIT_EXCEEDED",
                 "BUDGET",
                 record_index=index,
                 byte_offset=offset,
-                context={"max_bytes": self._limits.max_bytes, "max_records": self._limits.max_records},
+                context={
+                    "max_bytes": self._limits.max_bytes,
+                    "max_records": self._limits.max_records,
+                },
             )
         self._check_time()
         try:
@@ -397,11 +422,15 @@ class DayRecordScan(Iterator[LocatedDay]):
                         "unknown_groups": unknown_groups,
                         "reserved_equal": previous.reserved == decoded.reserved,
                     },
-                    detail="未知字段无法证明规范业务值一致" if unknown_groups else "规范已知字段相同",
+                    detail="未知字段无法证明规范业务值一致"
+                    if unknown_groups
+                    else "规范已知字段相同",
                 )
         self._check_time()
         self._record_count += 1
-        self._first_date = decoded.session_date if self._first_date is None else self._first_date
+        self._first_date = (
+            decoded.session_date if self._first_date is None else self._first_date
+        )
         self._last_date = decoded.session_date
         self._count_fields(decoded)
         self._previous_decoded = decoded
@@ -476,7 +505,16 @@ class DayRecordScan(Iterator[LocatedDay]):
             error.context.setdefault("byte_count", self._byte_count)
             error.context.setdefault("record_count", self._record_count)
             attempted_index = error.record_index
-            if error.code in {"INVALID_DATE", "DUPLICATE_DATE", "SAME_DAY_CONFLICT", "NON_INCREASING_DATE"} and attempted_index is not None:
+            if (
+                error.code
+                in {
+                    "INVALID_DATE",
+                    "DUPLICATE_DATE",
+                    "SAME_DAY_CONFLICT",
+                    "NON_INCREASING_DATE",
+                }
+                and attempted_index is not None
+            ):
                 error.context.setdefault("records_attempted", attempted_index + 1)
             else:
                 error.context.setdefault("records_attempted", self._record_count)

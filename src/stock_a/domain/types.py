@@ -1,4 +1,5 @@
 """字段值及合同错误；质量和能力就绪状态分开。"""
+
 from dataclasses import dataclass
 from decimal import Decimal
 from fractions import Fraction
@@ -20,7 +21,11 @@ class FieldValue:
         if self.quality == "OBSERVED":
             if self.value is None or self.reason is not None:
                 raise ContractError("已知字段必须有值且不能带缺失原因")
-        elif self.value is not None or not isinstance(self.reason, str) or not self.reason:
+        elif (
+            self.value is not None
+            or not isinstance(self.reason, str)
+            or not self.reason
+        ):
             raise ContractError("未知/不适用字段必须为空且有明确原因")
 
 

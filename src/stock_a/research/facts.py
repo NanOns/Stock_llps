@@ -1,4 +1,5 @@
 """研究内核的显式事实绑定；不授予来源、PIT或发布权限。"""
+
 from dataclasses import dataclass
 from datetime import date
 from itertools import product
@@ -60,11 +61,23 @@ class Fact:
     episode_id: str | None = None
 
     def validate(self, entity_id, session, coordinate_id):
-        if (not isinstance(self.field, FieldValue) or type(self.session) is not date
-                or not all(isinstance(x, str) and x for x in (self.entity_id, self.coordinate_id, self.source_ref))
-                or (self.entity_id, self.session, self.coordinate_id) != (entity_id, session, coordinate_id)):
+        if (
+            not isinstance(self.field, FieldValue)
+            or type(self.session) is not date
+            or not all(
+                isinstance(x, str) and x
+                for x in (self.entity_id, self.coordinate_id, self.source_ref)
+            )
+            or (self.entity_id, self.session, self.coordinate_id)
+            != (entity_id, session, coordinate_id)
+        ):
             raise ValueError("事实实体/日期/坐标/来源绑定不一致")
 
 
 def completions(values, domains):
-    return product(*(domain if value is None else (value,) for value, domain in zip(values, domains)))
+    return product(
+        *(
+            domain if value is None else (value,)
+            for value, domain in zip(values, domains)
+        )
+    )

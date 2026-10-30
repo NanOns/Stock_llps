@@ -1,4 +1,5 @@
 """新项目本地诊断与受控来源只读检查。"""
+
 from __future__ import annotations
 
 import argparse
@@ -19,7 +20,11 @@ from typing import Any
 import uuid
 
 from stock_a import __version__
-from stock_a.contracts import DAY_CHAIN_MODULES, DayChainContractError, load_day_chain_contract
+from stock_a.contracts import (
+    DAY_CHAIN_MODULES,
+    DayChainContractError,
+    load_day_chain_contract,
+)
 from stock_a.domain import ContractError
 from stock_a.sources.tdx.day import UnitContract
 from stock_a.sources.tdx.actions import (
@@ -47,15 +52,23 @@ from stock_a.sources.tdx.vipdata import (
     verify_existing_vipdata_package,
     vipdata_research_candidate_pool,
 )
-from stock_a.postgres_identity import inspect_postgres
-from stock_a.postgres_binding import (
-    BindingCommittedConfigError, BindingRefused, bind_stock_namespace,
-    registered_migration_ids, registered_task_scopes,
+from stock_a.storage.postgres.identity import inspect_postgres
+from stock_a.storage.postgres.binding import (
+    BindingCommittedConfigError,
+    BindingRefused,
+    bind_stock_namespace,
+    registered_migration_ids,
+    registered_task_scopes,
 )
-from stock_a.postgres_source_raw import (
-    RAW_DAILY_APPEND_TASK_SCOPES, RawSourcePgError, import_verified_vipdata_target,
-    import_verified_vipdata_history, read_raw_daily_catalog, read_raw_daily_page,
-    read_raw_daily_history_page, read_raw_daily_history_stock,
+from stock_a.storage.postgres.source_raw import (
+    RAW_DAILY_APPEND_TASK_SCOPES,
+    RawSourcePgError,
+    import_verified_vipdata_target,
+    import_verified_vipdata_history,
+    read_raw_daily_catalog,
+    read_raw_daily_page,
+    read_raw_daily_history_page,
+    read_raw_daily_history_stock,
     read_raw_daily_stock,
 )
 from stock_a.research.entry import (
@@ -75,15 +88,20 @@ from stock_a.research.entry import (
 from stock_a.sources.baostock.identity import project_identity_lifecycle
 
 
-_WORKSPACE = Path("G:/codex work/Stock A")
-_CONFIG_ROOT = _WORKSPACE / "config"
-_CONFIG_FILE = _CONFIG_ROOT / "runtime.defaults.json"
-_CONFIG_CONTRACT = "STOCK-A-RUNTIME-DEFAULTS/R9"
-_EXIT_OK = 0
-_EXIT_ARGUMENT = 2
-_EXIT_UNAVAILABLE = 3
-_EXIT_PERMISSION = 4
-_EXIT_ENGINEERING = 5
+from stock_a.application.runtime_config import (
+    DiagnosticError,
+    _CONFIG_ROOT,
+    _EXIT_ARGUMENT,
+    _EXIT_ENGINEERING,
+    _EXIT_OK,
+    _EXIT_PERMISSION,
+    _EXIT_UNAVAILABLE,
+    _WORKSPACE,
+    load_runtime_config as _load_runtime_config,
+)
+from stock_a.application.research_window import (
+    resolve_pg_history_window as _pg_history_window,
+)
 
 _READ_ERROR_EXIT_CODES = {
     "SOURCE_NOT_CONFIGURED": _EXIT_UNAVAILABLE,
@@ -107,15 +125,6 @@ _READ_ERROR_EXIT_CODES = {
 }
 
 
-class DiagnosticError(Exception):
-    """可向用户显示的配置或能力不可用错误。"""
-
-    def __init__(self, code: str, message: str, exit_code: int = _EXIT_UNAVAILABLE):
-        super().__init__(message)
-        self.code = code
-        self.exit_code = exit_code
-
-
 def _module_mode() -> dict[str, str]:
     module_path = Path(__file__).resolve()
     workspace = _WORKSPACE.resolve()
@@ -128,222 +137,30 @@ def _module_mode() -> dict[str, str]:
         try:
             distribution = importlib.metadata.distribution("stock-a")
             files = distribution.files or ()
-            installed = {Path(distribution.locate_file(item)).resolve() for item in files}
+            installed = {
+                Path(distribution.locate_file(item)).resolve() for item in files
+            }
             if module_path not in installed:
-                raise DiagnosticError("PACKAGE_IDENTITY_INVALID", "无法核验当前模块属于已安装的stock-a发行包")
+                raise DiagnosticError(
+                    "PACKAGE_IDENTITY_INVALID",
+                    "无法核验当前模块属于已安装的stock-a发行包",
+                )
         except importlib.metadata.PackageNotFoundError as error:
-            raise DiagnosticError("PACKAGE_IDENTITY_INVALID", "当前模块不在开发源码根，也未登记为已安装包") from error
+            raise DiagnosticError(
+                "PACKAGE_IDENTITY_INVALID", "当前模块不在开发源码根，也未登记为已安装包"
+            ) from error
     return {"module_path": str(module_path), "version": __version__, "mode": mode}
 
 
-def _inside(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-        return True
-    except ValueError:
-        return False
-
-
-def _load_runtime_config(explicit_path: str | None = None) -> tuple[dict[str, Any], Path]:
-    if explicit_path is not None:
-        try:
-            requested = Path(explicit_path)
-            approved = _CONFIG_FILE.resolve(strict=True)
-            if not requested.is_absolute() or requested.resolve() != approved:
-                raise DiagnosticError("CONFIG_PATH_REJECTED", "仅允许读取唯一登记配置runtime.defaults.json")
-        except FileNotFoundError as error:
-            raise DiagnosticError("CONFIG_MISSING", "唯一正式运行配置不存在") from error
-        except PermissionError as error:
-            raise DiagnosticError("CONFIG_PERMISSION_DENIED", "操作系统拒绝核验正式配置路径", _EXIT_PERMISSION) from error
-        except OSError as error:
-            raise DiagnosticError("CONFIG_IO_ERROR", "核验显式配置路径时发生工程I/O错误", _EXIT_ENGINEERING) from error
-    try:
-        config_root = _CONFIG_ROOT.resolve(strict=True)
-        config_path = _CONFIG_FILE.resolve(strict=True)
-        if config_root != _CONFIG_ROOT or not _inside(config_path, config_root):
-            raise DiagnosticError("CONFIG_PATH_REJECTED", "正式配置根或配置文件经链接离开唯一配置槽位")
-        if not config_path.is_file():
-            raise DiagnosticError("CONFIG_MISSING", "唯一正式运行配置不是普通文件")
-    except FileNotFoundError as error:
-        raise DiagnosticError("CONFIG_MISSING", "唯一正式运行配置或配置根不存在") from error
-    except PermissionError as error:
-        raise DiagnosticError("CONFIG_PERMISSION_DENIED", "操作系统拒绝核验正式配置根及最终路径", _EXIT_PERMISSION) from error
-    except OSError as error:
-        raise DiagnosticError("CONFIG_IO_ERROR", "核验正式配置根及最终路径时发生工程I/O错误", _EXIT_ENGINEERING) from error
-    try:
-        with config_path.open("r", encoding="utf-8") as stream:
-            config = json.load(stream, parse_constant=lambda value: (_ for _ in ()).throw(ValueError(value)))
-    except PermissionError as error:
-        raise DiagnosticError("CONFIG_PERMISSION_DENIED", "操作系统拒绝读取正式配置", _EXIT_PERMISSION) from error
-    except OSError as error:
-        raise DiagnosticError("CONFIG_IO_ERROR", "读取正式配置时发生工程I/O错误", _EXIT_ENGINEERING) from error
-    except (UnicodeError, json.JSONDecodeError, ValueError) as error:
-        raise DiagnosticError("CONFIG_INVALID", "正式配置无法按UTF-8 JSON读取") from error
-    _validate_config(config)
-    return config, config_path
-
-
-def _require_mapping(value: Any, label: str) -> dict[str, Any]:
-    if not isinstance(value, dict):
-        raise DiagnosticError("CONFIG_INVALID", f"配置字段{label}必须是对象")
-    return value
-
-
-def _validate_config(config: Any) -> None:
-    root = _require_mapping(config, "根")
-    if root.get("contract") != _CONFIG_CONTRACT:
-        raise DiagnosticError("CONFIG_CONTRACT_MISMATCH", "正式配置合同版本不匹配")
-    paths = _require_mapping(root.get("paths"), "paths")
-    for key in ("workspace_root", "configuration_root", "temporary_root"):
-        value = paths.get(key)
-        if not isinstance(value, str) or not Path(value).is_absolute():
-            raise DiagnosticError("CONFIG_INVALID", f"配置字段paths.{key}必须是绝对路径")
-    if Path(paths["workspace_root"]).resolve() != _WORKSPACE.resolve():
-        raise DiagnosticError("CONFIG_INVALID", "配置workspace_root与唯一源码根不一致")
-    if Path(paths["configuration_root"]).resolve() != _CONFIG_ROOT.resolve():
-        raise DiagnosticError("CONFIG_INVALID", "配置configuration_root与唯一配置槽位不一致")
-    policy = _require_mapping(root.get("configuration_policy"), "configuration_policy")
-    if (
-        policy.get("contract") != "STOCK-A-CONFIGURATION-POLICY/R1"
-        or policy.get("root_only") is not True
-        or policy.get("recursive_autoload") is not False
-        or policy.get("unknown_files") != "REJECT"
-    ):
-        raise DiagnosticError("CONFIG_INVALID", "配置目录安全策略缺失或类型错误")
-    private_policy = _require_mapping(policy.get("private_files"), "configuration_policy.private_files")
-    expected_private_files = [{
-        "path": "private/postgresql.credentials.json",
-        "schema": "STOCK-A-PG-CREDENTIALS/R1",
-        "allowed_keys": ["schema", "host", "port", "database", "username", "password"],
-        "consumer": "stock_a.postgres_identity.inspect_postgres（仅pg-identity）",
-        "lifecycle": "STOCK_A_PG_DSN优先；仅在其缺失时由pg-identity进程内存读取；不得输出、摘要、记录、复制或传入子进程参数",
-    }]
-    if (private_policy.get("root") != "private" or private_policy.get("git_allowed") is not False
-            or private_policy.get("allowed_role") != "SECRET_CONNECTION_KEYS_ONLY_NOT_BUSINESS_TEST_OR_RESULT_DATA"
-            or private_policy.get("registered_files") != expected_private_files):
-        raise DiagnosticError("CONFIG_INVALID", "私密配置登记必须精确匹配唯一PG凭据文件合同")
-    expected_deployment_connection = {
-        "name": "STOCK_A_PG_DEPLOYMENT_DSN",
-        "consumer": "stock_a.postgres_identity._deployment_storage_checks",
-        "role": "EXISTING_SUPERUSER_DEPLOYMENT_VERIFICATION_ONLY",
-        "target": "127.0.0.1:5432/stock_a",
-        "lifecycle": "可选安全环境变量；与stock_a业务连接分离；仅作只读实际簇、存储路径和业务后端绑定核验；缺失时拒绝写入、发布和迁移；不得输出、记录或复制秘密",
-    }
-    if policy.get("deployment_connection_environment") != expected_deployment_connection:
-        raise DiagnosticError("CONFIG_INVALID", "独立PG部署核验连接必须按唯一安全环境变量合同登记")
-    registered = policy.get("public_files")
-    contract_revision = "STOCK-A-DAY-CHAIN/R10"
-    expected = {
-        ("runtime.defaults.json", "BUSINESS_RUNTIME_CONFIGURATION", _CONFIG_CONTRACT,
-         "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official"),
-        ("contracts/day-chain.contract.json", "BUSINESS_PIPELINE_DESIGN_CONTRACT", contract_revision,
-         "stock_a.contracts.load_day_chain_contract（唯一入口清单）"),
-    }
-    module_labels = {
-        "pipeline": "pipeline", "fields-source": "source fields", "fields-core": "Core fields",
-        "fields-profile": "cross/Profile rules", "fields-control": "control fields",
-        "research": "research rules", "service": "service contract", "policies": "policies",
-    }
-    expected.update(
-        (
-            f"contracts/{path}",
-            "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-            contract_revision,
-            f"stock_a.contracts.load_day_chain_contract（{module_labels[module]}）",
-        )
-        for module, path in DAY_CHAIN_MODULES
-    )
-    if not isinstance(registered, list):
-        raise DiagnosticError("CONFIG_INVALID", "configuration_policy.public_files必须是登记清单")
-    actual = set()
-    for item in registered:
-        if not isinstance(item, dict) or not all(isinstance(item.get(key), str) for key in ("path", "role", "contract", "consumer")):
-            raise DiagnosticError("CONFIG_INVALID", "公共配置登记项字段不完整")
-        actual.add((item["path"], item["role"], item["contract"], item["consumer"]))
-    if actual != expected or len(actual) != len(registered):
-        raise DiagnosticError("CONFIG_INVALID", "公共配置登记清单与已批准配置槽位不一致")
-    sources = _require_mapping(root.get("source_policy"), "source_policy")
-    roots = sources.get("configured_tdx_source_roots")
-    if (
-        not isinstance(roots, list)
-        or any(not isinstance(item, str) or not item or not Path(item).is_absolute() for item in roots)
-        or sources.get("all_source_roots_read_only") is not True
-        or sources.get("require_phase0_before_dependent_operations") is not True
-    ):
-        raise DiagnosticError("CONFIG_INVALID", "TDX来源根必须是绝对路径字符串列表")
-    try:
-        VipdataSourceConfig.from_mapping(sources.get("vipdata_official"))
-    except VipdataError as error:
-        raise DiagnosticError("CONFIG_INVALID", f"通达信官网端点配置无效：{error}") from error
-    app = _require_mapping(root.get("application_identity"), "application_identity")
-    project_uuid = app.get("project_uuid")
-    try:
-        valid_project_uuid = isinstance(project_uuid, str) and str(uuid.UUID(project_uuid)) == project_uuid.lower()
-    except (ValueError, AttributeError):
-        valid_project_uuid = False
-    if app.get("application_id") != "STOCK_A" or not valid_project_uuid:
-        raise DiagnosticError("CONFIG_INVALID", "应用身份声明不完整")
-    if type(app.get("deployment_applied")) is not bool:
-        raise DiagnosticError("CONFIG_INVALID", "deployment_applied必须是布尔值")
-    if not isinstance(app.get("migration_lineage"), str) or not app["migration_lineage"].strip():
-        raise DiagnosticError("CONFIG_INVALID", "应用迁移谱系声明缺失")
-    instance_id = app.get("deployment_instance_uuid")
-    cluster_id = app.get("cluster_system_identifier")
-    if app["deployment_applied"] is False:
-        if (instance_id != "BIND_DURING_EXPLICIT_ENABLEMENT" or cluster_id != "BIND_DURING_EXPLICIT_ENABLEMENT"
-                or app.get("migration_digest") != "BIND_DURING_EXPLICIT_ENABLEMENT"):
-            raise DiagnosticError("CONFIG_INVALID", "未部署状态必须使用明确的实例与簇绑定占位值")
-    else:
-        try:
-            valid_instance = isinstance(instance_id, str) and str(uuid.UUID(instance_id)) == instance_id.lower()
-        except (ValueError, AttributeError):
-            valid_instance = False
-        if not valid_instance or not isinstance(cluster_id, str) or not cluster_id.isdecimal() or int(cluster_id) <= 0:
-            raise DiagnosticError("CONFIG_INVALID", "已部署状态的实例或簇身份无效")
-        if not isinstance(app.get("migration_digest"), str) or not re.fullmatch(r"[0-9a-f]{64}", app["migration_digest"]):
-            raise DiagnosticError("CONFIG_INVALID", "已部署状态的迁移账本摘要无效")
-    if app.get("business_login") != "stock_a":
-        raise DiagnosticError("CONFIG_INVALID", "PostgreSQL业务连接账号必须固定为stock_a")
-    database = _require_mapping(root.get("postgresql"), "postgresql")
-    if database.get("database") != "stock_a":
-        raise DiagnosticError("CONFIG_INVALID", "PostgreSQL逻辑数据库必须固定为stock_a")
-    if database.get("business_schema") != "stock":
-        raise DiagnosticError("CONFIG_INVALID", "PostgreSQL唯一业务schema必须固定为stock")
-    expected_pg_paths = {
-        "host": "127.0.0.1", "port": 5432,
-        "data_directory": "G:/Postgres/data", "wal_directory": "G:/Postgres/data/pg_wal",
-        "log_directory": "G:/Postgres/log", "manual_export_and_backup_directory": "G:/Postgres/backups",
-        "temp_tablespaces": "",
-    }
-    for key, expected_value in expected_pg_paths.items():
-        value = database.get(key)
-        if type(value) is not type(expected_value) or value != expected_value:
-            raise DiagnosticError("CONFIG_INVALID", f"PostgreSQL配置字段{key}未匹配唯一G盘部署默认")
-    service_role = _require_mapping(root.get("startup_policy"), "startup_policy")
-    expected_security_policy = {
-        "require_explicit_validated_configuration": True,
-        "require_pg_data_directory_match": True,
-        "allow_legacy_postgres_writes": False,
-        "allow_automatic_pg_initialization": False,
-        "allow_database_creation": False,
-        "allow_schema_creation": False,
-        "allow_automatic_old_data_migration": False,
-        "allow_port_takeover": False,
-        "require_database_schema_application_instance_and_migration_match": True,
-        "require_business_login_match": True,
-        "allow_automatic_identity_bootstrap": False,
-    }
-    for key, expected_value in expected_security_policy.items():
-        if type(service_role.get(key)) is not bool or service_role[key] is not expected_value:
-            raise DiagnosticError("CONFIG_INVALID", f"启动安全策略{key}缺失、类型错误或值违反固定策略")
-    if app.get("business_login") != "stock_a":
-        raise DiagnosticError("CONFIG_INVALID", "应用运行账号必须固定为stock_a")
-
-
-def _configuration_snapshot(config: dict[str, Any], config_path: Path) -> dict[str, Any]:
+def _configuration_snapshot(
+    config: dict[str, Any], config_path: Path
+) -> dict[str, Any]:
     app = config["application_identity"]
     paths = config["paths"]
-    roots = [str(Path(item).resolve()) for item in config["source_policy"]["configured_tdx_source_roots"]]
+    roots = [
+        str(Path(item).resolve())
+        for item in config["source_policy"]["configured_tdx_source_roots"]
+    ]
     bound = (
         app["deployment_applied"] is True
         and app["deployment_instance_uuid"] != "BIND_DURING_EXPLICIT_ENABLEMENT"
@@ -353,7 +170,10 @@ def _configuration_snapshot(config: dict[str, Any], config_path: Path) -> dict[s
         "configuration_path": str(config_path),
         "configuration_contract": config["contract"],
         "workspace_root": paths["workspace_root"],
-        "service_role": {"business_login": app["business_login"], "actual_session_role": "NOT_CONNECTED_NOT_VERIFIED"},
+        "service_role": {
+            "business_login": app["business_login"],
+            "actual_session_role": "NOT_CONNECTED_NOT_VERIFIED",
+        },
         "source_roots": roots,
         "source_status": "NOT_CONFIGURED" if not roots else "DECLARED_NOT_VERIFIED",
         "database": {
@@ -364,7 +184,9 @@ def _configuration_snapshot(config: dict[str, Any], config_path: Path) -> dict[s
             "deployment_applied": app["deployment_applied"],
             "instance_uuid": app["deployment_instance_uuid"],
             "cluster_system_identifier": app["cluster_system_identifier"],
-            "identity_status": "DECLARED_BOUND_NOT_CONNECTED" if bound else "UNBOUND_NOT_VERIFIED",
+            "identity_status": "DECLARED_BOUND_NOT_CONNECTED"
+            if bound
+            else "UNBOUND_NOT_VERIFIED",
             "connection_verified": False,
         },
     }
@@ -381,7 +203,13 @@ def _json_default(value: Any) -> Any:
 
 
 def _emit(payload: dict[str, Any], *, error: bool = False) -> None:
-    text = json.dumps(payload, ensure_ascii=False, allow_nan=False, separators=(",", ":"), default=_json_default)
+    text = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        separators=(",", ":"),
+        default=_json_default,
+    )
     print(text, file=sys.stderr if error else sys.stdout)
 
 
@@ -390,7 +218,9 @@ class ChineseFormatter(argparse.HelpFormatter):
         return super()._format_usage(usage, actions, groups, "用法：")
 
     def start_section(self, heading):
-        translated = {"positional arguments": "位置参数", "options": "选项"}.get(heading, heading)
+        translated = {"positional arguments": "位置参数", "options": "选项"}.get(
+            heading, heading
+        )
         super().start_section(translated)
 
 
@@ -400,210 +230,679 @@ class ChineseParser(argparse.ArgumentParser):
     def __init__(self, *args, **kwargs):
         kwargs.setdefault("add_help", False)
         super().__init__(*args, **kwargs)
-        self.add_argument("-h", "--help", action="help", default=argparse.SUPPRESS, help="显示此帮助信息并退出")
+        self.add_argument(
+            "-h",
+            "--help",
+            action="help",
+            default=argparse.SUPPRESS,
+            help="显示此帮助信息并退出",
+        )
 
     def format_usage(self) -> str:
         return super().format_usage().replace("usage:", "用法：", 1)
 
     def format_help(self) -> str:
         rendered = super().format_help().replace("usage:", "用法：", 1)
-        for english, chinese in (("positional arguments:", "位置参数："), ("optional arguments:", "选项："), ("options:", "选项：")):
+        for english, chinese in (
+            ("positional arguments:", "位置参数："),
+            ("optional arguments:", "选项："),
+            ("options:", "选项："),
+        ):
             rendered = rendered.replace(english, chinese)
         return rendered
 
     def error(self, message: str) -> None:
-        _emit({"ok": False, "code": "ARGUMENT_ERROR", "message": "参数错误：请核对命令格式及必需参数"}, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": "ARGUMENT_ERROR",
+                "message": "参数错误：请核对命令格式及必需参数",
+            },
+            error=True,
+        )
         raise SystemExit(_EXIT_ARGUMENT)
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = ChineseParser(prog="stock-a", description="Stock A中文诊断与TDX只读来源检查")
+    parser = ChineseParser(
+        prog="stock-a", description="Stock A中文诊断与TDX只读来源检查"
+    )
     commands = parser.add_subparsers(dest="command", parser_class=ChineseParser)
     doctor = commands.add_parser("doctor", help="诊断本地配置、包身份和声明能力")
-    doctor.add_argument("--config", help="仅接受唯一登记配置runtime.defaults.json的绝对路径")
-    pg = commands.add_parser("pg-identity", help="以只读事务核验stock_a登录、固定数据库/schema及项目迁移身份")
-    pg.add_argument("--timeout-seconds", type=float, default=5.0, help="连接与每条查询的秒数上限，默认5秒，最大30秒")
-    bind = commands.add_parser("pg-bind", help="在明确任务范围内以stock_a账号应用指定集中迁移")
-    bind.add_argument("--task-scope", required=True,
-                      choices=registered_task_scopes(),
-                      help="必填：已批准且受限的PG任务范围")
-    bind.add_argument("--migration-id", required=True, type=int, choices=registered_migration_ids(),
-                      help="必填：任务范围对应的已登记迁移ID；范围与ID配对由数据库绑定层再次核验")
-    bind.add_argument("--timeout-seconds", type=float, default=20.0, help="身份绑定总耗时上限，默认20秒，最大30秒")
+    doctor.add_argument(
+        "--config", help="仅接受唯一登记配置runtime.defaults.json的绝对路径"
+    )
+    pg = commands.add_parser(
+        "pg-identity", help="以只读事务核验stock_a登录、固定数据库/schema及项目迁移身份"
+    )
+    pg.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=5.0,
+        help="连接与每条查询的秒数上限，默认5秒，最大30秒",
+    )
+    bind = commands.add_parser(
+        "pg-bind", help="在明确任务范围内以stock_a账号应用指定集中迁移"
+    )
+    bind.add_argument(
+        "--task-scope",
+        required=True,
+        choices=registered_task_scopes(),
+        help="必填：已批准且受限的PG任务范围",
+    )
+    bind.add_argument(
+        "--migration-id",
+        required=True,
+        type=int,
+        choices=registered_migration_ids(),
+        help="必填：任务范围对应的已登记迁移ID；范围与ID配对由数据库绑定层再次核验",
+    )
+    bind.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=20.0,
+        help="身份绑定总耗时上限，默认20秒，最大30秒",
+    )
     phase0 = commands.add_parser(
         "source-phase0",
         help="有界核验已绑定的本地TDX来源能力",
         description="按明示预算有界核验已绑定的本地TDX来源能力，只读不写",
     )
-    phase0.add_argument("--max-entries", type=int, default=50000, help="每个行情目录最多枚举的目录项数，默认50000")
-    phase0.add_argument("--max-file-bytes", type=int, default=16777216, help="单个来源文件最大读取字节数，默认16777216")
-    phase0.add_argument("--max-total-bytes", type=int, default=33554432, help="本次来源文件总读取字节数上限，默认33554432")
-    phase0.add_argument("--max-records", type=int, default=200000, help="每个日线文件及GBBQ最多解析记录数，默认200000")
-    phase0.add_argument("--max-seconds", default="30", help="本次总核验耗时上限，默认30秒")
+    phase0.add_argument(
+        "--max-entries",
+        type=int,
+        default=50000,
+        help="每个行情目录最多枚举的目录项数，默认50000",
+    )
+    phase0.add_argument(
+        "--max-file-bytes",
+        type=int,
+        default=16777216,
+        help="单个来源文件最大读取字节数，默认16777216",
+    )
+    phase0.add_argument(
+        "--max-total-bytes",
+        type=int,
+        default=33554432,
+        help="本次来源文件总读取字节数上限，默认33554432",
+    )
+    phase0.add_argument(
+        "--max-records",
+        type=int,
+        default=200000,
+        help="每个日线文件及GBBQ最多解析记录数，默认200000",
+    )
+    phase0.add_argument(
+        "--max-seconds", default="30", help="本次总核验耗时上限，默认30秒"
+    )
     inspect = commands.add_parser("source-inspect", help="只读检查单个TDX日线文件")
     inspect.add_argument("path", help="待检查日线文件的绝对路径")
     inspect.add_argument("--unit-version", required=True, help="显式日线单位合同版本")
-    inspect.add_argument("--amount-to-cny", required=True, help="金额到元的精确十进制倍率")
-    inspect.add_argument("--volume-to-shares", required=True, type=int, help="数量到股的正整数倍率")
-    inspect.add_argument("--max-bytes", required=True, type=int, help="本次最大读取字节数")
-    inspect.add_argument("--max-records", required=True, type=int, help="本次最大记录数")
-    inspect.add_argument("--chunk-records", default=256, type=int, help="单次读取块记录数，默认256")
+    inspect.add_argument(
+        "--amount-to-cny", required=True, help="金额到元的精确十进制倍率"
+    )
+    inspect.add_argument(
+        "--volume-to-shares", required=True, type=int, help="数量到股的正整数倍率"
+    )
+    inspect.add_argument(
+        "--max-bytes", required=True, type=int, help="本次最大读取字节数"
+    )
+    inspect.add_argument(
+        "--max-records", required=True, type=int, help="本次最大记录数"
+    )
+    inspect.add_argument(
+        "--chunk-records", default=256, type=int, help="单次读取块记录数，默认256"
+    )
     inspect.add_argument("--max-seconds", default="30", help="本次最大读取秒数，默认30")
-    stock = commands.add_parser("research-stock", help="只读查看单只股票的原始行情、Core字段和基础观察")
+    stock = commands.add_parser(
+        "research-stock", help="只读查看单只股票的原始行情、Core字段和基础观察"
+    )
     stock.add_argument("symbol", help="来源代码，格式SH.六位代码或SZ.六位代码")
     _add_research_arguments(stock, include_vipdata=True)
-    stock.add_argument("--pg-source-raw", action="store_true", help="按显式目标日和来源SHA从stock_a.stock查询Raw事实；不打开ZIP、不重算、不执行DDL")
-    stock.add_argument("--pg-source-history", action="store_true", help="显式从PG读取同包官方会话历史，计算现役Core43/Profile11研究预览；只读、NON_PIT")
-    stock.add_argument("--pg-source-sha256", help="PG Raw查询必填：64位小写VIPDATA包SHA-256，不回退latest或跨日")
-    stock.add_argument("--pg-history-session-count", type=int, default=75, help="PG历史画像官方会话窗口，1至75，默认75")
-    stock.add_argument("--format", dest="output_format", choices=("summary", "json"), default="json", help="输出可读事实摘要或完整JSON，默认json")
-    stock.add_argument("--include-profile-preview", action="store_true", help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
-    stock.add_argument("--include-baostock-evidence", action="store_true", help="显式查询目标日单条BaoStock只读补充字段；可能联网，单位与身份仍需独立核验")
-    stock.add_argument("--include-baostock-identity", action="store_true", help="显式一次登录查询单证券Bao基本资料和目标日名录；先返回TDX/Core，再在有限预算内补充身份，NON_PIT")
-    stock.add_argument("--baostock-timeout-seconds", type=float, default=8.0, help="BaoStock单个socket等待上限，默认8秒")
-    stock.add_argument("--baostock-max-seconds", type=float, default=25.0, help="BaoStock身份会话总预算上限，默认25秒；只在显式启用身份查询时生效")
-    compare = commands.add_parser("research-compare", help="盘后只读输出有界多标的Core基础观察摘要")
-    compare.add_argument("symbols", nargs="+", help="一个或多个来源代码，格式SH.六位代码或SZ.六位代码")
+    stock.add_argument(
+        "--pg-source-raw",
+        action="store_true",
+        help="按显式目标日和来源SHA从stock_a.stock查询Raw事实；不打开ZIP、不重算、不执行DDL",
+    )
+    stock.add_argument(
+        "--pg-source-history",
+        action="store_true",
+        help="显式从PG读取同包官方会话历史，计算现役Core43/Profile11研究预览；只读、NON_PIT",
+    )
+    stock.add_argument(
+        "--pg-source-sha256",
+        help="PG Raw查询必填：64位小写VIPDATA包SHA-256，不回退latest或跨日",
+    )
+    stock.add_argument(
+        "--pg-history-session-count",
+        type=int,
+        default=75,
+        help="PG历史画像官方会话窗口，1至75，默认75",
+    )
+    stock.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("summary", "json"),
+        default="json",
+        help="输出可读事实摘要或完整JSON，默认json",
+    )
+    stock.add_argument(
+        "--include-profile-preview",
+        action="store_true",
+        help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT且不开放生产准入",
+    )
+    stock.add_argument(
+        "--include-baostock-evidence",
+        action="store_true",
+        help="显式查询目标日单条BaoStock只读补充字段；可能联网，单位与身份仍需独立核验",
+    )
+    stock.add_argument(
+        "--include-baostock-identity",
+        action="store_true",
+        help="显式一次登录查询单证券Bao基本资料和目标日名录；先返回TDX/Core，再在有限预算内补充身份，NON_PIT",
+    )
+    stock.add_argument(
+        "--baostock-timeout-seconds",
+        type=float,
+        default=8.0,
+        help="BaoStock单个socket等待上限，默认8秒",
+    )
+    stock.add_argument(
+        "--baostock-max-seconds",
+        type=float,
+        default=25.0,
+        help="BaoStock身份会话总预算上限，默认25秒；只在显式启用身份查询时生效",
+    )
+    compare = commands.add_parser(
+        "research-compare", help="盘后只读输出有界多标的Core基础观察摘要"
+    )
+    compare.add_argument(
+        "symbols", nargs="+", help="一个或多个来源代码，格式SH.六位代码或SZ.六位代码"
+    )
     _add_research_arguments(compare)
-    compare.add_argument("--max-total-bytes", type=int, default=335544320, help="本次多股票扫描总字节上限，默认335544320")
-    compare.add_argument("--max-total-records", type=int, default=4000000, help="本次多股票解析总记录上限，默认4000000")
-    compare.add_argument("--max-total-seconds", type=float, default=120.0, help="本次多股票扫描总耗时秒数上限，默认120")
+    compare.add_argument(
+        "--max-total-bytes",
+        type=int,
+        default=335544320,
+        help="本次多股票扫描总字节上限，默认335544320",
+    )
+    compare.add_argument(
+        "--max-total-records",
+        type=int,
+        default=4000000,
+        help="本次多股票解析总记录上限，默认4000000",
+    )
+    compare.add_argument(
+        "--max-total-seconds",
+        type=float,
+        default=120.0,
+        help="本次多股票扫描总耗时秒数上限，默认120",
+    )
     universe = commands.add_parser(
         "research-universe-preview",
         help="发现沪深主板/创业板TDX来源候选并分页查看盘后基础观察",
     )
     _add_research_arguments(universe, include_vipdata=True)
-    universe.add_argument("--pg-source-raw", action="store_true", help="从stock_a.stock按显式目标日和来源SHA真实SQL分页读取Raw候选")
-    universe.add_argument("--pg-source-history", action="store_true", help="显式从PG批量读取来源候选历史并分页展示Core/Profile研究摘要；只读、NON_PIT")
-    universe.add_argument("--pg-source-sha256", help="PG Raw分页查询必填：64位小写VIPDATA包SHA-256")
-    universe.add_argument("--pg-history-session-count", type=int, default=75, help="PG历史画像官方会话窗口，1至75，默认75")
-    universe.add_argument("--offset", type=int, default=0, help="来源候选分页起点，默认0")
-    universe.add_argument("--limit", type=int, default=20, help="本页证券数，默认20，最多100")
-    universe.add_argument("--market", choices=("ALL", "SH", "SZ"), default="ALL", help="市场过滤，默认ALL")
-    universe.add_argument("--board", choices=("ALL", "MAIN_BOARD", "GEM"), default="ALL", help="板别过滤，默认ALL")
-    universe.add_argument("--full-target-quality", action="store_true", help="显式扫描全部来源候选目标日质量；默认只评价当前页")
-    universe.add_argument("--full-source-core-profile", action="store_true", help="显式单遍扫描ZIP全来源候选，并逐只调用现有Core与11项Profile预览；只读、内存、NON_PIT")
-    universe.add_argument("--max-source-quality-bytes", type=int, default=4294967296, help="显式目标日质量扫描总字节上限，默认4GiB")
-    universe.add_argument("--max-source-quality-records", type=int, default=125000000, help="显式目标日质量扫描总记录上限，默认125000000")
-    universe.add_argument("--max-source-quality-seconds", type=float, default=1800.0, help="显式目标日质量扫描总耗时上限，默认1800秒")
-    universe.add_argument("--format", dest="output_format", choices=("summary", "json"), default="summary", help="输出短摘要或完整JSON，默认summary")
-    universe.add_argument("--include-profile-preview", action="store_true", help="在本页已评价Raw/Core结果上附加11项基础画像组件预览；非PIT且不开放生产准入")
-    universe.add_argument("--max-directory-entries", type=int, default=50000, help="来源目录累计枚举上限，默认50000")
-    universe.add_argument("--max-discovery-seconds", type=float, default=30.0, help="来源目录发现时间上限秒，默认30")
-    universe.add_argument("--max-total-bytes", type=int, default=335544320, help="当前页累计TDX读取字节上限，默认335544320")
-    universe.add_argument("--max-total-records", type=int, default=4000000, help="当前页累计TDX记录上限，默认4000000")
-    universe.add_argument("--max-total-seconds", type=float, default=120.0, help="当前页累计扫描秒数上限，默认120")
+    universe.add_argument(
+        "--pg-source-raw",
+        action="store_true",
+        help="从stock_a.stock按显式目标日和来源SHA真实SQL分页读取Raw候选",
+    )
+    universe.add_argument(
+        "--pg-source-history",
+        action="store_true",
+        help="显式从PG批量读取来源候选历史并分页展示Core/Profile研究摘要；只读、NON_PIT",
+    )
+    universe.add_argument(
+        "--pg-source-sha256", help="PG Raw分页查询必填：64位小写VIPDATA包SHA-256"
+    )
+    universe.add_argument(
+        "--pg-history-session-count",
+        type=int,
+        default=75,
+        help="PG历史画像官方会话窗口，1至75，默认75",
+    )
+    universe.add_argument(
+        "--offset", type=int, default=0, help="来源候选分页起点，默认0"
+    )
+    universe.add_argument(
+        "--limit", type=int, default=20, help="本页证券数，默认20，最多100"
+    )
+    universe.add_argument(
+        "--market", choices=("ALL", "SH", "SZ"), default="ALL", help="市场过滤，默认ALL"
+    )
+    universe.add_argument(
+        "--board",
+        choices=("ALL", "MAIN_BOARD", "GEM"),
+        default="ALL",
+        help="板别过滤，默认ALL",
+    )
+    universe.add_argument(
+        "--full-target-quality",
+        action="store_true",
+        help="显式扫描全部来源候选目标日质量；默认只评价当前页",
+    )
+    universe.add_argument(
+        "--full-source-core-profile",
+        action="store_true",
+        help="显式单遍扫描ZIP全来源候选，并逐只调用现有Core与11项Profile预览；只读、内存、NON_PIT",
+    )
+    universe.add_argument(
+        "--max-source-quality-bytes",
+        type=int,
+        default=4294967296,
+        help="显式目标日质量扫描总字节上限，默认4GiB",
+    )
+    universe.add_argument(
+        "--max-source-quality-records",
+        type=int,
+        default=125000000,
+        help="显式目标日质量扫描总记录上限，默认125000000",
+    )
+    universe.add_argument(
+        "--max-source-quality-seconds",
+        type=float,
+        default=1800.0,
+        help="显式目标日质量扫描总耗时上限，默认1800秒",
+    )
+    universe.add_argument(
+        "--format",
+        dest="output_format",
+        choices=("summary", "json"),
+        default="summary",
+        help="输出短摘要或完整JSON，默认summary",
+    )
+    universe.add_argument(
+        "--include-profile-preview",
+        action="store_true",
+        help="在本页已评价Raw/Core结果上附加11项基础画像组件预览；非PIT且不开放生产准入",
+    )
+    universe.add_argument(
+        "--max-directory-entries",
+        type=int,
+        default=50000,
+        help="来源目录累计枚举上限，默认50000",
+    )
+    universe.add_argument(
+        "--max-discovery-seconds",
+        type=float,
+        default=30.0,
+        help="来源目录发现时间上限秒，默认30",
+    )
+    universe.add_argument(
+        "--max-total-bytes",
+        type=int,
+        default=335544320,
+        help="当前页累计TDX读取字节上限，默认335544320",
+    )
+    universe.add_argument(
+        "--max-total-records",
+        type=int,
+        default=4000000,
+        help="当前页累计TDX记录上限，默认4000000",
+    )
+    universe.add_argument(
+        "--max-total-seconds",
+        type=float,
+        default=120.0,
+        help="当前页累计扫描秒数上限，默认120",
+    )
     target_quality = commands.add_parser(
         "source-vipdata-target-quality",
         help="逐页评价已校验VIPDATA ZIP的沪深主板/创业板目标日来源候选及逐字段质量",
     )
-    target_quality.add_argument("--vipdata-package", required=True, help="G盘已下载且不修改的官网ZIP绝对路径")
-    target_quality.add_argument("--vipdata-package-sha256", required=True, help="已知的64位ZIP SHA-256")
-    target_quality.add_argument("--max-vipdata-validation-seconds", type=float, default=300.0, help="一次ZIP SHA/CRC重验的耗时上限秒数，默认300")
-    target_quality.add_argument("--target-session", required=True, help="已核验官方市场日历中的目标交易会话，格式YYYY-MM-DD")
-    target_quality.add_argument("--unit-version", required=True, help="显式研究单位合同版本；金额/数量仍按调用方假设")
-    target_quality.add_argument("--amount-to-cny", required=True, help="金额到人民币元的调用方倍率假设")
-    target_quality.add_argument("--volume-to-shares", required=True, type=int, help="数量到股的调用方倍率假设")
-    target_quality.add_argument("--page-size", type=int, default=100, help="每页候选数，默认100，最大100")
-    target_quality.add_argument("--max-total-bytes", type=int, default=4294967296, help="总条目读取字节上限，默认4GiB")
-    target_quality.add_argument("--max-total-records", type=int, default=125000000, help="总记录读取上限，默认125000000")
-    target_quality.add_argument("--max-total-seconds", type=float, default=1800.0, help="总评价耗时上限秒数，默认1800")
-    target_quality.add_argument("--max-candidate-bytes", type=int, default=33554432, help="单条目最多读取字节，默认32MiB")
-    target_quality.add_argument("--max-candidate-records", type=int, default=1000000, help="单条目最多解析记录数，默认1000000")
-    target_quality.add_argument("--max-candidate-seconds", type=float, default=30.0, help="单条目读取秒数上限，默认30")
-    target_quality.add_argument("--chunk-records", type=int, default=1024, help="单次解码块记录数，默认1024")
+    target_quality.add_argument(
+        "--vipdata-package", required=True, help="G盘已下载且不修改的官网ZIP绝对路径"
+    )
+    target_quality.add_argument(
+        "--vipdata-package-sha256", required=True, help="已知的64位ZIP SHA-256"
+    )
+    target_quality.add_argument(
+        "--max-vipdata-validation-seconds",
+        type=float,
+        default=300.0,
+        help="一次ZIP SHA/CRC重验的耗时上限秒数，默认300",
+    )
+    target_quality.add_argument(
+        "--target-session",
+        required=True,
+        help="已核验官方市场日历中的目标交易会话，格式YYYY-MM-DD",
+    )
+    target_quality.add_argument(
+        "--unit-version",
+        required=True,
+        help="显式研究单位合同版本；金额/数量仍按调用方假设",
+    )
+    target_quality.add_argument(
+        "--amount-to-cny", required=True, help="金额到人民币元的调用方倍率假设"
+    )
+    target_quality.add_argument(
+        "--volume-to-shares", required=True, type=int, help="数量到股的调用方倍率假设"
+    )
+    target_quality.add_argument(
+        "--page-size", type=int, default=100, help="每页候选数，默认100，最大100"
+    )
+    target_quality.add_argument(
+        "--max-total-bytes",
+        type=int,
+        default=4294967296,
+        help="总条目读取字节上限，默认4GiB",
+    )
+    target_quality.add_argument(
+        "--max-total-records",
+        type=int,
+        default=125000000,
+        help="总记录读取上限，默认125000000",
+    )
+    target_quality.add_argument(
+        "--max-total-seconds",
+        type=float,
+        default=1800.0,
+        help="总评价耗时上限秒数，默认1800",
+    )
+    target_quality.add_argument(
+        "--max-candidate-bytes",
+        type=int,
+        default=33554432,
+        help="单条目最多读取字节，默认32MiB",
+    )
+    target_quality.add_argument(
+        "--max-candidate-records",
+        type=int,
+        default=1000000,
+        help="单条目最多解析记录数，默认1000000",
+    )
+    target_quality.add_argument(
+        "--max-candidate-seconds",
+        type=float,
+        default=30.0,
+        help="单条目读取秒数上限，默认30",
+    )
+    target_quality.add_argument(
+        "--chunk-records", type=int, default=1024, help="单次解码块记录数，默认1024"
+    )
     revision_compare = commands.add_parser(
         "source-vipdata-revision-compare",
         help="只读对照两份已校验VIPDATA ZIP的同会话来源条目修订",
     )
-    revision_compare.add_argument("--old-package", required=True, help="G盘现存旧版官方VIPDATA ZIP绝对路径")
-    revision_compare.add_argument("--old-package-sha256", required=True, help="旧包已知SHA-256")
-    revision_compare.add_argument("--new-package", required=True, help="G盘现存新版官方VIPDATA ZIP绝对路径")
-    revision_compare.add_argument("--new-package-sha256", required=True, help="新版已知SHA-256")
-    revision_compare.add_argument("--target-session", required=True, help="两包共同对照的目标交易会话，YYYY-MM-DD")
-    revision_compare.add_argument("--max-validation-seconds", type=float, default=300.0, help="每包SHA/CRC复验秒数上限，默认300")
-    revision_compare.add_argument("--max-total-bytes", type=int, default=4294967296, help="候选条目解压字节总上限，默认4GiB")
-    revision_compare.add_argument("--max-total-records", type=int, default=125000000, help="候选条目记录总上限，默认125000000")
-    revision_compare.add_argument("--max-total-seconds", type=float, default=1800.0, help="逐条目对照秒数上限，默认1800")
-    revision_compare.add_argument("--sample-limit", type=int, default=20, help="最多保留多少条变化样本，默认20")
+    revision_compare.add_argument(
+        "--old-package", required=True, help="G盘现存旧版官方VIPDATA ZIP绝对路径"
+    )
+    revision_compare.add_argument(
+        "--old-package-sha256", required=True, help="旧包已知SHA-256"
+    )
+    revision_compare.add_argument(
+        "--new-package", required=True, help="G盘现存新版官方VIPDATA ZIP绝对路径"
+    )
+    revision_compare.add_argument(
+        "--new-package-sha256", required=True, help="新版已知SHA-256"
+    )
+    revision_compare.add_argument(
+        "--target-session", required=True, help="两包共同对照的目标交易会话，YYYY-MM-DD"
+    )
+    revision_compare.add_argument(
+        "--max-validation-seconds",
+        type=float,
+        default=300.0,
+        help="每包SHA/CRC复验秒数上限，默认300",
+    )
+    revision_compare.add_argument(
+        "--max-total-bytes",
+        type=int,
+        default=4294967296,
+        help="候选条目解压字节总上限，默认4GiB",
+    )
+    revision_compare.add_argument(
+        "--max-total-records",
+        type=int,
+        default=125000000,
+        help="候选条目记录总上限，默认125000000",
+    )
+    revision_compare.add_argument(
+        "--max-total-seconds",
+        type=float,
+        default=1800.0,
+        help="逐条目对照秒数上限，默认1800",
+    )
+    revision_compare.add_argument(
+        "--sample-limit", type=int, default=20, help="最多保留多少条变化样本，默认20"
+    )
     vipdata = commands.add_parser(
         "source-vipdata",
         help="显式检查通达信官网盘后ZIP，或在G盘临时目录下载并校验",
         description="仅此显式命令联网。默认只检查官网；download-verify会在满足日期门后下载一次完整ZIP并校验。",
     )
-    vipdata.add_argument("--mode", choices=("inspect", "download-verify"), default="inspect", help="只检查官网元数据，或下载并验证完整ZIP，默认inspect")
-    vipdata.add_argument("--target-session", required=True, help="必填目标正式交易会话，格式YYYY-MM-DD")
-    vipdata.add_argument("--max-page-bytes", type=int, default=2097152, help="官网页面最大读取字节数，默认2097152")
-    vipdata.add_argument("--max-package-bytes", type=int, default=2147483648, help="完整ZIP最大下载字节数，默认2147483648")
-    vipdata.add_argument("--max-zip-entries", type=int, default=50000, help="ZIP中央目录最大条目数，默认50000")
-    vipdata.add_argument("--max-uncompressed-bytes", type=int, default=4294967296, help="ZIP最大总解压字节数，默认4294967296")
-    vipdata.add_argument("--max-entry-bytes", type=int, default=33554432, help="ZIP单条目最大解压字节数，默认33554432")
-    vipdata.add_argument("--max-compression-ratio", type=int, default=200, help="ZIP条目最大压缩比，默认200")
-    vipdata.add_argument("--timeout-seconds", type=float, default=20.0, help="单次连接或读取超时秒数，默认20")
-    vipdata.add_argument("--max-total-seconds", type=float, default=300.0, help="页面和下载的总读取秒数上限，默认300")
-    vipdata.add_argument("--max-redirects", type=int, default=4, help="官网HTTPS重定向最大次数，默认4")
-    vipdata.add_argument("--reserve-free-bytes", type=int, default=536870912, help="下载期间必须保留的G盘可用空间，默认536870912")
-    vipdata.add_argument("--consume-symbol", help="可选：将已验证ZIP中的一个SH./SZ.日线样本送入现有Raw/Canonical/Core只读消费者")
+    vipdata.add_argument(
+        "--mode",
+        choices=("inspect", "download-verify"),
+        default="inspect",
+        help="只检查官网元数据，或下载并验证完整ZIP，默认inspect",
+    )
+    vipdata.add_argument(
+        "--target-session", required=True, help="必填目标正式交易会话，格式YYYY-MM-DD"
+    )
+    vipdata.add_argument(
+        "--max-page-bytes",
+        type=int,
+        default=2097152,
+        help="官网页面最大读取字节数，默认2097152",
+    )
+    vipdata.add_argument(
+        "--max-package-bytes",
+        type=int,
+        default=2147483648,
+        help="完整ZIP最大下载字节数，默认2147483648",
+    )
+    vipdata.add_argument(
+        "--max-zip-entries",
+        type=int,
+        default=50000,
+        help="ZIP中央目录最大条目数，默认50000",
+    )
+    vipdata.add_argument(
+        "--max-uncompressed-bytes",
+        type=int,
+        default=4294967296,
+        help="ZIP最大总解压字节数，默认4294967296",
+    )
+    vipdata.add_argument(
+        "--max-entry-bytes",
+        type=int,
+        default=33554432,
+        help="ZIP单条目最大解压字节数，默认33554432",
+    )
+    vipdata.add_argument(
+        "--max-compression-ratio",
+        type=int,
+        default=200,
+        help="ZIP条目最大压缩比，默认200",
+    )
+    vipdata.add_argument(
+        "--timeout-seconds",
+        type=float,
+        default=20.0,
+        help="单次连接或读取超时秒数，默认20",
+    )
+    vipdata.add_argument(
+        "--max-total-seconds",
+        type=float,
+        default=300.0,
+        help="页面和下载的总读取秒数上限，默认300",
+    )
+    vipdata.add_argument(
+        "--max-redirects", type=int, default=4, help="官网HTTPS重定向最大次数，默认4"
+    )
+    vipdata.add_argument(
+        "--reserve-free-bytes",
+        type=int,
+        default=536870912,
+        help="下载期间必须保留的G盘可用空间，默认536870912",
+    )
+    vipdata.add_argument(
+        "--consume-symbol",
+        help="可选：将已验证ZIP中的一个SH./SZ.日线样本送入现有Raw/Canonical/Core只读消费者",
+    )
     vipdata.add_argument("--unit-version", help="使用Core消费者时必填的显式TDX单位版本")
-    vipdata.add_argument("--amount-to-cny", help="使用Core消费者时必填的精确金额到元倍率")
-    vipdata.add_argument("--volume-to-shares", type=int, help="使用Core消费者时必填的数量到股正整数倍率")
-    vipdata.add_argument("--max-symbol-bytes", type=int, default=16777216, help="Core消费者单个日线文件最大读取字节数，默认16777216")
-    vipdata.add_argument("--max-symbol-records", type=int, default=200000, help="Core消费者单个日线文件最大记录数，默认200000")
-    vipdata.add_argument("--max-symbol-seconds", default="30", help="Core消费者单个日线文件最大扫描秒数，默认30")
+    vipdata.add_argument(
+        "--amount-to-cny", help="使用Core消费者时必填的精确金额到元倍率"
+    )
+    vipdata.add_argument(
+        "--volume-to-shares", type=int, help="使用Core消费者时必填的数量到股正整数倍率"
+    )
+    vipdata.add_argument(
+        "--max-symbol-bytes",
+        type=int,
+        default=16777216,
+        help="Core消费者单个日线文件最大读取字节数，默认16777216",
+    )
+    vipdata.add_argument(
+        "--max-symbol-records",
+        type=int,
+        default=200000,
+        help="Core消费者单个日线文件最大记录数，默认200000",
+    )
+    vipdata.add_argument(
+        "--max-symbol-seconds",
+        default="30",
+        help="Core消费者单个日线文件最大扫描秒数，默认30",
+    )
     raw_import = commands.add_parser(
         "source-vipdata-persist",
         help="按稳定Raw每日APPEND操作将已验证VIPDATA单日观察写入固定PG typed表",
         description="只接受已登记的稳定Raw每日APPEND操作标识、显式G盘ZIP和目标交易会话；最多5000候选，分块写stock_a.stock.source_raw_daily。",
     )
-    raw_import.add_argument("--task-scope", required=True,
-                            choices=RAW_DAILY_APPEND_TASK_SCOPES,
-                            help="仅登记Raw每日APPEND操作及过渡兼容标识")
-    raw_import.add_argument("--vipdata-package", required=True, help="G:/codex_tmp内已存在且只读的VIPDATA ZIP绝对路径")
-    raw_import.add_argument("--vipdata-package-sha256", required=True, help="完整ZIP的64位小写SHA-256")
-    raw_import.add_argument("--max-vipdata-validation-seconds", type=float, default=300.0,
-                            help="本地ZIP SHA与CRC完整复验秒数上限，默认300")
-    raw_import.add_argument("--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD")
-    raw_import.add_argument("--history-session-count", type=int, default=1,
-                            help="显式官方日历历史窗口会话数，1保持单日行为，最多75；每个VIPDATA条目只扫描一次")
-    raw_import.add_argument("--max-source-quality-bytes", type=int, default=4294967296,
-                            help="全来源候选条目解压字节上限，默认4GiB")
-    raw_import.add_argument("--max-source-quality-records", type=int, default=125000000,
-                            help="全来源候选记录上限，默认125000000")
-    raw_import.add_argument("--max-source-quality-seconds", type=float, default=1800.0,
-                            help="单遍全来源目标日扫描秒数上限，默认1800")
-    raw_import.add_argument("--chunk-size", type=int, default=100,
-                            help="每个可恢复PG事务最多写入行数，固定上限100")
+    raw_import.add_argument(
+        "--task-scope",
+        required=True,
+        choices=RAW_DAILY_APPEND_TASK_SCOPES,
+        help="仅登记Raw每日APPEND操作及过渡兼容标识",
+    )
+    raw_import.add_argument(
+        "--vipdata-package",
+        required=True,
+        help="G:/codex_tmp内已存在且只读的VIPDATA ZIP绝对路径",
+    )
+    raw_import.add_argument(
+        "--vipdata-package-sha256", required=True, help="完整ZIP的64位小写SHA-256"
+    )
+    raw_import.add_argument(
+        "--max-vipdata-validation-seconds",
+        type=float,
+        default=300.0,
+        help="本地ZIP SHA与CRC完整复验秒数上限，默认300",
+    )
+    raw_import.add_argument(
+        "--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD"
+    )
+    raw_import.add_argument(
+        "--history-session-count",
+        type=int,
+        default=1,
+        help="显式官方日历历史窗口会话数，1保持单日行为，最多75；每个VIPDATA条目只扫描一次",
+    )
+    raw_import.add_argument(
+        "--max-source-quality-bytes",
+        type=int,
+        default=4294967296,
+        help="全来源候选条目解压字节上限，默认4GiB",
+    )
+    raw_import.add_argument(
+        "--max-source-quality-records",
+        type=int,
+        default=125000000,
+        help="全来源候选记录上限，默认125000000",
+    )
+    raw_import.add_argument(
+        "--max-source-quality-seconds",
+        type=float,
+        default=1800.0,
+        help="单遍全来源目标日扫描秒数上限，默认1800",
+    )
+    raw_import.add_argument(
+        "--chunk-size",
+        type=int,
+        default=100,
+        help="每个可恢复PG事务最多写入行数，固定上限100",
+    )
     raw_catalog = commands.add_parser(
         "source-raw-catalog",
         help="只读查询PG中Stock A Raw来源日期版本目录",
     )
     raw_catalog.add_argument("--year", type=int, help="可选年份筛选Raw目录")
     raw_catalog.add_argument("--offset", type=int, default=0, help="版本页偏移，默认0")
-    raw_catalog.add_argument("--limit", type=int, default=100, help="每页版本数，默认100，最多200")
+    raw_catalog.add_argument(
+        "--limit", type=int, default=100, help="每页版本数，默认100，最多200"
+    )
     preview_serve = commands.add_parser(
         "preview-serve",
         help="显式启动本机PG来源级研究预览页面（仅127.0.0.1:28766）",
         description="仅用于开发研究预览；只读现有PG Raw，非正式发布、非PIT。",
     )
-    preview_serve.add_argument("--host", default="127.0.0.1", help="固定127.0.0.1，不允许远程监听")
-    preview_serve.add_argument("--port", type=int, default=28766, help="固定开发端口28766")
+    preview_serve.add_argument(
+        "--host", default="127.0.0.1", help="固定127.0.0.1，不允许远程监听"
+    )
+    preview_serve.add_argument(
+        "--port", type=int, default=28766, help="固定开发端口28766"
+    )
     return parser
 
 
-def _add_research_arguments(command: argparse.ArgumentParser, *, include_vipdata: bool = False) -> None:
-    command.add_argument("--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD")
-    command.add_argument("--unit-version", required=True, help="本次研究使用的显式TDX单位合同版本")
-    command.add_argument("--amount-to-cny", help="可选：金额到人民币元的研究倍率；省略则金额单位保持未知")
-    command.add_argument("--volume-to-shares", type=int, help="可选：数量到股的研究倍率；省略则数量单位保持未知")
-    command.add_argument("--max-bytes", type=int, default=16777216, help="单文件最多读取字节数，默认16777216")
-    command.add_argument("--max-records", type=int, default=200000, help="单文件最多读取记录数，默认200000")
-    command.add_argument("--chunk-records", type=int, default=256, help="单次读取块记录数，默认256")
-    command.add_argument("--max-seconds", default="30", help="单文件最大读取秒数，默认30")
+def _add_research_arguments(
+    command: argparse.ArgumentParser, *, include_vipdata: bool = False
+) -> None:
+    command.add_argument(
+        "--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD"
+    )
+    command.add_argument(
+        "--unit-version", required=True, help="本次研究使用的显式TDX单位合同版本"
+    )
+    command.add_argument(
+        "--amount-to-cny", help="可选：金额到人民币元的研究倍率；省略则金额单位保持未知"
+    )
+    command.add_argument(
+        "--volume-to-shares",
+        type=int,
+        help="可选：数量到股的研究倍率；省略则数量单位保持未知",
+    )
+    command.add_argument(
+        "--max-bytes",
+        type=int,
+        default=16777216,
+        help="单文件最多读取字节数，默认16777216",
+    )
+    command.add_argument(
+        "--max-records",
+        type=int,
+        default=200000,
+        help="单文件最多读取记录数，默认200000",
+    )
+    command.add_argument(
+        "--chunk-records", type=int, default=256, help="单次读取块记录数，默认256"
+    )
+    command.add_argument(
+        "--max-seconds", default="30", help="单文件最大读取秒数，默认30"
+    )
     if include_vipdata:
-        command.add_argument("--vipdata-package", help="显式选择G:/codex_tmp内已下载的VIPDATA ZIP；只读并逐次核验SHA/CRC")
-        command.add_argument("--vipdata-package-sha256", help="显式VIPDATA包的预期SHA-256；与--vipdata-package配套必填")
-        command.add_argument("--max-vipdata-validation-seconds", type=float, default=300.0, help="本次ZIP SHA/CRC完整校验总秒数上限，默认300")
-        command.add_argument("--max-vipdata-extract-bytes", type=int, default=536870912, help="当前单页临时解压字节上限，默认536870912")
+        command.add_argument(
+            "--vipdata-package",
+            help="显式选择G:/codex_tmp内已下载的VIPDATA ZIP；只读并逐次核验SHA/CRC",
+        )
+        command.add_argument(
+            "--vipdata-package-sha256",
+            help="显式VIPDATA包的预期SHA-256；与--vipdata-package配套必填",
+        )
+        command.add_argument(
+            "--max-vipdata-validation-seconds",
+            type=float,
+            default=300.0,
+            help="本次ZIP SHA/CRC完整校验总秒数上限，默认300",
+        )
+        command.add_argument(
+            "--max-vipdata-extract-bytes",
+            type=int,
+            default=536870912,
+            help="当前单页临时解压字节上限，默认536870912",
+        )
 
 
 def _safe_child(path: Path, root: Path, *, optional: bool = False) -> Path | None:
@@ -618,15 +917,21 @@ def _safe_child(path: Path, root: Path, *, optional: bool = False) -> Path | Non
     except PermissionError as error:
         if optional:
             return None
-        raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验来源目录", _EXIT_PERMISSION) from error
+        raise DiagnosticError(
+            "SOURCE_ACCESS_DENIED", "操作系统拒绝核验来源目录", _EXIT_PERMISSION
+        ) from error
     except OSError as error:
         if optional:
             return None
-        raise DiagnosticError("SOURCE_IO_ERROR", "核验来源目录时发生工程I/O错误", _EXIT_ENGINEERING) from error
+        raise DiagnosticError(
+            "SOURCE_IO_ERROR", "核验来源目录时发生工程I/O错误", _EXIT_ENGINEERING
+        ) from error
     except ValueError as error:
         if optional:
             return None
-        raise DiagnosticError("SOURCE_PATH_INVALID", "来源目录不存在或最终路径离开保护根") from error
+        raise DiagnosticError(
+            "SOURCE_PATH_INVALID", "来源目录不存在或最终路径离开保护根"
+        ) from error
     if not stat.S_ISDIR(mode):
         if optional:
             return None
@@ -639,17 +944,37 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config()
     roots = config["source_policy"]["configured_tdx_source_roots"]
     if not roots:
-        raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX来源保护根，阶段0在目录枚举前拒绝")
+        raise DiagnosticError(
+            "SOURCE_NOT_CONFIGURED",
+            "配置中没有绑定TDX来源保护根，阶段0在目录枚举前拒绝",
+        )
     if len(roots) != 1:
-        raise DiagnosticError("SOURCE_ROOT_AMBIGUOUS", "阶段0要求一个明确绑定的本地TDX来源根")
-    if type(args.max_entries) is not int or args.max_entries <= 0 or type(args.max_file_bytes) is not int or args.max_file_bytes <= 0 or type(args.max_total_bytes) is not int or args.max_total_bytes <= 0 or type(args.max_records) is not int or args.max_records <= 0:
-        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", "阶段0目录、字节与记录预算必须是拒绝布尔值的正整数", _EXIT_ARGUMENT)
+        raise DiagnosticError(
+            "SOURCE_ROOT_AMBIGUOUS", "阶段0要求一个明确绑定的本地TDX来源根"
+        )
+    if (
+        type(args.max_entries) is not int
+        or args.max_entries <= 0
+        or type(args.max_file_bytes) is not int
+        or args.max_file_bytes <= 0
+        or type(args.max_total_bytes) is not int
+        or args.max_total_bytes <= 0
+        or type(args.max_records) is not int
+        or args.max_records <= 0
+    ):
+        raise DiagnosticError(
+            "ARGUMENT_CONTRACT_INVALID",
+            "阶段0目录、字节与记录预算必须是拒绝布尔值的正整数",
+            _EXIT_ARGUMENT,
+        )
     try:
         seconds = Decimal(args.max_seconds)
         if not seconds.is_finite() or seconds <= 0:
             raise ValueError
     except (InvalidOperation, ValueError) as error:
-        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", "阶段0耗时预算必须是有限正数", _EXIT_ARGUMENT) from error
+        raise DiagnosticError(
+            "ARGUMENT_CONTRACT_INVALID", "阶段0耗时预算必须是有限正数", _EXIT_ARGUMENT
+        ) from error
     started = time.monotonic()
     try:
         root = Path(roots[0]).resolve(strict=True)
@@ -657,9 +982,13 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
     except FileNotFoundError as error:
         raise DiagnosticError("SOURCE_PATH_INVALID", "已绑定TDX来源根不存在") from error
     except PermissionError as error:
-        raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验已绑定来源根", _EXIT_PERMISSION) from error
+        raise DiagnosticError(
+            "SOURCE_ACCESS_DENIED", "操作系统拒绝核验已绑定来源根", _EXIT_PERMISSION
+        ) from error
     except OSError as error:
-        raise DiagnosticError("SOURCE_IO_ERROR", "核验已绑定来源根时发生工程I/O错误", _EXIT_ENGINEERING) from error
+        raise DiagnosticError(
+            "SOURCE_IO_ERROR", "核验已绑定来源根时发生工程I/O错误", _EXIT_ENGINEERING
+        ) from error
     if not stat.S_ISDIR(root_mode):
         raise DiagnosticError("SOURCE_PATH_INVALID", "已绑定TDX来源根不是目录")
     sample_rule = "对sh/sz/bj协议目录分别按文件名排序，完整只读扫描首个.day文件；每个目录最多枚举max_entries项"
@@ -668,7 +997,9 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
     total_records = 0
     for market in ("sh", "sz", "bj"):
         optional_market = market == "bj"
-        directory = _safe_child(root / "vipdoc" / market / "lday", root, optional=optional_market)
+        directory = _safe_child(
+            root / "vipdoc" / market / "lday", root, optional=optional_market
+        )
         if directory is None:
             markets[market] = {
                 "directory": str(root / "vipdoc" / market / "lday"),
@@ -689,45 +1020,71 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
             with os.scandir(directory) as entries:
                 for entry in entries:
                     if time.monotonic() - started > float(seconds):
-                        raise DiagnosticError("READ_TIMEOUT", "来源目录枚举超过耗时预算", _EXIT_UNAVAILABLE)
+                        raise DiagnosticError(
+                            "READ_TIMEOUT",
+                            "来源目录枚举超过耗时预算",
+                            _EXIT_UNAVAILABLE,
+                        )
                     entry_count += 1
                     if entry_count > args.max_entries:
-                        raise DiagnosticError("READ_LIMIT_EXCEEDED", "行情目录项数超过预算，不能将截断枚举报告为完整", _EXIT_UNAVAILABLE)
+                        raise DiagnosticError(
+                            "READ_LIMIT_EXCEEDED",
+                            "行情目录项数超过预算，不能将截断枚举报告为完整",
+                            _EXIT_UNAVAILABLE,
+                        )
                     if entry.is_symlink():
                         excluded_links += 1
                         continue
-                    if entry.is_file(follow_symlinks=False) and entry.name.lower().endswith(".day"):
+                    if entry.is_file(
+                        follow_symlinks=False
+                    ) and entry.name.lower().endswith(".day"):
                         names.append(entry.name)
         except PermissionError as error:
             if optional_market:
                 markets[market] = {
-                    "directory": str(directory), "day_file_count": None,
-                    "enumerated_entry_count": entry_count, "excluded_link_count": excluded_links,
-                    "scope_complete": False, "market_status": "OPTIONAL_DEFERRED",
-                    "reason": "SOURCE_ACCESS_DENIED", "sample_rule": "北交所目录读取失败，沪深结果保留",
+                    "directory": str(directory),
+                    "day_file_count": None,
+                    "enumerated_entry_count": entry_count,
+                    "excluded_link_count": excluded_links,
+                    "scope_complete": False,
+                    "market_status": "OPTIONAL_DEFERRED",
+                    "reason": "SOURCE_ACCESS_DENIED",
+                    "sample_rule": "北交所目录读取失败，沪深结果保留",
                     "sample": None,
                 }
                 continue
-            raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝枚举行情目录", _EXIT_PERMISSION) from error
+            raise DiagnosticError(
+                "SOURCE_ACCESS_DENIED", "操作系统拒绝枚举行情目录", _EXIT_PERMISSION
+            ) from error
         except OSError as error:
             if optional_market:
                 markets[market] = {
-                    "directory": str(directory), "day_file_count": None,
-                    "enumerated_entry_count": entry_count, "excluded_link_count": excluded_links,
-                    "scope_complete": False, "market_status": "OPTIONAL_DEFERRED",
-                    "reason": "SOURCE_IO_ERROR", "sample_rule": "北交所目录读取失败，沪深结果保留",
+                    "directory": str(directory),
+                    "day_file_count": None,
+                    "enumerated_entry_count": entry_count,
+                    "excluded_link_count": excluded_links,
+                    "scope_complete": False,
+                    "market_status": "OPTIONAL_DEFERRED",
+                    "reason": "SOURCE_IO_ERROR",
+                    "sample_rule": "北交所目录读取失败，沪深结果保留",
                     "sample": None,
                 }
                 continue
-            raise DiagnosticError("SOURCE_IO_ERROR", "枚举行情目录时发生工程I/O错误", _EXIT_ENGINEERING) from error
+            raise DiagnosticError(
+                "SOURCE_IO_ERROR", "枚举行情目录时发生工程I/O错误", _EXIT_ENGINEERING
+            ) from error
         except DiagnosticError as error:
             if not optional_market:
                 raise
             markets[market] = {
-                "directory": str(directory), "day_file_count": None,
-                "enumerated_entry_count": entry_count, "excluded_link_count": excluded_links,
-                "scope_complete": False, "market_status": "OPTIONAL_DEFERRED",
-                "reason": error.code, "sample_rule": "北交所目录枚举预算未完成，沪深结果保留",
+                "directory": str(directory),
+                "day_file_count": None,
+                "enumerated_entry_count": entry_count,
+                "excluded_link_count": excluded_links,
+                "scope_complete": False,
+                "market_status": "OPTIONAL_DEFERRED",
+                "reason": error.code,
+                "sample_rule": "北交所目录枚举预算未完成，沪深结果保留",
                 "sample": None,
             }
             continue
@@ -744,37 +1101,66 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
         }
         if names:
             try:
-                sample_path = _safe_file(root / "vipdoc" / market / "lday" / names[0], root, optional=optional_market)
+                sample_path = _safe_file(
+                    root / "vipdoc" / market / "lday" / names[0],
+                    root,
+                    optional=optional_market,
+                )
                 if sample_path is None:
                     raise DiagnosticError("SOURCE_NOT_FOUND", "北交所样本在枚举后消失")
                 size = _source_file_size(sample_path)
             except DiagnosticError as error:
                 if not optional_market:
                     raise
-                market_result.update({
-                    "market_status": "OPTIONAL_DEFERRED", "reason": error.code, "sample": None,
-                })
+                market_result.update(
+                    {
+                        "market_status": "OPTIONAL_DEFERRED",
+                        "reason": error.code,
+                        "sample": None,
+                    }
+                )
                 markets[market] = market_result
                 continue
             if size > args.max_file_bytes or total_bytes + size > args.max_total_bytes:
                 if optional_market:
-                    market_result.update({
-                        "market_status": "OPTIONAL_DEFERRED", "reason": "READ_LIMIT_EXCEEDED", "sample": None,
-                    })
+                    market_result.update(
+                        {
+                            "market_status": "OPTIONAL_DEFERRED",
+                            "reason": "READ_LIMIT_EXCEEDED",
+                            "sample": None,
+                        }
+                    )
                     markets[market] = market_result
                     continue
-                raise DiagnosticError("READ_LIMIT_EXCEEDED", "日线样本超过本次文件或总字节预算", _EXIT_UNAVAILABLE)
+                raise DiagnosticError(
+                    "READ_LIMIT_EXCEEDED",
+                    "日线样本超过本次文件或总字节预算",
+                    _EXIT_UNAVAILABLE,
+                )
             units = UnitContract("TDX_RAW_DIAGNOSTIC_ONLY", Decimal(1), 1)
             remaining_total = args.max_total_bytes - total_bytes
             if remaining_total <= 0:
                 if optional_market:
-                    market_result.update({
-                        "market_status": "OPTIONAL_DEFERRED", "reason": "READ_LIMIT_EXCEEDED", "sample": None,
-                    })
+                    market_result.update(
+                        {
+                            "market_status": "OPTIONAL_DEFERRED",
+                            "reason": "READ_LIMIT_EXCEEDED",
+                            "sample": None,
+                        }
+                    )
                     markets[market] = market_result
                     continue
-                raise DiagnosticError("READ_LIMIT_EXCEEDED", "日线样本没有剩余总字节预算", _EXIT_UNAVAILABLE)
-            limits = ReadLimits(min(args.max_file_bytes, remaining_total), args.max_records, 1024, seconds)
+                raise DiagnosticError(
+                    "READ_LIMIT_EXCEEDED",
+                    "日线样本没有剩余总字节预算",
+                    _EXIT_UNAVAILABLE,
+                )
+            limits = ReadLimits(
+                min(args.max_file_bytes, remaining_total),
+                args.max_records,
+                1024,
+                seconds,
+            )
             try:
                 with open_day_file(sample_path, roots, units, limits) as scan:
                     for _record in scan:
@@ -783,16 +1169,20 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
                     summary = scan.summary
             except DayReadError as error:
                 if optional_market:
-                    market_result.update({
-                        "market_status": "OPTIONAL_DEFERRED",
-                        "reason": error.code,
-                        "sample": None,
-                    })
+                    market_result.update(
+                        {
+                            "market_status": "OPTIONAL_DEFERRED",
+                            "reason": error.code,
+                            "sample": None,
+                        }
+                    )
                     markets[market] = market_result
                     continue
                 code = error.code
                 exit_code = _READ_ERROR_EXIT_CODES.get(code, _EXIT_ENGINEERING)
-                raise DiagnosticError(code, f"日线真实样本未能完整核验：{error}", exit_code) from error
+                raise DiagnosticError(
+                    code, f"日线真实样本未能完整核验：{error}", exit_code
+                ) from error
             total_bytes += summary.scan.byte_count
             total_records += summary.scan.record_count
             market_result["sample"] = {
@@ -808,40 +1198,86 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
                 "price_diagnostic_scale": "raw_price_integer/100 per existing decoder; candidate protocol observation only",
                 "amount_unit": "UNVERIFIED_RAW_FLOAT32",
                 "volume_unit": "UNVERIFIED_RAW_UINT32",
-                "field_quality": {name: asdict(getattr(summary.scan, name)) for name in ("prices", "amount", "volume")},
+                "field_quality": {
+                    name: asdict(getattr(summary.scan, name))
+                    for name in ("prices", "amount", "volume")
+                },
             }
             market_result["market_status"] = "SAMPLED"
         else:
             market_result["market_status"] = "NO_DAY_FILES"
         markets[market] = market_result
 
-    capabilities: list[dict[str, Any]] = [{
-        "capability": "TDX_DAILY_RAW",
-        "dataset_id": "TDX_DAILY_BARS",
-        "version": "TDX_DAY_RECORD_32B_CANDIDATE",
-        "source_authority": "UNVERIFIED_LOCAL_TDX_INSTALLATION",
-        "producer": "stock_a.sources.tdx.day.decode_day_record + day_stream.DayRecordScan",
-        "field_contract": [
-            {"field": "trade_date", "unit": "YYYYMMDD calendar date", "time_role": "trade_date only; not publication or availability", "quality": "date validation in existing parser", "consumer_admission": "DENY_UNTIL_OFFICIAL_CALENDAR"},
-            {"field": "open/high/low/close", "unit": "candidate raw price integer / 100", "time_role": "bar trade_date", "quality": "group validation counts included per sample", "consumer_admission": "DENY_NORMALIZED_CORE_PENDING_SOURCE_AND_UNIT_AUTHORITY"},
-            {"field": "amount", "unit": "UNVERIFIED_RAW_FLOAT32", "time_role": "bar trade_date", "quality": "finite/nonnegative group validation counts included per sample", "consumer_admission": "DENY_NORMALIZED_CORE"},
-            {"field": "volume", "unit": "UNVERIFIED_RAW_UINT32", "time_role": "bar trade_date", "quality": "nonnegative integer group validation counts included per sample", "consumer_admission": "DENY_NORMALIZED_CORE"},
-        ],
-        "clock_contract": {"observed_at": "read_started_at/read_completed_at with local timezone per sample", "available_at": "UNKNOWN", "published_at": "UNKNOWN", "captured_at": "this local CLI read observation only; not historical first capture", "sealed_at": "UNKNOWN"},
-        "required": True,
-        "status": "BLOCKED",
-        "reason": "真实文件可读，但仅每市场一个样本；成交额/成交量单位及其来源权威未独立成立，未注册规范化消费者",
-        "sample_scope": sample_rule,
-        "consumer_admission": "DENY_NORMALIZED_CORE",
-    }]
+    capabilities: list[dict[str, Any]] = [
+        {
+            "capability": "TDX_DAILY_RAW",
+            "dataset_id": "TDX_DAILY_BARS",
+            "version": "TDX_DAY_RECORD_32B_CANDIDATE",
+            "source_authority": "UNVERIFIED_LOCAL_TDX_INSTALLATION",
+            "producer": "stock_a.sources.tdx.day.decode_day_record + day_stream.DayRecordScan",
+            "field_contract": [
+                {
+                    "field": "trade_date",
+                    "unit": "YYYYMMDD calendar date",
+                    "time_role": "trade_date only; not publication or availability",
+                    "quality": "date validation in existing parser",
+                    "consumer_admission": "DENY_UNTIL_OFFICIAL_CALENDAR",
+                },
+                {
+                    "field": "open/high/low/close",
+                    "unit": "candidate raw price integer / 100",
+                    "time_role": "bar trade_date",
+                    "quality": "group validation counts included per sample",
+                    "consumer_admission": "DENY_NORMALIZED_CORE_PENDING_SOURCE_AND_UNIT_AUTHORITY",
+                },
+                {
+                    "field": "amount",
+                    "unit": "UNVERIFIED_RAW_FLOAT32",
+                    "time_role": "bar trade_date",
+                    "quality": "finite/nonnegative group validation counts included per sample",
+                    "consumer_admission": "DENY_NORMALIZED_CORE",
+                },
+                {
+                    "field": "volume",
+                    "unit": "UNVERIFIED_RAW_UINT32",
+                    "time_role": "bar trade_date",
+                    "quality": "nonnegative integer group validation counts included per sample",
+                    "consumer_admission": "DENY_NORMALIZED_CORE",
+                },
+            ],
+            "clock_contract": {
+                "observed_at": "read_started_at/read_completed_at with local timezone per sample",
+                "available_at": "UNKNOWN",
+                "published_at": "UNKNOWN",
+                "captured_at": "this local CLI read observation only; not historical first capture",
+                "sealed_at": "UNKNOWN",
+            },
+            "required": True,
+            "status": "BLOCKED",
+            "reason": "真实文件可读，但仅每市场一个样本；成交额/成交量单位及其来源权威未独立成立，未注册规范化消费者",
+            "sample_scope": sample_rule,
+            "consumer_admission": "DENY_NORMALIZED_CORE",
+        }
+    ]
 
     action_path = _safe_file(root / "T0002" / "hq_cache" / "gbbq", root, optional=True)
-    action_result: dict[str, Any] = {"status": "UNAVAILABLE", "reason": "来源文件不存在"}
+    action_result: dict[str, Any] = {
+        "status": "UNAVAILABLE",
+        "reason": "来源文件不存在",
+    }
     if action_path is not None:
         action_size = _source_file_size(action_path)
         remaining_total = args.max_total_bytes - total_bytes
-        if remaining_total <= 0 or action_size > args.max_file_bytes or action_size > remaining_total:
-            raise DiagnosticError("READ_LIMIT_EXCEEDED", "GBBQ超过本次文件或总字节预算，未生成完成摘要", _EXIT_UNAVAILABLE)
+        if (
+            remaining_total <= 0
+            or action_size > args.max_file_bytes
+            or action_size > remaining_total
+        ):
+            raise DiagnosticError(
+                "READ_LIMIT_EXCEEDED",
+                "GBBQ超过本次文件或总字节预算，未生成完成摘要",
+                _EXIT_UNAVAILABLE,
+            )
         try:
             raw, identity = read_protected_bytes(
                 action_path,
@@ -851,7 +1287,9 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
             )
         except DayReadError as error:
             exit_code = _READ_ERROR_EXIT_CODES.get(error.code, _EXIT_ENGINEERING)
-            raise DiagnosticError(error.code, f"GBBQ真实文件未能完整核验：{error}", exit_code) from error
+            raise DiagnosticError(
+                error.code, f"GBBQ真实文件未能完整核验：{error}", exit_code
+            ) from error
         total_bytes += len(raw)
         try:
             parsed = decode_gbbq_bytes(
@@ -863,11 +1301,20 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
                 max_records=args.max_records,
             )
         except GbbqDecodeError as error:
-            action_result = {"status": "BLOCKED", "reason": "GBBQ内容合同未闭合", "error_code": error.code, "raw_byte_sha256": hashlib.sha256(raw).hexdigest(), "byte_count": len(raw), "handle_path": identity.handle_path}
+            action_result = {
+                "status": "BLOCKED",
+                "reason": "GBBQ内容合同未闭合",
+                "error_code": error.code,
+                "raw_byte_sha256": hashlib.sha256(raw).hexdigest(),
+                "byte_count": len(raw),
+                "handle_path": identity.handle_path,
+            }
         else:
             categories: dict[str, int] = {}
             for record in parsed.records:
-                categories[record.category_name] = categories.get(record.category_name, 0) + 1
+                categories[record.category_name] = (
+                    categories.get(record.category_name, 0) + 1
+                )
             action_result = {
                 "status": "DEGRADED_PASS",
                 "path": str(action_path),
@@ -884,64 +1331,132 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
                 "pit_status": "NOT_ASSERTED_LOCAL_READ_CLOCK_ONLY",
                 "consumer_admission": "CATEGORY_1_CANDIDATE_ONLY_NO_PIT_OR_OFFICIAL_IDENTITY",
             }
-    capabilities.append({
-        "capability": "TDX_GBBQ_CORPORATE_ACTIONS",
-        "required": False,
-        "status": action_result["status"],
-        "reason": "本地字节可解析但不构成身份或PIT证明" if action_result["status"] == "DEGRADED_PASS" else action_result.get("reason"),
-        "evidence": action_result,
-    })
+    capabilities.append(
+        {
+            "capability": "TDX_GBBQ_CORPORATE_ACTIONS",
+            "required": False,
+            "status": action_result["status"],
+            "reason": "本地字节可解析但不构成身份或PIT证明"
+            if action_result["status"] == "DEGRADED_PASS"
+            else action_result.get("reason"),
+            "evidence": action_result,
+        }
+    )
 
     classification_candidates = []
     for relative in ("T0002/hq_cache/tdxhy.cfg", "T0002/hq_cache/infoharbor_block.dat"):
         candidate = _safe_file(root.joinpath(*relative.split("/")), root, optional=True)
         if candidate is not None:
-            classification_candidates.append({"path": str(candidate), "byte_count": _source_file_size(candidate)})
+            classification_candidates.append(
+                {"path": str(candidate), "byte_count": _source_file_size(candidate)}
+            )
     identity_candidates = []
-    for relative in ("T0002/hq_cache/ds_stk.dat", "T0002/hq_cache/base.dbf", "T0002/hq_cache/code2name.ini"):
+    for relative in (
+        "T0002/hq_cache/ds_stk.dat",
+        "T0002/hq_cache/base.dbf",
+        "T0002/hq_cache/code2name.ini",
+    ):
         candidate = _safe_file(root.joinpath(*relative.split("/")), root, optional=True)
         if candidate is not None:
-            identity_candidates.append({"path": str(candidate), "byte_count": _source_file_size(candidate)})
-    capabilities.extend([
-        {"capability": "TDX_INDUSTRY_CONCEPT_MEMBERSHIP", "required": False, "status": "BLOCKED", "reason": "分类候选文件存在但未有新项目解析/有效时钟合同；U03解析内核待后续身份与成员任务接入", "candidates": classification_candidates, "consumer_admission": "DENY"},
-        {"capability": "SECURITY_ENTITY_AND_LIFECYCLE", "required": True, "status": "BLOCKED", "reason": "本地目录/代码/首条日线不是官方稳定实体、上市/退市或换码证明；U06候选未在本目标引入", "candidates": identity_candidates, "consumer_admission": "DENY_UNMAPPED"},
-        {"capability": "OFFICIAL_TRADING_CALENDAR_AND_STATUS", "required": True, "status": "BLOCKED", "reason": "未识别并验证版本化交易所日历或日期有效状态来源；禁止由连续价格或缺bar推断", "consumer_admission": "DENY_UNKNOWN_GAPS"},
-        {"capability": "BAOSTOCK_SUPPLEMENTAL", "required": False, "status": "UNAVAILABLE", "reason": "本任务禁止联网或调用第三方接口，未验证逐字段覆盖与单位", "consumer_admission": "DENY_SUPPLEMENTAL_ONLY"},
-    ])
-    required_blocked = any(item["required"] and item["status"] not in ("FULL_PASS", "DEGRADED_PASS") for item in capabilities)
-    overall = "BLOCKED" if required_blocked else ("DEGRADED_PASS" if any(item["status"] != "FULL_PASS" for item in capabilities) else "FULL_PASS")
+            identity_candidates.append(
+                {"path": str(candidate), "byte_count": _source_file_size(candidate)}
+            )
+    capabilities.extend(
+        [
+            {
+                "capability": "TDX_INDUSTRY_CONCEPT_MEMBERSHIP",
+                "required": False,
+                "status": "BLOCKED",
+                "reason": "分类候选文件存在但未有新项目解析/有效时钟合同；U03解析内核待后续身份与成员任务接入",
+                "candidates": classification_candidates,
+                "consumer_admission": "DENY",
+            },
+            {
+                "capability": "SECURITY_ENTITY_AND_LIFECYCLE",
+                "required": True,
+                "status": "BLOCKED",
+                "reason": "本地目录/代码/首条日线不是官方稳定实体、上市/退市或换码证明；U06候选未在本目标引入",
+                "candidates": identity_candidates,
+                "consumer_admission": "DENY_UNMAPPED",
+            },
+            {
+                "capability": "OFFICIAL_TRADING_CALENDAR_AND_STATUS",
+                "required": True,
+                "status": "BLOCKED",
+                "reason": "未识别并验证版本化交易所日历或日期有效状态来源；禁止由连续价格或缺bar推断",
+                "consumer_admission": "DENY_UNKNOWN_GAPS",
+            },
+            {
+                "capability": "BAOSTOCK_SUPPLEMENTAL",
+                "required": False,
+                "status": "UNAVAILABLE",
+                "reason": "本任务禁止联网或调用第三方接口，未验证逐字段覆盖与单位",
+                "consumer_admission": "DENY_SUPPLEMENTAL_ONLY",
+            },
+        ]
+    )
+    required_blocked = any(
+        item["required"] and item["status"] not in ("FULL_PASS", "DEGRADED_PASS")
+        for item in capabilities
+    )
+    overall = (
+        "BLOCKED"
+        if required_blocked
+        else (
+            "DEGRADED_PASS"
+            if any(item["status"] != "FULL_PASS" for item in capabilities)
+            else "FULL_PASS"
+        )
+    )
     elapsed = time.monotonic() - started
-    _emit({
-        "ok": overall != "BLOCKED",
-        "status": overall,
-        "message": "已按声明预算完成本地只读阶段0核验；BLOCKED能力不进入scanner/消费者，观测时钟不代表available_at、published_at、封口或PIT",
-        "package": package,
-        "configuration_path": str(config_path),
-        "source_root": str(root),
-        "source_root_final_path": str(root),
-        "observed_at": datetime.now().astimezone().isoformat(),
-        "clock_role": "LOCAL_OBSERVED_AT_ONLY",
-        "sample_rule": sample_rule,
-        "market_directories": markets,
-        "capabilities": capabilities,
-        "coverage": {
-            "known_market_day_file_count": sum(
-                item["day_file_count"] for item in markets.values()
-                if type(item.get("day_file_count")) is int
-            ),
-            "market_day_file_count_complete": all(item.get("scope_complete") is True for item in markets.values()),
-            "markets_with_unknown_day_file_count": [
-                market for market, item in markets.items() if type(item.get("day_file_count")) is not int
-            ],
-            "sampled_day_files": sum(item["sample"] is not None for item in markets.values()),
-            "sampled_records": total_records,
-            "sampled_source_bytes": total_bytes,
-        },
-        "budgets": {"max_entries_per_market_directory": args.max_entries, "max_file_bytes": args.max_file_bytes, "max_total_bytes": args.max_total_bytes, "max_records_per_file": args.max_records, "max_seconds": str(seconds), "elapsed_seconds": round(elapsed, 6), "elapsed_budget_exceeded": elapsed > float(seconds)},
-        "business_admission": "DENY" if overall == "BLOCKED" else "SCOPED_ONLY",
-        "database_connected": False,
-        "production_switched": False,
-    })
+    _emit(
+        {
+            "ok": overall != "BLOCKED",
+            "status": overall,
+            "message": "已按声明预算完成本地只读阶段0核验；BLOCKED能力不进入scanner/消费者，观测时钟不代表available_at、published_at、封口或PIT",
+            "package": package,
+            "configuration_path": str(config_path),
+            "source_root": str(root),
+            "source_root_final_path": str(root),
+            "observed_at": datetime.now().astimezone().isoformat(),
+            "clock_role": "LOCAL_OBSERVED_AT_ONLY",
+            "sample_rule": sample_rule,
+            "market_directories": markets,
+            "capabilities": capabilities,
+            "coverage": {
+                "known_market_day_file_count": sum(
+                    item["day_file_count"]
+                    for item in markets.values()
+                    if type(item.get("day_file_count")) is int
+                ),
+                "market_day_file_count_complete": all(
+                    item.get("scope_complete") is True for item in markets.values()
+                ),
+                "markets_with_unknown_day_file_count": [
+                    market
+                    for market, item in markets.items()
+                    if type(item.get("day_file_count")) is not int
+                ],
+                "sampled_day_files": sum(
+                    item["sample"] is not None for item in markets.values()
+                ),
+                "sampled_records": total_records,
+                "sampled_source_bytes": total_bytes,
+            },
+            "budgets": {
+                "max_entries_per_market_directory": args.max_entries,
+                "max_file_bytes": args.max_file_bytes,
+                "max_total_bytes": args.max_total_bytes,
+                "max_records_per_file": args.max_records,
+                "max_seconds": str(seconds),
+                "elapsed_seconds": round(elapsed, 6),
+                "elapsed_budget_exceeded": elapsed > float(seconds),
+            },
+            "business_admission": "DENY" if overall == "BLOCKED" else "SCOPED_ONLY",
+            "database_connected": False,
+            "production_switched": False,
+        }
+    )
     return _EXIT_UNAVAILABLE if overall == "BLOCKED" else _EXIT_OK
 
 
@@ -955,11 +1470,17 @@ def _safe_file(path: Path, root: Path, *, optional: bool = False) -> Path | None
             return None
         raise DiagnosticError("SOURCE_PATH_INVALID", "所需TDX目录不存在")
     except PermissionError as error:
-        raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝核验来源文件", _EXIT_PERMISSION) from error
+        raise DiagnosticError(
+            "SOURCE_ACCESS_DENIED", "操作系统拒绝核验来源文件", _EXIT_PERMISSION
+        ) from error
     except OSError as error:
-        raise DiagnosticError("SOURCE_IO_ERROR", "核验来源文件时发生工程I/O错误", _EXIT_ENGINEERING) from error
+        raise DiagnosticError(
+            "SOURCE_IO_ERROR", "核验来源文件时发生工程I/O错误", _EXIT_ENGINEERING
+        ) from error
     except ValueError as error:
-        raise DiagnosticError("SOURCE_PATH_INVALID", "来源文件最终路径离开保护根") from error
+        raise DiagnosticError(
+            "SOURCE_PATH_INVALID", "来源文件最终路径离开保护根"
+        ) from error
     if not stat.S_ISREG(mode):
         raise DiagnosticError("SOURCE_PATH_INVALID", "来源目标不是普通文件")
     return resolved
@@ -970,11 +1491,17 @@ def _source_file_size(path: Path) -> int:
     try:
         return path.stat().st_size
     except FileNotFoundError as error:
-        raise DiagnosticError("SOURCE_NOT_FOUND", "来源文件在大小核验时已不存在", _EXIT_UNAVAILABLE) from error
+        raise DiagnosticError(
+            "SOURCE_NOT_FOUND", "来源文件在大小核验时已不存在", _EXIT_UNAVAILABLE
+        ) from error
     except PermissionError as error:
-        raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝读取来源文件大小", _EXIT_PERMISSION) from error
+        raise DiagnosticError(
+            "SOURCE_ACCESS_DENIED", "操作系统拒绝读取来源文件大小", _EXIT_PERMISSION
+        ) from error
     except OSError as error:
-        raise DiagnosticError("SOURCE_IO_ERROR", "读取来源文件大小时发生工程I/O错误", _EXIT_ENGINEERING) from error
+        raise DiagnosticError(
+            "SOURCE_IO_ERROR", "读取来源文件大小时发生工程I/O错误", _EXIT_ENGINEERING
+        ) from error
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
@@ -987,45 +1514,59 @@ def _run_doctor(args: argparse.Namespace) -> int:
         raise DiagnosticError(error.code, str(error)) from error
     contract_document = loaded_contract.document
     foundation = contract_document["scope_bindings"]["FOUNDATION_EOD"]
-    _emit({
-        "ok": False,
-        "status": "LOCAL_DIAGNOSTIC_ONLY",
-        "message": "本地包与配置结构已检查；未核验真实来源或数据库连接，不允许据此启动业务",
-        "package": package,
-        **snapshot,
-        "day_chain_contract": {
-            "contract_id": contract_document["contract_id"],
-            "version": contract_document["version"],
-            "assembled_sha256": loaded_contract.assembled_sha256,
-            "module_count": len(loaded_contract.module_paths),
-            "module_paths": list(loaded_contract.module_paths),
-            "stage_count": len(contract_document["stages"]),
-            "artifact_count": len(contract_document["artifact_groups"]),
-            "foundation_field_count": len(foundation["field_registry"]),
-            "profile_expression_count": len(foundation["profile_expression_registry"]),
-            "production_readiness_claim": False,
-        },
-        "business_start_permitted": False,
-        "database_connection_attempted": False,
-    })
+    _emit(
+        {
+            "ok": False,
+            "status": "LOCAL_DIAGNOSTIC_ONLY",
+            "message": "本地包与配置结构已检查；未核验真实来源或数据库连接，不允许据此启动业务",
+            "package": package,
+            **snapshot,
+            "day_chain_contract": {
+                "contract_id": contract_document["contract_id"],
+                "version": contract_document["version"],
+                "assembled_sha256": loaded_contract.assembled_sha256,
+                "module_count": len(loaded_contract.module_paths),
+                "module_paths": list(loaded_contract.module_paths),
+                "stage_count": len(contract_document["stages"]),
+                "artifact_count": len(contract_document["artifact_groups"]),
+                "foundation_field_count": len(foundation["field_registry"]),
+                "profile_expression_count": len(
+                    foundation["profile_expression_registry"]
+                ),
+                "production_readiness_claim": False,
+            },
+            "business_start_permitted": False,
+            "database_connection_attempted": False,
+        }
+    )
     return _EXIT_UNAVAILABLE
 
 
 def _run_pg_identity(args: argparse.Namespace) -> int:
-    if type(args.timeout_seconds) not in (int, float) or not math.isfinite(args.timeout_seconds) or not 0 < args.timeout_seconds <= 30:
-        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", "PG核验超时必须大于0且不超过30秒", _EXIT_ARGUMENT)
+    if (
+        type(args.timeout_seconds) not in (int, float)
+        or not math.isfinite(args.timeout_seconds)
+        or not 0 < args.timeout_seconds <= 30
+    ):
+        raise DiagnosticError(
+            "ARGUMENT_CONTRACT_INVALID",
+            "PG核验超时必须大于0且不超过30秒",
+            _EXIT_ARGUMENT,
+        )
     package = _module_mode()
     config, config_path = _load_runtime_config()
     result = inspect_postgres(config, timeout_seconds=args.timeout_seconds)
-    result.update({
-        "ok": result.get("status") == "DB_MIGRATION_READY",
-        "message": "PG只读连接、账号迁移身份与物理存储核验状态分别返回；数据库状态不代表业务流水线已完成",
-        "package": package,
-        "configuration_path": str(config_path),
-        "business_write_admission": "DENY_GENERAL_WRITE_AND_PUBLISH",
-        "task_scoped_migration_admission": "REQUIRES_EXPLICIT_TASK_SCOPE",
-        "production_switched": False,
-    })
+    result.update(
+        {
+            "ok": result.get("status") == "DB_MIGRATION_READY",
+            "message": "PG只读连接、账号迁移身份与物理存储核验状态分别返回；数据库状态不代表业务流水线已完成",
+            "package": package,
+            "configuration_path": str(config_path),
+            "business_write_admission": "DENY_GENERAL_WRITE_AND_PUBLISH",
+            "task_scoped_migration_admission": "REQUIRES_EXPLICIT_TASK_SCOPE",
+            "production_switched": False,
+        }
+    )
     _emit(result, error=result.get("status") != "DB_MIGRATION_READY")
     if result.get("status") == "INVALID_ARGUMENT":
         return _EXIT_ARGUMENT
@@ -1039,56 +1580,138 @@ def _run_pg_identity(args: argparse.Namespace) -> int:
 
 
 def _run_pg_bind(args: argparse.Namespace) -> int:
-    if type(args.timeout_seconds) not in (int, float) or not math.isfinite(args.timeout_seconds) or not 0 < args.timeout_seconds <= 30:
-        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", "PG绑定超时必须大于0且不超过30秒", _EXIT_ARGUMENT)
+    if (
+        type(args.timeout_seconds) not in (int, float)
+        or not math.isfinite(args.timeout_seconds)
+        or not 0 < args.timeout_seconds <= 30
+    ):
+        raise DiagnosticError(
+            "ARGUMENT_CONTRACT_INVALID",
+            "PG绑定超时必须大于0且不超过30秒",
+            _EXIT_ARGUMENT,
+        )
     package = _module_mode()
     if package.get("mode") != "DEV":
-        raise DiagnosticError("BIND_MODE_REJECTED", "固定身份迁移仅允许从批准源码包的显式开发CLI执行", _EXIT_PERMISSION)
+        raise DiagnosticError(
+            "BIND_MODE_REJECTED",
+            "固定身份迁移仅允许从批准源码包的显式开发CLI执行",
+            _EXIT_PERMISSION,
+        )
     config, config_path = _load_runtime_config()
     try:
         result = bind_stock_namespace(
-            config, config_path, task_scope=args.task_scope, migration_id=args.migration_id,
+            config,
+            config_path,
+            task_scope=args.task_scope,
+            migration_id=args.migration_id,
             timeout_seconds=args.timeout_seconds,
         )
     except BindingCommittedConfigError as error:
-        _emit({"ok": False, "status": "CONFIG_SYNC_REQUIRED", "code": "PG_BIND_CONFIG_SYNC_REQUIRED",
-               "message": str(error), "business_write_admission": "DENY",
-               "task_scope": args.task_scope, "migration_id": args.migration_id,
-               "database_transaction_outcome": "COMMITTED",
-               "database_write_attempted": "YES",
-               "configuration_path": str(config_path), "production_switched": False}, error=True)
+        _emit(
+            {
+                "ok": False,
+                "status": "CONFIG_SYNC_REQUIRED",
+                "code": "PG_BIND_CONFIG_SYNC_REQUIRED",
+                "message": str(error),
+                "business_write_admission": "DENY",
+                "task_scope": args.task_scope,
+                "migration_id": args.migration_id,
+                "database_transaction_outcome": "COMMITTED",
+                "database_write_attempted": "YES",
+                "configuration_path": str(config_path),
+                "production_switched": False,
+            },
+            error=True,
+        )
         return _EXIT_ENGINEERING
     except BindingRefused as error:
-        _emit({"ok": False, "status": "REJECTED", "code": "PG_BIND_REFUSED",
-               "message": str(error), "business_write_admission": "DENY",
-               "task_scope": args.task_scope, "migration_id": args.migration_id,
-               "database_transaction_outcome": "ROLLED_BACK_OR_NOT_STARTED",
-               "database_write_attempted": "NO_COMMITTED_CHANGE",
-               "configuration_path": str(config_path), "production_switched": False}, error=True)
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": "PG_BIND_REFUSED",
+                "message": str(error),
+                "business_write_admission": "DENY",
+                "task_scope": args.task_scope,
+                "migration_id": args.migration_id,
+                "database_transaction_outcome": "ROLLED_BACK_OR_NOT_STARTED",
+                "database_write_attempted": "NO_COMMITTED_CHANGE",
+                "configuration_path": str(config_path),
+                "production_switched": False,
+            },
+            error=True,
+        )
         return _EXIT_PERMISSION
-    result.update({"ok": result.get("status") == "BOUND", "package": package,
-                   "configuration_path": str(config_path), "production_switched": False})
+    result.update(
+        {
+            "ok": result.get("status") == "BOUND",
+            "package": package,
+            "configuration_path": str(config_path),
+            "production_switched": False,
+        }
+    )
     _emit(result)
     return _EXIT_OK
 
 
-def _validate_pg_raw_query_args(args: argparse.Namespace, *, universe: bool) -> tuple[dict[str, Any], Path, date, str]:
+def _validate_pg_raw_query_args(
+    args: argparse.Namespace, *, universe: bool
+) -> tuple[dict[str, Any], Path, date, str]:
     if not getattr(args, "pg_source_raw", False):
         if getattr(args, "pg_source_sha256", None) is not None:
-            raise DiagnosticError("PG_SOURCE_FLAG_REQUIRED", "提供来源SHA时必须同时显式启用--pg-source-raw", _EXIT_ARGUMENT)
-        raise DiagnosticError("PG_SOURCE_FLAG_REQUIRED", "缺少显式PG Raw查询选项", _EXIT_ARGUMENT)
+            raise DiagnosticError(
+                "PG_SOURCE_FLAG_REQUIRED",
+                "提供来源SHA时必须同时显式启用--pg-source-raw",
+                _EXIT_ARGUMENT,
+            )
+        raise DiagnosticError(
+            "PG_SOURCE_FLAG_REQUIRED", "缺少显式PG Raw查询选项", _EXIT_ARGUMENT
+        )
     source_sha = getattr(args, "pg_source_sha256", None)
-    if not isinstance(source_sha, str) or re.fullmatch(r"[0-9a-f]{64}", source_sha) is None:
-        raise DiagnosticError("PG_SOURCE_REVISION_REQUIRED", "PG Raw读取必须提供64位小写来源包SHA-256", _EXIT_ARGUMENT)
+    if (
+        not isinstance(source_sha, str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_sha) is None
+    ):
+        raise DiagnosticError(
+            "PG_SOURCE_REVISION_REQUIRED",
+            "PG Raw读取必须提供64位小写来源包SHA-256",
+            _EXIT_ARGUMENT,
+        )
     if getattr(args, "vipdata_package", None) is not None:
-        raise DiagnosticError("PG_SOURCE_ZIP_CONFLICT", "PG Raw读取与重新打开VIPDATA ZIP不能在同一命令混用", _EXIT_ARGUMENT)
-    if getattr(args, "amount_to_cny", None) is not None or getattr(args, "volume_to_shares", None) is not None:
-        raise DiagnosticError("PG_SOURCE_UNIT_CONFLICT", "PG Raw读取保留TDX源单位，不接受金额或数量换算倍率", _EXIT_ARGUMENT)
-    for option in ("include_profile_preview", "include_baostock_evidence", "include_baostock_identity"):
+        raise DiagnosticError(
+            "PG_SOURCE_ZIP_CONFLICT",
+            "PG Raw读取与重新打开VIPDATA ZIP不能在同一命令混用",
+            _EXIT_ARGUMENT,
+        )
+    if (
+        getattr(args, "amount_to_cny", None) is not None
+        or getattr(args, "volume_to_shares", None) is not None
+    ):
+        raise DiagnosticError(
+            "PG_SOURCE_UNIT_CONFLICT",
+            "PG Raw读取保留TDX源单位，不接受金额或数量换算倍率",
+            _EXIT_ARGUMENT,
+        )
+    for option in (
+        "include_profile_preview",
+        "include_baostock_evidence",
+        "include_baostock_identity",
+    ):
         if getattr(args, option, False):
-            raise DiagnosticError("PG_SOURCE_RECALCULATION_CONFLICT", "PG Raw读取不能同时请求Core/Profile重算或外部来源", _EXIT_ARGUMENT)
-    if universe and any(getattr(args, name, False) for name in ("full_target_quality", "full_source_core_profile")):
-        raise DiagnosticError("PG_SOURCE_SCAN_CONFLICT", "PG Raw分页不能同时请求ZIP扫描或Core/Profile全范围计算", _EXIT_ARGUMENT)
+            raise DiagnosticError(
+                "PG_SOURCE_RECALCULATION_CONFLICT",
+                "PG Raw读取不能同时请求Core/Profile重算或外部来源",
+                _EXIT_ARGUMENT,
+            )
+    if universe and any(
+        getattr(args, name, False)
+        for name in ("full_target_quality", "full_source_core_profile")
+    ):
+        raise DiagnosticError(
+            "PG_SOURCE_SCAN_CONFLICT",
+            "PG Raw分页不能同时请求ZIP扫描或Core/Profile全范围计算",
+            _EXIT_ARGUMENT,
+        )
     config, config_path = _load_runtime_config()
     try:
         target = _parse_target(args.target_session)
@@ -1098,16 +1721,34 @@ def _validate_pg_raw_query_args(args: argparse.Namespace, *, universe: bool) -> 
 
 
 def _run_pg_raw_stock(args: argparse.Namespace) -> int:
-    config, config_path, target, source_sha = _validate_pg_raw_query_args(args, universe=False)
+    config, config_path, target, source_sha = _validate_pg_raw_query_args(
+        args, universe=False
+    )
     try:
         row = read_raw_daily_stock(
-            config, source_symbol=args.symbol, target_session=target, package_sha256=source_sha,
+            config,
+            source_symbol=args.symbol,
+            target_session=target,
+            package_sha256=source_sha,
         )
     except RawSourcePgError as error:
-        _emit({"ok": False, "status": "REJECTED", "code": error.code,
-               "message": str(error), "database_write_attempted": False,
-               "ddl_executed": False, "source_zip_opened": False}, error=True)
-        return _EXIT_PERMISSION if "REJECTED" in error.code or error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "source_zip_opened": False,
+            },
+            error=True,
+        )
+        return (
+            _EXIT_PERMISSION
+            if "REJECTED" in error.code or error.code.endswith("INVALID")
+            else _EXIT_UNAVAILABLE
+        )
     result = {
         "ok": True,
         "status": "AVAILABLE" if row is not None else "NO_MATCH",
@@ -1135,65 +1776,119 @@ def _run_pg_raw_stock(args: argparse.Namespace) -> int:
 
 
 def _run_pg_raw_universe(args: argparse.Namespace) -> int:
-    config, config_path, target, source_sha = _validate_pg_raw_query_args(args, universe=True)
-    if (type(args.offset) is not int or type(args.limit) is not int
-            or not 1 <= args.limit <= 100):
-        raise DiagnosticError("PG_PAGE_INVALID", "PG分页limit必须在1至100内，offset必须是非负整数", _EXIT_ARGUMENT)
+    config, config_path, target, source_sha = _validate_pg_raw_query_args(
+        args, universe=True
+    )
+    if (
+        type(args.offset) is not int
+        or type(args.limit) is not int
+        or not 1 <= args.limit <= 100
+    ):
+        raise DiagnosticError(
+            "PG_PAGE_INVALID",
+            "PG分页limit必须在1至100内，offset必须是非负整数",
+            _EXIT_ARGUMENT,
+        )
     try:
         result = read_raw_daily_page(
-            config, target_session=target, package_sha256=source_sha,
-            offset=args.offset, limit=args.limit, market=args.market, board=args.board,
+            config,
+            target_session=target,
+            package_sha256=source_sha,
+            offset=args.offset,
+            limit=args.limit,
+            market=args.market,
+            board=args.board,
         )
     except RawSourcePgError as error:
-        _emit({"ok": False, "status": "REJECTED", "code": error.code,
-               "message": str(error), "database_write_attempted": False,
-               "ddl_executed": False, "source_zip_opened": False}, error=True)
-        return _EXIT_PERMISSION if "REJECTED" in error.code or error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
-    result.update({
-        "ok": True,
-        "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_DAILY_FROM_POSTGRESQL",
-        "database_io_attempted": True,
-        "database_write_attempted": False,
-        "dml_executed": False,
-        "configuration_path": str(config_path),
-        "canonical_or_foundation_status": "NOT_WRITTEN_OR_ACCEPTED",
-    })
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "source_zip_opened": False,
+            },
+            error=True,
+        )
+        return (
+            _EXIT_PERMISSION
+            if "REJECTED" in error.code or error.code.endswith("INVALID")
+            else _EXIT_UNAVAILABLE
+        )
+    result.update(
+        {
+            "ok": True,
+            "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_DAILY_FROM_POSTGRESQL",
+            "database_io_attempted": True,
+            "database_write_attempted": False,
+            "dml_executed": False,
+            "configuration_path": str(config_path),
+            "canonical_or_foundation_status": "NOT_WRITTEN_OR_ACCEPTED",
+        }
+    )
     _emit(result)
     return _EXIT_OK
 
 
-def _pg_history_window(target_text: str, count: int) -> tuple[date, tuple[date, ...], str]:
-    if type(count) is not int or not 1 <= count <= 75:
-        raise DiagnosticError("PG_HISTORY_WINDOW_INVALID", "PG历史画像会话数须为1至75", _EXIT_ARGUMENT)
-    try:
-        target = _parse_target(target_text)
-    except ResearchEntryError as error:
-        raise DiagnosticError(error.code, str(error), _EXIT_ARGUMENT) from error
-    _calendar_payload, _metadata, revision, all_sessions = _load_calendar(target)
-    if target not in all_sessions:
-        raise DiagnosticError("TARGET_DATE_INVALID", "目标日不在现役版本化官方交易日历中", _EXIT_ARGUMENT)
-    eligible = tuple(session for session in all_sessions if session <= target)
-    if len(eligible) < count:
-        raise DiagnosticError("UNKNOWN_CALENDAR", "官方日历覆盖不足以提供请求的历史会话窗口", _EXIT_UNAVAILABLE)
-    return target, eligible[-count:], revision
-
-
-def _validate_pg_history_args(args: argparse.Namespace) -> tuple[dict[str, Any], Path, date, tuple[date, ...], str]:
+def _validate_pg_history_args(
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any], Path, date, tuple[date, ...], str]:
     if getattr(args, "pg_source_raw", False):
-        raise DiagnosticError("PG_SOURCE_MODES_EXCLUSIVE", "--pg-source-history不能与--pg-source-raw同时使用", _EXIT_ARGUMENT)
-    if getattr(args, "vipdata_package", None) is not None or getattr(args, "vipdata_package_sha256", None) is not None:
-        raise DiagnosticError("PG_HISTORY_ZIP_CONFLICT", "PG历史查询不得同时指定VIPDATA ZIP", _EXIT_ARGUMENT)
-    if getattr(args, "amount_to_cny", None) is not None or getattr(args, "volume_to_shares", None) is not None:
-        raise DiagnosticError("PG_HISTORY_UNIT_ASSUMPTION_REJECTED", "PG来源单位尚未核实，不能用调用方倍率生成量额Core", _EXIT_ARGUMENT)
-    if getattr(args, "unit_version", None) != "TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1":
-        raise DiagnosticError("PG_HISTORY_UNIT_VERSION_REJECTED", "PG历史模式必须显式声明TDX原值单位未核实版本", _EXIT_ARGUMENT)
-    if getattr(args, "include_baostock_evidence", False) or getattr(args, "include_baostock_identity", False):
-        raise DiagnosticError("PG_HISTORY_EXTERNAL_SOURCE_REJECTED", "PG历史查询是本地只读模式，不触发BaoStock网络请求", _EXIT_ARGUMENT)
+        raise DiagnosticError(
+            "PG_SOURCE_MODES_EXCLUSIVE",
+            "--pg-source-history不能与--pg-source-raw同时使用",
+            _EXIT_ARGUMENT,
+        )
+    if (
+        getattr(args, "vipdata_package", None) is not None
+        or getattr(args, "vipdata_package_sha256", None) is not None
+    ):
+        raise DiagnosticError(
+            "PG_HISTORY_ZIP_CONFLICT",
+            "PG历史查询不得同时指定VIPDATA ZIP",
+            _EXIT_ARGUMENT,
+        )
+    if (
+        getattr(args, "amount_to_cny", None) is not None
+        or getattr(args, "volume_to_shares", None) is not None
+    ):
+        raise DiagnosticError(
+            "PG_HISTORY_UNIT_ASSUMPTION_REJECTED",
+            "PG来源单位尚未核实，不能用调用方倍率生成量额Core",
+            _EXIT_ARGUMENT,
+        )
+    if (
+        getattr(args, "unit_version", None)
+        != "TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1"
+    ):
+        raise DiagnosticError(
+            "PG_HISTORY_UNIT_VERSION_REJECTED",
+            "PG历史模式必须显式声明TDX原值单位未核实版本",
+            _EXIT_ARGUMENT,
+        )
+    if getattr(args, "include_baostock_evidence", False) or getattr(
+        args, "include_baostock_identity", False
+    ):
+        raise DiagnosticError(
+            "PG_HISTORY_EXTERNAL_SOURCE_REJECTED",
+            "PG历史查询是本地只读模式，不触发BaoStock网络请求",
+            _EXIT_ARGUMENT,
+        )
     source_sha = getattr(args, "pg_source_sha256", None)
-    if not isinstance(source_sha, str) or re.fullmatch(r"[0-9a-f]{64}", source_sha) is None:
-        raise DiagnosticError("PG_HISTORY_PACKAGE_SHA_REQUIRED", "PG历史查询必须显式提供64位小写package SHA-256", _EXIT_ARGUMENT)
+    if (
+        not isinstance(source_sha, str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_sha) is None
+    ):
+        raise DiagnosticError(
+            "PG_HISTORY_PACKAGE_SHA_REQUIRED",
+            "PG历史查询必须显式提供64位小写package SHA-256",
+            _EXIT_ARGUMENT,
+        )
     target, sessions, _revision = _pg_history_window(
-        args.target_session, getattr(args, "pg_history_session_count", 75),
+        args.target_session,
+        getattr(args, "pg_history_session_count", 75),
     )
     config, config_path = _load_runtime_config()
     return config, config_path, target, sessions, source_sha
@@ -1220,33 +1915,63 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             profile_contract=profile_contract,
         )
     except RawSourcePgError as error:
-        _emit({
-            "ok": False, "status": "REJECTED", "code": error.code, "message": str(error),
-            "database_write_attempted": False, "ddl_executed": False, "source_zip_opened": False,
-        }, error=True)
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "source_zip_opened": False,
+            },
+            error=True,
+        )
         return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
     except (ResearchEntryError, DayChainContractError) as error:
         code = getattr(error, "code", "PROFILE_CONTRACT_UNAVAILABLE")
-        _emit({"ok": False, "status": "REJECTED", "code": code, "message": str(error),
-               "database_write_attempted": False, "ddl_executed": False, "source_zip_opened": False}, error=True)
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "source_zip_opened": False,
+            },
+            error=True,
+        )
         return _EXIT_UNAVAILABLE
-    result.update({
-        "database_io_attempted": True,
-        "database_write_attempted": False,
-        "dml_executed": False,
-        "configuration_path": str(config_path),
-    })
+    result.update(
+        {
+            "database_io_attempted": True,
+            "database_write_attempted": False,
+            "dml_executed": False,
+            "configuration_path": str(config_path),
+        }
+    )
     if getattr(args, "output_format", "json") == "summary":
         fields = result.get("core", {}).get("fields", {})
         preview = result.get("profile_preview", {})
-        core_labels = ("core.ma20", "core.ma60", "core.atr20", "core.ret20", "core.pos60")
+        core_labels = (
+            "core.ma20",
+            "core.ma60",
+            "core.atr20",
+            "core.ret20",
+            "core.pos60",
+        )
         line = [
             f"PG历史研究预览 {result.get('symbol')} {target.isoformat()} "
             f"窗口={result.get('window', {}).get('start_session')}..{result.get('window', {}).get('end_session')} "
-                f"有效Bar={result.get('window', {}).get('real_bar_count')}/{result.get('window', {}).get('requested_sessions')}",
+            f"有效Bar={result.get('window', {}).get('real_bar_count')}/{result.get('window', {}).get('requested_sessions')}",
         ]
-        line.extend(f"{name}={_summary_field(fields.get(name))}" for name in core_labels)
-        line.append(f"Core未知={result.get('core', {}).get('unknown_field_count')}/43 Profile规则={len(preview.get('components', []))}/11 NON_PIT")
+        line.extend(
+            f"{name}={_summary_field(fields.get(name))}" for name in core_labels
+        )
+        line.append(
+            f"Core未知={result.get('core', {}).get('unknown_field_count')}/43 Profile规则={len(preview.get('components', []))}/11 NON_PIT"
+        )
         sys.stdout.write("\n".join(line) + "\n")
     else:
         _emit(result)
@@ -1254,11 +1979,24 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
 
 
 def _run_pg_history_universe(args: argparse.Namespace) -> int:
-    if getattr(args, "full_target_quality", False) or getattr(args, "full_source_core_profile", False):
-        raise DiagnosticError("PG_HISTORY_SCAN_OPTION_REJECTED", "PG历史模式只读取已入库Raw，不运行ZIP扫描模式", _EXIT_ARGUMENT)
+    if getattr(args, "full_target_quality", False) or getattr(
+        args, "full_source_core_profile", False
+    ):
+        raise DiagnosticError(
+            "PG_HISTORY_SCAN_OPTION_REJECTED",
+            "PG历史模式只读取已入库Raw，不运行ZIP扫描模式",
+            _EXIT_ARGUMENT,
+        )
     config, config_path, target, sessions, source_sha = _validate_pg_history_args(args)
-    if type(args.offset) is not int or args.offset < 0 or type(args.limit) is not int or not 1 <= args.limit <= 100:
-        raise DiagnosticError("PG_PAGE_INVALID", "PG历史分页offset须非负且limit须为1至100", _EXIT_ARGUMENT)
+    if (
+        type(args.offset) is not int
+        or args.offset < 0
+        or type(args.limit) is not int
+        or not 1 <= args.limit <= 100
+    ):
+        raise DiagnosticError(
+            "PG_PAGE_INVALID", "PG历史分页offset须非负且limit须为1至100", _EXIT_ARGUMENT
+        )
     try:
         page = read_raw_daily_history_page(
             config,
@@ -1279,21 +2017,41 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             profile_contract=profile_contract,
         )
     except RawSourcePgError as error:
-        _emit({
-            "ok": False, "status": "REJECTED", "code": error.code, "message": str(error),
-            "database_write_attempted": False, "ddl_executed": False, "source_zip_opened": False,
-        }, error=True)
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "source_zip_opened": False,
+            },
+            error=True,
+        )
         return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
     except DayChainContractError as error:
-        _emit({"ok": False, "status": "REJECTED", "code": error.code, "message": str(error),
-               "database_write_attempted": False, "ddl_executed": False, "source_zip_opened": False}, error=True)
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "source_zip_opened": False,
+            },
+            error=True,
+        )
         return _EXIT_UNAVAILABLE
-    result.update({
-        "database_io_attempted": True,
-        "database_write_attempted": False,
-        "dml_executed": False,
-        "configuration_path": str(config_path),
-    })
+    result.update(
+        {
+            "database_io_attempted": True,
+            "database_write_attempted": False,
+            "dml_executed": False,
+            "configuration_path": str(config_path),
+        }
+    )
     if getattr(args, "output_format", "summary") == "summary":
         page_info = result["page"]
         lines = [
@@ -1307,7 +2065,10 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             core_fields = item.get("core_price_fields", {})
             lines.append(
                 f"{item['symbol']} Core未知={item.get('core_unknown_field_count')} "
-                + " ".join(f"{field}={_summary_field(value)}" for field, value in core_fields.items())
+                + " ".join(
+                    f"{field}={_summary_field(value)}"
+                    for field, value in core_fields.items()
+                )
                 + f" Profile={item.get('profile_status_counts')}"
             )
         sys.stdout.write("\n".join(lines) + "\n")
@@ -1320,22 +2081,34 @@ def _run_source_raw_catalog(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config()
     try:
         result = read_raw_daily_catalog(
-            config, year=args.year, offset=args.offset, limit=args.limit,
+            config,
+            year=args.year,
+            offset=args.offset,
+            limit=args.limit,
         )
     except RawSourcePgError as error:
-        _emit({
-            "ok": False, "status": "REJECTED", "code": error.code,
-            "message": str(error), "database_write_attempted": False,
-            "dml_executed": False, "ddl_executed": False,
-            "source_zip_opened": False,
-        }, error=True)
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "dml_executed": False,
+                "ddl_executed": False,
+                "source_zip_opened": False,
+            },
+            error=True,
+        )
         return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
-    result.update({
-        "ok": True,
-        "analysis_scope": "PERSISTED_TDX_SOURCE_RAW_VERSION_CATALOG",
-        "database_io_attempted": True,
-        "configuration_path": str(config_path),
-    })
+    result.update(
+        {
+            "ok": True,
+            "analysis_scope": "PERSISTED_TDX_SOURCE_RAW_VERSION_CATALOG",
+            "database_io_attempted": True,
+            "configuration_path": str(config_path),
+        }
+    )
     _emit(result)
     return _EXIT_OK
 
@@ -1344,26 +2117,55 @@ def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
     command_started = time.monotonic()
     config, config_path = _load_runtime_config()
     if args.task_scope not in RAW_DAILY_APPEND_TASK_SCOPES:
-        raise DiagnosticError("TASK_SCOPE_REJECTED", "Raw APPEND只接受已登记的日更业务范围", _EXIT_PERMISSION)
-    if (not math.isfinite(args.max_vipdata_validation_seconds)
-            or not 0 < args.max_vipdata_validation_seconds <= 600):
-        raise DiagnosticError("VIPDATA_BUDGET_INVALID", "ZIP SHA/CRC验证预算须大于0且不超过600秒", _EXIT_ARGUMENT)
+        raise DiagnosticError(
+            "TASK_SCOPE_REJECTED",
+            "Raw APPEND只接受已登记的日更业务范围",
+            _EXIT_PERMISSION,
+        )
+    if (
+        not math.isfinite(args.max_vipdata_validation_seconds)
+        or not 0 < args.max_vipdata_validation_seconds <= 600
+    ):
+        raise DiagnosticError(
+            "VIPDATA_BUDGET_INVALID",
+            "ZIP SHA/CRC验证预算须大于0且不超过600秒",
+            _EXIT_ARGUMENT,
+        )
     package = _verify_explicit_vipdata_package(args)
     if package is None:
-        raise DiagnosticError("VIPDATA_PACKAGE_REQUIRED", "Raw来源入库必须显式绑定已验证ZIP", _EXIT_ARGUMENT)
+        raise DiagnosticError(
+            "VIPDATA_PACKAGE_REQUIRED",
+            "Raw来源入库必须显式绑定已验证ZIP",
+            _EXIT_ARGUMENT,
+        )
     try:
         target = _parse_target(args.target_session)
     except ResearchEntryError as error:
         raise DiagnosticError(error.code, str(error), _EXIT_ARGUMENT) from error
-    _calendar_payload, _calendar_metadata, _calendar_revision, official_sessions = _load_calendar(target)
+    _calendar_payload, _calendar_metadata, _calendar_revision, official_sessions = (
+        _load_calendar(target)
+    )
     if target not in official_sessions:
-        raise DiagnosticError("TARGET_DATE_INVALID", "目标日期不在现行已核交易日历内", _EXIT_ARGUMENT)
-    if type(args.history_session_count) is not int or not 1 <= args.history_session_count <= 75:
-        raise DiagnosticError("HISTORY_SESSION_WINDOW_INVALID", "历史扫描会话数须为1至75", _EXIT_ARGUMENT)
-    available_sessions = tuple(session for session in official_sessions if session <= target)
+        raise DiagnosticError(
+            "TARGET_DATE_INVALID", "目标日期不在现行已核交易日历内", _EXIT_ARGUMENT
+        )
+    if (
+        type(args.history_session_count) is not int
+        or not 1 <= args.history_session_count <= 75
+    ):
+        raise DiagnosticError(
+            "HISTORY_SESSION_WINDOW_INVALID", "历史扫描会话数须为1至75", _EXIT_ARGUMENT
+        )
+    available_sessions = tuple(
+        session for session in official_sessions if session <= target
+    )
     if len(available_sessions) < args.history_session_count:
-        raise DiagnosticError("UNKNOWN_CALENDAR", "官方日历覆盖不足以形成请求的历史会话窗口", _EXIT_UNAVAILABLE)
-    selected_sessions = available_sessions[-args.history_session_count:]
+        raise DiagnosticError(
+            "UNKNOWN_CALENDAR",
+            "官方日历覆盖不足以形成请求的历史会话窗口",
+            _EXIT_UNAVAILABLE,
+        )
+    selected_sessions = available_sessions[-args.history_session_count :]
     try:
         budget = VipdataTargetScanBudget(
             max_total_bytes=args.max_source_quality_bytes,
@@ -1372,13 +2174,22 @@ def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
         )
         if args.history_session_count == 1:
             result = import_verified_vipdata_target(
-                config, package, target, task_scope=args.task_scope,
-                scan_budget=budget, chunk_size=args.chunk_size,
+                config,
+                package,
+                target,
+                task_scope=args.task_scope,
+                scan_budget=budget,
+                chunk_size=args.chunk_size,
             )
         else:
             result = import_verified_vipdata_history(
-                config, package, selected_sessions, task_scope=args.task_scope,
-                scan_budget=budget, chunk_size=args.chunk_size, max_raw_rows=750_000,
+                config,
+                package,
+                selected_sessions,
+                task_scope=args.task_scope,
+                scan_budget=budget,
+                chunk_size=args.chunk_size,
+                max_raw_rows=750_000,
             )
     except VipdataError as error:
         raise DiagnosticError(
@@ -1387,43 +2198,58 @@ def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
             _EXIT_UNAVAILABLE,
         ) from error
     except (ValueError, ContractError) as error:
-        raise DiagnosticError("SOURCE_RAW_ARGUMENT_INVALID", f"来源Raw扫描参数无效：{error}", _EXIT_ARGUMENT) from error
+        raise DiagnosticError(
+            "SOURCE_RAW_ARGUMENT_INVALID",
+            f"来源Raw扫描参数无效：{error}",
+            _EXIT_ARGUMENT,
+        ) from error
     except RawSourcePgError as error:
         payload = {
-            "ok": False, "status": "PARTIAL" if error.committed_rows is not None else "REJECTED",
-            "code": error.code, "message": str(error),
+            "ok": False,
+            "status": "PARTIAL" if error.committed_rows is not None else "REJECTED",
+            "code": error.code,
+            "message": str(error),
             "committed_row_count": error.committed_rows,
-            "target_session": target.isoformat(), "session_count": args.history_session_count,
+            "target_session": target.isoformat(),
+            "session_count": args.history_session_count,
             "package_sha256": package.sha256,
-            "zip_crc": package.zip_crc, "package_file_size": package.file_size,
+            "zip_crc": package.zip_crc,
+            "package_file_size": package.file_size,
             "task_scope": args.task_scope,
             "storage_location_status": "USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED",
-            "database_write_attempted": error.metadata_committed or error.committed_rows not in (None, 0),
-            "source_fallback_attempted": False, "production_switched": False,
+            "database_write_attempted": error.metadata_committed
+            or error.committed_rows not in (None, 0),
+            "source_fallback_attempted": False,
+            "production_switched": False,
         }
         _emit(payload, error=True)
         return _EXIT_UNAVAILABLE
-    result.update({
-        "ok": result.get("status") in {"COMPLETE", "ALREADY_COMPLETE"},
-        "mode": "verified_local_source_raw_ingest",
-        "package_file_name": package.file_name,
-        "package_file_size": package.file_size,
-        "zip_crc": package.zip_crc,
-        "zip_entry_count": package.zip_entry_count,
-        "entry_count_by_market": dict(package.entry_count_by_market),
-        "official_package_url": "https://data.tdx.com.cn/vipdoc/hsjday.zip",
-        "package_verified_at": package.verified_at.isoformat(),
-        "task_scope": args.task_scope,
-        "configuration_path": str(config_path),
-        "database_io_attempted": True,
-        "database_write_attempted": (
-            result.get("new_rows_committed", 0) > 0
-            or result.get("database_committed_rows", 0) > 0
-            or any(item.get("new_rows_committed", 0) > 0 for item in result.get("session_results", []))
-        ),
-        "production_switched": False,
-        "command_elapsed_seconds": round(time.monotonic() - command_started, 6),
-    })
+    result.update(
+        {
+            "ok": result.get("status") in {"COMPLETE", "ALREADY_COMPLETE"},
+            "mode": "verified_local_source_raw_ingest",
+            "package_file_name": package.file_name,
+            "package_file_size": package.file_size,
+            "zip_crc": package.zip_crc,
+            "zip_entry_count": package.zip_entry_count,
+            "entry_count_by_market": dict(package.entry_count_by_market),
+            "official_package_url": "https://data.tdx.com.cn/vipdoc/hsjday.zip",
+            "package_verified_at": package.verified_at.isoformat(),
+            "task_scope": args.task_scope,
+            "configuration_path": str(config_path),
+            "database_io_attempted": True,
+            "database_write_attempted": (
+                result.get("new_rows_committed", 0) > 0
+                or result.get("database_committed_rows", 0) > 0
+                or any(
+                    item.get("new_rows_committed", 0) > 0
+                    for item in result.get("session_results", [])
+                )
+            ),
+            "production_switched": False,
+            "command_elapsed_seconds": round(time.monotonic() - command_started, 6),
+        }
+    )
     _emit(result, error=not result["ok"])
     return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
 
@@ -1434,14 +2260,20 @@ def _run_source_inspect(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config()
     roots = config["source_policy"]["configured_tdx_source_roots"]
     if not roots:
-        raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX来源保护根，拒绝打开任何来源文件")
+        raise DiagnosticError(
+            "SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX来源保护根，拒绝打开任何来源文件"
+        )
     try:
         amount_scale = Decimal(args.amount_to_cny)
         seconds = Decimal(args.max_seconds)
         units = UnitContract(args.unit_version, amount_scale, args.volume_to_shares)
-        limits = ReadLimits(args.max_bytes, args.max_records, args.chunk_records, seconds)
+        limits = ReadLimits(
+            args.max_bytes, args.max_records, args.chunk_records, seconds
+        )
     except (InvalidOperation, ValueError, ContractError) as error:
-        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或读取预算无效：{error}", _EXIT_ARGUMENT) from error
+        raise DiagnosticError(
+            "ARGUMENT_CONTRACT_INVALID", f"单位或读取预算无效：{error}", _EXIT_ARGUMENT
+        ) from error
     try:
         with open_day_file(args.path, roots, units, limits) as scan:
             for _located in scan:
@@ -1451,31 +2283,58 @@ def _run_source_inspect(args: argparse.Namespace) -> int:
             source = file_summary.source
     except DayReadError as error:
         exit_code = _READ_ERROR_EXIT_CODES.get(error.code, _EXIT_ENGINEERING)
-        _emit({"ok": False, "code": error.code, "reason_category": error.reason_category, "cause_type": type(error.__cause__).__name__ if error.__cause__ is not None else None, "message": str(error), "record_index": error.record_index, "byte_offset": error.byte_offset}, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": error.code,
+                "reason_category": error.reason_category,
+                "cause_type": type(error.__cause__).__name__
+                if error.__cause__ is not None
+                else None,
+                "message": str(error),
+                "record_index": error.record_index,
+                "byte_offset": error.byte_offset,
+            },
+            error=True,
+        )
         return exit_code
     except PermissionError as error:
-        raise DiagnosticError("SOURCE_ACCESS_DENIED", "操作系统拒绝读取来源文件", _EXIT_PERMISSION) from error
+        raise DiagnosticError(
+            "SOURCE_ACCESS_DENIED", "操作系统拒绝读取来源文件", _EXIT_PERMISSION
+        ) from error
     except OSError as error:
-        raise DiagnosticError("SOURCE_IO_ERROR", "读取来源时发生操作系统I/O错误", _EXIT_ENGINEERING) from error
-    _emit({
-        "ok": True,
-        "status": "FILE_READ_COMPLETE_ONLY",
-        "message": "指定日线文件已只读扫描至EOF并通过最终句柄核验；不代表来源封口、PIT或阶段0通过",
-        "configuration_path": str(config_path),
-        "complete": summary.complete,
-        "record_count": summary.record_count,
-        "byte_count": summary.byte_count,
-        "first_date": summary.first_date.isoformat(),
-        "last_date": summary.last_date.isoformat(),
-        "raw_byte_sha256": summary.raw_byte_sha256,
-        "unit_version": summary.unit_version,
-        "groups": {name: asdict(getattr(summary, name)) for name in ("prices", "amount", "volume")},
-        "read_started_at": summary.read_started_at.isoformat(),
-        "read_completed_at": summary.read_completed_at.isoformat(),
-        "read_clock_role": "LOCAL_FILE_READ_TIME_ONLY",
-        "source": asdict(source),
-        "budgets": {"max_bytes": limits.max_bytes, "max_records": limits.max_records, "chunk_records": limits.chunk_records, "max_seconds": limits.max_seconds},
-    })
+        raise DiagnosticError(
+            "SOURCE_IO_ERROR", "读取来源时发生操作系统I/O错误", _EXIT_ENGINEERING
+        ) from error
+    _emit(
+        {
+            "ok": True,
+            "status": "FILE_READ_COMPLETE_ONLY",
+            "message": "指定日线文件已只读扫描至EOF并通过最终句柄核验；不代表来源封口、PIT或阶段0通过",
+            "configuration_path": str(config_path),
+            "complete": summary.complete,
+            "record_count": summary.record_count,
+            "byte_count": summary.byte_count,
+            "first_date": summary.first_date.isoformat(),
+            "last_date": summary.last_date.isoformat(),
+            "raw_byte_sha256": summary.raw_byte_sha256,
+            "unit_version": summary.unit_version,
+            "groups": {
+                name: asdict(getattr(summary, name))
+                for name in ("prices", "amount", "volume")
+            },
+            "read_started_at": summary.read_started_at.isoformat(),
+            "read_completed_at": summary.read_completed_at.isoformat(),
+            "read_clock_role": "LOCAL_FILE_READ_TIME_ONLY",
+            "source": asdict(source),
+            "budgets": {
+                "max_bytes": limits.max_bytes,
+                "max_records": limits.max_records,
+                "chunk_records": limits.chunk_records,
+                "max_seconds": limits.max_seconds,
+            },
+        }
+    )
     return _EXIT_OK
 
 
@@ -1507,9 +2366,13 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
     package = _verify_explicit_vipdata_package(args)
     package_verification_seconds = time.monotonic() - package_verification_started
     target = _parse_target(args.target_session)
-    _calendar_payload, _calendar_metadata, _calendar_revision, sessions = _load_calendar(target)
+    _calendar_payload, _calendar_metadata, _calendar_revision, sessions = (
+        _load_calendar(target)
+    )
     if target not in sessions:
-        raise DiagnosticError("TARGET_DATE_INVALID", "目标日期不在已核验的官方交易日历内", _EXIT_ARGUMENT)
+        raise DiagnosticError(
+            "TARGET_DATE_INVALID", "目标日期不在已核验的官方交易日历内", _EXIT_ARGUMENT
+        )
     try:
         units = UnitContract(
             args.unit_version,
@@ -1527,10 +2390,21 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
             chunk_records=args.chunk_records,
         )
     except (InvalidOperation, ValueError, ContractError, VipdataError) as error:
-        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"目标日质量评价合同或预算无效：{error}", _EXIT_ARGUMENT) from error
+        raise DiagnosticError(
+            "ARGUMENT_CONTRACT_INVALID",
+            f"目标日质量评价合同或预算无效：{error}",
+            _EXIT_ARGUMENT,
+        ) from error
 
     def show_page(page) -> None:
-        sys.stderr.write(json.dumps({"page_progress": asdict(page)}, ensure_ascii=False, default=_json_default) + "\n")
+        sys.stderr.write(
+            json.dumps(
+                {"page_progress": asdict(page)},
+                ensure_ascii=False,
+                default=_json_default,
+            )
+            + "\n"
+        )
 
     try:
         candidate_index_started = time.monotonic()
@@ -1538,19 +2412,27 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
         candidate_index_seconds = time.monotonic() - candidate_index_started
         quality_scan_started = time.monotonic()
         report = scan_vipdata_target_quality(
-            package, pool, target_session=target, units=units, budget=budget, on_page=show_page,
+            package,
+            pool,
+            target_session=target,
+            units=units,
+            budget=budget,
+            on_page=show_page,
         )
         quality_scan_wall_seconds = time.monotonic() - quality_scan_started
     except VipdataError as error:
-        _emit({
-            "ok": False,
-            "code": error.code,
-            "message": str(error),
-            "target_session": target.isoformat(),
-            "database_io_attempted": False,
-            "database_write_attempted": False,
-            "source_fallback_attempted": False,
-        }, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": error.code,
+                "message": str(error),
+                "target_session": target.isoformat(),
+                "database_io_attempted": False,
+                "database_write_attempted": False,
+                "source_fallback_attempted": False,
+            },
+            error=True,
+        )
         return _EXIT_UNAVAILABLE
     payload = {
         "ok": report.not_evaluated == 0 and report.read_failed == 0,
@@ -1575,8 +2457,10 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
             "target_bar_missing": report.target_missing,
             "read_failed": report.read_failed,
             "not_evaluated": report.not_evaluated,
-            "candidate_partition_closed": report.candidate_total == report.evaluated + report.not_evaluated,
-            "evaluation_partition_closed": report.evaluated == report.target_present + report.target_missing + report.read_failed,
+            "candidate_partition_closed": report.candidate_total
+            == report.evaluated + report.not_evaluated,
+            "evaluation_partition_closed": report.evaluated
+            == report.target_present + report.target_missing + report.read_failed,
         },
         "by_market": report.by_market,
         "by_board": report.by_board,
@@ -1644,15 +2528,18 @@ def _run_vipdata_revision_compare(args: argparse.Namespace) -> int:
             sample_limit=args.sample_limit,
         )
     except (VipdataError, ResearchEntryError, ValueError) as error:
-        _emit({
-            "ok": False,
-            "code": getattr(error, "code", "VIPDATA_REVISION_COMPARE_INVALID"),
-            "message": str(error),
-            "target_session": args.target_session,
-            "source_fallback_attempted": False,
-            "database_io_attempted": False,
-            "database_write_attempted": False,
-        }, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": getattr(error, "code", "VIPDATA_REVISION_COMPARE_INVALID"),
+                "message": str(error),
+                "target_session": args.target_session,
+                "source_fallback_attempted": False,
+                "database_io_attempted": False,
+                "database_write_attempted": False,
+            },
+            error=True,
+        )
         return _EXIT_UNAVAILABLE
     payload = {
         "ok": comparison.comparison_complete and comparison.not_evaluated == 0,
@@ -1696,14 +2583,26 @@ def _run_vipdata_revision_compare(args: argparse.Namespace) -> int:
 def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
     if getattr(args, "pg_source_history", False):
         if compare:
-            raise DiagnosticError("PG_HISTORY_COMMAND_UNSUPPORTED", "research-compare不支持PG历史画像模式", _EXIT_ARGUMENT)
+            raise DiagnosticError(
+                "PG_HISTORY_COMMAND_UNSUPPORTED",
+                "research-compare不支持PG历史画像模式",
+                _EXIT_ARGUMENT,
+            )
         return _run_pg_history_stock(args)
     if getattr(args, "pg_source_raw", False):
         if compare:
-            raise DiagnosticError("PG_SOURCE_COMMAND_UNSUPPORTED", "research-compare不支持本批PG Raw查询入口", _EXIT_ARGUMENT)
+            raise DiagnosticError(
+                "PG_SOURCE_COMMAND_UNSUPPORTED",
+                "research-compare不支持本批PG Raw查询入口",
+                _EXIT_ARGUMENT,
+            )
         return _run_pg_raw_stock(args)
     if getattr(args, "pg_source_sha256", None) is not None:
-        raise DiagnosticError("PG_SOURCE_FLAG_REQUIRED", "提供来源SHA时必须同时显式启用--pg-source-raw", _EXIT_ARGUMENT)
+        raise DiagnosticError(
+            "PG_SOURCE_FLAG_REQUIRED",
+            "提供来源SHA时必须同时显式启用--pg-source-raw",
+            _EXIT_ARGUMENT,
+        )
     cli_started = time.perf_counter()
     stage_timings: dict[str, Any] = {}
     config, config_path = _load_runtime_config()
@@ -1711,11 +2610,18 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
     package = _verify_explicit_vipdata_package(args)
     if package is not None:
         stage_timings["vipdata_package_verify_elapsed_ms"] = round(
-            (time.perf_counter() - vipdata_validation_started) * 1000, 3,
+            (time.perf_counter() - vipdata_validation_started) * 1000,
+            3,
         )
-    roots = () if package is not None else config["source_policy"]["configured_tdx_source_roots"]
+    roots = (
+        ()
+        if package is not None
+        else config["source_policy"]["configured_tdx_source_roots"]
+    )
     if package is None and not roots:
-        raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX来源保护根，拒绝读取行情")
+        raise DiagnosticError(
+            "SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX来源保护根，拒绝读取行情"
+        )
     try:
         units = UnitContract(
             args.unit_version,
@@ -1729,47 +2635,79 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
             Decimal(args.max_seconds),
         )
     except (InvalidOperation, ValueError, ContractError) as error:
-        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或读取预算无效：{error}", _EXIT_ARGUMENT) from error
+        raise DiagnosticError(
+            "ARGUMENT_CONTRACT_INVALID", f"单位或读取预算无效：{error}", _EXIT_ARGUMENT
+        ) from error
     foundation_contract = None
     if not compare:
         try:
             foundation_contract = load_day_chain_contract(_CONFIG_ROOT).document
         except DayChainContractError as error:
-            _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
+            _emit(
+                {
+                    "ok": False,
+                    "code": error.code,
+                    "message": str(error),
+                    "database_io_attempted": False,
+                },
+                error=True,
+            )
             return _EXIT_UNAVAILABLE
-    profile_contract = foundation_contract if (
-        not compare and getattr(args, "include_profile_preview", False)
-    ) else None
+    profile_contract = (
+        foundation_contract
+        if (not compare and getattr(args, "include_profile_preview", False))
+        else None
+    )
     identity_projection = None
     identity_snapshot: dict[str, Any] | None = None
     identity_query_status = "NOT_REQUESTED"
     include_identity = not compare and getattr(args, "include_baostock_identity", False)
     if include_identity and getattr(args, "include_baostock_evidence", False):
-        _emit({
-            "ok": False,
-            "code": "BAOSTOCK_OPTIONS_EXCLUSIVE",
-            "message": "身份与日线证据请求会各自建立Bao会话；为保持本次单次登录预算，请分开执行。",
-            "database_io_attempted": False,
-        }, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": "BAOSTOCK_OPTIONS_EXCLUSIVE",
+                "message": "身份与日线证据请求会各自建立Bao会话；为保持本次单次登录预算，请分开执行。",
+                "database_io_attempted": False,
+            },
+            error=True,
+        )
         return _EXIT_ARGUMENT
     if include_identity:
         try:
             target_text = _parse_target(args.target_session).isoformat()
         except ResearchEntryError as error:
-            _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
+            _emit(
+                {
+                    "ok": False,
+                    "code": error.code,
+                    "message": str(error),
+                    "database_io_attempted": False,
+                },
+                error=True,
+            )
             return _EXIT_ARGUMENT
         timeout_seconds = getattr(args, "baostock_timeout_seconds", 8.0)
         max_total_seconds = getattr(args, "baostock_max_seconds", 25.0)
-        if (isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float))
-                or not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 30
-                or isinstance(max_total_seconds, bool) or not isinstance(max_total_seconds, (int, float))
-                or not math.isfinite(max_total_seconds) or not 0.5 <= max_total_seconds <= 30):
-            _emit({
-                "ok": False,
-                "code": "BAOSTOCK_BUDGET_INVALID",
-                "message": "BaoStock socket超时须在0至30秒内，总预算须在0.5至30秒内。",
-                "database_io_attempted": False,
-            }, error=True)
+        if (
+            isinstance(timeout_seconds, bool)
+            or not isinstance(timeout_seconds, (int, float))
+            or not math.isfinite(timeout_seconds)
+            or not 0 < timeout_seconds <= 30
+            or isinstance(max_total_seconds, bool)
+            or not isinstance(max_total_seconds, (int, float))
+            or not math.isfinite(max_total_seconds)
+            or not 0.5 <= max_total_seconds <= 30
+        ):
+            _emit(
+                {
+                    "ok": False,
+                    "code": "BAOSTOCK_BUDGET_INVALID",
+                    "message": "BaoStock socket超时须在0至30秒内，总预算须在0.5至30秒内。",
+                    "database_io_attempted": False,
+                },
+                error=True,
+            )
             return _EXIT_ARGUMENT
     else:
         target_text = None
@@ -1791,25 +2729,41 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
             )
         elif package is not None:
             if compare:
-                raise DiagnosticError("VIPDATA_COMPARE_UNSUPPORTED", "当前显式ZIP入口只接research-stock和research-universe-preview")
+                raise DiagnosticError(
+                    "VIPDATA_COMPARE_UNSUPPORTED",
+                    "当前显式ZIP入口只接research-stock和research-universe-preview",
+                )
             candidate_index_started = time.perf_counter()
             pool = vipdata_research_candidate_pool(package)
             stage_timings["vipdata_candidate_index_elapsed_ms"] = round(
-                (time.perf_counter() - candidate_index_started) * 1000, 3,
+                (time.perf_counter() - candidate_index_started) * 1000,
+                3,
             )
             normalized, _directory, _board = _normalize_symbol(args.symbol)
-            candidate = next((item for item in pool.candidates if item["symbol"] == normalized), None)
+            candidate = next(
+                (item for item in pool.candidates if item["symbol"] == normalized), None
+            )
             if candidate is None:
-                raise VipdataError("ZIP_DAY_ENTRY_NOT_FOUND", "已校验VIPDATA包中没有该沪深主板/创业板证券条目")
+                raise VipdataError(
+                    "ZIP_DAY_ENTRY_NOT_FOUND",
+                    "已校验VIPDATA包中没有该沪深主板/创业板证券条目",
+                )
             if candidate["empty_placeholder"]:
-                raise VipdataError("ZIP_DAY_ENTRY_EMPTY", "官方ZIP将此证券作为零字节占位；未送入Raw/Core")
+                raise VipdataError(
+                    "ZIP_DAY_ENTRY_EMPTY",
+                    "官方ZIP将此证券作为零字节占位；未送入Raw/Core",
+                )
             entry_read_started = time.perf_counter()
             vipdata_capture = read_vipdata_candidate(
-                package, candidate, target_session=_parse_target(args.target_session),
-                units=units, limits=limits,
+                package,
+                candidate,
+                target_session=_parse_target(args.target_session),
+                units=units,
+                limits=limits,
             )
             stage_timings["vipdata_entry_read_elapsed_ms"] = round(
-                (time.perf_counter() - entry_read_started) * 1000, 3,
+                (time.perf_counter() - entry_read_started) * 1000,
+                3,
             )
             result = research_stock(
                 symbol=normalized,
@@ -1819,7 +2773,9 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 limits=limits,
                 profile_contract=profile_contract,
                 foundation_contract=foundation_contract,
-                include_baostock_evidence=getattr(args, "include_baostock_evidence", False),
+                include_baostock_evidence=getattr(
+                    args, "include_baostock_evidence", False
+                ),
                 vipdata_capture=vipdata_capture,
                 timing_sink=core_timings,
             )
@@ -1832,7 +2788,9 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 limits=limits,
                 profile_contract=profile_contract,
                 foundation_contract=foundation_contract,
-                include_baostock_evidence=getattr(args, "include_baostock_evidence", False),
+                include_baostock_evidence=getattr(
+                    args, "include_baostock_evidence", False
+                ),
                 timing_sink=core_timings,
             )
     except ResearchEntryError as error:
@@ -1841,31 +2799,53 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         elif error.code == "SOURCE_IO_ERROR":
             code = _EXIT_ENGINEERING
         else:
-            code = _EXIT_ARGUMENT if error.code in {
-                "TARGET_DATE_INVALID", "SYMBOL_INVALID", "SYMBOL_OUT_OF_SCOPE",
-                "COMPARE_SIZE_INVALID", "DUPLICATE_SYMBOL",
-            } else _EXIT_UNAVAILABLE
-        _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
+            code = (
+                _EXIT_ARGUMENT
+                if error.code
+                in {
+                    "TARGET_DATE_INVALID",
+                    "SYMBOL_INVALID",
+                    "SYMBOL_OUT_OF_SCOPE",
+                    "COMPARE_SIZE_INVALID",
+                    "DUPLICATE_SYMBOL",
+                }
+                else _EXIT_UNAVAILABLE
+            )
+        _emit(
+            {
+                "ok": False,
+                "code": error.code,
+                "message": str(error),
+                "database_io_attempted": False,
+            },
+            error=True,
+        )
         return code
     except DayReadError as error:
         exit_code = _READ_ERROR_EXIT_CODES.get(error.code, _EXIT_ENGINEERING)
-        _emit({
-            "ok": False,
-            "code": error.code,
-            "reason_category": error.reason_category,
-            "message": str(error),
-            "database_io_attempted": False,
-        }, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": error.code,
+                "reason_category": error.reason_category,
+                "message": str(error),
+                "database_io_attempted": False,
+            },
+            error=True,
+        )
         return exit_code
     except VipdataError as error:
-        _emit({
-            "ok": False,
-            "code": error.code,
-            "message": str(error),
-            "database_io_attempted": False,
-            "database_write_attempted": False,
-            "source_fallback_attempted": False,
-        }, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": error.code,
+                "message": str(error),
+                "database_io_attempted": False,
+                "database_write_attempted": False,
+                "source_fallback_attempted": False,
+            },
+            error=True,
+        )
         return _EXIT_UNAVAILABLE
     if include_identity and target_text is not None:
         identity_started = time.perf_counter()
@@ -1893,18 +2873,26 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 "request_started_at": None,
                 "request_completed_at": None,
                 "capture_clock_role": "UNKNOWN_QUERY_DID_NOT_RETURN",
-                "total_elapsed_ms": round((time.perf_counter() - identity_started) * 1000, 3),
+                "total_elapsed_ms": round(
+                    (time.perf_counter() - identity_started) * 1000, 3
+                ),
                 "stage_elapsed_ms": {},
                 "reason": f"BaoStock身份查询程序异常：{type(error).__name__}: {str(error)[:240]}",
                 "error_type": type(error).__name__,
                 "calls": {},
             }
-        identity_query_status = str(identity_snapshot.get("status", "SOURCE_UNAVAILABLE"))
+        identity_query_status = str(
+            identity_snapshot.get("status", "SOURCE_UNAVAILABLE")
+        )
         calls = identity_snapshot.get("calls")
         if identity_query_status == "RESPONSE_RECEIVED" and isinstance(calls, dict):
             basic = calls.get("stock_basic")
             daily_by_date = calls.get("all_stock")
-            session = daily_by_date.get(target_text) if isinstance(daily_by_date, dict) else None
+            session = (
+                daily_by_date.get(target_text)
+                if isinstance(daily_by_date, dict)
+                else None
+            )
             if isinstance(basic, dict) and isinstance(session, dict):
                 try:
                     identity_projection = project_identity_lifecycle(
@@ -1925,17 +2913,21 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
             identity_projection=identity_projection,
             identity_query_status=identity_query_status,
         )
-    result.update({
-        "ok": result.get("status") in ("AVAILABLE", "COMPLETE_WITH_DISCLOSURES"),
-        "configuration_path": str(config_path),
-        "database_io_attempted": False,
-        "database_write_attempted": False,
-    })
+    result.update(
+        {
+            "ok": result.get("status") in ("AVAILABLE", "COMPLETE_WITH_DISCLOSURES"),
+            "configuration_path": str(config_path),
+            "database_io_attempted": False,
+            "database_write_attempted": False,
+        }
+    )
     if identity_snapshot is not None:
         calls = identity_snapshot.get("calls")
         basic = calls.get("stock_basic") if isinstance(calls, dict) else None
         daily_by_date = calls.get("all_stock") if isinstance(calls, dict) else None
-        session = daily_by_date.get(target_text) if isinstance(daily_by_date, dict) else None
+        session = (
+            daily_by_date.get(target_text) if isinstance(daily_by_date, dict) else None
+        )
         result["bao_identity_capture"] = {
             "source": "BAOSTOCK",
             "target_symbol": identity_snapshot.get("target_symbol"),
@@ -1953,23 +2945,51 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
             "request_started_at": identity_snapshot.get("request_started_at"),
             "request_completed_at": identity_snapshot.get("request_completed_at"),
             "capture_clock_role": identity_snapshot.get("capture_clock_role"),
-            "verified_source_capture_id": identity_snapshot.get("verified_source_capture_id"),
-            "basic_query": ({
-                key: basic.get(key) for key in (
-                    "status", "requested_code", "query_error_code", "response_fields", "rows_seen",
-                    "max_rows_limit",
-                    "request_started_at", "request_completed_at", "api_call_elapsed_ms",
-                    "row_read_elapsed_ms", "elapsed_ms", "local_error",
-                )
-            } if isinstance(basic, dict) else None),
-            "target_day_list_query": ({
-                key: session.get(key) for key in (
-                    "status", "target_session", "query_error_code", "response_fields", "rows_seen",
-                    "max_rows_limit",
-                    "request_started_at", "request_completed_at", "api_call_elapsed_ms",
-                    "row_read_elapsed_ms", "elapsed_ms", "local_error",
-                )
-            } if isinstance(session, dict) else None),
+            "verified_source_capture_id": identity_snapshot.get(
+                "verified_source_capture_id"
+            ),
+            "basic_query": (
+                {
+                    key: basic.get(key)
+                    for key in (
+                        "status",
+                        "requested_code",
+                        "query_error_code",
+                        "response_fields",
+                        "rows_seen",
+                        "max_rows_limit",
+                        "request_started_at",
+                        "request_completed_at",
+                        "api_call_elapsed_ms",
+                        "row_read_elapsed_ms",
+                        "elapsed_ms",
+                        "local_error",
+                    )
+                }
+                if isinstance(basic, dict)
+                else None
+            ),
+            "target_day_list_query": (
+                {
+                    key: session.get(key)
+                    for key in (
+                        "status",
+                        "target_session",
+                        "query_error_code",
+                        "response_fields",
+                        "rows_seen",
+                        "max_rows_limit",
+                        "request_started_at",
+                        "request_completed_at",
+                        "api_call_elapsed_ms",
+                        "row_read_elapsed_ms",
+                        "elapsed_ms",
+                        "local_error",
+                    )
+                }
+                if isinstance(session, dict)
+                else None
+            ),
             "stage_elapsed_ms": identity_snapshot.get("stage_elapsed_ms"),
             "max_total_seconds": identity_snapshot.get("max_total_seconds"),
             "total_elapsed_ms": identity_snapshot.get("total_elapsed_ms"),
@@ -1979,16 +2999,25 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         }
         result["bao_status"] = identity_query_status
     stage_timings.update(core_timings)
-    stage_timings["cli_elapsed_before_output_ms"] = round((time.perf_counter() - cli_started) * 1000, 3)
-    stage_timings["clock"] = "Python perf_counter monotonic; process wall-clock independently recorded by caller"
+    stage_timings["cli_elapsed_before_output_ms"] = round(
+        (time.perf_counter() - cli_started) * 1000, 3
+    )
+    stage_timings["clock"] = (
+        "Python perf_counter monotonic; process wall-clock independently recorded by caller"
+    )
     result["diagnostic_timing"] = stage_timings
-    if not compare and getattr(args, "output_format", "json") == "summary" and not include_identity:
+    if (
+        not compare
+        and getattr(args, "output_format", "json") == "summary"
+        and not include_identity
+    ):
         summary = _render_basic_fact_summary(result)
         source_package = result.get("source_package")
         if isinstance(source_package, dict):
             summary = (
                 f"显式VIPDATA来源包 {source_package['package_id']}；ZIP SHA-256={source_package['sha256']}；"
-                f"条目={source_package['zip_entry_path']}；CRC={source_package['zip_crc']}\n" + summary
+                f"条目={source_package['zip_entry_path']}；CRC={source_package['zip_crc']}\n"
+                + summary
             )
         sys.stdout.write(summary + "\n")
     else:
@@ -2044,7 +3073,9 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
     canonical = result.get("canonical_selection", {})
     canonical_source = canonical.get("source", {})
     canonical_fields = canonical.get("fields", {})
-    canonical_observed = sum(item.get("quality") == "OBSERVED" for item in canonical_fields.values())
+    canonical_observed = sum(
+        item.get("quality") == "OBSERVED" for item in canonical_fields.values()
+    )
     lines = [
         f"基础量价研究解释 | {result.get('requested_symbol', '未知代码')} | 目标日 {result.get('target_session', '未知')} | NON_PIT_RETROSPECTIVE",
         (
@@ -2081,13 +3112,21 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
     )
     handoff = result.get("foundation_handoff", {})
     if isinstance(handoff, dict):
-        source_version = handoff.get("source_package_sha256") or handoff.get("source_byte_sha256") or "未知"
+        source_version = (
+            handoff.get("source_package_sha256")
+            or handoff.get("source_byte_sha256")
+            or "未知"
+        )
         lines.append(
             f"Foundation typed交接：目标日={handoff.get('target_session')}；来源版本={source_version}；"
             f"价格坐标={handoff.get('price_coordinate')}；目标Bar={handoff.get('target_bar_status')}；"
             f"价格研究={handoff.get('research_price_status')}。"
         )
-        for group_name, label in (("price", "价格"), ("amount", "金额"), ("volume", "数量")):
+        for group_name, label in (
+            ("price", "价格"),
+            ("amount", "金额"),
+            ("volume", "数量"),
+        ):
             group = handoff.get("quality_groups", {}).get(group_name, {})
             lines.append(
                 f"Foundation {label}质量={group.get('quality', 'UNKNOWN_DATA')}；"
@@ -2112,7 +3151,9 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
     )
     for key, label in group_labels:
         facts = groups.get(key, {})
-        rendered = "；".join(_summary_fact(item) for item in facts.values()) or "无可显示字段"
+        rendered = (
+            "；".join(_summary_fact(item) for item in facts.values()) or "无可显示字段"
+        )
         lines.append(f"{label}：{rendered}")
     lines.append(
         f"可用性：兼容状态={result.get('status')}；"
@@ -2134,7 +3175,12 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
     for key, label in group_labels:
         reasons = unknowns.get(key, {})
         if reasons:
-            lines.append(f"{label}未知原因：" + "；".join(f"{field_id}={reason}" for field_id, reason in reasons.items()))
+            lines.append(
+                f"{label}未知原因："
+                + "；".join(
+                    f"{field_id}={reason}" for field_id, reason in reasons.items()
+                )
+            )
     explanation = result.get("availability_explanation", {})
     if explanation.get("missing_target_bar_explanation"):
         lines.append("目标日行情：" + explanation["missing_target_bar_explanation"])
@@ -2156,7 +3202,11 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
         )
         for component in preview["components"]:
             if component["status"] == "EVALUATED":
-                result_text = component["value"] if component["quality"] == "OBSERVED" else component.get("reason")
+                result_text = (
+                    component["value"]
+                    if component["quality"] == "OBSERVED"
+                    else component.get("reason")
+                )
                 inputs = "；".join(
                     f"{item['rule_input_field']}←{item['source_field_id']}({item['value']['quality']})"
                     for item in component["inputs"]
@@ -2166,7 +3216,9 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
                     f"规则={component['rule_id']}；输入={inputs or '无'}"
                 )
             else:
-                missing = "、".join(item["field_id"] for item in component.get("missing_inputs", []))
+                missing = "、".join(
+                    item["field_id"] for item in component.get("missing_inputs", [])
+                )
                 lines.append(
                     f"{component['field_id']}：{component['status']}；缺少={missing or '未登记生产者'}；"
                     f"原因={component['reason']}"
@@ -2180,7 +3232,12 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
             f"请求时钟={bao.get('request_started_at')}至{bao.get('request_completed_at')}；"
             "NON_PIT_RETROSPECTIVE/RAW_UNADJUSTED/SOURCE_SYMBOL_ONLY；TDX主结果未替换。"
         )
-        for key, label in (("open", "开盘"), ("high", "最高"), ("low", "最低"), ("close", "收盘")):
+        for key, label in (
+            ("open", "开盘"),
+            ("high", "最高"),
+            ("low", "最低"),
+            ("close", "收盘"),
+        ):
             field = fields.get(key, {})
             comparison = bao.get("price_comparisons", {}).get(key, {})
             lines.append(
@@ -2188,14 +3245,22 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
                 f"差(Bao−TDX)={comparison.get('difference_baostock_minus_tdx')}；"
                 f"adjustflag={comparison.get('observed_adjustflag') or '未核实'}"
             )
-        for key, label in (("volume", "成交量"), ("amount", "成交金额"), ("turn", "换手")):
+        for key, label in (
+            ("volume", "成交量"),
+            ("amount", "成交金额"),
+            ("turn", "换手"),
+        ):
             field = fields.get(key, {})
-            lines.append(f"Bao {label}：{_summary_field(field)}；对照={comparisons.get(key, {}).get('status', '—')}"
-                         f"/{comparisons.get(key, {}).get('observed_relation_under_declared_units', '—')}")
+            lines.append(
+                f"Bao {label}：{_summary_field(field)}；对照={comparisons.get(key, {}).get('status', '—')}"
+                f"/{comparisons.get(key, {}).get('observed_relation_under_declared_units', '—')}"
+            )
         for key, label in (("tradestatus", "来源交易状态"), ("isST", "来源ST")):
             field = fields.get(key, {})
-            lines.append(f"Bao {label}：{field.get('status', 'UNKNOWN')}；原值={field.get('raw_value')}；"
-                         f"质量={field.get('quality')}；原因={field.get('reason') or '无'}")
+            lines.append(
+                f"Bao {label}：{field.get('status', 'UNKNOWN')}；原值={field.get('raw_value')}；"
+                f"质量={field.get('quality')}；原因={field.get('reason') or '无'}"
+            )
         amount_explanation = bao.get("amount_precision_explanation", {})
         volume_difference = bao.get("volume_difference", {})
         lines.append(
@@ -2211,7 +3276,9 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
             f"原因={volume_difference.get('reason') or '数值相同'}。金额精度仅在声明单位下解释金额，不解释整数成交量；"
             "差值不构成来源单位权威或TDX错误判定。"
         )
-        lines.append("正式profile()生产准入仍阻断；本查询不计算换手历史分位、不写来源或数据库。")
+        lines.append(
+            "正式profile()生产准入仍阻断；本查询不计算换手历史分位、不写来源或数据库。"
+        )
     return "\n".join(lines)
 
 
@@ -2252,7 +3319,11 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
             f"发现={budget['discovery_elapsed_seconds']}秒，总耗时={budget['elapsed_seconds']}秒；"
             f"未复权、NON_PIT，不代表全候选池已读取或全部指标已知"
         ),
-        "代码 | 市场/板别 | 目标Bar及逐字段质量 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | Foundation准入 | 未知原因/错误 | 单股回查",
+        (
+            "代码 | 市场/板别 | 目标Bar及逐字段质量 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | "
+            "ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | Foundation准入 | "
+            "未知原因/错误 | 单股回查"
+        ),
     ]
     if isinstance(source_quality, dict):
         lines.insert(
@@ -2303,14 +3374,20 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
         reasons = dict(core.get("unknown_reasons", {}))
         for reason, count in (raw.get("unknown_reasons") or {}).items():
             reasons[f"Raw:{reason}"] = count
-        reason_text = ";".join(f"{name}×{count}" for name, count in sorted(reasons.items()))
+        reason_text = ";".join(
+            f"{name}×{count}" for name, count in sorted(reasons.items())
+        )
         if item.get("error_code"):
             reason_text = ";".join(filter(None, (reason_text, item["error_code"])))
         source_quality_row = item.get("source_bar_quality") or {}
-        field_quality_text = ",".join(
-            f"{name}={source_quality_row.get(f'{name}_quality') or 'UNKNOWN'}"
-            for name in ("price", "amount", "volume")
-        ) if source_quality_row else "未评价"
+        field_quality_text = (
+            ",".join(
+                f"{name}={source_quality_row.get(f'{name}_quality') or 'UNKNOWN'}"
+                for name in ("price", "amount", "volume")
+            )
+            if source_quality_row
+            else "未评价"
+        )
         bar_text = (
             f"{item.get('source_bar_status') or '页内未评价'}:{item.get('source_bar_reason') or '—'}"
             f"[{field_quality_text}]"
@@ -2318,14 +3395,23 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
         foundation = item.get("foundation_handoff") or {}
         formal_reasons = foundation.get("foundation_admission_reason_explanations", {})
         foundation_text = (
-            f"typed={foundation.get('typed_pg_admission_status', '未评价')};"
-            f"foundation={foundation.get('foundation_admission_status', '未评价')};"
-            + "；".join(formal_reasons.values())
-        ) if foundation else f"{item.get('status')}:{item.get('error_code') or '来源未评价'}"
+            (
+                f"typed={foundation.get('typed_pg_admission_status', '未评价')};"
+                f"foundation={foundation.get('foundation_admission_status', '未评价')};"
+                + "；".join(formal_reasons.values())
+            )
+            if foundation
+            else f"{item.get('status')}:{item.get('error_code') or '来源未评价'}"
+        )
         detail = item.get("detail_query", {})
-        detail_command = "stock-a " + " ".join(
-            _powershell_quote(value) for value in detail.get("arguments", [])
-        ) if detail else "—"
+        detail_command = (
+            "stock-a "
+            + " ".join(
+                _powershell_quote(value) for value in detail.get("arguments", [])
+            )
+            if detail
+            else "—"
+        )
         row = [
             item["symbol"],
             f"{item['market']}/{item['board']}",
@@ -2366,7 +3452,9 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
                         )
                 row.append("；".join(component_text))
             else:
-                row.append(f"{item.get('status')}:{item.get('error_code') or '未返回画像'}")
+                row.append(
+                    f"{item.get('status')}:{item.get('error_code') or '未返回画像'}"
+                )
         lines.append(" | ".join(row))
     return "\n".join(lines)
 
@@ -2382,24 +3470,44 @@ def _run_full_source_core_profile(
 ) -> tuple[dict[str, Any], Any, float, float]:
     """让全范围ZIP扫描逐条经过现役research_stock消费者，只保留有限统计与样本。"""
     if not isinstance(profile_contract, dict):
-        raise DiagnosticError("PROFILE_PREVIEW_CONTRACT_REQUIRED", "全范围Core/Profile生产必须装载唯一day-chain合同", _EXIT_ARGUMENT)
+        raise DiagnosticError(
+            "PROFILE_PREVIEW_CONTRACT_REQUIRED",
+            "全范围Core/Profile生产必须装载唯一day-chain合同",
+            _EXIT_ARGUMENT,
+        )
     target = _parse_target(args.target_session)
     _calendar, _metadata, _revision, sessions = _load_calendar(target)
     if target not in sessions:
-        raise DiagnosticError("TARGET_DATE_INVALID", "目标日期不在已核验官方交易日历内", _EXIT_ARGUMENT)
+        raise DiagnosticError(
+            "TARGET_DATE_INVALID", "目标日期不在已核验官方交易日历内", _EXIT_ARGUMENT
+        )
 
     filtered = tuple(
-        item for item in pool.candidates
+        item
+        for item in pool.candidates
         if (args.market == "ALL" or item["market"] == args.market)
         and (args.board == "ALL" or item["board"] == args.board)
     )
     candidate_total = len(filtered)
-    if type(args.offset) is not int or args.offset < 0 or type(args.limit) is not int or not 1 <= args.limit <= 100:
-        raise DiagnosticError("UNIVERSE_PAGE_INVALID", "ZIP来源分页或过滤条件无效", _EXIT_ARGUMENT)
-    requested_page = filtered[args.offset:args.offset + args.limit]
-    sample_positions = {0, len(requested_page) // 2, len(requested_page) - 1} if requested_page else set()
+    if (
+        type(args.offset) is not int
+        or args.offset < 0
+        or type(args.limit) is not int
+        or not 1 <= args.limit <= 100
+    ):
+        raise DiagnosticError(
+            "UNIVERSE_PAGE_INVALID", "ZIP来源分页或过滤条件无效", _EXIT_ARGUMENT
+        )
+    requested_page = filtered[args.offset : args.offset + args.limit]
+    sample_positions = (
+        {0, len(requested_page) // 2, len(requested_page) - 1}
+        if requested_page
+        else set()
+    )
     sample_symbols = {
-        item["symbol"] for index, item in enumerate(requested_page) if index in sample_positions
+        item["symbol"]
+        for index, item in enumerate(requested_page)
+        if index in sample_positions
     }
     sampled_groups: set[tuple[str, str]] = set()
     for item in filtered:
@@ -2411,18 +3519,28 @@ def _run_full_source_core_profile(
     scope = profile_contract.get("scope_bindings", {}).get("FOUNDATION_EOD", {})
     field_registry = scope.get("field_registry", [])
     rules = scope.get("profile_expression_registry", {})
-    core_fields = sorted({
-        item.get("field_id") for item in field_registry
-        if isinstance(item, dict) and isinstance(item.get("field_id"), str)
-        and item["field_id"].startswith("core.")
-    })
+    core_fields = sorted(
+        {
+            item.get("field_id")
+            for item in field_registry
+            if isinstance(item, dict)
+            and isinstance(item.get("field_id"), str)
+            and item["field_id"].startswith("core.")
+        }
+    )
     profile_fields = {
         rule_id: rule.get("field_id")
         for rule_id, rule in rules.items()
-        if isinstance(rule_id, str) and isinstance(rule, dict) and isinstance(rule.get("field_id"), str)
+        if isinstance(rule_id, str)
+        and isinstance(rule, dict)
+        and isinstance(rule.get("field_id"), str)
     }
     if len(core_fields) != 43 or len(profile_fields) != 11:
-        raise DiagnosticError("PROFILE_PREVIEW_CONTRACT_INVALID", "现役合同未提供43个Core字段和11条画像规则", _EXIT_UNAVAILABLE)
+        raise DiagnosticError(
+            "PROFILE_PREVIEW_CONTRACT_INVALID",
+            "现役合同未提供43个Core字段和11条画像规则",
+            _EXIT_UNAVAILABLE,
+        )
 
     source_status_counts: dict[str, int] = {}
     source_reason_counts: dict[str, int] = {}
@@ -2431,7 +3549,13 @@ def _run_full_source_core_profile(
         for name in core_fields
     }
     profile_stats = {
-        field_id: {"rule_id": rule_id, "status_counts": {}, "quality_counts": {}, "unavailable_counts": {}, "reason_counts": {}}
+        field_id: {
+            "rule_id": rule_id,
+            "status_counts": {},
+            "quality_counts": {},
+            "unavailable_counts": {},
+            "reason_counts": {},
+        }
         for rule_id, field_id in profile_fields.items()
     }
     samples: dict[str, dict[str, Any]] = {}
@@ -2467,14 +3591,21 @@ def _run_full_source_core_profile(
         counters.cb = ctypes.sizeof(counters)
         psapi = ctypes.WinDLL("psapi", use_last_error=True)
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        if not psapi.GetProcessMemoryInfo(kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb):
+        if not psapi.GetProcessMemoryInfo(
+            kernel32.GetCurrentProcess(), ctypes.byref(counters), counters.cb
+        ):
             return None
         return int(counters.WorkingSetSize)
 
     def increment(target_map: dict[str, int], key: str) -> None:
         target_map[key] = target_map.get(key, 0) + 1
 
-    def save_sample(symbol: str, row: Any, result: dict[str, Any] | None, unavailable_status: str | None = None) -> None:
+    def save_sample(
+        symbol: str,
+        row: Any,
+        result: dict[str, Any] | None,
+        unavailable_status: str | None = None,
+    ) -> None:
         if symbol not in sample_symbols:
             return
         sample: dict[str, Any] = {
@@ -2490,24 +3621,40 @@ def _run_full_source_core_profile(
         if result is None:
             sample["consumer_status"] = unavailable_status
         else:
-            sample.update({
-                "consumer_status": result.get("status"),
-                "source": result.get("source_package"),
-                "price_coordinate": result.get("adjustment", {}).get("coordinate"),
-                "research_mode": result.get("research_mode"),
-                "target_bar_present": result.get("target_bar_present"),
-                "raw_availability": result.get("raw_availability"),
-                "core_availability": result.get("core_availability"),
-                "target_raw_fields": result.get("target_raw_fields"),
-                "core_fields": result.get("core_fields"),
-                "profile_components": [
-                    {key: item.get(key) for key in ("field_id", "rule_id", "status", "quality", "value", "reason")}
-                    for item in result.get("profile_preview", {}).get("components", [])
-                ],
-            })
+            sample.update(
+                {
+                    "consumer_status": result.get("status"),
+                    "source": result.get("source_package"),
+                    "price_coordinate": result.get("adjustment", {}).get("coordinate"),
+                    "research_mode": result.get("research_mode"),
+                    "target_bar_present": result.get("target_bar_present"),
+                    "raw_availability": result.get("raw_availability"),
+                    "core_availability": result.get("core_availability"),
+                    "target_raw_fields": result.get("target_raw_fields"),
+                    "core_fields": result.get("core_fields"),
+                    "profile_components": [
+                        {
+                            key: item.get(key)
+                            for key in (
+                                "field_id",
+                                "rule_id",
+                                "status",
+                                "quality",
+                                "value",
+                                "reason",
+                            )
+                        }
+                        for item in result.get("profile_preview", {}).get(
+                            "components", []
+                        )
+                    ],
+                }
+            )
         samples[symbol] = sample
 
-    def record_unavailable(symbol: str, row: Any, status: str, reason: str | None) -> None:
+    def record_unavailable(
+        symbol: str, row: Any, status: str, reason: str | None
+    ) -> None:
         nonlocal nonproduced_candidates
         nonproduced_candidates += 1
         for stats in core_stats.values():
@@ -2538,7 +3685,9 @@ def _run_full_source_core_profile(
             if field.get("reason"):
                 increment(stats["reason_counts"], field["reason"])
         components = result.get("profile_preview", {}).get("components", [])
-        by_field = {item.get("field_id"): item for item in components if isinstance(item, dict)}
+        by_field = {
+            item.get("field_id"): item for item in components if isinstance(item, dict)
+        }
         for field_id, stats in profile_stats.items():
             component = by_field.get(field_id)
             if component is None:
@@ -2606,14 +3755,23 @@ def _run_full_source_core_profile(
         market=args.market,
         board=args.board,
         on_candidate=consume_candidate,
-        on_page=lambda page: sys.stderr.write(json.dumps({"page_progress": asdict(page)}, ensure_ascii=False, default=_json_default) + "\n"),
+        on_page=lambda page: sys.stderr.write(
+            json.dumps(
+                {"page_progress": asdict(page)},
+                ensure_ascii=False,
+                default=_json_default,
+            )
+            + "\n"
+        ),
     )
     scan_wall = time.monotonic() - scan_started
     current_rss = process_working_set_bytes()
     if current_rss is not None:
         peak_working_set_bytes = max(peak_working_set_bytes or 0, current_rss)
     field_partition_complete = all(
-        sum(stats["quality_counts"].values()) + sum(stats["unavailable_counts"].values()) == candidate_total
+        sum(stats["quality_counts"].values())
+        + sum(stats["unavailable_counts"].values())
+        == candidate_total
         for stats in core_stats.values()
     )
     profile_partition_complete = all(
@@ -2625,7 +3783,12 @@ def _run_full_source_core_profile(
 
     summary = {
         "contract": "TDX_VIPDATA_FULL_SOURCE_CORE_PROFILE_NON_PIT_R1",
-        "status": "COMPLETE_WITH_DISCLOSURES" if scan_complete and consumer_complete and field_partition_complete and profile_partition_complete else "PARTIAL",
+        "status": "COMPLETE_WITH_DISCLOSURES"
+        if scan_complete
+        and consumer_complete
+        and field_partition_complete
+        and profile_partition_complete
+        else "PARTIAL",
         "target_session": target.isoformat(),
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "price_coordinate": "RAW_UNADJUSTED",
@@ -2633,11 +3796,14 @@ def _run_full_source_core_profile(
         "source_candidate_total": candidate_total,
         "source_status_counts": dict(sorted(source_status_counts.items())),
         "source_reason_counts": dict(sorted(source_reason_counts.items())),
-        "source_partition_complete": sum(source_status_counts.values()) == candidate_total,
+        "source_partition_complete": sum(source_status_counts.values())
+        == candidate_total,
         "core_profile_produced": produced_candidates,
         "core_profile_not_produced": nonproduced_candidates,
         "consumer_failed": consumer_failed,
-        "consumer_failure_reason_counts": dict(sorted(consumer_failure_reasons.items())),
+        "consumer_failure_reason_counts": dict(
+            sorted(consumer_failure_reasons.items())
+        ),
         "core_field_count": len(core_fields),
         "core_fields": core_stats,
         "profile_rule_count": len(profile_fields),
@@ -2710,8 +3876,17 @@ def _run_full_source_core_profile(
             "by_board": scan_report.by_board,
             "field_quality": scan_report.field_quality,
             "not_evaluated_reason_counts": {
-                reason: sum(item.status == "NOT_EVALUATED" and item.reason == reason for item in scan_report.candidates)
-                for reason in sorted({item.reason for item in scan_report.candidates if item.status == "NOT_EVALUATED" and item.reason})
+                reason: sum(
+                    item.status == "NOT_EVALUATED" and item.reason == reason
+                    for item in scan_report.candidates
+                )
+                for reason in sorted(
+                    {
+                        item.reason
+                        for item in scan_report.candidates
+                        if item.status == "NOT_EVALUATED" and item.reason
+                    }
+                )
             },
         },
         "full_source_core_profile": summary,
@@ -2754,7 +3929,11 @@ def _run_research_universe(args: argparse.Namespace) -> int:
     if getattr(args, "pg_source_raw", False):
         return _run_pg_raw_universe(args)
     if getattr(args, "pg_source_sha256", None) is not None:
-        raise DiagnosticError("PG_SOURCE_FLAG_REQUIRED", "提供来源SHA时必须同时显式启用--pg-source-raw", _EXIT_ARGUMENT)
+        raise DiagnosticError(
+            "PG_SOURCE_FLAG_REQUIRED",
+            "提供来源SHA时必须同时显式启用--pg-source-raw",
+            _EXIT_ARGUMENT,
+        )
     command_started = time.monotonic()
     config, config_path = _load_runtime_config()
     package_verification_seconds = 0.0
@@ -2763,10 +3942,20 @@ def _run_research_universe(args: argparse.Namespace) -> int:
     if package is not None:
         package_verification_seconds = time.monotonic() - package_verification_started
     if args.full_source_core_profile and package is None:
-        raise DiagnosticError("VIPDATA_PACKAGE_REQUIRED", "全范围Core/Profile模式必须显式指定已校验的VIPDATA ZIP", _EXIT_ARGUMENT)
-    roots = () if package is not None else config["source_policy"]["configured_tdx_source_roots"]
+        raise DiagnosticError(
+            "VIPDATA_PACKAGE_REQUIRED",
+            "全范围Core/Profile模式必须显式指定已校验的VIPDATA ZIP",
+            _EXIT_ARGUMENT,
+        )
+    roots = (
+        ()
+        if package is not None
+        else config["source_policy"]["configured_tdx_source_roots"]
+    )
     if package is None and not roots:
-        raise DiagnosticError("SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX只读来源根，拒绝发现来源候选")
+        raise DiagnosticError(
+            "SOURCE_NOT_CONFIGURED", "配置中没有绑定TDX只读来源根，拒绝发现来源候选"
+        )
     try:
         units = UnitContract(
             args.unit_version,
@@ -2793,33 +3982,61 @@ def _run_research_universe(args: argparse.Namespace) -> int:
             max_total_records=args.max_source_quality_records,
             max_total_seconds=args.max_source_quality_seconds,
         )
-    except (InvalidOperation, ValueError, ContractError, ResearchEntryError, VipdataError) as error:
-        raise DiagnosticError("ARGUMENT_CONTRACT_INVALID", f"单位或预算合同无效：{error}", _EXIT_ARGUMENT) from error
+    except (
+        InvalidOperation,
+        ValueError,
+        ContractError,
+        ResearchEntryError,
+        VipdataError,
+    ) as error:
+        raise DiagnosticError(
+            "ARGUMENT_CONTRACT_INVALID", f"单位或预算合同无效：{error}", _EXIT_ARGUMENT
+        ) from error
     try:
         foundation_contract = load_day_chain_contract(_CONFIG_ROOT).document
     except DayChainContractError as error:
-        _emit({"ok": False, "code": error.code, "message": str(error), "database_io_attempted": False}, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": error.code,
+                "message": str(error),
+                "database_io_attempted": False,
+            },
+            error=True,
+        )
         return _EXIT_UNAVAILABLE
-    profile_contract = foundation_contract if args.include_profile_preview or args.full_source_core_profile else None
+    profile_contract = (
+        foundation_contract
+        if args.include_profile_preview or args.full_source_core_profile
+        else None
+    )
     try:
         if args.full_source_core_profile:
             candidate_index_started = time.monotonic()
             pool = vipdata_research_candidate_pool(package)
             candidate_index_seconds = time.monotonic() - candidate_index_started
-            result, target_quality_report, scan_wall_seconds, consumer_seconds = _run_full_source_core_profile(
-                args,
-                package=package,
-                pool=pool,
-                units=units,
-                profile_contract=profile_contract,
-                scan_budget=source_quality_budget,
+            result, target_quality_report, scan_wall_seconds, consumer_seconds = (
+                _run_full_source_core_profile(
+                    args,
+                    package=package,
+                    pool=pool,
+                    units=units,
+                    profile_contract=profile_contract,
+                    scan_budget=source_quality_budget,
+                )
             )
-            result["performance"].update({
-                "zip_sha_crc_validation_seconds": round(package_verification_seconds, 6),
-                "candidate_pool_metadata_seconds": round(candidate_index_seconds, 6),
-                "full_source_scan_seconds": round(scan_wall_seconds, 6),
-                "core_profile_consumer_seconds": round(consumer_seconds, 6),
-            })
+            result["performance"].update(
+                {
+                    "zip_sha_crc_validation_seconds": round(
+                        package_verification_seconds, 6
+                    ),
+                    "candidate_pool_metadata_seconds": round(
+                        candidate_index_seconds, 6
+                    ),
+                    "full_source_scan_seconds": round(scan_wall_seconds, 6),
+                    "core_profile_consumer_seconds": round(consumer_seconds, 6),
+                }
+            )
         elif package is None:
             result = research_universe_preview(
                 target_session=args.target_session,
@@ -2839,21 +4056,30 @@ def _run_research_universe(args: argparse.Namespace) -> int:
             candidate_index_started = time.monotonic()
             pool = vipdata_research_candidate_pool(package)
             candidate_index_seconds = time.monotonic() - candidate_index_started
-            if (type(args.offset) is not int or args.offset < 0
-                    or type(args.limit) is not int or not 1 <= args.limit <= 100
-                    or args.market not in {"ALL", "SH", "SZ"}
-                    or args.board not in {"ALL", "MAIN_BOARD", "GEM"}):
-                raise ResearchEntryError("UNIVERSE_PAGE_INVALID", "ZIP来源分页或过滤条件无效")
+            if (
+                type(args.offset) is not int
+                or args.offset < 0
+                or type(args.limit) is not int
+                or not 1 <= args.limit <= 100
+                or args.market not in {"ALL", "SH", "SZ"}
+                or args.board not in {"ALL", "MAIN_BOARD", "GEM"}
+            ):
+                raise ResearchEntryError(
+                    "UNIVERSE_PAGE_INVALID", "ZIP来源分页或过滤条件无效"
+                )
             target = _parse_target(args.target_session)
             _calendar, _metadata, _revision, sessions = _load_calendar(target)
             if target not in sessions:
-                raise ResearchEntryError("TARGET_DATE_INVALID", "目标日期不在已核验的官方交易日历内")
+                raise ResearchEntryError(
+                    "TARGET_DATE_INVALID", "目标日期不在已核验的官方交易日历内"
+                )
             filtered = tuple(
-                item for item in pool.candidates
+                item
+                for item in pool.candidates
                 if (args.market == "ALL" or item["market"] == args.market)
                 and (args.board == "ALL" or item["board"] == args.board)
             )
-            page_candidates = filtered[args.offset:args.offset + args.limit]
+            page_candidates = filtered[args.offset : args.offset + args.limit]
             quality_scan_started = time.monotonic()
             target_quality_report = scan_vipdata_target_quality(
                 package,
@@ -2862,11 +4088,13 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 units=units,
                 budget=source_quality_budget,
                 evaluation_symbols=(
-                    None if args.full_target_quality
+                    None
+                    if args.full_target_quality
                     else tuple(item["symbol"] for item in page_candidates)
                 ),
                 capture_symbols=tuple(
-                    item["symbol"] for item in page_candidates
+                    item["symbol"]
+                    for item in page_candidates
                     if item.get("empty_placeholder") is not True
                 ),
             )
@@ -2893,40 +4121,60 @@ def _run_research_universe(args: argparse.Namespace) -> int:
             source_quality = result.get("source_target_quality")
             if isinstance(source_quality, dict):
                 source_quality["evaluation_mode"] = (
-                    "FULL_TARGET_QUALITY" if args.full_target_quality else "FAST_PAGE_ONLY"
+                    "FULL_TARGET_QUALITY"
+                    if args.full_target_quality
+                    else "FAST_PAGE_ONLY"
                 )
-                source_quality["full_pool_evaluation_complete"] = target_quality_report.not_evaluated == 0
-                source_quality["read_failures_present"] = target_quality_report.read_failed > 0
+                source_quality["full_pool_evaluation_complete"] = (
+                    target_quality_report.not_evaluated == 0
+                )
+                source_quality["read_failures_present"] = (
+                    target_quality_report.read_failed > 0
+                )
                 source_quality["not_evaluated_reason_counts"] = {
                     reason: sum(
                         item.status == "NOT_EVALUATED" and item.reason == reason
                         for item in target_quality_report.candidates
                     )
-                    for reason in sorted({
-                        item.reason for item in target_quality_report.candidates
-                        if item.status == "NOT_EVALUATED" and item.reason is not None
-                    })
+                    for reason in sorted(
+                        {
+                            item.reason
+                            for item in target_quality_report.candidates
+                            if item.status == "NOT_EVALUATED"
+                            and item.reason is not None
+                        }
+                    )
                 }
             page_symbols = {item["symbol"] for item in page_candidates}
             page_quality_rows = tuple(
-                item for item in target_quality_report.candidates if item.symbol in page_symbols
+                item
+                for item in target_quality_report.candidates
+                if item.symbol in page_symbols
             )
             result["performance"] = {
                 "timing_contract": "STOCK_A_RESEARCH_UNIVERSE_SEGMENTS_R1",
-                "zip_sha_crc_validation_seconds": round(package_verification_seconds, 6),
+                "zip_sha_crc_validation_seconds": round(
+                    package_verification_seconds, 6
+                ),
                 "candidate_pool_metadata_seconds": round(candidate_index_seconds, 6),
                 "target_quality_scan_wall_seconds": round(quality_scan_wall_seconds, 6),
                 "target_quality_scan_report_seconds": target_quality_report.elapsed_seconds,
                 "page_entry_decode_seconds": target_quality_report.consumer_capture_read_elapsed_seconds,
                 "full_pool_entry_decode_seconds": (
-                    target_quality_report.entry_read_elapsed_seconds if args.full_target_quality else None
+                    target_quality_report.entry_read_elapsed_seconds
+                    if args.full_target_quality
+                    else None
                 ),
                 "full_pool_target_scan_seconds": (
-                    target_quality_report.elapsed_seconds if args.full_target_quality else None
+                    target_quality_report.elapsed_seconds
+                    if args.full_target_quality
+                    else None
                 ),
                 "page_core_profile_seconds": round(page_research_seconds, 6),
                 "page_source_bytes": sum(item.bytes_read for item in page_quality_rows),
-                "page_source_records": sum(item.record_count for item in page_quality_rows),
+                "page_source_records": sum(
+                    item.record_count for item in page_quality_rows
+                ),
                 "quality_scan_bytes": target_quality_report.bytes_read,
                 "quality_scan_records": target_quality_report.records_read,
                 "quality_scan_candidate_total": target_quality_report.candidate_total,
@@ -2952,14 +4200,17 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 "acceptance_status": "NOT_ACCEPTED_NOT_PERSISTED",
             }
     except VipdataError as error:
-        _emit({
-            "ok": False,
-            "code": error.code,
-            "message": str(error),
-            "database_io_attempted": False,
-            "database_write_attempted": False,
-            "source_fallback_attempted": False,
-        }, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": error.code,
+                "message": str(error),
+                "database_io_attempted": False,
+                "database_write_attempted": False,
+                "source_fallback_attempted": False,
+            },
+            error=True,
+        )
         return _EXIT_UNAVAILABLE
     except ResearchEntryError as error:
         if error.code == "SOURCE_ACCESS_DENIED":
@@ -2967,30 +4218,40 @@ def _run_research_universe(args: argparse.Namespace) -> int:
         elif error.code == "SOURCE_IO_ERROR":
             code = _EXIT_ENGINEERING
         elif error.code in {
-            "TARGET_DATE_INVALID", "UNIVERSE_PAGE_INVALID", "UNIVERSE_FILTER_INVALID",
-            "UNIVERSE_BUDGET_INVALID", "COMPARE_BUDGET_INVALID",
+            "TARGET_DATE_INVALID",
+            "UNIVERSE_PAGE_INVALID",
+            "UNIVERSE_FILTER_INVALID",
+            "UNIVERSE_BUDGET_INVALID",
+            "COMPARE_BUDGET_INVALID",
         }:
             code = _EXIT_ARGUMENT
         else:
             code = _EXIT_UNAVAILABLE
-        _emit({
-            "ok": False,
-            "code": error.code,
-            "message": str(error),
-            "context": error.context,
+        _emit(
+            {
+                "ok": False,
+                "code": error.code,
+                "message": str(error),
+                "context": error.context,
+                "database_io_attempted": False,
+                "database_write_attempted": False,
+            },
+            error=True,
+        )
+        return code
+    result.update(
+        {
+            "ok": result["status"] == "COMPLETE_WITH_DISCLOSURES",
+            "configuration_path": str(config_path),
             "database_io_attempted": False,
             "database_write_attempted": False,
-        }, error=True)
-        return code
-    result.update({
-        "ok": result["status"] == "COMPLETE_WITH_DISCLOSURES",
-        "configuration_path": str(config_path),
-        "database_io_attempted": False,
-        "database_write_attempted": False,
-    })
+        }
+    )
     performance = result.get("performance")
     if isinstance(performance, dict):
-        performance["total_command_seconds"] = round(time.monotonic() - command_started, 6)
+        performance["total_command_seconds"] = round(
+            time.monotonic() - command_started, 6
+        )
     if args.output_format == "summary":
         full_observation = result.get("full_source_core_profile")
         if isinstance(full_observation, dict):
@@ -2998,7 +4259,8 @@ def _run_research_universe(args: argparse.Namespace) -> int:
             lines = [
                 f"全范围来源候选 Core/Profile：{full_observation['status']}；日期={full_observation['target_session']}；"
                 f"ZIP SHA-256={source_package.get('sha256')}；坐标=RAW_UNADJUSTED；NON_PIT_RETROSPECTIVE",
-                f"来源候选={full_observation['source_candidate_total']}；来源状态={json.dumps(full_observation['source_status_counts'], ensure_ascii=False, sort_keys=True)}；"
+                f"来源候选={full_observation['source_candidate_total']}；来源状态="
+                f"{json.dumps(full_observation['source_status_counts'], ensure_ascii=False, sort_keys=True)}；"
                 f"Core/Profile已生产={full_observation['core_profile_produced']}；未生产={full_observation['core_profile_not_produced']}；"
                 f"消费者失败={full_observation['consumer_failed']}",
                 f"来源分母闭合={full_observation['source_partition_complete']}；"
@@ -3035,11 +4297,27 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                     },
                     "profile": sample.get("profile_components"),
                 }
-                lines.append("  " + json.dumps(concise, ensure_ascii=False, default=_json_default, separators=(",", ":")))
+                lines.append(
+                    "  "
+                    + json.dumps(
+                        concise,
+                        ensure_ascii=False,
+                        default=_json_default,
+                        separators=(",", ":"),
+                    )
+                )
             lines.append(
-                "耗时/资源：" + json.dumps(full_observation["read_usage"], ensure_ascii=False, default=_json_default, sort_keys=True)
+                "耗时/资源："
+                + json.dumps(
+                    full_observation["read_usage"],
+                    ensure_ascii=False,
+                    default=_json_default,
+                    sort_keys=True,
+                )
             )
-            lines.append("只读内存观察；不等于上市Universe、PIT、正式Profile、PG、Foundation accepted、API或网页发布。")
+            lines.append(
+                "只读内存观察；不等于上市Universe、PIT、正式Profile、PG、Foundation accepted、API或网页发布。"
+            )
             summary = "\n".join(lines)
         else:
             summary = _render_universe_summary(result)
@@ -3047,7 +4325,8 @@ def _run_research_universe(args: argparse.Namespace) -> int:
         if isinstance(source_package, dict):
             summary = (
                 f"显式VIPDATA来源包 {source_package['package_id']}；ZIP SHA-256={source_package['sha256']}；"
-                f"CRC={source_package['zip_crc']}；沪深主板/GEM为代码池，不是官方上市总体\n" + summary
+                f"CRC={source_package['zip_crc']}；沪深主板/GEM为代码池，不是官方上市总体\n"
+                + summary
             )
         sys.stdout.write(summary + "\n")
     else:
@@ -3059,7 +4338,9 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
     runtime_config, _config_path = _load_runtime_config()
     try:
         source_policy = runtime_config["source_policy"]
-        source_config = VipdataSourceConfig.from_mapping(source_policy["vipdata_official"])
+        source_config = VipdataSourceConfig.from_mapping(
+            source_policy["vipdata_official"]
+        )
         budgets = VipdataBudgets(
             max_page_bytes=args.max_page_bytes,
             max_package_bytes=args.max_package_bytes,
@@ -3073,18 +4354,27 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
             reserve_free_bytes=args.reserve_free_bytes,
         )
         observation = inspect_vipdata_page(
-            args.target_session, budgets=budgets, source_config=source_config,
+            args.target_session,
+            budgets=budgets,
+            source_config=source_config,
         )
     except VipdataError as error:
-        _emit({
-            "ok": False,
-            "code": error.code,
-            "message": str(error),
-            "network_action": "EXPLICIT_SOURCE_VIPDATA_ONLY",
-            "database_io_attempted": False,
-            "database_write_attempted": False,
-        }, error=True)
-        return _EXIT_ARGUMENT if error.code in {"TARGET_SESSION_INVALID", "BUDGET_INVALID"} else _EXIT_UNAVAILABLE
+        _emit(
+            {
+                "ok": False,
+                "code": error.code,
+                "message": str(error),
+                "network_action": "EXPLICIT_SOURCE_VIPDATA_ONLY",
+                "database_io_attempted": False,
+                "database_write_attempted": False,
+            },
+            error=True,
+        )
+        return (
+            _EXIT_ARGUMENT
+            if error.code in {"TARGET_SESSION_INVALID", "BUDGET_INVALID"}
+            else _EXIT_UNAVAILABLE
+        )
     result: dict[str, Any] = {
         "ok": False,
         "mode": args.mode,
@@ -3100,7 +4390,10 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
         _emit(result, error=not result["ok"])
         return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
     if observation.status != "PACKAGE_CANDIDATE_READY":
-        result["download"] = {"status": "NOT_STARTED", "reason": observation.reason or observation.status}
+        result["download"] = {
+            "status": "NOT_STARTED",
+            "reason": observation.reason or observation.status,
+        }
         _emit(result, error=True)
         return _EXIT_UNAVAILABLE
     try:
@@ -3112,23 +4405,46 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
     result["package"] = package_dict(package)
     result["validated_day_entry_count"] = len(package.day_entries)
     result["entry_count_by_market"] = dict(package.entry_count_by_market)
-    result["core_consumer"] = {"status": "NOT_REQUESTED", "reason": "未显式提供--consume-symbol"}
+    result["core_consumer"] = {
+        "status": "NOT_REQUESTED",
+        "reason": "未显式提供--consume-symbol",
+    }
     if args.consume_symbol:
-        if not all((args.unit_version, args.amount_to_cny, args.volume_to_shares is not None)):
-            _emit({
-                **result,
-                "ok": False,
-                "core_consumer": {"status": "BLOCKED", "reason": "Core消费必须显式提供单位合同版本及倍率"},
-            }, error=True)
+        if not all(
+            (args.unit_version, args.amount_to_cny, args.volume_to_shares is not None)
+        ):
+            _emit(
+                {
+                    **result,
+                    "ok": False,
+                    "core_consumer": {
+                        "status": "BLOCKED",
+                        "reason": "Core消费必须显式提供单位合同版本及倍率",
+                    },
+                },
+                error=True,
+            )
             return _EXIT_ARGUMENT
         try:
             symbol = args.consume_symbol.strip().upper()
             parts = symbol.split(".")
-            if len(parts) != 2 or parts[0] not in {"SH", "SZ"} or re.fullmatch(r"[0-9]{6}", parts[1]) is None:
-                raise VipdataError("SYMBOL_INVALID", "Core样本必须使用SH.六位代码或SZ.六位代码")
-            units = UnitContract(args.unit_version, Decimal(args.amount_to_cny), args.volume_to_shares)
-            limits = ReadLimits(args.max_symbol_bytes, args.max_symbol_records, 256,
-                                Decimal(args.max_symbol_seconds))
+            if (
+                len(parts) != 2
+                or parts[0] not in {"SH", "SZ"}
+                or re.fullmatch(r"[0-9]{6}", parts[1]) is None
+            ):
+                raise VipdataError(
+                    "SYMBOL_INVALID", "Core样本必须使用SH.六位代码或SZ.六位代码"
+                )
+            units = UnitContract(
+                args.unit_version, Decimal(args.amount_to_cny), args.volume_to_shares
+            )
+            limits = ReadLimits(
+                args.max_symbol_bytes,
+                args.max_symbol_records,
+                256,
+                Decimal(args.max_symbol_seconds),
+            )
             entry_scan = scan_vipdata_day_entry(
                 package,
                 market=parts[0],
@@ -3138,7 +4454,9 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
                 limits=limits,
             )
             extraction_root, extracted_path = extract_vipdata_day_entry(
-                package, market=parts[0], symbol=parts[1],
+                package,
+                market=parts[0],
+                symbol=parts[1],
             )
             consumer = research_stock(
                 symbol=symbol,
@@ -3148,7 +4466,9 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
                 limits=limits,
             )
             result["core_consumer"] = {
-                "status": "CORE_CONSUMED" if entry_scan.target_bar_present else "CORE_CONSUMED_TARGET_BAR_MISSING",
+                "status": "CORE_CONSUMED"
+                if entry_scan.target_bar_present
+                else "CORE_CONSUMED_TARGET_BAR_MISSING",
                 "sample_symbol": symbol,
                 "archive_entry": entry_scan.entry.path,
                 "extracted_path": str(extracted_path),
@@ -3163,8 +4483,19 @@ def _run_source_vipdata(args: argparse.Namespace) -> int:
                 "canonical_selection": consumer.get("canonical_selection"),
                 "status_semantics": "NON_PIT_RETROSPECTIVE；不代表官方身份、来源封口、PG接受或生产准入",
             }
-        except (VipdataError, ContractError, InvalidOperation, ResearchEntryError, DayReadError, OSError) as error:
-            code = error.code if isinstance(error, (VipdataError, ResearchEntryError, DayReadError)) else "CORE_CONSUMER_FAILED"
+        except (
+            VipdataError,
+            ContractError,
+            InvalidOperation,
+            ResearchEntryError,
+            DayReadError,
+            OSError,
+        ) as error:
+            code = (
+                error.code
+                if isinstance(error, (VipdataError, ResearchEntryError, DayReadError))
+                else "CORE_CONSUMER_FAILED"
+            )
             result["core_consumer"] = {"status": code, "reason": str(error)}
             _emit(result, error=True)
             return _EXIT_UNAVAILABLE
@@ -3211,15 +4542,41 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "source-raw-catalog":
             return _run_source_raw_catalog(args)
         if args.command == "preview-serve":
-            from stock_a.web_preview import run_preview_server
+            from stock_a.service.preview_http import run_preview_server
+
             return run_preview_server(host=args.host, port=args.port)
     except DiagnosticError as error:
-        _emit({"ok": False, "code": error.code, "cause_type": type(error.__cause__).__name__ if error.__cause__ is not None else None, "message": str(error)}, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": error.code,
+                "cause_type": type(error.__cause__).__name__
+                if error.__cause__ is not None
+                else None,
+                "message": str(error),
+            },
+            error=True,
+        )
         return error.exit_code
     except KeyboardInterrupt:
-        _emit({"ok": False, "code": "OPERATION_INTERRUPTED", "message": "操作已中断，未生成完整来源摘要"}, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": "OPERATION_INTERRUPTED",
+                "message": "操作已中断，未生成完整来源摘要",
+            },
+            error=True,
+        )
         return _EXIT_ENGINEERING
     except Exception as error:
-        _emit({"ok": False, "code": "ENGINEERING_ERROR", "cause_type": type(error).__name__, "message": f"诊断执行失败：{type(error).__name__}"}, error=True)
+        _emit(
+            {
+                "ok": False,
+                "code": "ENGINEERING_ERROR",
+                "cause_type": type(error).__name__,
+                "message": f"诊断执行失败：{type(error).__name__}",
+            },
+            error=True,
+        )
         return _EXIT_ENGINEERING
     return _EXIT_ENGINEERING

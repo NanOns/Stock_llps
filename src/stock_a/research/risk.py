@@ -1,4 +1,5 @@
 """P17股票单体研究风险；有限域归并，不反向影响P16。"""
+
 from dataclasses import dataclass
 
 from stock_a.domain import FieldValue
@@ -43,9 +44,20 @@ def _rules(p, e, i, w):
     return "LOW", "NO_REGISTERED_WARNING", ("NO_REGISTERED_WARNING",)
 
 
-def compose(*, entity_id, session, coordinate_id, selected_episode_id,
-            structure_applicability, support_applicability, damage: Fact, extension: Fact,
-            invalidated: Fact, shallow_breach: Fact, capability_state: str) -> RiskResult:
+def compose(
+    *,
+    entity_id,
+    session,
+    coordinate_id,
+    selected_episode_id,
+    structure_applicability,
+    support_applicability,
+    damage: Fact,
+    extension: Fact,
+    invalidated: Fact,
+    shallow_breach: Fact,
+    capability_state: str,
+) -> RiskResult:
     capability(capability_state)
     facts = (damage, extension, invalidated, shallow_breach)
     for fact in facts:
@@ -57,7 +69,9 @@ def compose(*, entity_id, session, coordinate_id, selected_episode_id,
     if support_applicability not in {"ABSENT", "LINKED", "UNKNOWN"}:
         raise ValueError("关联support适用性非法")
     if structure_applicability == "LINKED":
-        if not selected_episode_id or any(f.episode_id != selected_episode_id for f in facts[2:]):
+        if not selected_episode_id or any(
+            f.episode_id != selected_episode_id for f in facts[2:]
+        ):
             raise ValueError("结构事实不属于所选episode")
         i = boolean(invalidated.field)
         if support_applicability == "ABSENT":
@@ -71,9 +85,13 @@ def compose(*, entity_id, session, coordinate_id, selected_episode_id,
         else:
             w = boolean(shallow_breach.field)
     else:
-        if selected_episode_id is not None or any(f.episode_id is not None for f in facts[2:]):
+        if selected_episode_id is not None or any(
+            f.episode_id is not None for f in facts[2:]
+        ):
             raise ValueError("无已选episode时不能绑定其它episode事实")
-        expected = "NOT_APPLICABLE" if structure_applicability == "ABSENT" else "UNKNOWN_DATA"
+        expected = (
+            "NOT_APPLICABLE" if structure_applicability == "ABSENT" else "UNKNOWN_DATA"
+        )
         if support_applicability != structure_applicability:
             raise ValueError("未选定episode不能自证关联support适用性")
         if any(f.field.quality != expected for f in facts[2:]):
@@ -82,21 +100,49 @@ def compose(*, entity_id, session, coordinate_id, selected_episode_id,
     if any(f.field.quality == "NOT_APPLICABLE" for f in facts[:2]):
         raise ValueError("价格损伤与extension是必需适用输入")
     values = boolean(damage.field), enum(extension.field, LEVELS), i, w
-    results = tuple(_rules(*row) for row in completions(values, ((False, True), LEVELS, (False, True), (False, True))))
+    results = tuple(
+        _rules(*row)
+        for row in completions(
+            values, ((False, True), LEVELS, (False, True), (False, True))
+        )
+    )
     levels = tuple(x for x in LEVELS if any(row[0] == x for row in results))
     primary = tuple(dict.fromkeys(row[1] for row in results))
     all_sets = [set(row[2]) for row in results]
     confirmed = tuple(sorted(set.intersection(*all_sets)))
     possible = tuple(sorted(set.union(*all_sets)))
-    applicable = 2 if structure_applicability == "ABSENT" else 3 if support_applicability == "ABSENT" else 4
+    applicable = (
+        2
+        if structure_applicability == "ABSENT"
+        else 3
+        if support_applicability == "ABSENT"
+        else 4
+    )
     known = sum(f.field.quality == "OBSERVED" for f in facts)
-    field = FieldValue(levels[0]) if len(levels) == 1 else FieldValue(None, "UNKNOWN_DATA", "RISK_COMPLETION_AMBIGUOUS")
-    return RiskResult(field, levels, levels[0], levels[-1], primary[0] if len(primary) == 1 else None,
-                      primary, confirmed, possible, structure_applicability == "ABSENT",
-                      support_applicability == "ABSENT", known, applicable)
+    field = (
+        FieldValue(levels[0])
+        if len(levels) == 1
+        else FieldValue(None, "UNKNOWN_DATA", "RISK_COMPLETION_AMBIGUOUS")
+    )
+    return RiskResult(
+        field,
+        levels,
+        levels[0],
+        levels[-1],
+        primary[0] if len(primary) == 1 else None,
+        primary,
+        confirmed,
+        possible,
+        structure_applicability == "ABSENT",
+        support_applicability == "ABSENT",
+        known,
+        applicable,
+    )
 
 
-def priority_status(eligibility: FieldValue, risk: RiskResult, *, other_keys_ready: bool):
+def priority_status(
+    eligibility: FieldValue, risk: RiskResult, *, other_keys_ready: bool
+):
     if type(other_keys_ready) is not bool:
         raise ValueError("排序完整性门必须为bool")
     eligible = boolean(eligibility)

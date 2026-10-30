@@ -1,4 +1,5 @@
 """BaoStock身份与目标日状态的只读投影；不把证券代码提升为稳定实体ID。"""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -35,16 +36,24 @@ def eligible_research_board(symbol: object) -> str | None:
     return None
 
 
-def _valid_response(snapshot: object, required_fields: set[str], *, target_session: str | None = None) -> bool:
-    if not isinstance(snapshot, Mapping) or snapshot.get("status") != "RESPONSE_RECEIVED":
+def _valid_response(
+    snapshot: object, required_fields: set[str], *, target_session: str | None = None
+) -> bool:
+    if (
+        not isinstance(snapshot, Mapping)
+        or snapshot.get("status") != "RESPONSE_RECEIVED"
+    ):
         return False
     if snapshot.get("query_error_code") != "0" or snapshot.get("complete") is not True:
         return False
     fields = snapshot.get("response_fields")
     rows = snapshot.get("rows")
-    if (not isinstance(fields, list) or not required_fields.issubset(set(fields))
-            or not isinstance(rows, list)
-            or snapshot.get("rows_seen") != len(rows)):
+    if (
+        not isinstance(fields, list)
+        or not required_fields.issubset(set(fields))
+        or not isinstance(rows, list)
+        or snapshot.get("rows_seen") != len(rows)
+    ):
         return False
     if target_session is not None and snapshot.get("target_session") != target_session:
         return False
@@ -54,9 +63,11 @@ def _valid_response(snapshot: object, required_fields: set[str], *, target_sessi
     except (KeyError, TypeError, ValueError):
         return False
     return (
-        started.tzinfo is not None and completed.tzinfo is not None
+        started.tzinfo is not None
+        and completed.tzinfo is not None
         and started <= completed
-        and snapshot.get("capture_clock_role") == "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE"
+        and snapshot.get("capture_clock_role")
+        == "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE"
     )
 
 
@@ -132,21 +143,49 @@ def project_identity_lifecycle(
         raise ValueError("身份投影必须绑定沪深代码和明确目标日")
     if not _valid_response(basic_snapshot, _REQUIRED_BASIC_FIELDS):
         return IdentityLifecycleProjection(
-            normalized, target_session, eligible_research_board(normalized), "UNMAPPED", None,
-            None, None, None, None, None, None, "UNKNOWN_NO_BAR", None,
+            normalized,
+            target_session,
+            eligible_research_board(normalized),
+            "UNMAPPED",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "UNKNOWN_NO_BAR",
+            None,
             reason="BAOSTOCK_BASIC_SOURCE_UNAVAILABLE_OR_SCHEMA_INVALID",
         )
     session_text = target_session.isoformat()
-    if not _valid_response(session_snapshot, _REQUIRED_SESSION_FIELDS, target_session=session_text):
+    if not _valid_response(
+        session_snapshot, _REQUIRED_SESSION_FIELDS, target_session=session_text
+    ):
         return IdentityLifecycleProjection(
-            normalized, target_session, eligible_research_board(normalized), "UNMAPPED", None,
-            None, None, None, None, None, None, "UNKNOWN_NO_BAR", None,
+            normalized,
+            target_session,
+            eligible_research_board(normalized),
+            "UNMAPPED",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "UNKNOWN_NO_BAR",
+            None,
             reason="BAOSTOCK_TARGET_DAY_LIST_UNAVAILABLE_OR_SCHEMA_INVALID",
         )
 
     def rows_by_symbol(snapshot: Mapping[str, Any]) -> list[Mapping[str, Any]]:
-        return [row for row in snapshot["rows"] if isinstance(row, Mapping)
-                and normalize_baostock_symbol(row.get("code")) == normalized]
+        return [
+            row
+            for row in snapshot["rows"]
+            if isinstance(row, Mapping)
+            and normalize_baostock_symbol(row.get("code")) == normalized
+        ]
 
     basic_rows = rows_by_symbol(basic_snapshot)
     day_rows = rows_by_symbol(session_snapshot)
@@ -154,20 +193,49 @@ def project_identity_lifecycle(
     day = day_rows[0] if len(day_rows) == 1 else None
     if len(basic_rows) > 1 or len(day_rows) > 1:
         return IdentityLifecycleProjection(
-            normalized, target_session, eligible_research_board(normalized), "UNMAPPED", None,
-            None, None, None, None, None, None, "UNKNOWN_NO_BAR", None,
+            normalized,
+            target_session,
+            eligible_research_board(normalized),
+            "UNMAPPED",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "UNKNOWN_NO_BAR",
+            None,
             reason="BAOSTOCK_DUPLICATE_SYMBOL_ROWS",
         )
 
-    observed_values = [basic_snapshot.get("request_completed_at"), session_snapshot.get("request_completed_at")]
+    observed_values = [
+        basic_snapshot.get("request_completed_at"),
+        session_snapshot.get("request_completed_at"),
+    ]
     try:
-        observed_at = max(datetime.fromisoformat(value) for value in observed_values if isinstance(value, str))
+        observed_at = max(
+            datetime.fromisoformat(value)
+            for value in observed_values
+            if isinstance(value, str)
+        )
     except (TypeError, ValueError):
         observed_at = None
     if basic is None:
         return IdentityLifecycleProjection(
-            normalized, target_session, eligible_research_board(normalized), "UNMAPPED", None,
-            None, None, None, None, None, None, "UNKNOWN_NO_BAR", observed_at,
+            normalized,
+            target_session,
+            eligible_research_board(normalized),
+            "UNMAPPED",
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "UNKNOWN_NO_BAR",
+            observed_at,
             reason="BAOSTOCK_BASIC_ROW_NOT_FOUND",
         )
     date_error = False
@@ -177,10 +245,14 @@ def project_identity_lifecycle(
     except ValueError:
         ipo_date = out_date = None
         date_error = True
-    interval_conflict = ipo_date is not None and out_date is not None and ipo_date > out_date
+    interval_conflict = (
+        ipo_date is not None and out_date is not None and ipo_date > out_date
+    )
     security_type = _parse_enum(basic.get("type"), {1, 2, 3, 4, 5})
     listing_status = _parse_enum(basic.get("status"), {0, 1})
-    trade_status = _parse_enum(day.get("tradeStatus"), {0, 1}) if day is not None else None
+    trade_status = (
+        _parse_enum(day.get("tradeStatus"), {0, 1}) if day is not None else None
+    )
     name = basic.get("code_name") if isinstance(basic.get("code_name"), str) else None
 
     if date_error:
@@ -204,7 +276,11 @@ def project_identity_lifecycle(
     else:
         classification = "UNKNOWN_BAO_TARGET_STATUS"
 
-    reason = "BAOSTOCK_TARGET_DAY_ROW_NOT_FOUND" if day is None else "BAOSTOCK_HAS_NO_STABLE_SECURITY_ID"
+    reason = (
+        "BAOSTOCK_TARGET_DAY_ROW_NOT_FOUND"
+        if day is None
+        else "BAOSTOCK_HAS_NO_STABLE_SECURITY_ID"
+    )
     if date_error:
         reason = "BAOSTOCK_LISTING_DATE_INVALID"
     elif interval_conflict:
@@ -212,9 +288,20 @@ def project_identity_lifecycle(
     elif basic_rows and security_type is None:
         reason = "BAOSTOCK_SECURITY_TYPE_INVALID_OR_UNKNOWN"
     return IdentityLifecycleProjection(
-        normalized, target_session, eligible_research_board(normalized), "PROVISIONAL", None,
-        name, security_type, listing_status, ipo_date, out_date, trade_status,
-        classification, observed_at, reason=reason,
+        normalized,
+        target_session,
+        eligible_research_board(normalized),
+        "PROVISIONAL",
+        None,
+        name,
+        security_type,
+        listing_status,
+        ipo_date,
+        out_date,
+        trade_status,
+        classification,
+        observed_at,
+        reason=reason,
     )
 
 
@@ -238,17 +325,27 @@ def reconcile_identity_bar_status(
         )
 
     if source_status != "RESPONSE_RECEIVED" or projection is None:
-        result = f"BAO_UNAVAILABLE_TDX_BAR_{'PRESENT' if target_bar_status == 'PRESENT' else 'MISSING'}" \
-            if target_bar_status in {"PRESENT", "TARGET_MISSING"} else \
-            f"BAO_UNAVAILABLE_TDX_{target_bar_status}"
+        result = (
+            f"BAO_UNAVAILABLE_TDX_BAR_{'PRESENT' if target_bar_status == 'PRESENT' else 'MISSING'}"
+            if target_bar_status in {"PRESENT", "TARGET_MISSING"}
+            else f"BAO_UNAVAILABLE_TDX_{target_bar_status}"
+        )
     elif target_bar_status == "PRESENT":
-        result = ("BAO_TRADING_TDX_BAR_PRESENT" if bao_trade_status == 1 else
-                  "BAO_SUSPENDED_TDX_BAR_PRESENT_CONFLICT" if bao_trade_status == 0 else
-                  "BAO_UNKNOWN_TDX_BAR_PRESENT")
+        result = (
+            "BAO_TRADING_TDX_BAR_PRESENT"
+            if bao_trade_status == 1
+            else "BAO_SUSPENDED_TDX_BAR_PRESENT_CONFLICT"
+            if bao_trade_status == 0
+            else "BAO_UNKNOWN_TDX_BAR_PRESENT"
+        )
     elif target_bar_status == "TARGET_MISSING":
-        result = ("BAO_TRADING_TDX_BAR_MISSING" if bao_trade_status == 1 else
-                  "BAO_SUSPENDED_TDX_BAR_MISSING" if bao_trade_status == 0 else
-                  "BAO_UNKNOWN_TDX_BAR_MISSING")
+        result = (
+            "BAO_TRADING_TDX_BAR_MISSING"
+            if bao_trade_status == 1
+            else "BAO_SUSPENDED_TDX_BAR_MISSING"
+            if bao_trade_status == 0
+            else "BAO_UNKNOWN_TDX_BAR_MISSING"
+        )
     elif target_bar_status == "READ_FAILED":
         result = f"BAO_{'UNKNOWN' if bao_trade_status is None else bao_status}_TDX_READ_FAILED"
     else:
@@ -277,36 +374,60 @@ def classify_missing_bar_candidates(
     if len(set(normalized)) != len(normalized):
         raise ValueError("缺Bar候选含重复代码，拒绝制造互斥分类分母")
     basic_ok = _valid_response(basic_snapshot, _REQUIRED_BASIC_FIELDS)
-    session_ok = _valid_response(session_snapshot, _REQUIRED_SESSION_FIELDS,
-                                 target_session=target_session.isoformat())
+    session_ok = _valid_response(
+        session_snapshot,
+        _REQUIRED_SESSION_FIELDS,
+        target_session=target_session.isoformat(),
+    )
     projections: list[IdentityLifecycleProjection] = []
     for symbol in normalized:
-        projections.append(project_identity_lifecycle(
-            source_symbol=symbol, target_session=target_session,
-            basic_snapshot=basic_snapshot, session_snapshot=session_snapshot,
-        ))
+        projections.append(
+            project_identity_lifecycle(
+                source_symbol=symbol,
+                target_session=target_session,
+                basic_snapshot=basic_snapshot,
+                session_snapshot=session_snapshot,
+            )
+        )
     by_class: dict[str, int] = {}
     for projection in projections:
-        by_class[projection.classification] = by_class.get(projection.classification, 0) + 1
+        by_class[projection.classification] = (
+            by_class.get(projection.classification, 0) + 1
+        )
     if sum(by_class.values()) != len(normalized):
         raise AssertionError("缺Bar分类计数未闭合")
-    unknown_count = sum(
-        projection.identity_status != "PROVISIONAL"
-        or projection.classification.startswith("UNKNOWN")
-        for projection in projections
-    ) if basic_ok and session_ok else 0
+    unknown_count = (
+        sum(
+            projection.identity_status != "PROVISIONAL"
+            or projection.classification.startswith("UNKNOWN")
+            for projection in projections
+        )
+        if basic_ok and session_ok
+        else 0
+    )
     return {
         "target_session": target_session.isoformat(),
         "source_symbol_denominator": len(normalized),
-        "evidence_status": "REAL_CAPTURED_NON_PIT" if basic_ok and session_ok else "PARTIAL_OR_UNAVAILABLE",
+        "evidence_status": "REAL_CAPTURED_NON_PIT"
+        if basic_ok and session_ok
+        else "PARTIAL_OR_UNAVAILABLE",
         "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
-        "basic_capture_completed_at": basic_snapshot.get("request_completed_at") if basic_ok else None,
-        "session_capture_completed_at": session_snapshot.get("request_completed_at") if session_ok else None,
+        "basic_capture_completed_at": basic_snapshot.get("request_completed_at")
+        if basic_ok
+        else None,
+        "session_capture_completed_at": session_snapshot.get("request_completed_at")
+        if session_ok
+        else None,
         "strict_pit": False,
         "stable_security_id_issued": False,
-        "classification_counts": (dict(sorted(by_class.items())) if basic_ok and session_ok
-                                   else ({"NOT_EVALUATED": len(normalized)} if normalized else {})),
-        "classified_with_evidence": len(normalized) - unknown_count if basic_ok and session_ok else 0,
+        "classification_counts": (
+            dict(sorted(by_class.items()))
+            if basic_ok and session_ok
+            else ({"NOT_EVALUATED": len(normalized)} if normalized else {})
+        ),
+        "classified_with_evidence": len(normalized) - unknown_count
+        if basic_ok and session_ok
+        else 0,
         "unknown": unknown_count,
         "not_evaluated": 0 if basic_ok and session_ok else len(normalized),
         "rows": [projection.as_dict() for projection in projections],
