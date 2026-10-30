@@ -105,6 +105,9 @@ function clearResult() {
 const implementationLabels = {
   DESIGN_ONLY: "仅有机器合同设计",
   PURE_KERNEL: "纯计算内核可用，正式生产者未接通",
+  RUNNABLE_P00_PLAN: "P00计划已接通真实来源与合同",
+  RUNNABLE_CAPABILITY_ACCOUNTING: "来源能力核算已接通",
+  PG_CANDIDATE: "PG NON_PIT来源候选",
   PG_SOURCE_FACT: "PG来源事实已保存（来源代码级观察）",
   ON_DEMAND_PREVIEW: "用户触发的开发研究预览",
   FORMAL_PERSISTED: "正式PG持久结果",
@@ -115,11 +118,17 @@ const dataLabels = {
   PARTIAL: "部分记录或存在读取失败",
   MISSING: "所需记录缺失",
   NOT_CHECKED: "本请求未检查",
+  BLOCKED: "计划被环境门阻止",
+  UNKNOWN: "能力未知",
+  NOT_REQUESTED: "本次未请求",
+  AVAILABLE_CANDIDATE: "已保存候选，非正式封口",
+  SOURCE_RAW_ONLY: "仅来源Raw观察，不是正式P05",
   NOT_APPLICABLE: "不适用于当前阶段",
 };
 const consumerLabels = {
   CONNECTED_PREVIEW: "已接入开发预览",
   CONNECTED_FORMAL: "已接入正式消费",
+  BLOCKED_ENVIRONMENT: "当前环境门阻止阶段调度",
   NOT_CONNECTED: "正式下游未接通",
   NOT_APPLICABLE: "不适用",
 };
@@ -134,6 +143,8 @@ function clearChainReadiness(message) {
   $("chainState").className = "chain-state";
   $("chainState").textContent = message;
   $("chainChecked").textContent = "尚未查询";
+  $("sourceIngressSummary").textContent =
+    "等待精确日期与来源包版本的实时PG核算。";
   $("sourceSetCandidate").textContent = "等待精确日期与包版本查询。";
   $("chainOverview").replaceChildren();
   $("chainGroups").replaceChildren();
@@ -144,6 +155,84 @@ function readinessDetail(parent, label, value) {
   const dd = document.createElement("dd");
   dd.textContent = value;
   parent.append(dt, dd);
+}
+function renderSourceIngress(data) {
+  const root = $("sourceIngressSummary");
+  root.replaceChildren();
+  const ingress = data.source_ingress;
+  if (!ingress || ingress.status === "NOT_RUN") {
+    appendText(root, "p", "本次没有SOURCE_INGRESS运行结果。 ");
+    return;
+  }
+  const grid = document.createElement("div");
+  grid.className = "source-ingress-grid";
+  const p00 = document.createElement("div");
+  p00.className = "source-ingress-card";
+  appendText(
+    p00,
+    "strong",
+    `P00 ${ingress.plan?.mode || "—"} · ${ingress.plan?.status || "—"} · ${ingress.environment_gate?.status || "—"}`,
+  );
+  appendText(p00, "p", `计划SHA ${ingress.plan?.plan_sha256 || "—"}`);
+  appendText(
+    p00,
+    "p",
+    `阶段要求 ${ingress.plan?.required_stage_ids?.join("、") || "—"}；本次排程 ${ingress.plan?.scheduled_stage_ids?.join("、") || "无"}`,
+  );
+  const blocked = (ingress.environment_gate?.capabilities || [])
+    .filter((item) => item.status !== "READY")
+    .map((item) => `${item.capability}=${item.status}`);
+  appendText(
+    p00,
+    "p",
+    `环境门原因 ${ingress.environment_gate?.reason_codes?.join("、") || "无"}；未就绪能力 ${blocked.join("、") || "无"}`,
+  );
+  appendText(
+    p00,
+    "p",
+    `P01捕获 ${ingress.p01_capture?.source_capture_id || "—"} · ${ingress.p01_capture?.capture_validated_at || "—"}；available_at=${ingress.p01_capture?.source_available_at ?? "未知"}`,
+  );
+  appendText(
+    p00,
+    "p",
+    `真实分母 ${ingress.p01_capture?.stored_rows ?? "—"}/${ingress.p01_capture?.expected_rows ?? "—"}；有Bar ${ingress.p01_capture?.present_rows ?? "—"} / 缺Bar ${ingress.p01_capture?.missing_rows ?? "—"} / 失败 ${ingress.p01_capture?.failed_rows ?? "—"}`,
+  );
+  appendText(
+    p00,
+    "p",
+    `正式来源封口 ${ingress.p01_capture?.formal_source_seal || "未知"}；阻断项 ${(ingress.p01_capture?.formal_source_seal_blockers || []).join("、") || "无"}。P04身份与严格PIT不是P03候选前置。`,
+  );
+
+  const p02 = document.createElement("div");
+  p02.className = "source-ingress-card";
+  const bao = ingress.p02_baostock || {};
+  appendText(
+    p02,
+    "strong",
+    `P02 BaoStock ${bao.status || "—"} · 能力 ${bao.capability || "—"}`,
+  );
+  appendText(
+    p02,
+    "p",
+    `实际请求：登录 ${bao.actual_requests?.logins ?? "—"} 次，查询 ${bao.actual_requests?.queries ?? "—"} 次；网络访问 ${bao.network_accessed === false ? "否" : "未知"}`,
+  );
+  appendText(
+    p02,
+    "p",
+    `已登记预算：每批登录 ${bao.budget?.max_logins ?? "—"} 次、每目标日查询 ${bao.budget?.max_queries_per_target_session ?? "—"} 次、单次 ${bao.budget?.query_timeout_seconds ?? "—"} 秒。`,
+  );
+  appendText(
+    p02,
+    "p",
+    `影响：${bao.impact || "未知"}；${bao.reason_code || "无原因码"}。零请求不代表Bao能力可用。`,
+  );
+  appendText(
+    p02,
+    "p",
+    `P02绑定计划SHA ${bao.plan_sha256 || "—"}；配置摘要 ${bao.policy_sha256 || "—"}`,
+  );
+  grid.append(p00, p02);
+  root.append(grid);
 }
 function renderSourceSetCandidate(data) {
   const root = $("sourceSetCandidate");
@@ -238,6 +327,7 @@ function renderReadiness(data) {
     `${chainDetail} 来源候选数 ≠ 官方有效上市证券数。`,
   ].join("");
   $("chainChecked").textContent = `只读核查 ${data.checked_at}`;
+  renderSourceIngress(data);
   renderSourceSetCandidate(data);
   const stats = [
     ["PG与来源命名空间", `stock_a.stock · ${v.namespace_id}`],

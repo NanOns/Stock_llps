@@ -201,7 +201,7 @@ def _validate_config(config: Any) -> None:
             "runtime.defaults.json",
             "BUSINESS_RUNTIME_CONFIGURATION",
             _CONFIG_CONTRACT,
-            "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official",
+            "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official; SOURCE_INGRESS P00/P02 reads source_policy.baostock_supplement",
         ),
         (
             "contracts/day-chain.contract.json",
@@ -257,6 +257,27 @@ def _validate_config(config: Any) -> None:
         or sources.get("require_phase0_before_dependent_operations") is not True
     ):
         raise DiagnosticError("CONFIG_INVALID", "TDX来源根必须是绝对路径字符串列表")
+    bao = _require_mapping(
+        sources.get("baostock_supplement"), "source_policy.baostock_supplement"
+    )
+    budget = _require_mapping(
+        bao.get("request_budget"), "source_policy.baostock_supplement.request_budget"
+    )
+    if (
+        bao.get("contract") != "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1"
+        or bao.get("request_policy") != "NOT_REQUESTED"
+        or bao.get("reason_code") != "OPTIONAL_SOURCE_NOT_REQUESTED"
+        or bao.get("required_for_core") is not False
+        or budget
+        != {
+            "max_logins": 1,
+            "max_queries_per_target_session": 10,
+            "query_timeout_seconds": 30,
+        }
+    ):
+        raise DiagnosticError(
+            "CONFIG_INVALID", "BaoStock可选来源策略或本批请求预算不符合合同"
+        )
     try:
         VipdataSourceConfig.from_mapping(sources.get("vipdata_official"))
     except VipdataError as error:

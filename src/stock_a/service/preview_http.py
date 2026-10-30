@@ -25,6 +25,7 @@ from stock_a.application.runtime_config import (
     load_runtime_config,
 )
 from stock_a.application.research_window import resolve_pg_history_window
+from stock_a.application.source_ingress import build_source_ingress_plan
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
     read_raw_daily_catalog,
@@ -578,12 +579,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PG_SOURCE_NO_MATCH",
                         "当前DEV namespace中没有该明确日期和来源包SHA的Raw来源版本",
                     )
+                source_ingress_result = build_source_ingress_plan(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    package_sha256=package_sha,
+                )
                 checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
                 payload = build_chain_readiness_payload(
                     self.preview_server.state.profile_contract,
                     source_version,
                     checked_at=checked_at,
                     source_set_candidate=source_candidate,
+                    source_ingress_result=source_ingress_result,
                 )
                 self._send_json(200, payload)
                 return

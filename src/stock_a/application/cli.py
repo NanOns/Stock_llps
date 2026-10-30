@@ -75,10 +75,15 @@ from stock_a.storage.postgres.source_raw import (
 )
 from stock_a.application.source_set_candidate import (
     SourceSetCandidateApplicationError,
+    persist_source_set_candidate,
     prepare_source_set_candidate,
     read_source_set_candidate,
 )
 from stock_a.storage.postgres.source_set_candidate import SourceSetCandidatePgError
+from stock_a.application.source_ingress import (
+    SourceIngressError,
+    build_source_ingress_plan,
+)
 from stock_a.research.entry import (
     CompareBudget,
     ResearchEntryError,
@@ -851,6 +856,31 @@ def _parser() -> argparse.ArgumentParser:
     source_set.add_argument(
         "--package-sha256", required=True, help="完整TDX来源包SHA-256"
     )
+    source_set.add_argument(
+        "--persist",
+        action="store_true",
+        help="经P00/P02真实核算后事务幂等插入候选，最多一条主行和七条输入",
+    )
+    source_ingress = commands.add_parser(
+        "source-ingress-plan",
+        help="按精确PG来源版本运行P00 SOURCE_INGRESS计划及P02能力核算",
+    )
+    source_ingress.add_argument(
+        "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
+    )
+    source_ingress.add_argument(
+        "--package-sha256", required=True, help="完整TDX来源包SHA-256"
+    )
+    source_ingress.add_argument(
+        "--skip-phase0-scan",
+        action="store_true",
+        help="不重复扫描TDX根；计划将source_phase0标记UNKNOWN并阻止stage调度",
+    )
+    source_ingress.add_argument("--max-entries", type=int, default=50000)
+    source_ingress.add_argument("--max-file-bytes", type=int, default=16777216)
+    source_ingress.add_argument("--max-total-bytes", type=int, default=33554432)
+    source_ingress.add_argument("--max-records", type=int, default=200000)
+    source_ingress.add_argument("--max-seconds", default="30")
     source_set_catalog = commands.add_parser(
         "source-set-catalog", help="按精确日期与TDX包SHA只读查询P03来源集合候选"
     )
@@ -966,7 +996,7 @@ def _safe_child(path: Path, root: Path, *, optional: bool = False) -> Path | Non
     return resolved
 
 
-def _run_source_phase0(args: argparse.Namespace) -> int:
+def _collect_source_phase0(args: argparse.Namespace) -> dict[str, Any]:
     package = _module_mode()
     config, config_path = _load_runtime_config()
     roots = config["source_policy"]["configured_tdx_source_roots"]
@@ -1436,55 +1466,58 @@ def _run_source_phase0(args: argparse.Namespace) -> int:
         )
     )
     elapsed = time.monotonic() - started
-    _emit(
-        {
-            "ok": overall != "BLOCKED",
-            "status": overall,
-            "message": "已按声明预算完成本地只读阶段0核验；BLOCKED能力不进入scanner/消费者，观测时钟不代表available_at、published_at、封口或PIT",
-            "package": package,
-            "configuration_path": str(config_path),
-            "source_root": str(root),
-            "source_root_final_path": str(root),
-            "observed_at": datetime.now().astimezone().isoformat(),
-            "clock_role": "LOCAL_OBSERVED_AT_ONLY",
-            "sample_rule": sample_rule,
-            "market_directories": markets,
-            "capabilities": capabilities,
-            "coverage": {
-                "known_market_day_file_count": sum(
-                    item["day_file_count"]
-                    for item in markets.values()
-                    if type(item.get("day_file_count")) is int
-                ),
-                "market_day_file_count_complete": all(
-                    item.get("scope_complete") is True for item in markets.values()
-                ),
-                "markets_with_unknown_day_file_count": [
-                    market
-                    for market, item in markets.items()
-                    if type(item.get("day_file_count")) is not int
-                ],
-                "sampled_day_files": sum(
-                    item["sample"] is not None for item in markets.values()
-                ),
-                "sampled_records": total_records,
-                "sampled_source_bytes": total_bytes,
-            },
-            "budgets": {
-                "max_entries_per_market_directory": args.max_entries,
-                "max_file_bytes": args.max_file_bytes,
-                "max_total_bytes": args.max_total_bytes,
-                "max_records_per_file": args.max_records,
-                "max_seconds": str(seconds),
-                "elapsed_seconds": round(elapsed, 6),
-                "elapsed_budget_exceeded": elapsed > float(seconds),
-            },
-            "business_admission": "DENY" if overall == "BLOCKED" else "SCOPED_ONLY",
-            "database_connected": False,
-            "production_switched": False,
-        }
-    )
-    return _EXIT_UNAVAILABLE if overall == "BLOCKED" else _EXIT_OK
+    return {
+        "ok": overall != "BLOCKED",
+        "status": overall,
+        "message": "已按声明预算完成本地只读阶段0核验；BLOCKED能力不进入scanner/消费者，观测时钟不代表available_at、published_at、封口或PIT",
+        "package": package,
+        "configuration_path": str(config_path),
+        "source_root": str(root),
+        "source_root_final_path": str(root),
+        "observed_at": datetime.now().astimezone().isoformat(),
+        "clock_role": "LOCAL_OBSERVED_AT_ONLY",
+        "sample_rule": sample_rule,
+        "market_directories": markets,
+        "capabilities": capabilities,
+        "coverage": {
+            "known_market_day_file_count": sum(
+                item["day_file_count"]
+                for item in markets.values()
+                if type(item.get("day_file_count")) is int
+            ),
+            "market_day_file_count_complete": all(
+                item.get("scope_complete") is True for item in markets.values()
+            ),
+            "markets_with_unknown_day_file_count": [
+                market
+                for market, item in markets.items()
+                if type(item.get("day_file_count")) is not int
+            ],
+            "sampled_day_files": sum(
+                item["sample"] is not None for item in markets.values()
+            ),
+            "sampled_records": total_records,
+            "sampled_source_bytes": total_bytes,
+        },
+        "budgets": {
+            "max_entries_per_market_directory": args.max_entries,
+            "max_file_bytes": args.max_file_bytes,
+            "max_total_bytes": args.max_total_bytes,
+            "max_records_per_file": args.max_records,
+            "max_seconds": str(seconds),
+            "elapsed_seconds": round(elapsed, 6),
+            "elapsed_budget_exceeded": elapsed > float(seconds),
+        },
+        "business_admission": "DENY" if overall == "BLOCKED" else "SCOPED_ONLY",
+        "database_connected": False,
+        "production_switched": False,
+    }
+
+
+def _run_source_phase0(args: argparse.Namespace) -> int:
+    result = _collect_source_phase0(args)
+    _emit(result, error=result.get("status") == "BLOCKED")
+    return _EXIT_UNAVAILABLE if result.get("status") == "BLOCKED" else _EXIT_OK
 
 
 def _safe_file(path: Path, root: Path, *, optional: bool = False) -> Path | None:
@@ -2171,7 +2204,13 @@ def _run_source_set_candidate(
     config, config_path = _load_runtime_config()
     target_session = _parse_source_set_date(args.target_session)
     try:
-        if compute_candidate:
+        if compute_candidate and getattr(args, "persist", False):
+            result = persist_source_set_candidate(
+                config,
+                target_session=target_session,
+                package_sha256=args.package_sha256,
+            )
+        elif compute_candidate:
             result = prepare_source_set_candidate(
                 config,
                 target_session=target_session,
@@ -2183,7 +2222,11 @@ def _run_source_set_candidate(
                 target_session=target_session,
                 package_sha256=args.package_sha256,
             )
-    except (SourceSetCandidateApplicationError, SourceSetCandidatePgError) as error:
+    except (
+        SourceSetCandidateApplicationError,
+        SourceSetCandidatePgError,
+        SourceIngressError,
+    ) as error:
         code = getattr(error, "code", "SOURCE_SET_CANDIDATE_REJECTED")
         _emit(
             {
@@ -2209,6 +2252,49 @@ def _run_source_set_candidate(
     )
     _emit(result)
     return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
+
+
+def _run_source_ingress_plan(args: argparse.Namespace) -> int:
+    config, config_path = _load_runtime_config()
+    target_session = _parse_source_set_date(args.target_session)
+    phase0_result = None
+    if not args.skip_phase0_scan:
+        phase0_result = _collect_source_phase0(
+            argparse.Namespace(
+                max_entries=args.max_entries,
+                max_file_bytes=args.max_file_bytes,
+                max_total_bytes=args.max_total_bytes,
+                max_records=args.max_records,
+                max_seconds=args.max_seconds,
+            )
+        )
+    try:
+        result = build_source_ingress_plan(
+            config,
+            target_session=target_session,
+            package_sha256=args.package_sha256,
+            phase0_result=phase0_result,
+        )
+    except SourceIngressError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": "SOURCE_INGRESS_REJECTED",
+                "message": str(error),
+                "database_write_attempted": False,
+                "network_accessed": False,
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
+    result["configuration_path"] = str(config_path)
+    _emit(result)
+    return (
+        _EXIT_OK
+        if result["environment_gate"]["status"] == "READY"
+        else _EXIT_UNAVAILABLE
+    )
 
 
 def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
@@ -4666,6 +4752,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_set_candidate(args, compute_candidate=True)
         if args.command == "source-set-catalog":
             return _run_source_set_candidate(args, compute_candidate=False)
+        if args.command == "source-ingress-plan":
+            return _run_source_ingress_plan(args)
         if args.command == "preview-serve":
             from stock_a.service.preview_http import run_preview_server
 

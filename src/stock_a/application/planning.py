@@ -529,9 +529,12 @@ def _validated_contract(request: DayPlanRequest) -> tuple[Mapping[str, object], 
     ):
         raise _plan_error("CONTRACT_VERSION_MISMATCH", "机器合同身份或版本不匹配")
     binding = request.contract.get("scope_bindings")
-    if not isinstance(binding, Mapping) or "FOUNDATION_EOD" not in binding:
-        raise _plan_error("SCOPE_BINDING_MISSING", "正式合同缺少FOUNDATION_EOD绑定")
-    day_plan_binding = binding["FOUNDATION_EOD"].get("day_plan_pure_kernel")
+    selected_scope = (
+        binding.get(request.scope_id) if isinstance(binding, Mapping) else None
+    )
+    if not isinstance(selected_scope, Mapping):
+        raise _plan_error("SCOPE_BINDING_MISSING", "正式合同缺少所选scope绑定")
+    day_plan_binding = selected_scope.get("day_plan_pure_kernel")
     if (
         not isinstance(day_plan_binding, Mapping)
         or day_plan_binding.get("contract_digest_algorithm") != "SHA-256"
@@ -888,7 +891,7 @@ def _required_context_fields(
     stages = contract["scope_bindings"][scope_id]["stage_bindings"]
     p00 = [item for item in stages if item.get("stage_id") == "P00"]
     if len(p00) != 1:
-        raise _plan_error("P00_BINDING_INVALID", "FOUNDATION_EOD必须恰有一个P00绑定")
+        raise _plan_error("P00_BINDING_INVALID", scope_id + "必须恰有一个P00绑定")
     required = p00[0].get("required_inputs")
     if not isinstance(required, list) or not required:
         raise _plan_error("P00_INPUTS_INCOMPLETE", "P00必需输入登记缺失")

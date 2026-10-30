@@ -10,6 +10,7 @@ from typing import Any, Mapping
 from urllib.parse import urlparse
 
 from stock_a.storage.postgres.source_set_candidate import (
+    persist_source_set_candidate as persist_pg_candidate,
     prepare_source_set_candidate as prepare_pg_candidate,
     read_source_set_candidate as read_pg_candidate,
 )
@@ -19,7 +20,7 @@ class SourceSetCandidateApplicationError(ValueError):
     """候选目标交易日或版本化官方日历不满足合同。"""
 
 
-def _official_calendar(target_session: date) -> dict[str, str]:
+def _official_calendar(target_session: date) -> dict[str, Any]:
     if type(target_session) is not date:
         raise SourceSetCandidateApplicationError("必须显式提供目标交易会话日期")
     filename = f"cn_equity_sessions_{target_session.year}.json"
@@ -94,6 +95,7 @@ def _official_calendar(target_session: date) -> dict[str, str]:
         "calendar_id": calendar["calendar_id"],
         "calendar_revision": calendar["revision"],
         "calendar_sha256": hashlib.sha256(raw).hexdigest(),
+        "sessions": tuple(date.fromisoformat(item) for item in sessions),
     }
 
 
@@ -120,3 +122,38 @@ def read_source_set_candidate(
     return read_pg_candidate(
         config, target_session=target_session, package_sha256=package_sha256
     )
+
+
+def persist_source_set_candidate(
+    config: Mapping[str, Any], *, target_session: date, package_sha256: str
+) -> dict[str, Any]:
+    """经本次P00/P02核算后，幂等保存精确NON_PIT来源候选。"""
+    from stock_a.application.source_ingress import build_source_ingress_plan
+
+    calendar = _official_calendar(target_session)
+    ingress = build_source_ingress_plan(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+    )
+    if (
+        ingress.get("scope") != "SOURCE_INGRESS"
+        or ingress.get("target_session") != target_session.isoformat()
+        or ingress.get("package_sha256") != package_sha256
+        or not isinstance(ingress.get("plan", {}).get("plan_sha256"), str)
+    ):
+        raise SourceSetCandidateApplicationError("P00计划没有绑定精确候选身份")
+    result = persist_pg_candidate(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        calendar=calendar,
+        bao_capability=ingress["p02_baostock"],
+    )
+    return {
+        **result,
+        "source_ingress_plan": ingress["plan"],
+        "environment_gate": ingress["environment_gate"],
+        "p02_baostock": ingress["p02_baostock"],
+        "formal_p03_complete": False,
+    }

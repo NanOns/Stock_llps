@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from datetime import date, datetime
+from hashlib import sha256
+import json
 import re
 from typing import Any, Mapping
 import uuid
@@ -85,6 +87,8 @@ _INPUT_COLUMNS = (
 
 class SourceSetCandidatePgError(RuntimeError):
     """候选来源读取、写入、幂等读回或身份核验失败。"""
+
+    preserve_transaction_error = True
 
     def __init__(self, code: str, message: str):
         self.code = code
@@ -454,6 +458,192 @@ def prepare_source_set_candidate(
         "candidate": _public_candidate(header, inputs),
         "database_write_attempted": False,
         "dml_executed": False,
+    }
+
+
+def persist_source_set_candidate(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    calendar: Mapping[str, str],
+    bao_capability: Mapping[str, Any],
+) -> dict[str, Any]:
+    """事务内插入至多一条候选和七条引用；精确同摘要重跑为空操作。"""
+    _date_and_sha(target_session, package_sha256)
+    if not isinstance(calendar, Mapping) or any(
+        not isinstance(calendar.get(key), str) or not calendar[key]
+        for key in ("calendar_id", "calendar_revision", "calendar_sha256")
+    ):
+        raise SourceSetCandidatePgError(
+            "CALENDAR_EVIDENCE_INVALID", "缺少版本化官方日历证据"
+        )
+    policy = config.get("source_policy", {}).get("baostock_supplement")
+    policy_sha = (
+        sha256(
+            json.dumps(
+                dict(policy),
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        if isinstance(policy, Mapping)
+        else None
+    )
+    if (
+        not isinstance(bao_capability, Mapping)
+        or bao_capability.get("status") != "NOT_REQUESTED"
+        or bao_capability.get("reason_code") != "OPTIONAL_SOURCE_NOT_REQUESTED"
+        or bao_capability.get("target_session") != target_session.isoformat()
+        or bao_capability.get("package_sha256") != package_sha256
+        or not isinstance(bao_capability.get("plan_sha256"), str)
+        or _SHA256.fullmatch(bao_capability["plan_sha256"]) is None
+        or bao_capability.get("policy_contract")
+        != "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1"
+        or bao_capability.get("policy_sha256") != policy_sha
+        or bao_capability.get("budget")
+        != {
+            "max_logins": 1,
+            "max_queries_per_target_session": 10,
+            "query_timeout_seconds": 30,
+        }
+        or bao_capability.get("capability") != "UNKNOWN_NOT_MEASURED"
+        or bao_capability.get("data_quality") != "NOT_MEASURED_NO_RESPONSE"
+        or bao_capability.get("source_available_at") is not None
+        or bao_capability.get("actual_requests") != {"logins": 0, "queries": 0}
+        or bao_capability.get("network_accessed") is not False
+    ):
+        raise SourceSetCandidatePgError(
+            "P02_CAPABILITY_UNBOUND", "P03写入必须绑定本日期/SHA的真实P02零请求核算"
+        )
+
+    header, inputs = _read_candidate_facts(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        calendar=calendar,
+    )
+    if header["candidate_sha256"] != source_set_candidate_digest(header, inputs):
+        raise SourceSetCandidatePgError(
+            "CANDIDATE_DIGEST_INVALID", "候选写入前的独立摘要核验失败"
+        )
+
+    inserted_parent = False
+    inserted_inputs = 0
+    for attempt in range(3):
+        try:
+            with source_raw._transaction(config, write=True) as (
+                _connection,
+                cursor,
+                namespace_id,
+            ):
+                if namespace_id != header["namespace_id"]:
+                    raise SourceSetCandidatePgError(
+                        "NAMESPACE_CHANGED", "候选读取与写入之间DEV命名空间发生变化"
+                    )
+                parent_columns = _CANDIDATE_COLUMNS[:-1]
+                parent_values = [header[column] for column in parent_columns]
+                cursor.execute(
+                    f"INSERT INTO stock.source_set_candidates ({', '.join(parent_columns)}) "
+                    f"VALUES ({', '.join(['%s'] * len(parent_columns))}) "
+                    "ON CONFLICT (namespace_id, target_session, package_sha256) DO NOTHING",
+                    parent_values,
+                )
+                inserted_parent = cursor.rowcount == 1
+                if cursor.rowcount not in (0, 1):
+                    raise SourceSetCandidatePgError(
+                        "PARENT_INSERT_BOUND_EXCEEDED", "候选主行插入超出单行上限"
+                    )
+                if inserted_parent:
+                    input_columns = _INPUT_COLUMNS
+                    for input_row in inputs:
+                        cursor.execute(
+                            f"INSERT INTO stock.source_set_candidate_inputs ({', '.join(input_columns)}) "
+                            f"VALUES ({', '.join(['%s'] * len(input_columns))})",
+                            [input_row[column] for column in input_columns],
+                        )
+                        if cursor.rowcount != 1:
+                            raise SourceSetCandidatePgError(
+                                "INPUT_INSERT_FAILED", "候选输入没有恰好插入一条"
+                            )
+                        inserted_inputs += cursor.rowcount
+                cursor.execute(
+                    f"SELECT {', '.join(_CANDIDATE_COLUMNS)} "
+                    "FROM stock.source_set_candidates "
+                    "WHERE namespace_id=%s::uuid AND target_session=%s AND package_sha256=%s",
+                    (namespace_id, target_session, package_sha256),
+                )
+                stored_parent = cursor.fetchone()
+                if stored_parent is None:
+                    raise SourceSetCandidatePgError(
+                        "CANDIDATE_READBACK_MISSING", "事务内未读回候选主行"
+                    )
+                stored_header = dict(
+                    zip(_CANDIDATE_COLUMNS, stored_parent, strict=True)
+                )
+                cursor.execute(
+                    f"SELECT {', '.join(_INPUT_COLUMNS)} "
+                    "FROM stock.source_set_candidate_inputs "
+                    "WHERE namespace_id=%s::uuid AND target_session=%s AND package_sha256=%s "
+                    "ORDER BY input_ordinal",
+                    (namespace_id, target_session, package_sha256),
+                )
+                stored_inputs = [
+                    dict(zip(_INPUT_COLUMNS, row, strict=True))
+                    for row in cursor.fetchall()
+                ]
+                try:
+                    stored_digest = source_set_candidate_digest(
+                        stored_header, stored_inputs
+                    )
+                except SourceSetCandidateError as error:
+                    raise SourceSetCandidatePgError(
+                        "CANDIDATE_READBACK_INVALID", str(error)
+                    ) from error
+                if (
+                    len(stored_inputs) != len(INPUT_ROLES)
+                    or stored_digest != stored_header["candidate_sha256"]
+                    or stored_digest != header["candidate_sha256"]
+                ):
+                    raise SourceSetCandidatePgError(
+                        "CANDIDATE_KEY_CONFLICT",
+                        "精确候选键已有不同摘要或不完整输入；事务回滚且不覆盖原值",
+                    )
+            break
+        except SourceSetCandidatePgError:
+            raise
+        except source_raw.RawSourcePgError as error:
+            if getattr(error.__cause__, "sqlstate", None) == "40001" and attempt < 2:
+                inserted_parent = False
+                inserted_inputs = 0
+                continue
+            raise SourceSetCandidatePgError(error.code, str(error)) from error
+    else:
+        raise SourceSetCandidatePgError(
+            "SERIALIZATION_RETRY_EXHAUSTED", "候选幂等事务连续序列化冲突"
+        )
+
+    readback = read_source_set_candidate(
+        config, target_session=target_session, package_sha256=package_sha256
+    )
+    if readback.get("status") != "AVAILABLE":
+        raise SourceSetCandidatePgError(
+            "CANDIDATE_COMMITTED_READBACK_FAILED", "提交后精确候选读回失败"
+        )
+    return {
+        **readback,
+        "status": "PERSISTED" if inserted_parent else "ALREADY_PRESENT",
+        "candidate_state": "SOURCE_SET_CANDIDATE_PERSISTED_NON_PIT",
+        "inserted_parent_rows": 1 if inserted_parent else 0,
+        "inserted_input_rows": inserted_inputs if inserted_parent else 0,
+        "maximum_parent_rows": 1,
+        "maximum_input_rows": len(INPUT_ROLES),
+        "dml_executed": True,
+        "database_write_attempted": True,
+        "ddl_executed": False,
+        "update_executed": False,
+        "delete_executed": False,
     }
 
 

@@ -167,6 +167,7 @@ def build_chain_readiness_payload(
     *,
     checked_at: str,
     source_set_candidate: Mapping[str, Any] | None = None,
+    source_ingress_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """将唯一机器合同和本次精确PG证据组合为只读准备状态。"""
     stages = contract.get("stages")
@@ -248,22 +249,78 @@ def build_chain_readiness_payload(
             },
         )
         capability = dict(capability)
-        if stage_id in {"P01", "P05"}:
+        if stage_id == "P01":
             capability["data_status"] = source_data_status
             capability["evidence_type"] = "REAL_PG"
-            if stage_id == "P05":
-                capability["status_reason"] = (
-                    f"PG精确读取到{source_version['stored_row_count']}/{source_version['capture_expected_row_count']}条来源代码观察，"
-                    "bar状态分区和来源引用均已核验；这是source_raw_daily来源观察，不是正式identity/universe下的raw_bars或Foundation持久化。"
-                    if source_data_status == "AVAILABLE"
-                    else f"PG精确读取到{source_version['stored_row_count']}/{source_version['capture_expected_row_count']}条来源代码观察；"
-                    "当前版本为PARTIAL或含READ_FAILED，且这些观察仍不等于正式identity/universe下的raw_bars。"
-                )
+        if stage_id == "P05":
+            capability["data_status"] = "SOURCE_RAW_ONLY"
+            capability["evidence_type"] = "REAL_PG_SOURCE_OBSERVATION"
+            capability["status_reason"] = (
+                f"PG有{source_version['stored_row_count']}/{source_version['capture_expected_row_count']}条source_raw_daily来源代码观察；"
+                "这些记录未绑定正式P04身份与Universe，不是P05 raw_bars，也不能代表官方上市总体。"
+            )
+        if stage_id == "P00" and isinstance(source_ingress_result, Mapping):
+            plan = source_ingress_result.get("plan", {})
+            gate = source_ingress_result.get("environment_gate", {})
+            gate_status = gate.get("status")
+            capability.update(
+                {
+                    "implementation_level": "RUNNABLE_P00_PLAN",
+                    "data_status": plan.get("status", "UNKNOWN"),
+                    "consumer_status": (
+                        "CONNECTED_PREVIEW"
+                        if gate_status == "READY"
+                        else "BLOCKED_ENVIRONMENT"
+                    ),
+                    "evidence_type": "REAL_PG_AND_CONTRACT",
+                    "producer": "stock_a.application.source_ingress.build_source_ingress_plan → stock_a.application.planning.assemble_day_plan",
+                    "consumer": "source-ingress-plan CLI、GET /api/preview/chain-readiness、预览页",
+                    "status_reason": (
+                        f"精确版本P00计划={plan.get('mode')}，摘要={plan.get('plan_sha256')}；"
+                        f"环境门={gate_status}，原因={','.join(gate.get('reason_codes', [])) or '无'}。"
+                        "计划不会执行P01至P03。"
+                    ),
+                }
+            )
+        if stage_id == "P02" and isinstance(source_ingress_result, Mapping):
+            bao = source_ingress_result.get("p02_baostock", {})
+            capability.update(
+                {
+                    "implementation_level": "RUNNABLE_CAPABILITY_ACCOUNTING",
+                    "data_status": bao.get("status", "UNKNOWN"),
+                    "consumer_status": "CONNECTED_PREVIEW",
+                    "evidence_type": "REAL_POLICY_ACCOUNTING",
+                    "producer": "stock_a.application.source_ingress.calculate_baostock_capability",
+                    "consumer": "source-ingress-plan CLI、GET /api/preview/chain-readiness、预览页",
+                    "status_reason": (
+                        f"本日期Bao策略={bao.get('status')}，实际登录/查询="
+                        f"{bao.get('actual_requests', {}).get('logins', 0)}/"
+                        f"{bao.get('actual_requests', {}).get('queries', 0)}；能力保持"
+                        f"{bao.get('capability', 'UNKNOWN')}，零请求且可选补充不阻断Core。"
+                    ),
+                }
+            )
         if stage_id == "P03" and candidate_status == "AVAILABLE":
             candidate = source_set_candidate.get("candidate", {})
             capability["status_reason"] = (
                 f"存在精确绑定本日期与来源包SHA的P03来源集合候选（摘要{candidate.get('candidate_sha256', '未知')}）；"
-                "其状态为NON_PIT候选，Bao/稳定身份/真实PIT等正式前置仍未接通，正式P03保持未接通。"
+                "其状态为NON_PIT候选；正式封口仍取决于来源时钟、质量、单位与正式消费者。"
+            )
+            if isinstance(source_ingress_result, Mapping):
+                capability.update(
+                    {
+                        "implementation_level": "PG_CANDIDATE",
+                        "data_status": "AVAILABLE_CANDIDATE",
+                        "consumer_status": "CONNECTED_PREVIEW",
+                        "evidence_type": "REAL_PG_NON_PIT_CANDIDATE",
+                        "producer": "stock_a.storage.postgres.source_set_candidate.persist_source_set_candidate",
+                        "consumer": "精确候选目录、只读准备状态API与预览页",
+                    }
+                )
+        if stage_id == "P03" and isinstance(source_ingress_result, Mapping):
+            capability["status_reason"] += (
+                " 正式NON_PIT来源封口仍受source_available_at为空及金额/数量单位未验证阻断；"
+                "P04稳定身份和严格PIT不是P03候选持久化前置。"
             )
         prior_inputs = [
             {
@@ -416,6 +473,7 @@ def build_chain_readiness_payload(
         "source_set_candidate": dict(
             source_set_candidate or {"status": "NO_MATCH", "candidate": None}
         ),
+        "source_ingress": dict(source_ingress_result or {"status": "NOT_RUN"}),
         "source_observations": {
             "status": source_data_status,
             "version_status": source_version["version_status"],

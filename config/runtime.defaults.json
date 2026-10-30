@@ -40,6 +40,17 @@
       "page_url": "https://www.tdx.com.cn/article/vipdata.html",
       "package_url": "https://data.tdx.com.cn/vipdoc/hsjday.zip",
       "metadata_url": "https://data.tdx.com.cn/vipdoc/_hsjdayinfo.js"
+    },
+    "baostock_supplement": {
+      "contract": "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1",
+      "request_policy": "NOT_REQUESTED",
+      "reason_code": "OPTIONAL_SOURCE_NOT_REQUESTED",
+      "required_for_core": false,
+      "request_budget": {
+        "max_logins": 1,
+        "max_queries_per_target_session": 10,
+        "query_timeout_seconds": 30
+      }
     }
   },
   "startup_policy": {
@@ -70,7 +81,7 @@
         "path": "runtime.defaults.json",
         "role": "BUSINESS_RUNTIME_CONFIGURATION",
         "contract": "STOCK-A-RUNTIME-DEFAULTS/R9",
-        "consumer": "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official"
+        "consumer": "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official; SOURCE_INGRESS P00/P02 reads source_policy.baostock_supplement"
       },
       {
         "path": "contracts/day-chain.contract.json",

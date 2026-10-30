@@ -28,7 +28,38 @@
             "P02",
             "P03"
           ],
-          "generic_complete_eligible": false
+          "generic_complete_eligible": false,
+          "binding_ref": "scope_bindings.SOURCE_INGRESS",
+          "contract": "STOCK_A_SOURCE_INGRESS_BINDING_R1",
+          "execution_mode": "SINGLE_EXECUTOR_SCOPE_PROJECTED_KERNELS",
+          "owner_roles": {
+            "SOURCE_CANONICAL": [
+              "source_set",
+              "source_capabilities"
+            ]
+          },
+          "required_consumers": [
+            "SOURCE_INGRESS_CLI",
+            "SOURCE_INGRESS_API",
+            "SOURCE_INGRESS_WEB"
+          ],
+          "history_policy": {
+            "source": "EXACT_TDX_CONTENT_AND_CAPTURE_NON_PIT",
+            "selection": "EXPLICIT_TARGET_SESSION_AND_PACKAGE_SHA256",
+            "first_observation": "EXPLICIT_FIRST_RUN_NO_ACCEPTED_SOURCE_SET",
+            "p04_identity_and_strict_pit": "NOT_A_P03_PREREQUISITE",
+            "source_available_at_missing": "FORMAL_SEAL_BLOCKED"
+          },
+          "required_environment_capabilities": [
+            "validated_configuration",
+            "calendar_authority",
+            "accepted_state_catalog",
+            "contract_registry",
+            "build_identity",
+            "pg_deployment",
+            "source_phase0",
+            "readonly_source_roots"
+          ]
         },
         "FOUNDATION_EOD": {
           "contract_role": "NAMED_SCOPE_BINDING_OF_SINGLE_PRODUCTION_EXECUTOR",

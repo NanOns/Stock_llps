@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
 from decimal import Decimal
 from hashlib import sha256
@@ -671,7 +672,97 @@ def load_day_chain_contract(configuration_root: Path | str) -> LoadedDayChainCon
     scope_fields["field_registry"] = [
         definition for _, _, definition in sorted(field_rows, key=lambda row: row[0])
     ]
-    top_level["scope_bindings"] = {"FOUNDATION_EOD": scope_fields}
+    source_scope_policy = (
+        top_level.get("scope_policy", {}).get("scopes", {}).get("SOURCE_INGRESS")
+    )
+    source_scope_keys = {
+        "required_stages",
+        "generic_complete_eligible",
+        "binding_ref",
+        "contract",
+        "execution_mode",
+        "owner_roles",
+        "required_consumers",
+        "history_policy",
+        "required_environment_capabilities",
+    }
+    if (
+        not isinstance(source_scope_policy, dict)
+        or not source_scope_keys.issubset(source_scope_policy)
+        or source_scope_policy.get("binding_ref") != "scope_bindings.SOURCE_INGRESS"
+        or source_scope_policy.get("required_stages") != ["P00", "P01", "P02", "P03"]
+        or source_scope_policy.get("generic_complete_eligible") is not False
+        or not isinstance(source_scope_policy.get("owner_roles"), dict)
+        or not isinstance(source_scope_policy.get("required_consumers"), list)
+        or not isinstance(source_scope_policy.get("history_policy"), dict)
+        or not isinstance(
+            source_scope_policy.get("required_environment_capabilities"), list
+        )
+    ):
+        raise DayChainContractError(
+            "DAY_CHAIN_SOURCE_INGRESS_BINDING_INVALID",
+            "SOURCE_INGRESS必须具备精确的P00至P03范围绑定",
+        )
+
+    source_stage_ids = set(source_scope_policy["required_stages"])
+    source_stage_bindings = [
+        deepcopy(binding)
+        for binding in scope_fields["stage_bindings"]
+        if binding.get("stage_id") in source_stage_ids
+    ]
+    known_stage_ids = {stage["id"] for stage in top_level["stages"]}
+    source_field_registry = []
+    for field_definition in scope_fields["field_registry"]:
+        if field_definition.get("producer_stage") not in source_stage_ids:
+            continue
+        projected = deepcopy(field_definition)
+        projected["consumers"] = [
+            consumer
+            for consumer in projected["consumers"]
+            if consumer not in known_stage_ids or consumer in source_stage_ids
+        ]
+        if not projected["consumers"]:
+            projected["consumers"] = ["SOURCE_INGRESS_OBSERVABILITY"]
+        source_field_registry.append(projected)
+
+    artifacts = top_level["artifact_groups"]
+    source_owners = {}
+    for owner_id, artifact_ids in source_scope_policy["owner_roles"].items():
+        if not isinstance(artifact_ids, list) or not artifact_ids:
+            raise DayChainContractError(
+                "DAY_CHAIN_SOURCE_INGRESS_BINDING_INVALID",
+                "SOURCE_INGRESS owner必须绑定至少一个真实stage产物",
+            )
+        if any(
+            artifact_id not in artifacts
+            or artifacts[artifact_id].get("producer") not in source_stage_ids
+            for artifact_id in artifact_ids
+        ):
+            raise DayChainContractError(
+                "DAY_CHAIN_SOURCE_INGRESS_BINDING_INVALID",
+                "SOURCE_INGRESS owner引用了范围外产物",
+            )
+        source_owners[owner_id] = list(artifact_ids)
+
+    source_kernel = deepcopy(scope_fields["day_plan_pure_kernel"])
+    source_kernel["required_environment_capabilities"] = list(
+        source_scope_policy["required_environment_capabilities"]
+    )
+    source_binding = {
+        "contract": source_scope_policy["contract"],
+        "execution_mode": source_scope_policy["execution_mode"],
+        "stage_bindings": source_stage_bindings,
+        "within_stage_field_toposort_required": True,
+        "history_policy": deepcopy(source_scope_policy["history_policy"]),
+        "day_plan_pure_kernel": source_kernel,
+        "owner_roles": source_owners,
+        "required_consumers": list(source_scope_policy["required_consumers"]),
+        "field_registry": source_field_registry,
+    }
+    top_level["scope_bindings"] = {
+        "FOUNDATION_EOD": scope_fields,
+        "SOURCE_INGRESS": source_binding,
+    }
     top_level["field_rule_defaults"] = {
         "contract": "STOCK-A-DAY-CHAIN-FIELD-RULE-DEFAULTS/R1",
         "application": "MODULE_DEFAULTS_THEN_FIELD_OVERRIDES",

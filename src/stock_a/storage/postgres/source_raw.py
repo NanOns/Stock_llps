@@ -178,6 +178,8 @@ def _transaction(
     except RawSourcePgError:
         raise
     except Exception as error:
+        if getattr(error, "preserve_transaction_error", False) is True:
+            raise
         sqlstate = getattr(error, "sqlstate", None)
         raise RawSourcePgError(
             "PG_WRITE_FAILED" if write else "PG_READ_FAILED",
