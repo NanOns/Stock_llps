@@ -393,7 +393,6 @@ def _read_capability(
     row: Mapping[str, Any],
     *,
     namespace_id: str,
-    config: Mapping[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     cursor.execute(
         f"SELECT {', '.join(_CAPABILITY_SELECT)} "
@@ -411,6 +410,15 @@ def _read_capability(
     records = [
         _as_cursor_record(cursor, item, _CAPABILITY_COLUMNS) for item in raw_rows
     ]
+    if any(
+        item["namespace_id"] != namespace_id
+        or item["ingress_attempt_id"] != row["ingress_attempt_id"]
+        for item in records
+    ):
+        raise SourceSetIngressError(
+            "SOURCE_SET_P02_BINDING_INVALID",
+            "能力ledger返回了跨namespace或跨attempt行",
+        )
     by_id = {item["capability_id"]: item for item in records}
     if set(by_id) != {_CAPABILITY_ID, _ACK_CAPABILITY_ID}:
         raise SourceSetIngressError(
@@ -418,28 +426,10 @@ def _read_capability(
         )
     capability = by_id[_CAPABILITY_ID]
     ack = by_id[_ACK_CAPABILITY_ID]
-    p02_policy = config.get("source_policy", {}).get("baostock_supplement")
-    if not isinstance(p02_policy, Mapping):
-        raise SourceSetIngressError(
-            "SOURCE_SET_P02_POLICY_MISSING", "唯一正式配置缺少BaoStock策略合同"
-        )
-    expected_policy = {
-        "contract": "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1",
-        "request_policy": "NOT_REQUESTED",
-        "reason_code": "OPTIONAL_SOURCE_NOT_REQUESTED",
-        "required_for_core": False,
-        "request_budget": {
-            "max_logins": 1,
-            "max_queries_per_target_session": 10,
-            "query_timeout_seconds": 30,
-        },
-    }
-    if dict(p02_policy) != expected_policy:
-        raise SourceSetIngressError(
-            "SOURCE_SET_P02_POLICY_INVALID", "唯一正式配置中的P02策略不符合登记合同"
-        )
-    policy_sha = _canonical_sha256(p02_policy)
-    budget = p02_policy.get("request_budget")
+    # 历史P02必须按自身已封存的policy SHA和typed ledger复核。此处不能
+    # 重新读取当前source_policy，否则一次合法的新策略会让历史SEALED失效。
+    policy_sha = _required_sha(capability.get("policy_sha256"), "P02冻结策略摘要")
+    policy_contract = "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1"
     expected_binding = _canonical_sha256(
         {
             "target_session": row["target_session"].isoformat(),
@@ -464,17 +454,11 @@ def _read_capability(
         ):
             raise SourceSetIngressError(
                 "SOURCE_SET_P02_BINDING_INVALID",
-                "P00/P02计划或策略摘要与当前正式配置不一致",
+                "P00/P02计划或历史冻结策略摘要与typed ledger不一致",
             )
     if (
         capability["status"] != "NOT_REQUESTED"
-        or capability["policy_contract"] != p02_policy.get("contract")
-        or budget
-        != {
-            "max_logins": 1,
-            "max_queries_per_target_session": 10,
-            "query_timeout_seconds": 30,
-        }
+        or capability["policy_contract"] != policy_contract
         or capability["max_logins"] != 1
         or capability["max_queries"] != 10
         or capability["query_timeout_seconds"] != 30
@@ -663,8 +647,10 @@ def _accepted_projection(namespace_id: str, row: Mapping[str, Any]) -> dict[str,
     }
 
 
-def _validate_source_references(cursor: Any, row: Mapping[str, Any]) -> dict[str, Any]:
-    """以candidate/capture/content FKs及Raw分母校验SEALED的真实PG上游。"""
+def _validate_source_references(
+    cursor: Any, row: Mapping[str, Any], *, audit_mode: bool
+) -> dict[str, Any]:
+    """按已封存typed证明轻读；显式audit_mode才逐行读取并重算Raw摘要。"""
     cursor.execute(
         """SELECT c.candidate_sha256, c.source_content_id, c.source_capture_id::text,
                   c.raw_source_digest, c.capture_canonical_digest, c.raw_row_count,
@@ -761,53 +747,72 @@ def _validate_source_references(cursor: Any, row: Mapping[str, Any]) -> dict[str
                 "P04_SOURCE_REFERENCE_MISMATCH",
                 f"PG候选/capture/content字段{key}与SEALED主行不一致",
             )
-    raw_rows = source_raw._read_raw_rows(
-        cursor,
-        row["namespace_id"],
-        row["target_session"],
-        row["package_sha256"],
-    )
-    status_counts = {
-        status: sum(item["bar_status"] == status for item in raw_rows)
-        for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED")
-    }
-    capture_ids = {str(item["source_capture_id"]) for item in raw_rows}
-    content_ids = {item["source_content_id"] for item in raw_rows}
-    broken_references = sum(
-        str(item["source_capture_id"]) != row["source_capture_id"]
-        or item["source_content_id"] != row["source_content_id"]
-        or item["session_date"] != row["target_session"]
-        or item["package_sha256"] != row["package_sha256"]
-        for item in raw_rows
-    )
-    unknown_statuses = sum(
-        item["bar_status"] not in {"TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED"}
-        for item in raw_rows
-    )
-    actual_raw_digest = source_raw._row_digest(raw_rows)
-    if (
-        len(raw_rows) != row["raw_row_count"]
-        or len(raw_rows) != row["capture_expected_row_count"]
-        or status_counts["TARGET_PRESENT"] != row["target_present_count"]
-        or status_counts["TARGET_MISSING"] != row["target_missing_count"]
-        or status_counts["READ_FAILED"] != row["read_failed_count"]
-        or capture_ids != {row["source_capture_id"]}
-        or content_ids != {row["source_content_id"]}
-        or broken_references != 0
-        or unknown_statuses != 0
-        or actual_raw_digest != row["source_raw_digest"]
-        or actual_raw_digest != candidate["candidate_raw_digest"]
-    ):
-        raise SourceSetIngressError(
-            "P04_RAW_DENOMINATOR_MISMATCH",
-            "正式Raw逐行摘要、状态分母、capture或content引用与封口摘要不一致",
+    if audit_mode:
+        raw_rows = source_raw._read_raw_rows(
+            cursor,
+            row["namespace_id"],
+            row["target_session"],
+            row["package_sha256"],
         )
-    counts = (
-        len(raw_rows),
-        status_counts["TARGET_PRESENT"],
-        status_counts["TARGET_MISSING"],
-        status_counts["READ_FAILED"],
-    )
+        status_counts = {
+            status: sum(item["bar_status"] == status for item in raw_rows)
+            for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED")
+        }
+        capture_ids = {str(item["source_capture_id"]) for item in raw_rows}
+        content_ids = {item["source_content_id"] for item in raw_rows}
+        broken_references = sum(
+            str(item["source_capture_id"]) != row["source_capture_id"]
+            or item["source_content_id"] != row["source_content_id"]
+            or item["session_date"] != row["target_session"]
+            or item["package_sha256"] != row["package_sha256"]
+            for item in raw_rows
+        )
+        unknown_statuses = sum(
+            item["bar_status"]
+            not in {"TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED"}
+            for item in raw_rows
+        )
+        actual_raw_digest = source_raw._row_digest(raw_rows)
+        if (
+            len(raw_rows) != row["raw_row_count"]
+            or len(raw_rows) != row["capture_expected_row_count"]
+            or status_counts["TARGET_PRESENT"] != row["target_present_count"]
+            or status_counts["TARGET_MISSING"] != row["target_missing_count"]
+            or status_counts["READ_FAILED"] != row["read_failed_count"]
+            or capture_ids != {row["source_capture_id"]}
+            or content_ids != {row["source_content_id"]}
+            or broken_references != 0
+            or unknown_statuses != 0
+            or actual_raw_digest != row["source_raw_digest"]
+            or actual_raw_digest != candidate["candidate_raw_digest"]
+        ):
+            raise SourceSetIngressError(
+                "P04_RAW_DENOMINATOR_MISMATCH",
+                "正式Raw逐行摘要、状态分母、capture或content引用与封口摘要不一致",
+            )
+        counts = (
+            len(raw_rows),
+            status_counts["TARGET_PRESENT"],
+            status_counts["TARGET_MISSING"],
+            status_counts["READ_FAILED"],
+        )
+        raw_digest = actual_raw_digest
+        digest_recomputed = True
+        proof_level = "DEEP_RAW_DIGEST_VERIFIED"
+        raw_rows_scanned = len(raw_rows)
+    else:
+        # P03封口行、P02能力账、candidate/capture/content typed字段及其摘要
+        # 已按精确业务键校验；普通GET保留封口证明等级，不宣称现场Raw深审。
+        counts = (
+            row["raw_row_count"],
+            row["target_present_count"],
+            row["target_missing_count"],
+            row["read_failed_count"],
+        )
+        raw_digest = row["source_raw_digest"]
+        digest_recomputed = False
+        proof_level = "SEALED_TYPED_PROOF_NOT_DEEP_RECHECKED"
+        raw_rows_scanned = 0
     return {
         "candidate_sha256": candidate["candidate_sha256"],
         "source_content_id": candidate["candidate_content_id"],
@@ -816,8 +821,10 @@ def _validate_source_references(cursor: Any, row: Mapping[str, Any]) -> dict[str
         "target_present_count": counts[1],
         "target_missing_count": counts[2],
         "read_failed_count": counts[3],
-        "raw_digest_recomputed": True,
-        "raw_digest_sha256": actual_raw_digest,
+        "raw_digest_recomputed": digest_recomputed,
+        "raw_digest_sha256": raw_digest,
+        "raw_rows_scanned": raw_rows_scanned,
+        "proof_level": proof_level,
         "candidate_and_capture_exact": True,
     }
 
@@ -933,7 +940,7 @@ def read_accepted_source_state(
                 namespace_id=str(namespace_id),
             )
             p02, _ack = _read_capability(
-                cursor, accepted_row, namespace_id=str(namespace_id), config=config
+                cursor, accepted_row, namespace_id=str(namespace_id)
             )
             projection = _accepted_projection(str(namespace_id), accepted_row)
             projection["p02_capability"] = p02
@@ -994,7 +1001,6 @@ def read_accepted_source_state(
                     cursor,
                     accepted_row,
                     namespace_id=str(namespace_id),
-                    config=config,
                 )
                 accepted = _accepted_projection(str(namespace_id), accepted_row)
                 accepted["p02_capability"] = p02
@@ -1050,9 +1056,7 @@ def read_accepted_source_state(
                     "database_write": False,
                 }
             same = _validate_source_set(same_sealed[0], namespace_id=str(namespace_id))
-            p02, _ack = _read_capability(
-                cursor, same, namespace_id=str(namespace_id), config=config
-            )
+            p02, _ack = _read_capability(cursor, same, namespace_id=str(namespace_id))
             accepted = _accepted_projection(str(namespace_id), same)
             accepted["p02_capability"] = p02
             exact = (
@@ -1125,13 +1129,19 @@ def read_accepted_source_state(
 
 
 def read_p04_source_input(
-    config: Mapping[str, Any], *, target_session: date, package_sha256: str
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    audit_mode: bool = False,
 ) -> dict[str, Any]:
     """按namespace、目标日和包SHA读取已封口P03 typed来源集合。"""
     if type(target_session) is not date:
         raise ValueError("P04来源输入必须绑定显式目标会话")
     if not isinstance(package_sha256, str) or _SHA256.fullmatch(package_sha256) is None:
         raise ValueError("P04来源输入必须绑定完整小写SHA-256")
+    if type(audit_mode) is not bool:
+        raise ValueError("P04 audit_mode必须是明确布尔值")
     with source_raw._transaction(config, write=False) as (
         _connection,
         cursor,
@@ -1204,10 +1214,10 @@ def read_p04_source_input(
                 raise SourceSetIngressError(
                     "P04_SOURCE_SET_AMBIGUOUS", "精确日期和SHA存在相同revision冲突"
                 )
-        capability, ack = _read_capability(
-            cursor, row, namespace_id=str(namespace_id), config=config
+        capability, ack = _read_capability(cursor, row, namespace_id=str(namespace_id))
+        raw_revalidation = _validate_source_references(
+            cursor, row, audit_mode=audit_mode
         )
-        raw_revalidation = _validate_source_references(cursor, row)
     return {
         "status": "AVAILABLE",
         "target_session": target_session.isoformat(),
@@ -1270,6 +1280,7 @@ def read_p04_source_input(
             "capability_digest": ack["capability_digest"],
         },
         "raw_revalidation": raw_revalidation,
+        "audit_mode": audit_mode,
         "identity_digest_revalidated": True,
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "stable_security_identity": "P04_IDENTITY_RESOLUTION_PENDING",

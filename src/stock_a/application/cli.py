@@ -918,6 +918,11 @@ def _parser() -> argparse.ArgumentParser:
     source_p04.add_argument(
         "--package-sha256", required=True, help="完整TDX来源包SHA-256"
     )
+    source_p04.add_argument(
+        "--audit-mode",
+        action="store_true",
+        help="显式逐行读取Raw并重算4940行封口摘要，执行深度核验",
+    )
     preview_serve = commands.add_parser(
         "preview-serve",
         help="显式启动本机PG来源级研究预览页面（仅127.0.0.1:28766）",
@@ -2389,6 +2394,7 @@ def _run_source_p04_read(args: argparse.Namespace) -> int:
             config,
             target_session=target_session,
             package_sha256=args.package_sha256,
+            audit_mode=args.audit_mode,
         )
     except Exception as error:
         _emit(

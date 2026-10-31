@@ -9,6 +9,7 @@ import re
 from typing import Any, Mapping
 import uuid
 
+from stock_a.domain.source_policy import validate_optional_baostock_policy
 from stock_a.domain.source_set_candidate import source_set_candidate_digest
 from stock_a.domain.source_set_seal import (
     SourceSetSealError,
@@ -533,18 +534,9 @@ def _validate_current_policy(config: Mapping[str, Any], p02: Mapping[str, Any]) 
         if isinstance(source_policy, Mapping)
         else None
     )
-    expected = {
-        "contract": "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1",
-        "request_policy": "NOT_REQUESTED",
-        "reason_code": "OPTIONAL_SOURCE_NOT_REQUESTED",
-        "required_for_core": False,
-        "request_budget": {
-            "max_logins": 1,
-            "max_queries_per_target_session": 10,
-            "query_timeout_seconds": 30,
-        },
-    }
-    if not isinstance(policy, Mapping) or dict(policy) != expected:
+    try:
+        policy = validate_optional_baostock_policy(policy)
+    except ValueError:
         raise SourceSetWriteError(
             "P02_POLICY_INVALID", "唯一正式配置中的Bao可选策略与NOT_REQUESTED合同不一致"
         )
@@ -1048,6 +1040,7 @@ def _seal_transaction(
                 config,
                 target_session=source_facts["target_session"],
                 package_sha256=source_facts["package_sha256"],
+                audit_mode=True,
             )
             if (
                 existing.get("status") != "AVAILABLE"
@@ -1119,6 +1112,7 @@ def _seal_transaction(
         config,
         target_session=source_facts["target_session"],
         package_sha256=source_facts["package_sha256"],
+        audit_mode=True,
     )
     if (
         readback.get("status") != "AVAILABLE"

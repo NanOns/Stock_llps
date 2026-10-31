@@ -19,6 +19,7 @@ from stock_a.domain.source_set_candidate import (
     SourceSetCandidateError,
     source_set_candidate_digest,
 )
+from stock_a.domain.source_policy import validate_optional_baostock_policy
 
 from . import source_raw
 
@@ -482,7 +483,18 @@ def persist_source_set_candidate(
         raise SourceSetCandidatePgError(
             "P02_CAPABILITY_UNBOUND", "P03写入必须绑定本日期/SHA的真实P02零请求核算"
         )
-    policy = config.get("source_policy", {}).get("baostock_supplement")
+    source_policy = config.get("source_policy")
+    configured_policy = (
+        source_policy.get("baostock_supplement")
+        if isinstance(source_policy, Mapping)
+        else None
+    )
+    try:
+        policy = validate_optional_baostock_policy(configured_policy)
+    except ValueError as error:
+        raise SourceSetCandidatePgError(
+            "P02_POLICY_INVALID", "唯一正式配置中的Bao可选策略不符合typed合同"
+        ) from error
     policy_sha = (
         sha256(
             json.dumps(

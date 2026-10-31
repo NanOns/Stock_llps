@@ -366,6 +366,11 @@ function renderFormalSourceSet(data) {
     `SEALED · ${sourceSet.target_session} · revision ${sourceSet.revision_id} · source_set_id ${sourceSet.source_set_id}`,
     "formal-source-status",
   );
+  appendText(
+    root,
+    "p",
+    "P04证券身份来源未接入；本页仅展示SOURCE_SYMBOL_ONLY原始代码，稳定证券ID保持未知，不推断上市身份或历史PIT。",
+  );
   const list = document.createElement("dl");
   list.className = "formal-source-facts";
   const p02 = sourceSet.p02_capability || {};
@@ -399,6 +404,10 @@ function renderFormalSourceSet(data) {
     [
       "Raw分母",
       `${sourceSet.raw_row_count}/${sourceSet.capture_expected_row_count}；有Bar ${sourceSet.target_present_count} / 缺Bar ${sourceSet.target_missing_count} / 失败 ${sourceSet.read_failed_count}`,
+    ],
+    [
+      "Raw核验级别",
+      sourceSet.raw_revalidation?.proof_level || "未提供；拒绝推断深度已核验",
     ],
     [
       "价格 / 成交额 / 成交量单位",

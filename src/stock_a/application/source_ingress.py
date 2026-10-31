@@ -21,6 +21,7 @@ from stock_a.application.source_set_candidate import (
     prepare_source_set_candidate,
 )
 from stock_a.contracts import LoadedDayChainContract, load_day_chain_contract
+from stock_a.domain.source_policy import validate_optional_baostock_policy
 from stock_a.storage.postgres.identity import inspect_postgres
 from stock_a.storage.postgres import source_raw
 from stock_a.storage.postgres.source_set_ingress import (
@@ -402,20 +403,12 @@ def calculate_baostock_capability(
         if isinstance(source_policy, Mapping)
         else None
     )
-    expected_budget = {
-        "max_logins": 1,
-        "max_queries_per_target_session": 10,
-        "query_timeout_seconds": 30,
-    }
-    if (
-        not isinstance(policy, Mapping)
-        or policy.get("contract") != "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1"
-        or policy.get("request_policy") != "NOT_REQUESTED"
-        or policy.get("reason_code") != "OPTIONAL_SOURCE_NOT_REQUESTED"
-        or policy.get("required_for_core") is not False
-        or policy.get("request_budget") != expected_budget
-    ):
-        raise SourceIngressError("BaoStock策略未知或预算不符合登记合同，拒绝请求")
+    try:
+        policy = validate_optional_baostock_policy(policy)
+    except ValueError as error:
+        raise SourceIngressError(
+            "BaoStock策略未知或预算不符合登记合同，拒绝请求"
+        ) from error
     capability = {
         "status": "NOT_REQUESTED",
         "capability": "UNKNOWN_NOT_MEASURED",
@@ -426,7 +419,7 @@ def calculate_baostock_capability(
         "plan_sha256": plan_sha256,
         "policy_contract": policy["contract"],
         "policy_sha256": _canonical_sha256(policy),
-        "budget": dict(expected_budget),
+        "budget": dict(policy["request_budget"]),
         "actual_requests": {"logins": 0, "queries": 0},
         "source_available_at": None,
         "data_quality": "NOT_MEASURED_NO_RESPONSE",
@@ -454,7 +447,9 @@ def build_source_ingress_plan(
     if candidate_result.get("status") != "COMPUTED_READ_ONLY":
         raise SourceIngressError("精确PG候选计算未返回可核验结果")
     candidate = candidate_result["candidate"]
-    bao_policy = config["source_policy"]["baostock_supplement"]
+    bao_policy = validate_optional_baostock_policy(
+        config["source_policy"]["baostock_supplement"]
+    )
     bao_policy_sha256 = _canonical_sha256(bao_policy)
     accepted_state = _accepted_source_state(
         config,
