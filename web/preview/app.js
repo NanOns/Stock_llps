@@ -10,6 +10,11 @@ const state = {
   readinessRequest: 0,
   stockRequest: 0,
   catalogRequest: 0,
+  profileSnapshots: [],
+  profileRequest: 0,
+  profileOffset: 0,
+  profileLimit: 100,
+  profileTotal: 0,
   loading: false,
 };
 const labels = {
@@ -31,6 +36,16 @@ const labels = {
   PG_HISTORY_SESSION_MISSING: "PG缺少所需历史会话",
   HISTORY_WINDOW_INCOMPLETE: "历史窗口不完整",
   EVALUATED: "已计算",
+  TDX_TARGET_BAR_PRESENT: "目标日有Bar",
+  TDX_TARGET_BAR_MISSING: "目标日缺Bar",
+  TDX_READ_FAILED: "目标日读取失败",
+  RECORDS_COMPLETE: "PG窗口记录齐全",
+  HISTORY_ROW_NOT_STORED: "历史Raw行未保存",
+  USABLE: "价格窗口可用",
+  INSUFFICIENT_VALID_BARS: "有效Bar不足",
+  PRICE_FIELDS_UNKNOWN: "价格字段未知",
+  RESEARCH_PREVIEW_NON_PIT: "来源代码非PIT研究",
+  CONSUMER_FAILED: "内核消费失败",
 };
 const profileLabels = {
   "profile.trend": "趋势",
@@ -933,7 +948,11 @@ async function queryStock(event) {
       `实际Bar ${result.window.real_bar_count}/${result.window.requested_sessions}，` +
       `TDX缺Bar/读取失败 ${result.window.source_bar_gap_count}，` +
       `PG未保存历史会话 ${result.window.unavailable_history_row_count}；` +
-      `${result.window.history_status}，未使用未来会话。缺Bar不证明停牌、退市或上市前。`;
+      `Raw行覆盖 ${result.window.history_records_status}；` +
+      `MA20/ATR20价格窗口 ${result.window.price_window_status} ` +
+      `(${result.window.ma20_window_valid_bar_count}/${result.window.ma20_window_expected_bar_count}; ` +
+      `${result.window.price_window_valid_bar_count}/${result.window.price_window_expected_bar_count})，` +
+      `未使用未来会话。缺Bar不证明停牌、退市或上市前。`;
     $("resultMode").dataset.namespace = result.snapshot_identity.namespace_id;
     rawItems(raw.raw, raw.formal_source_set);
     renderFields($("coreRows"), result.core.fields, coreNames);
@@ -958,6 +977,268 @@ async function queryStock(event) {
     setMessage(error.message);
   } finally {
     if (requestId === state.stockRequest) $("queryStock").disabled = false;
+  }
+}
+function selectedProfileSnapshot() {
+  const key = $("profileSnapshotSelect").value;
+  return state.profileSnapshots.find(
+    (item) =>
+      `${item.target_session}|${item.source_set_id}|${item.profile_revision}` ===
+      key,
+  );
+}
+function clearProfileDetail() {
+  $("profileDetail").hidden = true;
+  $("profileDetail").replaceChildren();
+}
+function showProfileDetail(item) {
+  const root = $("profileDetail");
+  root.replaceChildren();
+  root.hidden = false;
+  appendText(
+    root,
+    "h3",
+    `${item.source_symbol} · ${item.target_session} · 画像详情`,
+  );
+  const meta = document.createElement("dl");
+  meta.className = "profile-detail-meta";
+  const details = [
+    ["来源范围", item.calculation_scope],
+    ["研究资格", `${item.identity_status} · ${item.pit_status}`],
+    ["source_set_id", item.source_set_id],
+    ["来源包SHA-256", item.package_sha256],
+    [
+      "画像修订 / 合同SHA",
+      `${item.profile_revision} · ${item.producer_contract_sha256}`,
+    ],
+    [
+      "窗口与日历",
+      `${item.history_calendar_id} ${item.history_calendar_revision} · ${item.history_window_start} 至 ${item.history_window_end}`,
+    ],
+    [
+      "窗口记录 / 有效价格Bar",
+      `${item.history_stored_session_count}/${item.history_requested_session_count} · ${item.history_actual_price_bar_count}`,
+    ],
+    [
+      "MA20 / ATR20实际有效Bar",
+      `${item.ma20_window_valid_bar_count}/${item.ma20_window_expected_bar_count} · ${item.atr20_window_valid_bar_count}/${item.atr20_window_expected_bar_count}`,
+    ],
+    [
+      "历史记录覆盖",
+      `${item.history_records_status} · ${item.history_records_complete ? "记录齐全" : "存在未持久Raw行"}`,
+    ],
+    [
+      "价格窗口状态",
+      `${item.price_window_status} · ${item.price_window_reason || "无"}`,
+    ],
+    ["窗口输入摘要SHA-256", item.history_window_sha256],
+    [
+      "量额单位资格",
+      `成交额 ${item.amount_unit_status} · 成交量 ${item.volume_unit_status}`,
+    ],
+  ];
+  for (const [label, value] of details) {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    dd.textContent = text(value);
+    meta.append(dt, dd);
+  }
+  root.append(meta);
+  appendText(root, "h3", "目标日PG Raw OHLC（按需联读）");
+  const rawGrid = document.createElement("div");
+  rawGrid.className = "raw-grid";
+  for (const [label, value] of [
+    ["开盘", item.target_raw_open],
+    ["最高", item.target_raw_high],
+    ["最低", item.target_raw_low],
+    ["收盘", item.target_raw_close],
+    ["价格质量", item.target_raw_price_quality],
+    ["价格原因", item.target_raw_price_reason],
+  ]) {
+    const card = document.createElement("div");
+    appendText(card, "span", label, "raw-label");
+    appendText(card, "strong", text(value));
+    rawGrid.append(card);
+  }
+  root.append(rawGrid);
+  appendText(root, "h3", "Core价格字段 / 质量 / 原因");
+  const coreTable = document.createElement("table");
+  coreTable.innerHTML =
+    "<thead><tr><th>字段</th><th>NUMERIC值</th><th>精确分数</th><th>质量</th><th>原因</th></tr></thead>";
+  const coreBody = document.createElement("tbody");
+  for (const name of [
+    "ma5",
+    "ma10",
+    "ma20",
+    "ma60",
+    "atr20",
+    "clv",
+    "prior_high20",
+    "ret20",
+    "pos60",
+    "bias20_atr",
+  ]) {
+    tableRow(coreBody, [
+      `core.${name}`,
+      item[name],
+      item[`${name}_exact_numerator`] == null
+        ? "—"
+        : `${item[`${name}_exact_numerator`]}/${item[`${name}_exact_denominator`]}`,
+      item[`${name}_quality`],
+      item[`${name}_reason`],
+    ]);
+  }
+  coreTable.append(coreBody);
+  const coreWrap = document.createElement("div");
+  coreWrap.className = "table-wrap";
+  coreWrap.append(coreTable);
+  root.append(coreWrap);
+  appendText(root, "h3", "Profile 11分项状态 / 质量 / 原因");
+  const profileTable = document.createElement("table");
+  profileTable.innerHTML =
+    "<thead><tr><th>字段</th><th>状态</th><th>质量</th><th>原因</th></tr></thead>";
+  const profileBody = document.createElement("tbody");
+  item.profile_field_ids.forEach((field, index) => {
+    tableRow(profileBody, [
+      field,
+      item.profile_statuses[index],
+      item.profile_qualities[index],
+      item.profile_reasons[index] || "—",
+    ]);
+  });
+  profileTable.append(profileBody);
+  const profileWrap = document.createElement("div");
+  profileWrap.className = "table-wrap";
+  profileWrap.append(profileTable);
+  root.append(profileWrap);
+}
+async function loadProfileSnapshots() {
+  state.profileRequest++;
+  $("profileSnapshotSelect").disabled = true;
+  $("profileSnapshotSelect").replaceChildren(
+    new Option("正在读取PG画像目录…", ""),
+  );
+  try {
+    const data = await api("/api/source-symbol-price-profiles/snapshots");
+    state.profileSnapshots = data.snapshots || [];
+    $("profileSnapshotSelect").replaceChildren(
+      new Option("— 请选择精确画像日期 / source_set / revision —", ""),
+    );
+    for (const item of state.profileSnapshots) {
+      const key = `${item.target_session}|${item.source_set_id}|${item.profile_revision}`;
+      const option = new Option(
+        `${item.target_session} · ${item.source_set_id.slice(0, 8)} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话 · rev ${item.profile_revision.slice(0, 10)}`,
+        key,
+      );
+      option.disabled = !item.complete;
+      $("profileSnapshotSelect").append(option);
+    }
+    $("profileSnapshotSelect").disabled = state.profileSnapshots.length === 0;
+    $("profileCount").textContent = state.profileSnapshots.length
+      ? `${state.profileSnapshots.length}个真实PG画像版本`
+      : "没有已保存画像";
+    $("profileMessage").textContent = state.profileSnapshots.length
+      ? "请选择精确日期、P03 source_set和窗口修订。搜索仅读取PG持久画像，不回退latest。"
+      : "PG画像表中没有已保存记录。";
+  } catch (error) {
+    state.profileSnapshots = [];
+    $("profileCount").textContent = "PG画像目录不可用";
+    $("profileMessage").textContent = `画像目录读取失败：${error.message}`;
+  }
+}
+async function loadProfilePage() {
+  const snapshot = selectedProfileSnapshot();
+  const requestId = ++state.profileRequest;
+  clearProfileDetail();
+  $("profileRows").replaceChildren();
+  if (!snapshot) {
+    $("profileMessage").textContent =
+      "请先选择一个完整、已持久化的精确画像版本。";
+    $("profilePageStatus").textContent = "—";
+    $("profilePrev").disabled = true;
+    $("profileNext").disabled = true;
+    $("profileLast").disabled = true;
+    return;
+  }
+  const params = new URLSearchParams({
+    target_session: snapshot.target_session,
+    source_set_id: snapshot.source_set_id,
+    package_sha256: snapshot.package_sha256,
+    profile_revision: snapshot.profile_revision,
+    offset: String(state.profileOffset),
+    limit: String(state.profileLimit),
+    market: $("profileMarketSelect").value,
+    board: $("profileBoardSelect").value,
+    target_bar_status: $("profileBarStatusSelect").value,
+    price_window_status: $("profileWindowStatusSelect").value,
+  });
+  const symbol = $("profileSymbolInput").value.trim();
+  if (symbol) params.set("symbol", symbol);
+  $("profileMessage").textContent =
+    "正在按精确日期、来源集、包SHA和窗口修订读取PG分页…";
+  try {
+    const data = await api(`/api/source-symbol-price-profiles?${params}`);
+    if (requestId !== state.profileRequest) return;
+    const page = data.page;
+    state.profileTotal = page.total;
+    $("profileCount").textContent = `${page.count}条 / 筛选分母${page.total}`;
+    $("profileMessage").textContent =
+      `${data.target_session} · P03 ${data.source_set_id} · 窗口 ${data.history_window.start} 至 ${data.history_window.end}（${data.history_window.requested_session_count}会话） · NON_PIT来源代码研究，不是正式上市Universe。`;
+    $("profilePageStatus").textContent =
+      `偏移 ${page.offset} · 本页 ${page.count}/${page.limit} · 总计 ${page.total}`;
+    $("profilePrev").disabled = page.offset === 0;
+    $("profileNext").disabled = page.next_offset === null;
+    $("profileLast").disabled =
+      page.total === 0 || page.offset + page.limit >= page.total;
+    for (const item of data.rows) {
+      const tr = document.createElement("tr");
+      cell(tr, item.source_symbol);
+      cell(tr, `${item.market} / ${text(item.board)}`);
+      cell(
+        tr,
+        `${text(item.target_bar_status)} · ${text(item.target_raw_price_quality)}`,
+      );
+      cell(
+        tr,
+        `${item.history_stored_session_count}/${item.history_requested_session_count}行 · ${item.history_actual_price_bar_count}有效Bar · ${text(item.history_records_status)}`,
+      );
+      cell(tr, `${text(item.ma20)} · ${text(item.ma20_quality)}`);
+      cell(tr, `${text(item.atr20)} · ${text(item.atr20_quality)}`);
+      cell(tr, `${text(item.clv)} · ${text(item.clv_quality)}`);
+      cell(
+        tr,
+        `${text(item.price_window_status)}${item.price_window_reason ? ` · ${item.price_window_reason}` : ""}`,
+      );
+      const detailCell = document.createElement("td");
+      const detailButton = document.createElement("button");
+      detailButton.type = "button";
+      detailButton.className = "quiet";
+      detailButton.textContent = "详情";
+      detailButton.addEventListener("click", () => showProfileDetail(item));
+      detailCell.append(detailButton);
+      tr.append(detailCell);
+      $("profileRows").append(tr);
+    }
+  } catch (error) {
+    if (requestId !== state.profileRequest) return;
+    tableRow($("profileRows"), [
+      "没有匹配的PG画像",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+    ]);
+    $("profileMessage").textContent = `画像查询未返回记录：${error.message}`;
+    $("profileCount").textContent = "0条匹配记录";
+    $("profilePageStatus").textContent = "无匹配结果";
+    $("profilePrev").disabled = true;
+    $("profileNext").disabled = true;
+    $("profileLast").disabled = true;
   }
 }
 $("reloadCatalog").addEventListener("click", loadCatalog);
@@ -988,4 +1269,49 @@ $("nextPage").addEventListener("click", () => {
   }
 });
 $("stockForm").addEventListener("submit", queryStock);
+$("searchProfiles").addEventListener("click", () => {
+  state.profileOffset = 0;
+  loadProfilePage();
+});
+$("profileSymbolInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    state.profileOffset = 0;
+    loadProfilePage();
+  }
+});
+$("profileSnapshotSelect").addEventListener("change", () => {
+  state.profileOffset = 0;
+  loadProfilePage();
+});
+for (const id of [
+  "profileMarketSelect",
+  "profileBoardSelect",
+  "profileBarStatusSelect",
+  "profileWindowStatusSelect",
+]) {
+  $(id).addEventListener("change", () => {
+    state.profileOffset = 0;
+    loadProfilePage();
+  });
+}
+$("profilePrev").addEventListener("click", () => {
+  state.profileOffset = Math.max(0, state.profileOffset - state.profileLimit);
+  loadProfilePage();
+});
+$("profileNext").addEventListener("click", () => {
+  if (state.profileOffset + state.profileLimit < state.profileTotal) {
+    state.profileOffset += state.profileLimit;
+    loadProfilePage();
+  }
+});
+$("profileLast").addEventListener("click", () => {
+  if (state.profileTotal) {
+    state.profileOffset =
+      Math.floor((state.profileTotal - 1) / state.profileLimit) *
+      state.profileLimit;
+    loadProfilePage();
+  }
+});
+loadProfileSnapshots();
 loadCatalog();

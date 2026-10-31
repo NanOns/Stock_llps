@@ -83,6 +83,13 @@ from stock_a.application.pg_research import (
     PgResearchBindingError,
     read_sealed_source_context,
 )
+from stock_a.application.pg_price_profiles import (
+    PgPriceProfileError,
+    SOURCE_SYMBOL_PROFILE_SCOPE,
+    query_source_symbol_price_profiles,
+    run_source_symbol_price_profile,
+    source_symbol_price_profile_snapshots,
+)
 from stock_a.storage.postgres.source_set_candidate import SourceSetCandidatePgError
 from stock_a.application.source_ingress import (
     SourceIngressError,
@@ -911,6 +918,100 @@ def _parser() -> argparse.ArgumentParser:
     )
     source_set_catalog.add_argument(
         "--package-sha256", required=True, help="完整TDX来源包SHA-256"
+    )
+    price_profile = commands.add_parser(
+        "source-symbol-price-profile",
+        help="按精确P03封口版本计算、保存或分页查询来源代码级NON_PIT价格画像",
+    )
+    price_profile.add_argument(
+        "--action",
+        choices=("compute", "query", "snapshots"),
+        required=True,
+        help="compute按PG Raw批量计算并保存；query按精确键分页；snapshots列出现存画像版本",
+    )
+    price_profile.add_argument("--target-session", help="精确目标交易会话YYYY-MM-DD")
+    price_profile.add_argument("--source-set-id", help="正式SEALED P03 source_set UUID")
+    price_profile.add_argument("--package-sha256", help="精确TDX来源包SHA-256")
+    price_profile.add_argument(
+        "--scope",
+        choices=(SOURCE_SYMBOL_PROFILE_SCOPE,),
+        help="显式计算范围SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE",
+    )
+    price_profile.add_argument(
+        "--session-count",
+        type=int,
+        default=75,
+        help="官方历史窗口会话数，1至75，默认75",
+    )
+    price_profile.add_argument(
+        "--page-size", type=int, default=100, help="PG候选分页批大小，1至100，默认100"
+    )
+    price_profile.add_argument("--profile-revision", help="查询时必填的画像修订SHA-256")
+    price_profile.add_argument("--symbol", help="可选精确来源代码，如SH.六位数字")
+    price_profile.add_argument(
+        "--market", choices=("ALL", "SH", "SZ"), default="ALL", help="查询市场过滤"
+    )
+    price_profile.add_argument(
+        "--board",
+        choices=("ALL", "MAIN_BOARD", "GEM"),
+        default="ALL",
+        help="查询板别过滤",
+    )
+    price_profile.add_argument(
+        "--target-bar-status",
+        choices=(
+            "ALL",
+            "TDX_TARGET_BAR_PRESENT",
+            "TDX_TARGET_BAR_MISSING",
+            "TDX_READ_FAILED",
+        ),
+        default="ALL",
+        help="目标日Bar状态筛选",
+    )
+    price_profile.add_argument(
+        "--price-window-status",
+        choices=(
+            "ALL",
+            "USABLE",
+            "TARGET_MISSING",
+            "READ_FAILED",
+            "HISTORY_ROW_NOT_STORED",
+            "INSUFFICIENT_VALID_BARS",
+            "PRICE_FIELDS_UNKNOWN",
+        ),
+        default="ALL",
+        help="价格窗口状态筛选",
+    )
+    price_profile.add_argument(
+        "--core-field",
+        choices=(
+            "core.ma5",
+            "core.ma10",
+            "core.ma20",
+            "core.ma60",
+            "core.atr20",
+            "core.clv",
+            "core.prior_high20",
+            "core.ret20",
+            "core.pos60",
+            "core.bias20_atr",
+        ),
+        help="可选Core价格字段质量筛选",
+    )
+    price_profile.add_argument(
+        "--core-quality",
+        choices=("OBSERVED", "UNKNOWN", "NOT_APPLICABLE"),
+        help="配合Core字段的质量值",
+    )
+    price_profile.add_argument("--offset", type=int, default=0, help="查询偏移，默认0")
+    price_profile.add_argument(
+        "--limit", type=int, default=100, help="查询页大小，1至100，默认100"
+    )
+    price_profile.add_argument(
+        "--format",
+        choices=("summary", "json"),
+        default="json",
+        help="输出摘要或完整JSON",
     )
     source_p04 = commands.add_parser(
         "source-p04-read",
@@ -2307,6 +2408,138 @@ def _run_source_raw_catalog(args: argparse.Namespace) -> int:
     )
     _emit(result)
     return _EXIT_OK
+
+
+def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
+    config, config_path = _load_runtime_config()
+    try:
+        if args.action == "snapshots":
+            result = source_symbol_price_profile_snapshots(config)
+        elif args.action == "query":
+            if not all(
+                (
+                    args.target_session,
+                    args.source_set_id,
+                    args.package_sha256,
+                    args.profile_revision,
+                )
+            ):
+                raise DiagnosticError(
+                    "PROFILE_QUERY_KEY_REQUIRED",
+                    "画像查询必须显式指定目标日期、source_set、包SHA和profile_revision",
+                    _EXIT_ARGUMENT,
+                )
+            if args.core_field is None and args.core_quality is not None:
+                raise DiagnosticError(
+                    "PROFILE_CORE_FILTER_INVALID",
+                    "Core质量筛选必须同时指定字段",
+                    _EXIT_ARGUMENT,
+                )
+            result = query_source_symbol_price_profiles(
+                config,
+                target_session=_parse_source_set_date(args.target_session),
+                source_set_id=args.source_set_id,
+                package_sha256=args.package_sha256,
+                profile_revision=args.profile_revision,
+                offset=args.offset,
+                limit=args.limit,
+                market=args.market,
+                board=args.board,
+                target_bar_status=args.target_bar_status,
+                price_window_status=args.price_window_status,
+                source_symbol=args.symbol,
+                core_field=args.core_field,
+                core_quality=args.core_quality,
+            )
+        else:
+            if not all(
+                (
+                    args.target_session,
+                    args.source_set_id,
+                    args.package_sha256,
+                    args.scope,
+                )
+            ):
+                raise DiagnosticError(
+                    "PROFILE_COMPUTE_KEY_REQUIRED",
+                    "画像计算必须显式指定目标日期、SEALED source_set、包SHA与计算scope",
+                    _EXIT_ARGUMENT,
+                )
+            if re.fullmatch(r"[0-9a-f]{64}", args.package_sha256) is None:
+                raise DiagnosticError(
+                    "PROFILE_PACKAGE_SHA_INVALID",
+                    "完整TDX包SHA必须是64位小写十六进制值",
+                    _EXIT_ARGUMENT,
+                )
+            loaded_contract = load_day_chain_contract(_CONFIG_ROOT)
+            result = run_source_symbol_price_profile(
+                config,
+                target_session=_parse_source_set_date(args.target_session),
+                source_set_id=args.source_set_id,
+                package_sha256=args.package_sha256,
+                scope=args.scope,
+                session_count=args.session_count,
+                page_size=args.page_size,
+                profile_contract=loaded_contract.document,
+                profile_contract_sha256=loaded_contract.assembled_sha256,
+            )
+    except (PgPriceProfileError, DayChainContractError) as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": getattr(error, "code", "PROFILE_CONTRACT_INVALID"),
+                "message": str(error),
+                "configuration_path": str(config_path),
+                "database_write_attempted": args.action == "compute",
+                "ddl_executed": False,
+                "source_zip_opened": False,
+                "baostock_called": False,
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
+    result.update(
+        {
+            "ok": result.get("status") not in {"NO_MATCH", "EMPTY"},
+            "configuration_path": str(config_path),
+            "database_io_attempted": True,
+            "database_write_attempted": args.action == "compute",
+            "ddl_executed": False,
+            "source_zip_opened": False,
+            "baostock_called": False,
+        }
+    )
+    if args.format == "summary":
+        if args.action == "query":
+            page = result.get("page", {})
+            sys.stdout.write(
+                f"PG画像查询 target={result.get('target_session')} "
+                f"source_set={result.get('source_set_id')} offset={page.get('offset')} "
+                f"limit={page.get('limit')} rows={page.get('count')} total={page.get('total')} "
+                f"next={page.get('next_offset')} status={result.get('status')}\n"
+            )
+        elif args.action == "compute":
+            sys.stdout.write(
+                f"PG画像批次 target={result.get('target_session')} "
+                f"source_set={result.get('source_set_id')} "
+                f"scope={result.get('scope')} candidates={result.get('source_candidate_count')} "
+                f"inserted={result.get('inserted_count')} "
+                f"existing_same_content={result.get('existing_same_content_count')} "
+                f"consumer_failures={result.get('consumer_failure_count')} "
+                f"status={result.get('status')}\n"
+            )
+        else:
+            for item in result.get("snapshots", ()):
+                sys.stdout.write(
+                    f"target={item['target_session']} source_set={item['source_set_id']} "
+                    f"revision={item['profile_revision']} "
+                    f"rows={item['source_symbol_count']}/{item['expected_source_symbol_count']} "
+                    f"complete={item['complete']}\n"
+                )
+    else:
+        _emit(result)
+    return _EXIT_OK if result.get("ok") else _EXIT_UNAVAILABLE
 
 
 def _parse_source_set_date(value: str) -> date:
@@ -4981,6 +5214,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_set_candidate(args, compute_candidate=True)
         if args.command == "source-set-catalog":
             return _run_source_set_candidate(args, compute_candidate=False)
+        if args.command == "source-symbol-price-profile":
+            return _run_source_symbol_price_profile(args)
         if args.command == "source-p04-read":
             return _run_source_p04_read(args)
         if args.command == "source-ingress-plan":

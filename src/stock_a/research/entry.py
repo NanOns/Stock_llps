@@ -4245,6 +4245,67 @@ def research_stock_pg_history_preview(
         "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
         "READ_FAILED": "TDX_READ_FAILED",
     }[target_row["bar_status"]]
+    price_window_sessions = expected_sessions[-21:]
+    ma20_window_sessions = expected_sessions[-20:]
+
+    def has_valid_price_bar(session: date) -> bool:
+        row = rows_by_session.get(session)
+        return bool(
+            row is not None
+            and row.get("bar_status") == "TARGET_PRESENT"
+            and row.get("price_quality") == "OBSERVED"
+            and all(
+                row.get(name) is not None
+                for name in ("raw_open", "raw_high", "raw_low", "raw_close")
+            )
+        )
+
+    ma20_actual_bars = sum(has_valid_price_bar(day) for day in ma20_window_sessions)
+    atr20_actual_bars = sum(has_valid_price_bar(day) for day in price_window_sessions)
+    core_ma20 = core.get("core.ma20")
+    core_atr20 = core.get("core.atr20")
+    price_window_usable = bool(
+        core_ma20 is not None
+        and core_atr20 is not None
+        and core_ma20.quality == "OBSERVED"
+        and core_atr20.quality == "OBSERVED"
+    )
+    if price_window_usable:
+        price_window_status = "USABLE"
+        price_window_reason = None
+    elif target_row["bar_status"] == "TARGET_MISSING":
+        price_window_status = "TARGET_MISSING"
+        price_window_reason = (
+            target_row.get("bar_reason") or "TARGET_SESSION_BAR_MISSING"
+        )
+    elif target_row["bar_status"] == "READ_FAILED":
+        price_window_status = "READ_FAILED"
+        price_window_reason = target_row.get("bar_reason") or "SOURCE_ENTRY_READ_FAILED"
+    elif any(day not in rows_by_session for day in price_window_sessions):
+        price_window_status = "HISTORY_ROW_NOT_STORED"
+        price_window_reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+    elif ma20_actual_bars < 20 or atr20_actual_bars < 21:
+        price_window_status = "INSUFFICIENT_VALID_BARS"
+        price_window_reason = (
+            core_atr20.reason
+            if core_atr20 is not None and core_atr20.reason
+            else core_ma20.reason
+            if core_ma20 is not None
+            else "PRICE_WINDOW_UNAVAILABLE"
+        )
+    else:
+        price_window_status = "PRICE_FIELDS_UNKNOWN"
+        price_window_reason = (
+            core_atr20.reason
+            if core_atr20 is not None and core_atr20.reason
+            else core_ma20.reason
+            if core_ma20 is not None
+            else "PRICE_WINDOW_UNAVAILABLE"
+        )
+    history_records_complete = not missing_dates
+    history_records_status = (
+        "RECORDS_COMPLETE" if history_records_complete else "HISTORY_ROW_NOT_STORED"
+    )
     return {
         "ok": True,
         "contract": "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1",
@@ -4264,7 +4325,16 @@ def research_stock_pg_history_preview(
         "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
         "official_listing_universe_status": "UNKNOWN",
         "pit_status": "NON_PIT_RETROSPECTIVE",
-        "history_status": "COMPLETE" if not missing_dates else "UNKNOWN_HISTORY",
+        "history_status": history_records_status,
+        "history_records_complete": history_records_complete,
+        "history_records_status": history_records_status,
+        "price_window_usable": price_window_usable,
+        "price_window_status": price_window_status,
+        "price_window_reason": price_window_reason,
+        "price_window_valid_bar_count": atr20_actual_bars,
+        "price_window_expected_bar_count": len(price_window_sessions),
+        "ma20_window_valid_bar_count": ma20_actual_bars,
+        "ma20_window_expected_bar_count": len(ma20_window_sessions),
         "missing_history_sessions": [day.isoformat() for day in missing_dates],
         "formal_foundation_status": "NOT_ADMITTED",
         "source": {
@@ -4289,8 +4359,17 @@ def research_stock_pg_history_preview(
             "evaluated_sessions": len(rows),
             "stored_sessions": len(rows),
             "missing_history_sessions": [day.isoformat() for day in missing_dates],
-            "history_complete": not missing_dates,
-            "history_status": "COMPLETE" if not missing_dates else "UNKNOWN_HISTORY",
+            "history_complete": history_records_complete,
+            "history_status": history_records_status,
+            "history_records_complete": history_records_complete,
+            "history_records_status": history_records_status,
+            "price_window_usable": price_window_usable,
+            "price_window_status": price_window_status,
+            "price_window_reason": price_window_reason,
+            "price_window_valid_bar_count": atr20_actual_bars,
+            "price_window_expected_bar_count": len(price_window_sessions),
+            "ma20_window_valid_bar_count": ma20_actual_bars,
+            "ma20_window_expected_bar_count": len(ma20_window_sessions),
             "real_bar_count": actual_bars,
             "gap_count": gaps,
             "source_bar_gap_count": status_counts["TARGET_MISSING"]
@@ -4356,18 +4435,186 @@ def research_universe_pg_history_preview(
     results: list[dict[str, Any]] = []
     for candidate in page.get("candidates", ()):
         symbol = candidate["source_symbol"]
-        preview = research_stock_pg_history_preview(
-            symbol=symbol,
-            target_session=target_session,
-            package_sha256=package_sha256,
-            session_dates=session_dates,
-            history_rows=candidate["history_rows"],
-            missing_history_sessions=tuple(
-                date.fromisoformat(item) for item in candidate["missing_sessions"]
-            ),
-            namespace_id=page["namespace_id"],
-            profile_contract=profile_contract,
-        )
+        try:
+            preview = research_stock_pg_history_preview(
+                symbol=symbol,
+                target_session=target_session,
+                package_sha256=package_sha256,
+                session_dates=session_dates,
+                history_rows=candidate["history_rows"],
+                missing_history_sessions=tuple(
+                    date.fromisoformat(item) for item in candidate["missing_sessions"]
+                ),
+                namespace_id=page["namespace_id"],
+                profile_contract=profile_contract,
+            )
+        except ResearchEntryError as error:
+            field_registry = (
+                profile_contract.get("scope_bindings", {})
+                .get("FOUNDATION_EOD", {})
+                .get("field_registry", [])
+            )
+            profile_registry = (
+                profile_contract.get("scope_bindings", {})
+                .get("FOUNDATION_EOD", {})
+                .get("profile_expression_registry", {})
+            )
+            error_code = error.code
+            target_row = next(
+                (
+                    row
+                    for row in candidate["history_rows"]
+                    if row.get("session_date") == date.fromisoformat(target_session)
+                ),
+                None,
+            )
+            target_status = (target_row or {}).get("bar_status")
+            target_status = {
+                "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
+                "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
+                "READ_FAILED": "TDX_READ_FAILED",
+            }.get(target_status, "TDX_READ_FAILED")
+            core_field_ids = sorted(
+                {
+                    item.get("field_id")
+                    for item in field_registry
+                    if isinstance(item, dict)
+                    and isinstance(item.get("field_id"), str)
+                    and item["field_id"].startswith("core.")
+                }
+            )
+            component_ids = sorted(
+                {
+                    rule.get("field_id")
+                    for rule in profile_registry.values()
+                    if isinstance(rule, dict) and isinstance(rule.get("field_id"), str)
+                }
+            )
+            if len(core_field_ids) != 43 or len(component_ids) != 11:
+                raise ResearchEntryError(
+                    "PROFILE_PREVIEW_CONTRACT_INVALID",
+                    "逐代码研究失败时无法从现役合同恢复Core/Profile字段身份",
+                ) from error
+            field_names = (
+                "core.ma5",
+                "core.ma10",
+                "core.ma20",
+                "core.ma60",
+                "core.atr20",
+                "core.clv",
+                "core.prior_high20",
+                "core.ret20",
+                "core.pos60",
+                "core.bias20_atr",
+            )
+            row_dates = {
+                row.get("session_date"): row for row in candidate["history_rows"]
+            }
+            expected = tuple(session_dates)
+            present = set(row_dates)
+            (
+                calendar_payload,
+                _calendar_metadata,
+                calendar_revision,
+                _calendar_sessions,
+            ) = _load_calendar(date.fromisoformat(target_session))
+            stored_count = len(row_dates)
+            valid_count = sum(
+                row.get("bar_status") == "TARGET_PRESENT"
+                and row.get("price_quality") == "OBSERVED"
+                for row in candidate["history_rows"]
+            )
+            ma20_valid_count = sum(
+                day in row_dates
+                and row_dates[day].get("bar_status") == "TARGET_PRESENT"
+                and row_dates[day].get("price_quality") == "OBSERVED"
+                for day in expected[-20:]
+            )
+            atr20_valid_count = sum(
+                day in row_dates
+                and row_dates[day].get("bar_status") == "TARGET_PRESENT"
+                and row_dates[day].get("price_quality") == "OBSERVED"
+                for day in expected[-21:]
+            )
+            results.append(
+                {
+                    "symbol": symbol,
+                    "status": "CONSUMER_FAILED",
+                    "consumer_status": "CONSUMER_FAILED",
+                    "consumer_error_code": error_code,
+                    "identity_status": "SOURCE_SYMBOL_ONLY",
+                    "source_object_status": "TDX_SOURCE_SYMBOL_OBSERVED",
+                    "target_bar_status": target_status,
+                    "price_research_status": "UNKNOWN_DATA",
+                    "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
+                    "listing_status": "LISTING_STATUS_UNKNOWN",
+                    "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
+                    "pit_status": "NON_PIT_RETROSPECTIVE",
+                    "window": {
+                        "calendar_id": calendar_payload["calendar_id"],
+                        "calendar_revision": calendar_revision,
+                        "start_session": expected[0].isoformat(),
+                        "end_session": expected[-1].isoformat(),
+                        "requested_sessions": len(expected),
+                        "stored_sessions": stored_count,
+                        "real_bar_count": valid_count,
+                        "session_status_counts": {},
+                    },
+                    "history_status": (
+                        "RECORDS_COMPLETE"
+                        if stored_count == len(expected)
+                        else "HISTORY_ROW_NOT_STORED"
+                    ),
+                    "history_records_complete": stored_count == len(expected),
+                    "history_records_status": (
+                        "RECORDS_COMPLETE"
+                        if stored_count == len(expected)
+                        else "HISTORY_ROW_NOT_STORED"
+                    ),
+                    "price_window_usable": False,
+                    "price_window_status": "PRICE_FIELDS_UNKNOWN",
+                    "price_window_reason": error_code,
+                    "price_window_valid_bar_count": atr20_valid_count,
+                    "price_window_expected_bar_count": min(21, len(expected)),
+                    "ma20_window_valid_bar_count": ma20_valid_count,
+                    "ma20_window_expected_bar_count": min(20, len(expected)),
+                    "missing_history_sessions": [
+                        day.isoformat() for day in expected if day not in present
+                    ],
+                    "price_quality_counts": {},
+                    "core_price_fields": {
+                        name: {
+                            "value": None,
+                            "quality": "UNKNOWN",
+                            "reason": error_code,
+                        }
+                        for name in field_names
+                    },
+                    "core_unknown_field_count": 43,
+                    "core_unknown_reason_counts": {error_code: 43},
+                    "profile_rule_count": 11,
+                    "profile_status_counts": {"FAILED": 11},
+                    "profile_components": [
+                        {
+                            "field_id": field_id,
+                            "status": "FAILED",
+                            "quality": "UNKNOWN",
+                            "reason": error_code,
+                        }
+                        for field_id in component_ids
+                    ],
+                    "profile_unavailable": [
+                        {
+                            "field_id": field_id,
+                            "status": "FAILED",
+                            "quality": "UNKNOWN",
+                            "reason": error_code,
+                        }
+                        for field_id in component_ids
+                    ],
+                }
+            )
+            continue
         fields = preview.get("core", {}).get("fields", {})
         components = preview.get("profile_preview", {}).get("components", [])
         profile_status_counts: dict[str, int] = {}
@@ -4392,11 +4639,16 @@ def research_universe_pg_history_preview(
         selected_fields = {
             name: fields[name]
             for name in (
+                "core.ma5",
+                "core.ma10",
                 "core.ma20",
                 "core.ma60",
                 "core.atr20",
+                "core.clv",
+                "core.prior_high20",
                 "core.ret20",
                 "core.pos60",
+                "core.bias20_atr",
             )
             if name in fields
         }
@@ -4404,6 +4656,8 @@ def research_universe_pg_history_preview(
             {
                 "symbol": symbol,
                 "status": preview.get("status"),
+                "consumer_status": "RESEARCHED",
+                "consumer_error_code": None,
                 "identity_status": preview.get("identity_status"),
                 "source_object_status": preview.get("source_object_status"),
                 "target_bar_status": preview.get("target_bar_status"),
@@ -4414,6 +4668,23 @@ def research_universe_pg_history_preview(
                 "pit_status": preview.get("pit_status"),
                 "window": preview.get("window"),
                 "history_status": preview.get("history_status"),
+                "history_records_complete": preview.get("history_records_complete"),
+                "history_records_status": preview.get("history_records_status"),
+                "price_window_usable": preview.get("price_window_usable"),
+                "price_window_status": preview.get("price_window_status"),
+                "price_window_reason": preview.get("price_window_reason"),
+                "price_window_valid_bar_count": preview.get(
+                    "price_window_valid_bar_count"
+                ),
+                "price_window_expected_bar_count": preview.get(
+                    "price_window_expected_bar_count"
+                ),
+                "ma20_window_valid_bar_count": preview.get(
+                    "ma20_window_valid_bar_count"
+                ),
+                "ma20_window_expected_bar_count": preview.get(
+                    "ma20_window_expected_bar_count"
+                ),
                 "missing_history_sessions": preview.get("missing_history_sessions"),
                 "price_quality_counts": preview.get("quality", {}).get(
                     "price_quality_counts"
@@ -4427,6 +4698,15 @@ def research_universe_pg_history_preview(
                 ),
                 "profile_rule_count": len(components),
                 "profile_status_counts": dict(sorted(profile_status_counts.items())),
+                "profile_components": [
+                    {
+                        "field_id": item.get("field_id"),
+                        "status": item.get("status"),
+                        "quality": item.get("quality"),
+                        "reason": item.get("reason"),
+                    }
+                    for item in components
+                ],
                 "profile_unavailable": profile_unavailable,
             }
         )

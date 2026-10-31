@@ -25,6 +25,105 @@
           >当前页面展示来源候选，不代表官方上市总体、稳定证券身份、交易状态或选股结论。入选、行业和名称能力尚未接通。</span
         >
       </section>
+      <section
+        class="panel profile-browser"
+        aria-labelledby="profileBrowserTitle"
+      >
+        <div class="panel-head">
+          <div>
+            <h2 id="profileBrowserTitle">已持久化来源代码价格画像</h2>
+            <p>
+              SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE ·
+              只查询精确P03来源版本和画像修订；不是正式上市Universe或P05结果。
+            </p>
+          </div>
+          <span id="profileCount" class="count">等待PG画像目录</span>
+        </div>
+        <div class="profile-controls">
+          <label
+            >已保存的日期 / 来源 / 窗口版本<select
+              id="profileSnapshotSelect"
+              disabled
+            >
+              <option>正在读取PG画像目录…</option>
+            </select></label
+          ><label
+            >精确来源代码<input
+              id="profileSymbolInput"
+              placeholder="可留空；例如SH.600000"
+              autocomplete="off"
+              maxlength="9" /></label
+          ><label
+            >市场<select id="profileMarketSelect">
+              <option value="ALL">沪深全部</option>
+              <option value="SH">上海</option>
+              <option value="SZ">深圳</option>
+            </select></label
+          ><label
+            >板别<select id="profileBoardSelect">
+              <option value="ALL">主板与创业板</option>
+              <option value="MAIN_BOARD">主板</option>
+              <option value="GEM">创业板</option>
+            </select></label
+          ><label
+            >目标日Bar<select id="profileBarStatusSelect">
+              <option value="ALL">全部状态</option>
+              <option value="TDX_TARGET_BAR_PRESENT">有Bar</option>
+              <option value="TDX_TARGET_BAR_MISSING">目标日缺Bar</option>
+              <option value="TDX_READ_FAILED">读取失败</option>
+            </select></label
+          ><label
+            >价格窗口<select id="profileWindowStatusSelect">
+              <option value="ALL">全部状态</option>
+              <option value="USABLE">MA20与ATR20可用</option>
+              <option value="TARGET_MISSING">目标日缺Bar</option>
+              <option value="HISTORY_ROW_NOT_STORED">历史Raw行未保存</option>
+              <option value="INSUFFICIENT_VALID_BARS">有效Bar不足</option>
+              <option value="PRICE_FIELDS_UNKNOWN">价格字段未知</option>
+              <option value="READ_FAILED">目标读取失败</option>
+            </select></label
+          ><button id="searchProfiles" type="button">查询画像</button>
+        </div>
+        <div id="profileMessage" class="population" role="status">
+          正在读取真实PG已保存画像版本。
+        </div>
+        <div class="table-wrap">
+          <table class="profile-table">
+            <thead>
+              <tr>
+                <th>来源代码</th>
+                <th>市场 / 板别</th>
+                <th>目标日Bar</th>
+                <th>PG窗口覆盖</th>
+                <th>MA20</th>
+                <th>ATR20</th>
+                <th>CLV</th>
+                <th>价格状态 / 原因</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody id="profileRows">
+              <tr>
+                <td colspan="9" class="muted">请选择已保存的PG画像版本。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="profilePrev" class="quiet" disabled>上一页</button>
+          <span id="profilePageStatus">—</span>
+          <div class="pager-actions">
+            <button id="profileNext" class="quiet" disabled>下一页</button>
+            <button id="profileLast" class="quiet" disabled>末页</button>
+          </div>
+        </div>
+        <section
+          id="profileDetail"
+          class="profile-detail"
+          hidden
+          aria-live="polite"
+        ></section>
+      </section>
       <section class="panel">
         <div class="panel-head">
           <div>

@@ -342,6 +342,62 @@ footer {
     font-size: 12px;
   }
 }
+.profile-controls {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(145px, 1fr));
+  gap: 11px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+.profile-controls button {
+  min-height: 42px;
+}
+.profile-table {
+  min-width: 1140px;
+}
+.profile-detail {
+  margin-top: 16px;
+  padding: 14px;
+  border: 1px solid #cfdae2;
+  border-radius: 9px;
+  background: #f8fafb;
+}
+.profile-detail h3 {
+  margin-top: 10px;
+}
+.profile-detail-meta {
+  display: grid;
+  grid-template-columns: minmax(150px, 0.28fr) minmax(0, 1fr);
+  gap: 5px 10px;
+  font-size: 12px;
+}
+.profile-detail-meta dt {
+  color: #647987;
+}
+.profile-detail-meta dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.profile-detail code {
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1050px) {
+  .profile-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+@media (max-width: 620px) {
+  .profile-controls {
+    grid-template-columns: 1fr;
+  }
+  .profile-detail-meta {
+    grid-template-columns: 1fr;
+    gap: 1px;
+  }
+  .profile-detail-meta dd {
+    margin-bottom: 7px;
+  }
+}
 .message.success {
   background: #e9f7ef;
   color: #20683c;

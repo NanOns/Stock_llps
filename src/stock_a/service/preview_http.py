@@ -29,6 +29,11 @@ from stock_a.application.pg_research import (
     PgResearchBindingError,
     read_sealed_source_context,
 )
+from stock_a.application.pg_price_profiles import (
+    PgPriceProfileError,
+    query_source_symbol_price_profiles,
+    source_symbol_price_profile_snapshots,
+)
 from stock_a.application.source_ingress import build_source_ingress_plan
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
@@ -472,6 +477,24 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             )
             self._error(PreviewHttpError(status, error.code, str(error)))
             return
+        if isinstance(error, PgPriceProfileError):
+            if error.code.endswith("INVALID") or error.code in {
+                "PROFILE_PAGE_INVALID",
+                "PROFILE_FILTER_INVALID",
+                "PROFILE_SOURCE_SET_ID_INVALID",
+                "PROFILE_REVISION_INVALID",
+                "PROFILE_SYMBOL_INVALID",
+            }:
+                status = 400
+            elif error.code in {
+                "PROFILE_SOURCE_SET_NOT_FOUND",
+                "PROFILE_SNAPSHOT_INCOMPLETE",
+            }:
+                status = 404
+            else:
+                status = 503
+            self._error(PreviewHttpError(status, error.code, str(error)))
+            return
         if isinstance(error, RawSourcePgError):
             invalid = error.code.endswith("INVALID") or error.code in {
                 "PG_QUERY_KEY_INVALID",
@@ -598,6 +621,102 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "source_recalculated": False,
                     },
                 )
+                return
+            if parsed.path == "/api/source-symbol-price-profiles/snapshots":
+                if parsed.query:
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_QUERY_INVALID",
+                        "画像版本目录不接受隐式筛选或latest参数",
+                    )
+                snapshots = source_symbol_price_profile_snapshots(
+                    self.preview_server.state.config
+                )
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE",
+                        "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
+                        "snapshots": snapshots["snapshots"],
+                        "database_write": False,
+                        "ddl_executed": False,
+                    },
+                )
+                return
+            if parsed.path == "/api/source-symbol-price-profiles":
+                values = _query(
+                    self.path,
+                    {
+                        "target_session",
+                        "source_set_id",
+                        "package_sha256",
+                        "profile_revision",
+                        "offset",
+                        "limit",
+                        "market",
+                        "board",
+                        "target_bar_status",
+                        "price_window_status",
+                        "symbol",
+                        "core_field",
+                        "core_quality",
+                    },
+                )
+                required = {
+                    "target_session",
+                    "source_set_id",
+                    "package_sha256",
+                    "profile_revision",
+                }
+                if not required.issubset(values):
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_QUERY_REQUIRED",
+                        "画像查询必须显式绑定日期、source_set、包SHA和画像修订",
+                    )
+                target = _iso_date(values["target_session"])
+                package_sha = _sha(values["package_sha256"])
+                offset = _nonnegative_int(values.get("offset", "0"), "offset")
+                limit = _positive_int(
+                    _nonnegative_int(values.get("limit", "100"), "limit", 100) or 0,
+                    "limit",
+                    100,
+                )
+                symbol = _symbol(values["symbol"]) if "symbol" in values else None
+                result = query_source_symbol_price_profiles(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    source_set_id=values["source_set_id"],
+                    package_sha256=package_sha,
+                    profile_revision=values["profile_revision"],
+                    offset=offset,
+                    limit=limit,
+                    market=values.get("market", "ALL"),
+                    board=values.get("board", "ALL"),
+                    target_bar_status=values.get("target_bar_status", "ALL"),
+                    price_window_status=values.get("price_window_status", "ALL"),
+                    source_symbol=symbol,
+                    core_field=values.get("core_field"),
+                    core_quality=values.get("core_quality"),
+                )
+                if result["status"] == "NO_MATCH":
+                    raise PreviewHttpError(
+                        404,
+                        "PROFILE_NO_MATCH",
+                        "PG中没有满足这组精确来源版本与筛选条件的画像记录",
+                    )
+                result.update(
+                    {
+                        "ok": True,
+                        "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE",
+                        "database_write": False,
+                        "ddl_executed": False,
+                        "source_zip_opened": False,
+                        "baostock_called": False,
+                    }
+                )
+                self._send_json(200, result)
                 return
             if parsed.path == "/api/preview/chain-readiness":
                 values = _query(self.path, {"target_session", "package_sha256"})
