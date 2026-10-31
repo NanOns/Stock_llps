@@ -51,6 +51,9 @@ const labels = {
   PRICE_FIELDS_UNKNOWN: "价格字段未知",
   RESEARCH_PREVIEW_NON_PIT: "来源代码非PIT研究",
   CONSUMER_FAILED: "内核消费失败",
+  COMPLETE: "完整闭合",
+  PARTIAL: "部分覆盖",
+  UNFINISHED: "周期未闭合",
 };
 const profileLabels = {
   "profile.trend": "趋势",
@@ -873,6 +876,122 @@ function renderFields(parent, fields, select) {
     tableRow(parent, [name, field.value, field.quality, field.reason]);
   }
 }
+function formatOhlc(ohlc) {
+  if (!ohlc || ohlc.open == null) return "未闭合，不展示部分OHLC";
+  return `O ${text(ohlc.open)} · H ${text(ohlc.high)} · L ${text(ohlc.low)} · C ${text(ohlc.close)}`;
+}
+function renderRawPeriodRows(parent, periods) {
+  parent.replaceChildren();
+  for (const period of periods || []) {
+    const row = tableRow(parent, [
+      `${period.period_key} · ${period.calendar_start_session}—${period.calendar_end_session}`,
+      `${period.calendar_closed ? "日历已闭合" : "未闭合"} · ${text(period.coverage_status)}${period.reason_codes?.length ? ` · ${period.reason_codes.join(" / ")}` : ""}`,
+      formatOhlc(period.ohlc),
+      `${period.valid_price_bar_count}/${period.calendar_expected_session_count} · 窗口内 ${period.elapsed_expected_session_count}`,
+      `${period.target_missing_count} / ${period.read_failed_count} / ${period.missing_history_count}`,
+      "",
+    ]);
+    const detailCell = row.lastElementChild;
+    if (!period.calendar_closed || !period.daily_rows?.length) {
+      detailCell.textContent = "无闭合周期明细";
+      continue;
+    }
+    const details = document.createElement("details");
+    const summary = document.createElement("summary");
+    summary.textContent = `展开 ${period.daily_rows.length} 个会话的来源与质量`;
+    const wrap = document.createElement("div");
+    wrap.className = "table-wrap period-detail-wrap";
+    const table = document.createElement("table");
+    table.className = "period-detail-table";
+    const head = document.createElement("thead");
+    tableRow(head, [
+      "交易会话",
+      "Bar状态",
+      "价格质量 / 原因",
+      "原始OHLC",
+      "包SHA-256",
+      "捕获 / 内容 / 条目SHA",
+    ]);
+    const body = document.createElement("tbody");
+    for (const daily of period.daily_rows) {
+      const dailyOhlc = daily.valid_price_bar
+        ? `O ${text(daily.open)} · H ${text(daily.high)} · L ${text(daily.low)} · C ${text(daily.close)}`
+        : "无有效OHLC";
+      tableRow(body, [
+        daily.session,
+        `${text(daily.bar_status)} · ${text(daily.bar_reason)}`,
+        `${text(daily.price_quality)} · ${text(daily.price_reason)}`,
+        dailyOhlc,
+        daily.package_sha256,
+        `${text(daily.source_capture_id)} · ${text(daily.source_content_id)} · ${text(daily.source_entry_sha256)}`,
+      ]);
+    }
+    table.append(head, body);
+    wrap.append(table);
+    details.append(summary, wrap);
+    detailCell.append(details);
+  }
+  if (!periods?.length) {
+    tableRow(parent, [
+      "无周期",
+      "官方日历或Raw历史窗口没有可展示周期。",
+      "",
+      "",
+      "",
+      "",
+    ]);
+  }
+}
+function renderRawPeriods(data, errorMessage = null) {
+  const status = $("rawPeriodStatus");
+  const identity = $("rawPeriodIdentity");
+  const trends = $("rawPeriodTrends");
+  if (!data) {
+    status.textContent = `来源代码级周期观察未返回：${errorMessage || "未知错误"}。每日Core结果仍独立可用。`;
+    identity.textContent = "";
+    trends.replaceChildren();
+    renderRawPeriodRows($("rawWeekRows"), []);
+    renderRawPeriodRows($("rawMonthRows"), []);
+    return;
+  }
+  const window = data.history_window;
+  status.textContent =
+    `来源代码级 ${data.research_mode} · ${data.price_coordinate} · ${data.pit_status}；` +
+    `窗口 ${window.start_session} 至 ${window.end_session}，官方会话 ${window.official_session_count}，` +
+    `PG Raw 行 ${window.stored_raw_row_count}，有效价格Bar ${window.valid_price_bar_count}，` +
+    `缺Bar ${window.target_missing_count}，读取失败 ${window.read_failed_count}，` +
+    `未保存会话 ${window.missing_history_sessions.length}。`;
+  identity.textContent =
+    `${data.source_symbol} · 目标日 ${data.target_session} · 包SHA ${data.package_sha256} · ` +
+    `日历 ${data.calendar_revision} · 复权/公司行为 ${data.adjustment_status}/${data.corporate_action_status} · ` +
+    `正式闭周/月 ${data.formal_period_profile.closed_week}/${data.formal_period_profile.closed_month}：${data.formal_period_profile.reason}`;
+  trends.replaceChildren();
+  for (const kind of ["week", "month"]) {
+    const item = data.trends[kind];
+    const card = document.createElement("div");
+    card.className = "period-trend-card";
+    appendText(
+      card,
+      "strong",
+      kind === "week" ? "闭合周趋势观察" : "闭合月趋势观察",
+    );
+    appendText(
+      card,
+      "span",
+      item.status === "OBSERVED"
+        ? `${item.value} · ${item.input_period_keys.join(" → ")} · ${item.rule_id}`
+        : `UNKNOWN · ${item.complete_period_count}/${item.required_period_count} 个连续完整闭合周期 · ${item.reason}`,
+    );
+    appendText(
+      card,
+      "small",
+      "仅为NON_PIT_RAW_DIAGNOSTIC；不代表正式Profile或交易信号。",
+    );
+    trends.append(card);
+  }
+  renderRawPeriodRows($("rawWeekRows"), data.periods.week);
+  renderRawPeriodRows($("rawMonthRows"), data.periods.month);
+}
 const coreNames = [
   "core.ma20",
   "core.ma60",
@@ -975,6 +1094,16 @@ async function queryStock(event) {
         component.value,
         component.reason,
       ]);
+    }
+    try {
+      const periodData = await api(
+        `/api/source-symbol/raw-periods?${new URLSearchParams({ ...v, symbol })}`,
+      );
+      if (requestId !== state.stockRequest) return;
+      renderRawPeriods(periodData);
+    } catch (error) {
+      if (requestId !== state.stockRequest) return;
+      renderRawPeriods(null, error.message);
     }
   } catch (error) {
     if (requestId !== state.stockRequest) return;

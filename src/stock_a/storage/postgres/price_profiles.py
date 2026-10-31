@@ -12,7 +12,7 @@ from uuid import UUID
 from .source_raw import RawSourcePgError, _transaction
 
 
-MAX_PROFILE_ROWS_PER_INSERT = 4940
+MAX_PROFILE_ROWS_PER_BATCH = 5000
 INSERT_CHUNK_SIZE = 50
 _CORE_COLUMN_NAMES = (
     "ma5",
@@ -101,6 +101,15 @@ class PriceProfilePgError(Exception):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
+
+
+def validate_profile_batch_size(row_count: int) -> None:
+    """验证受控写入批次容量；业务分母仍由精确PG来源版本决定。"""
+    if type(row_count) is not int or not 1 <= row_count <= MAX_PROFILE_ROWS_PER_BATCH:
+        raise PriceProfilePgError(
+            "PROFILE_BATCH_LIMIT_EXCEEDED",
+            f"画像写入批次须为1至{MAX_PROFILE_ROWS_PER_BATCH}条",
+        )
 
 
 def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
@@ -240,10 +249,7 @@ def insert_profile_records_in_transaction(
     """用受控批量INSERT返回数据库实际写入的来源代码与内容摘要。"""
     if not isinstance(records, (tuple, list)) or not records:
         raise PriceProfilePgError("PROFILE_BATCH_EMPTY", "价格画像批次不能为空")
-    if len(records) > MAX_PROFILE_ROWS_PER_INSERT:
-        raise PriceProfilePgError(
-            "PROFILE_BATCH_LIMIT_EXCEEDED", "画像写入超过单日授权上限"
-        )
+    validate_profile_batch_size(len(records))
     prepared = [_normalize_record(item) for item in records]
     symbols = [item["source_symbol"] for item in prepared]
     if len(set(symbols)) != len(symbols):
@@ -283,11 +289,8 @@ def persist_profile_records(
     """同一SERIALIZABLE事务逐键核对内容后只INSERT缺失记录。"""
     if not isinstance(records, (tuple, list)) or not records:
         raise PriceProfilePgError("PROFILE_BATCH_EMPTY", "价格画像批次不能为空")
+    validate_profile_batch_size(len(records))
     prepared = [_normalize_record(item) for item in records]
-    if len(prepared) > MAX_PROFILE_ROWS_PER_INSERT:
-        raise PriceProfilePgError(
-            "PROFILE_BATCH_LIMIT_EXCEEDED", "画像写入超过单日授权上限"
-        )
     first = prepared[0]
     batch_key = (
         first["namespace_id"],

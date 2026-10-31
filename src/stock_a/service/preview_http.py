@@ -50,6 +50,13 @@ from stock_a.storage.postgres.source_set_candidate import (
 )
 from stock_a.research import core as research_core
 from stock_a.research import entry as research_entry
+from stock_a.research import raw_periods as research_raw_periods
+from stock_a.research.raw_periods import (
+    build_source_symbol_raw_periods,
+    evaluate_raw_period_trend,
+    raw_period_payload,
+    summarize_raw_history_rows,
+)
 
 
 from stock_a.service.readiness import build_chain_readiness_payload
@@ -287,6 +294,77 @@ def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _preview_source_context(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    namespace_id: str,
+    target_raw_rows: Sequence[Mapping[str, Any]],
+    expected_raw_row_count: int | None = None,
+) -> dict[str, Any]:
+    """P03存在时精确绑定；不存在时只披露Raw查询身份并保留正式状态未知。"""
+    unavailable_code = None
+    try:
+        return read_sealed_source_context(
+            config,
+            target_session=target_session,
+            package_sha256=package_sha256,
+            namespace_id=namespace_id,
+            target_raw_rows=target_raw_rows,
+            expected_raw_row_count=expected_raw_row_count,
+        )
+    except PgResearchBindingError as error:
+        if error.code != "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE":
+            raise
+        unavailable_code = error.code
+    target_rows = [
+        row
+        for row in target_raw_rows
+        if row.get("session_date") == target_session
+        or row.get("session_date") == target_session.isoformat()
+    ]
+    if expected_raw_row_count is None and not target_rows:
+        raise PgResearchBindingError(
+            "PG_RESEARCH_TARGET_RAW_UNAVAILABLE",
+            "缺少精确目标日Raw行；不能创建来源代码研究上下文。",
+        )
+    if any(
+        row.get("package_sha256") != package_sha256
+        or (
+            row.get("namespace_id") is not None
+            and str(row.get("namespace_id")) != namespace_id
+        )
+        for row in target_rows
+    ):
+        raise PgResearchBindingError(
+            "PG_RESEARCH_RAW_IDENTITY_MISMATCH",
+            "目标日Raw行与显式namespace或包SHA不匹配。",
+        )
+    return {
+        "status": "UNKNOWN",
+        "target_session": target_session.isoformat(),
+        "package_sha256": package_sha256,
+        "namespace_id": namespace_id,
+        "source_set_id": None,
+        "revision_id": None,
+        "seal_status": "UNKNOWN_NO_P03_SOURCE_SET",
+        "durability_status": "UNKNOWN_NO_P04_READBACK",
+        "formal_source_set_status": "UNKNOWN",
+        "formal_source_set_reason": unavailable_code,
+        "source_content_id": None,
+        "source_capture_id": None,
+        "source_digest": None,
+        "source_raw_digest": None,
+        "raw_revalidation_proof_level": "UNKNOWN",
+        "target_raw_binding_count": len(target_rows),
+        "target_raw_binding_status": "EXACT_PG_RAW_QUERY_WITHOUT_P03_BINDING",
+        "database_write": False,
+        "ddl_executed": False,
+        "candidate_fallback": False,
+    }
+
+
 class _PreviewState:
     def __init__(self, *, research_cutoff: date) -> None:
         if type(research_cutoff) is not date:
@@ -313,6 +391,9 @@ class _PreviewState:
         ).hexdigest()
         self.entry_source_sha256 = hashlib.sha256(
             Path(research_entry.__file__).read_bytes()
+        ).hexdigest()
+        self.raw_period_source_sha256 = hashlib.sha256(
+            Path(research_raw_periods.__file__).read_bytes()
         ).hexdigest()
 
     def snapshot_identity(
@@ -865,7 +946,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PG_SOURCE_NO_MATCH",
                         "PG中没有该明确日期、来源包SHA与来源代码的Raw记录",
                     )
-                source_context = read_sealed_source_context(
+                source_context = _preview_source_context(
                     self.preview_server.state.config,
                     target_session=target,
                     package_sha256=package_sha,
@@ -887,6 +968,143 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "raw": raw,
                         "formal_source_set": source_context,
                         "database_write": False,
+                    },
+                )
+                return
+            if parsed.path == "/api/source-symbol/raw-periods":
+                values = _query(
+                    self.path, {"target_session", "package_sha256", "symbol"}
+                )
+                required = {"target_session", "package_sha256", "symbol"}
+                if set(values) != required:
+                    raise PreviewHttpError(
+                        400,
+                        "RAW_PERIOD_QUERY_REQUIRED",
+                        "RAW周期查询必须显式提供日期、完整SHA和来源代码",
+                    )
+                target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
+                package_sha = _sha(values["package_sha256"])
+                symbol = _symbol(values["symbol"])
+                resolved_target, sessions, calendar_revision = (
+                    resolve_pg_history_window(target.isoformat(), 75)
+                )
+                if resolved_target != target:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_DATE_INVALID",
+                        "目标日期未通过官方交易日历校验",
+                    )
+                history = read_raw_daily_history_stock(
+                    self.preview_server.state.config,
+                    source_symbol=symbol,
+                    target_session=target,
+                    package_sha256=package_sha,
+                    sessions=sessions,
+                )
+                calendar_payload, _metadata, _year_revision, calendar_sessions = (
+                    research_entry._load_calendar(target)
+                )
+                period_bars = build_source_symbol_raw_periods(
+                    target_session=target,
+                    session_dates=sessions,
+                    calendar_sessions=calendar_sessions,
+                    history_rows=history["history_rows"],
+                )
+                history_summary = summarize_raw_history_rows(
+                    session_dates=sessions,
+                    history_rows=history["history_rows"],
+                )
+                foundation = self.preview_server.state.profile_contract.get(
+                    "scope_bindings", {}
+                ).get("FOUNDATION_EOD", {})
+                profile_rules = foundation.get("profile_expression_registry", {})
+                field_registry = foundation.get("field_registry", [])
+                trends = {
+                    kind.lower(): evaluate_raw_period_trend(
+                        kind=kind,
+                        periods=period_bars[kind],
+                        target_session=target,
+                        calendar_id=calendar_payload["calendar_id"],
+                        calendar_revision=calendar_revision,
+                        producer_source_sha256=self.preview_server.state.raw_period_source_sha256,
+                        profile_rules=profile_rules,
+                        field_registry=field_registry,
+                    )
+                    for kind in ("WEEK", "MONTH")
+                }
+
+                def trend_payload(item):
+                    return {
+                        "kind": item.kind,
+                        "rule_id": item.rule_id,
+                        "status": item.status,
+                        "value": item.value,
+                        "reason": item.reason,
+                        "required_period_count": item.required_period_count,
+                        "complete_period_count": item.complete_period_count,
+                        "input_period_keys": list(item.input_period_keys),
+                    }
+
+                rows = history["history_rows"]
+                if history_summary["missing_history_count"] != len(
+                    history["missing_history_sessions"]
+                ):
+                    raise PreviewHttpError(
+                        500,
+                        "RAW_HISTORY_SUMMARY_MISMATCH",
+                        "Raw历史缺失会话汇总与PG读取结果不一致",
+                    )
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "research_mode": "NON_PIT_RAW_DIAGNOSTIC",
+                        "identity_status": "SOURCE_SYMBOL_ONLY",
+                        "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
+                        "listing_status": "LISTING_STATUS_UNKNOWN",
+                        "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
+                        "official_listing_universe_status": "UNKNOWN",
+                        "pit_status": "NON_PIT_RETROSPECTIVE",
+                        "price_coordinate": "RAW_UNADJUSTED",
+                        "adjustment_status": "UNKNOWN_NOT_ADJUSTED",
+                        "corporate_action_status": "UNKNOWN_NOT_BOUND",
+                        "target_session": target.isoformat(),
+                        "source_symbol": symbol,
+                        "package_sha256": package_sha,
+                        "calendar_revision": calendar_revision,
+                        "history_window": {
+                            "start_session": sessions[0].isoformat(),
+                            "end_session": sessions[-1].isoformat(),
+                            **history_summary,
+                            "missing_history_sessions": history[
+                                "missing_history_sessions"
+                            ],
+                        },
+                        "periods": {
+                            "week": [
+                                raw_period_payload(period)
+                                for period in period_bars["WEEK"]
+                            ],
+                            "month": [
+                                raw_period_payload(period)
+                                for period in period_bars["MONTH"]
+                            ],
+                        },
+                        "trends": {
+                            name: trend_payload(item) for name, item in trends.items()
+                        },
+                        "formal_period_profile": {
+                            "closed_week": "UNKNOWN",
+                            "closed_month": "UNKNOWN",
+                            "reason": "NON_PIT_RAW_SOURCE_SYMBOL_NOT_FORMAL_CANONICAL_SELECTION",
+                        },
+                        "source_zip_opened": False,
+                        "source_recalculated": False,
+                        "database_write": False,
+                        "ddl_executed": False,
                     },
                 )
                 return
@@ -946,7 +1164,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PG_SOURCE_NO_MATCH",
                         "PG中没有该明确日期和来源包SHA的Raw来源版本",
                     )
-                source_context = read_sealed_source_context(
+                source_context = _preview_source_context(
                     self.preview_server.state.config,
                     target_session=target,
                     package_sha256=package_sha,
@@ -1075,7 +1293,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 package_sha256=package_sha,
                 sessions=sessions,
             )
-            source_context = read_sealed_source_context(
+            source_context = _preview_source_context(
                 self.preview_server.state.config,
                 target_session=target,
                 package_sha256=package_sha,

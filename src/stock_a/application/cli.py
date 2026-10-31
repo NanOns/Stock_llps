@@ -1049,7 +1049,7 @@ def _parser() -> argparse.ArgumentParser:
     source_p04.add_argument(
         "--audit-mode",
         action="store_true",
-        help="显式逐行读取Raw并重算4940行封口摘要，执行深度核验",
+        help="显式逐行读取Raw并按该来源版本的实际行数重算封口摘要",
     )
     preview_serve = commands.add_parser(
         "preview-serve",

@@ -146,6 +146,7 @@ button:disabled {
   background: #f1f6f8;
   color: #314d5e;
   font-size: 13px;
+  overflow-wrap: anywhere;
 }
 .columns {
   display: grid;
@@ -657,5 +658,68 @@ button {
   }
   .chain-group > summary {
     display: block;
+  }
+}
+.raw-period-research {
+  margin-top: 24px;
+  border-top: 1px solid #dfe7ec;
+  padding-top: 14px;
+}
+.raw-period-research > h3 {
+  margin-bottom: 6px;
+}
+.raw-period-research > h4 {
+  margin: 18px 0 8px;
+}
+#rawPeriodIdentity {
+  overflow-wrap: anywhere;
+  font-size: 12px;
+}
+.period-trends {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 9px;
+  margin-top: 10px;
+}
+.period-trend-card {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+  border: 1px solid #dfe7ec;
+  border-radius: 8px;
+  padding: 10px;
+  overflow-wrap: anywhere;
+}
+.period-trend-card strong {
+  color: #1e4053;
+}
+.period-trend-card span,
+.period-trend-card small {
+  color: #526977;
+}
+.period-table {
+  min-width: 980px;
+}
+.period-table td,
+.period-table th {
+  vertical-align: top;
+}
+.period-table details summary {
+  cursor: pointer;
+  color: #1d5f81;
+}
+.period-detail-wrap {
+  max-width: min(1100px, 82vw);
+  margin-top: 8px;
+}
+.period-detail-table {
+  min-width: 1120px;
+}
+@media (max-width: 620px) {
+  .period-trends {
+    grid-template-columns: 1fr;
+  }
+  .period-detail-wrap {
+    max-width: 78vw;
   }
 }

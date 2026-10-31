@@ -392,6 +392,68 @@
                 <tbody id="profileRows"></tbody>
               </table>
             </div>
+            <section
+              class="raw-period-research"
+              aria-labelledby="rawPeriodTitle"
+            >
+              <h3 id="rawPeriodTitle">来源代码后验周/月K线与趋势观察</h3>
+              <p class="muted">
+                NON_PIT_RAW_DIAGNOSTIC · 自然周/月按官方交易日历聚合真实PG Raw；
+                未闭合周期不展示部分OHLC，缺Bar不推断停牌或退市。
+              </p>
+              <div id="rawPeriodStatus" class="population" role="status">
+                正在读取该来源代码的真实Raw周期观察。
+              </div>
+              <div id="rawPeriodIdentity" class="population"></div>
+              <div id="rawPeriodTrends" class="period-trends"></div>
+              <h4>自然周</h4>
+              <div class="table-wrap">
+                <table class="period-table">
+                  <thead>
+                    <tr>
+                      <th>周期</th>
+                      <th>闭合 / 覆盖</th>
+                      <th>OHLC · RAW_UNADJUSTED</th>
+                      <th>有效Bar / 日历会话</th>
+                      <th>缺Bar / 读取失败 / 未保存</th>
+                      <th>真实来源日线</th>
+                    </tr>
+                  </thead>
+                  <tbody id="rawWeekRows">
+                    <tr>
+                      <td colspan="6" class="muted">等待周线研究读取。</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <h4>自然月</h4>
+              <div class="table-wrap">
+                <table class="period-table">
+                  <thead>
+                    <tr>
+                      <th>周期</th>
+                      <th>闭合 / 覆盖</th>
+                      <th>OHLC · RAW_UNADJUSTED</th>
+                      <th>有效Bar / 日历会话</th>
+                      <th>缺Bar / 读取失败 / 未保存</th>
+                      <th>真实来源日线</th>
+                    </tr>
+                  </thead>
+                  <tbody id="rawMonthRows">
+                    <tr>
+                      <td colspan="6" class="muted">等待月线研究读取。</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="unavailable">
+                <strong>正式资格继续未知</strong>
+                <span>
+                  复权共坐标、稳定 security_id、公司行为选集、上市总体与严格 PIT
+                  未由本页面证明；正式 profile.closed_week/month 保持 UNKNOWN。
+                </span>
+              </div>
+            </section>
             <div class="unavailable">
               <strong>当前未连接能力</strong
               ><span

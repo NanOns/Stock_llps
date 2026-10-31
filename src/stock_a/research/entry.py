@@ -2235,7 +2235,7 @@ def _build_profile_preview(
                     "rule_id": rule_id,
                     "expression_ref": rule.get("expression_ref"),
                     "status": unavailable["status"],
-                    "quality": unavailable["quality"],
+                    "quality": unavailable.get("quality", unavailable["status"]),
                     "production_eligibility": "NOT_ELIGIBLE",
                     "reason": unavailable["reason"],
                     "missing_inputs": missing_inputs,
