@@ -14,6 +14,7 @@ import threading
 from pathlib import Path
 from typing import Any, Mapping
 from urllib.parse import parse_qs, urlsplit
+from uuid import UUID
 
 from stock_a.contracts import DayChainContractError, load_day_chain_contract
 from stock_a.application.runtime_config import (
@@ -35,7 +36,11 @@ from stock_a.application.pg_price_profiles import (
     query_source_symbol_price_profile_changes,
     source_symbol_price_profile_snapshots,
 )
-from stock_a.application.source_ingress import build_source_ingress_plan
+from stock_a.application.source_ingress import (
+    SourceIngressError,
+    build_source_ingress_plan,
+)
+from stock_a.application.source_set_candidate import SourceSetCandidateApplicationError
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
     read_raw_daily_catalog,
@@ -69,6 +74,7 @@ _MAX_BODY_BYTES = 8192
 _MAX_PAGE_SIZE = 50
 _MAX_OFFSET = 2**31 - 1
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
+_SYMBOL_SEARCH = re.compile(r"^[A-Za-z0-9.]{1,9}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _PROFILE_CONTRACT_NAME = "STOCK_A_DAY_CHAIN_R11"
@@ -124,6 +130,16 @@ def _symbol(value: Any) -> str:
             400, "PREVIEW_SYMBOL_INVALID", "来源代码必须符合SH.六位数字或SZ.六位数字"
         )
     return value
+
+
+def _symbol_search(value: Any) -> str:
+    if not isinstance(value, str) or _SYMBOL_SEARCH.fullmatch(value) is None:
+        raise PreviewHttpError(
+            400,
+            "PREVIEW_SYMBOL_SEARCH_INVALID",
+            "来源代码搜索只接受1至9位字母、数字和点号",
+        )
+    return value.upper()
 
 
 def _positive_int(value: Any, field: str, maximum: int) -> int:
@@ -770,7 +786,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 _require_research_cutoff(
                     after_session, self.preview_server.state.research_cutoff
                 )
-                symbol = _symbol(values["symbol"]) if "symbol" in values else None
+                symbol = (
+                    _symbol_search(values["symbol"]) if values.get("symbol") else None
+                )
                 result = query_source_symbol_price_profile_changes(
                     self.preview_server.state.config,
                     before_session=before_session,
@@ -902,11 +920,21 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PG_SOURCE_NO_MATCH",
                         "当前DEV namespace中没有该明确日期和来源包SHA的Raw来源版本",
                     )
-                source_ingress_result = build_source_ingress_plan(
-                    self.preview_server.state.config,
-                    target_session=target,
-                    package_sha256=package_sha,
-                )
+                try:
+                    source_ingress_result = build_source_ingress_plan(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        package_sha256=package_sha,
+                    )
+                except (
+                    SourceIngressError,
+                    SourceSetCandidateApplicationError,
+                ) as error:
+                    raise PreviewHttpError(
+                        409,
+                        "PREVIEW_SOURCE_INGRESS_UNAVAILABLE",
+                        f"来源准备状态无法核验：{error}",
+                    ) from error
                 checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
                 payload = build_chain_readiness_payload(
                     self.preview_server.state.profile_contract,
@@ -1271,11 +1299,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     400, "PREVIEW_JSON_INVALID", "请求体不是有效UTF-8 JSON或含重复字段"
                 ) from error
             expected = {"symbol", "target_session", "package_sha256", "session_count"}
-            if not isinstance(body, dict) or set(body) != expected:
+            allowed_timeline = expected | {"source_set_id", "namespace_id"}
+            valid_body = isinstance(body, dict) and (
+                set(body) == expected
+                or (
+                    post_path == "/api/preview/stock-timeline"
+                    and set(body) == allowed_timeline
+                )
+            )
+            if not valid_body:
                 raise PreviewHttpError(
                     400,
                     "PREVIEW_BODY_FIELDS_INVALID",
-                    "请求体必须且只能包含symbol、target_session、package_sha256、session_count",
+                    "请求体须包含symbol、target_session、package_sha256、session_count；轨迹可同时绑定source_set_id与namespace_id",
                 )
             symbol = _symbol(body["symbol"])
             target_text = body["target_session"]
@@ -1283,6 +1319,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             _require_research_cutoff(target, self.preview_server.state.research_cutoff)
             package_sha = _sha(body["package_sha256"])
             session_count = _positive_int(body["session_count"], "session_count", 75)
+            expected_source_set_id = None
+            expected_namespace_id = None
+            if set(body) == allowed_timeline:
+                try:
+                    expected_source_set_id = str(UUID(body["source_set_id"]))
+                    expected_namespace_id = str(UUID(body["namespace_id"]))
+                except (ValueError, TypeError, AttributeError) as error:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_SOURCE_IDENTITY_INVALID",
+                        "轨迹来源身份须使用有效的source_set_id和namespace_id",
+                    ) from error
             resolved_target, sessions, calendar_revision = resolve_pg_history_window(
                 target.isoformat(), session_count
             )
@@ -1311,12 +1359,42 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     namespace_id=history["namespace_id"],
                     profile_contract=self.preview_server.state.profile_contract,
                 )
+                source_context = _preview_source_context(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    package_sha256=package_sha,
+                    namespace_id=history["namespace_id"],
+                    target_raw_rows=history["history_rows"],
+                )
+                if expected_namespace_id is not None and (
+                    expected_namespace_id != history["namespace_id"]
+                    or expected_source_set_id != source_context["source_set_id"]
+                    or source_context["status"] != "AVAILABLE"
+                ):
+                    raise PreviewHttpError(
+                        409,
+                        "PREVIEW_SOURCE_IDENTITY_MISMATCH",
+                        "轨迹返回的namespace或SEALED source_set与变化快照不一致",
+                    )
+                identity = self.preview_server.state.snapshot_identity(
+                    namespace_id=history["namespace_id"],
+                    target_session=target.isoformat(),
+                    package_sha256=package_sha,
+                    session_count=session_count,
+                    session_start=sessions[0].isoformat(),
+                    calendar_revision=calendar_revision,
+                    source_set_id=source_context["source_set_id"],
+                )
+                result["snapshot_identity"] = identity
+                result["formal_source_set"] = source_context
                 result["selection"] = {
                     "source_symbol": symbol,
                     "target_session": target.isoformat(),
                     "package_sha256": package_sha,
                     "session_count": session_count,
                     "calendar_revision": calendar_revision,
+                    "namespace_id": history["namespace_id"],
+                    "source_set_id": source_context["source_set_id"],
                 }
                 self._send_json(200, result)
                 return

@@ -20,6 +20,7 @@ const state = {
   changeTotal: 0,
   changeRequest: 0,
   changeSnapshots: [],
+  changeBinding: null,
   loading: false,
   timeline: null,
   timelineContext: null,
@@ -139,6 +140,7 @@ function selectedVersion() {
 }
 function clearResult() {
   $("stockResult").hidden = true;
+  $("stockResult").classList.remove("timeline-only");
   $("coreRows").replaceChildren();
   $("allCoreRows").replaceChildren();
   $("profileRows").replaceChildren();
@@ -677,6 +679,7 @@ async function loadReadiness() {
   }
 }
 async function loadCatalog() {
+  invalidateTimeline();
   const catalogRequest = ++state.catalogRequest;
   state.pageRequest++;
   state.readinessRequest++;
@@ -1033,6 +1036,7 @@ $("lastPage").addEventListener("click", () => {
 });
 async function queryStock(event) {
   event.preventDefault();
+  const requestId = ++state.stockRequest;
   const keepTimeline = state.timelineNavigation;
   state.timelineNavigation = false;
   if (!keepTimeline) {
@@ -1046,10 +1050,21 @@ async function queryStock(event) {
     setMessage("请先从真实PG目录选择目标日期和来源包版本。");
     return;
   }
-  const requestId = ++state.stockRequest,
-    key = `${v.target_session}|${v.package_sha256}`,
-    symbol = $("symbolInput").value.trim(),
-    count = Number($("windowInput").value);
+  const symbol = $("symbolInput").value.trim();
+  const count = Number($("windowInput").value);
+  const key = `${v.target_session}|${v.package_sha256}|${symbol}|${count}`;
+  const requestIsCurrent = () => {
+    const selected = selectedVersion();
+    return (
+      requestId === state.stockRequest &&
+      key ===
+        `${selected?.target_session}|${selected?.package_sha256}|${$("symbolInput").value.trim()}|${Number($("windowInput").value)}`
+    );
+  };
+  if (!symbol || !Number.isInteger(count) || count < 1 || count > 75) {
+    setMessage("来源代码与会话数无效；会话数须为1至75。");
+    return;
+  }
   clearResult();
   $("queryStock").disabled = true;
   setMessage("正在按显式日期、包SHA和窗口只读读取PG并计算现役Core/Profile…");
@@ -1057,12 +1072,7 @@ async function queryStock(event) {
     const raw = await api(
       `/api/preview/raw?${new URLSearchParams({ ...v, symbol })}`,
     );
-    if (
-      requestId !== state.stockRequest ||
-      key !==
-        `${selectedVersion()?.target_session}|${selectedVersion()?.package_sha256}`
-    )
-      return;
+    if (!requestIsCurrent()) return;
     const result = await api("/api/preview/stock", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -1073,12 +1083,7 @@ async function queryStock(event) {
         session_count: count,
       }),
     });
-    if (
-      requestId !== state.stockRequest ||
-      key !==
-        `${selectedVersion()?.target_session}|${selectedVersion()?.package_sha256}`
-    )
-      return;
+    if (!requestIsCurrent()) return;
     const a = raw.snapshot_identity,
       b = result.snapshot_identity;
     if (
@@ -1127,20 +1132,20 @@ async function queryStock(event) {
       const periodData = await api(
         `/api/source-symbol/raw-periods?${new URLSearchParams({ ...v, symbol })}`,
       );
-      if (requestId !== state.stockRequest) return;
+      if (!requestIsCurrent()) return;
       renderRawPeriods(periodData);
     } catch (error) {
-      if (requestId !== state.stockRequest) return;
+      if (!requestIsCurrent()) return;
       renderRawPeriods(null, error.message);
     }
     if (state.timeline) renderTimeline(state.timeline);
   } catch (error) {
-    if (requestId !== state.stockRequest) return;
+    if (!requestIsCurrent()) return;
     $("stockResult").hidden = Boolean(!keepTimeline || !state.timeline);
     setMessage(error.message);
     if (keepTimeline && state.timeline) renderTimeline(state.timeline);
   } finally {
-    if (requestId === state.stockRequest) $("queryStock").disabled = false;
+    if (requestIsCurrent()) $("queryStock").disabled = false;
   }
 }
 function selectedProfileSnapshot() {
@@ -1165,16 +1170,30 @@ function priorHighRelationLabel(relation) {
   };
   return labels[relation] || "UNKNOWN";
 }
-function openTimelineSession(sessionDate) {
+function invalidateTimeline(errorMessage = "") {
+  state.timelineRequest++;
+  state.timeline = null;
+  state.timelineContext = null;
+  $("queryTimeline").disabled = false;
+  renderTimeline(null, errorMessage);
+}
+function openTimelineSession(point) {
   const context = state.timelineContext;
-  if (!context || !state.timeline) return;
-  const value = `${sessionDate}|${context.package_sha256}`;
+  if (!context || !state.timeline || point.raw_row_present !== true) return;
+  const value = `${point.session_date}|${context.package_sha256}`;
   const select = $("versionSelect");
-  let option = Array.from(select.options).find((item) => item.value === value);
-  if (!option) {
-    option = new Option(`${sessionDate} · ${context.package_sha256}`, value);
-    select.add(option);
-  }
+  const option = Array.from(select.options).find(
+    (item) => item.value === value,
+  );
+  if (
+    !option ||
+    !state.versions.some(
+      (item) =>
+        item.session_date === point.session_date &&
+        item.package_sha256 === context.package_sha256,
+    )
+  )
+    return;
   state.timelineNavigation = true;
   $("symbolInput").value = context.symbol;
   $("windowInput").value = String(context.session_count);
@@ -1185,11 +1204,59 @@ function returnToTimelineCutoff() {
   const context = state.timelineContext;
   if (!context) return;
   const value = `${context.target_session}|${context.package_sha256}`;
+  if (
+    !Array.from($("versionSelect").options).some((item) => item.value === value)
+  )
+    return;
   state.timelineNavigation = true;
   $("symbolInput").value = context.symbol;
   $("windowInput").value = String(context.session_count);
   $("versionSelect").value = value;
   $("stockForm").requestSubmit();
+}
+function returnToChanges() {
+  const context = state.timelineContext;
+  const selection = context?.returnSelection;
+  if (!context || context.origin !== "change" || !selection) return;
+  const value = `${selection.target_session}|${selection.package_sha256}`;
+  if (
+    !Array.from($("versionSelect").options).some((item) => item.value === value)
+  )
+    return;
+  $("versionSelect").value = value;
+  $("symbolInput").value = selection.symbol;
+  $("windowInput").value = String(selection.session_count);
+  state.stockRequest++;
+  state.timelineRequest++;
+  state.timeline = null;
+  state.timelineContext = null;
+  state.timelineNavigation = false;
+  renderTimeline(null);
+  clearResult();
+  $("changeDetail").scrollIntoView({ block: "start" });
+}
+function renderTimelineReturnControls(context, selected) {
+  const returnRoot = $("timelineReturn");
+  if (context?.origin === "change") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = "返回画像变化详情";
+    button.addEventListener("click", returnToChanges);
+    returnRoot.append(button);
+  }
+  if (
+    context &&
+    selected &&
+    selected.target_session !== context.target_session
+  ) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = `返回轨迹截止日 ${context.target_session}`;
+    button.addEventListener("click", returnToTimelineCutoff);
+    returnRoot.append(button);
+  }
 }
 function renderTimeline(data, errorMessage = "") {
   const panel = $("timelinePanel");
@@ -1203,6 +1270,7 @@ function renderTimeline(data, errorMessage = "") {
     if (errorMessage) {
       panel.hidden = false;
       status.textContent = `历史轨迹未返回：${errorMessage}`;
+      renderTimelineReturnControls(state.timelineContext, selectedVersion());
     }
     return;
   }
@@ -1218,20 +1286,9 @@ function renderTimeline(data, errorMessage = "") {
     `不可比较 ${data.not_comparable_count} · 首次可评价 ${data.first_evaluable_count}次 ` +
     `（${data.first_evaluable_session || "尚无"}）。` +
     `事件：${counts || "无"}。${data.price_coordinate} / ${data.research_mode}；` +
-    `${data.producer || "stock_a.research.core:calculate_core"} · ${data.semantic_version || "CORE_PRIMITIVES_FIELDSET_R2"}。`;
-  const selected = selectedVersion();
-  if (
-    state.timelineContext &&
-    selected &&
-    selected.target_session !== state.timelineContext.target_session
-  ) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "quiet";
-    button.textContent = `返回轨迹截止日 ${state.timelineContext.target_session}`;
-    button.addEventListener("click", returnToTimelineCutoff);
-    returnRoot.append(button);
-  }
+    `${data.producer || "stock_a.research.core:calculate_core"} · ${data.semantic_version || "CORE_PRIMITIVES_FIELDSET_R2"}。` +
+    "身份SOURCE_SYMBOL_ONLY/NON_PIT；选股NOT_EVALUATED/NOT_CONNECTED；严格PIT、复权与RPS资格UNKNOWN；Raw候选数不等于官方上市总体。";
+  renderTimelineReturnControls(state.timelineContext, selectedVersion());
   for (const point of data.points || []) {
     const tr = document.createElement("tr");
     cell(tr, point.session_date);
@@ -1269,10 +1326,23 @@ function renderTimeline(data, errorMessage = "") {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "quiet";
-    button.textContent = "查看当日Core / 周月";
-    button.addEventListener("click", () =>
-      openTimelineSession(point.session_date),
+    const exactOption = state.versions.some(
+      (version) =>
+        version.session_date === point.session_date &&
+        version.package_sha256 === point.package_sha256,
     );
+    button.disabled = point.raw_row_present !== true || !exactOption;
+    if (!point.raw_row_present) {
+      button.textContent = "PG未保存，不可展开";
+      button.title =
+        "该官方会话没有此来源代码的PG Raw行，不会发起单日Core请求。";
+    } else if (!exactOption) {
+      button.textContent = "缺少精确目录版本";
+      button.title = "目录中没有同日期、同完整包SHA的版本，不能回退其他版本。";
+    } else {
+      button.textContent = "查看当日Core / 周月";
+      button.addEventListener("click", () => openTimelineSession(point));
+    }
     actionCell.append(button);
     tr.append(actionCell);
     rows.append(tr);
@@ -1280,23 +1350,41 @@ function renderTimeline(data, errorMessage = "") {
   if (!data.points?.length)
     tableRow(rows, ["无官方会话轨迹", "", "", "", "", "", "", "", ""]);
 }
-async function queryTimeline() {
+async function queryTimeline(binding = null) {
+  const requestId = ++state.timelineRequest;
   const version = selectedVersion();
   const symbol = $("symbolInput").value.trim();
   const sessionCount = Number($("windowInput").value);
   if (!version || !symbol || !Number.isInteger(sessionCount)) {
+    state.timeline = null;
+    state.timelineContext = null;
+    $("queryTimeline").disabled = false;
     renderTimeline(
       null,
       "请先选择目标日和完整来源包版本，并填写来源代码及会话数。",
     );
     return;
   }
-  const requestId = ++state.timelineRequest;
   state.timeline = null;
-  state.timelineContext = {
+  const context = {
     ...version,
     symbol,
     session_count: sessionCount,
+    namespace_id: binding?.namespace_id || null,
+    source_set_id: binding?.source_set_id || null,
+    origin: binding?.origin || "manual",
+    returnSelection: binding?.returnSelection || null,
+  };
+  state.timelineContext = context;
+  const requestKey = `${version.target_session}|${version.package_sha256}|${symbol}|${sessionCount}`;
+  const requestIsCurrent = () => {
+    const currentVersion = selectedVersion();
+    return (
+      requestId === state.timelineRequest &&
+      state.timelineContext === context &&
+      requestKey ===
+        `${currentVersion?.target_session}|${currentVersion?.package_sha256}|${$("symbolInput").value.trim()}|${Number($("windowInput").value)}`
+    );
   };
   $("queryTimeline").disabled = true;
   $("timelinePanel").hidden = false;
@@ -1312,17 +1400,30 @@ async function queryTimeline() {
         target_session: version.target_session,
         package_sha256: version.package_sha256,
         session_count: sessionCount,
+        ...(context.source_set_id && context.namespace_id
+          ? {
+              source_set_id: context.source_set_id,
+              namespace_id: context.namespace_id,
+            }
+          : {}),
       }),
     });
-    if (requestId !== state.timelineRequest) return;
+    if (!requestIsCurrent()) return;
+    if (
+      data.snapshot_identity?.namespace_id !== data.namespace_id ||
+      data.snapshot_identity?.target_session !== version.target_session ||
+      data.snapshot_identity?.package_sha256 !== version.package_sha256 ||
+      (context.source_set_id &&
+        data.snapshot_identity?.source_set_id !== context.source_set_id)
+    )
+      throw new Error("轨迹响应身份与精确变化快照不一致，已拒绝展示。");
     state.timeline = data;
     renderTimeline(data);
   } catch (error) {
-    if (requestId !== state.timelineRequest) return;
+    if (!requestIsCurrent()) return;
     renderTimeline(null, error.message);
   } finally {
-    if (requestId === state.timelineRequest)
-      $("queryTimeline").disabled = false;
+    if (requestIsCurrent()) $("queryTimeline").disabled = false;
   }
 }
 function clearProfileDetail() {
@@ -1464,6 +1565,115 @@ function resetChangeDetail() {
   $("changeDetail").hidden = true;
   $("changeDetail").replaceChildren();
 }
+function resolveChangeTimelineSide(item, side, binding, versions) {
+  const snapshot = binding?.[`${side}_snapshot`];
+  const member = item[`${side}_present`] === true;
+  const rawStored = item[`${side}_window_status`] !== "HISTORY_ROW_NOT_STORED";
+  const exactVersion = snapshot
+    ? versions.find(
+        (version) =>
+          version.session_date === snapshot.target_session &&
+          version.package_sha256 === snapshot.package_sha256,
+      )
+    : null;
+  return { snapshot, member, rawStored, exactVersion };
+}
+function changeTimelineSnapshot(item, side) {
+  return resolveChangeTimelineSide(
+    item,
+    side,
+    state.changeBinding,
+    state.versions,
+  );
+}
+function openChangeTimeline(item, side) {
+  const { snapshot, member, rawStored, exactVersion } = changeTimelineSnapshot(
+    item,
+    side,
+  );
+  if (!member || !snapshot?.complete || !rawStored || !exactVersion) return;
+  const selected = selectedVersion();
+  const fallback = state.changeBinding?.after_snapshot;
+  const returnDate = selected?.target_session || fallback?.target_session;
+  const returnSha = selected?.package_sha256 || fallback?.package_sha256;
+  if (
+    !returnDate ||
+    !returnSha ||
+    !state.versions.some(
+      (version) =>
+        version.session_date === returnDate &&
+        version.package_sha256 === returnSha,
+    )
+  )
+    return;
+  $("versionSelect").value =
+    `${snapshot.target_session}|${snapshot.package_sha256}`;
+  $("symbolInput").value = item.source_symbol;
+  $("windowInput").value = "75";
+  state.stockRequest++;
+  clearResult();
+  $("stockResult").classList.add("timeline-only");
+  $("stockResult").hidden = false;
+  $("resultTitle").textContent =
+    `${item.source_symbol} · ${snapshot.target_session}`;
+  $("resultMode").textContent =
+    "变化快照关联历史轨迹 · SOURCE_SYMBOL_ONLY · NON_PIT · RAW_UNADJUSTED";
+  $("snapshotId").textContent =
+    `source_set_id ${snapshot.source_set_id} · namespace ${state.changeBinding.namespace_id} · 包SHA ${snapshot.package_sha256}`;
+  $("windowText").textContent =
+    "此视图只读取该快照绑定的官方会话轨迹；每日Core/周月详情须从存在Raw行的轨迹点进入。";
+  state.timeline = null;
+  queryTimeline({
+    origin: "change",
+    source_set_id: snapshot.source_set_id,
+    namespace_id: state.changeBinding.namespace_id,
+    returnSelection: {
+      target_session: returnDate,
+      package_sha256: returnSha,
+      symbol: item.source_symbol,
+      session_count: 75,
+    },
+  });
+}
+function appendChangeTimelineLinks(root, item) {
+  appendText(root, "h3", "前后封口快照 · 单股75日Core轨迹");
+  const actions = document.createElement("div");
+  actions.className = "timeline-change-actions";
+  for (const [side, label] of [
+    ["before", "前日"],
+    ["after", "后日"],
+  ]) {
+    const { snapshot, member, rawStored, exactVersion } =
+      changeTimelineSnapshot(item, side);
+    const action = document.createElement("div");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.disabled =
+      !member || !snapshot?.complete || !rawStored || !exactVersion;
+    button.textContent = snapshot
+      ? `查看${label} ${snapshot.target_session} · 75日历史轨迹`
+      : `查看${label}历史轨迹`;
+    if (!member) {
+      button.title = `${label}快照中没有该来源代码。`;
+    } else if (!rawStored) {
+      button.title = `${label}目标日没有保存该来源代码的Raw行，不能生成历史轨迹。`;
+    } else if (!exactVersion) {
+      button.title = `${label}快照的日期和完整包SHA不在当前PG目录中，不能回退版本。`;
+    } else {
+      button.addEventListener("click", () => openChangeTimeline(item, side));
+    }
+    action.append(button);
+    actions.append(action);
+  }
+  root.append(actions);
+  appendText(
+    root,
+    "p",
+    "轨迹按变化快照的日期、完整包SHA、source_set与namespace绑定；缺Bar保留解释，未保存Raw会话不可展开。结果为SOURCE_SYMBOL_ONLY、NON_PIT研究，不表示选股资格。",
+    "muted",
+  );
+}
 function showChangeDetail(item) {
   const root = $("changeDetail");
   root.replaceChildren();
@@ -1498,6 +1708,7 @@ function showChangeDetail(item) {
   ])
     readinessDetail(meta, label, text(value));
   root.append(meta);
+  appendChangeTimelineLinks(root, item);
   appendText(root, "h3", "Profile11状态、质量与UNKNOWN原因");
   if (!item.profile_compatible) {
     appendText(
@@ -1572,6 +1783,8 @@ function populateChangeSnapshots(snapshots) {
   }
 }
 async function loadChanges() {
+  if (state.timelineContext?.origin === "change") invalidateTimeline();
+  state.changeBinding = null;
   const before = $("changeBeforeSelect").value;
   const after = $("changeAfterSelect").value;
   const requestId = ++state.changeRequest;
@@ -1604,6 +1817,17 @@ async function loadChanges() {
     if (requestId !== state.changeRequest) return;
     const s = data.summary;
     const p = data.page;
+    state.changeBinding = {
+      namespace_id: data.namespace_id,
+      before_snapshot: data.before_snapshot,
+      after_snapshot: data.after_snapshot,
+      before_session: before,
+      after_session: after,
+      offset: p.offset,
+      limit: p.limit,
+      change_type: $("changeTypeSelect").value,
+      symbol: $("changeSymbolInput").value.trim(),
+    };
     state.changeTotal = p.total;
     $("changeCount").textContent = `${s.changed_source_symbol_count}个变化对象`;
     $("changeSummary").textContent =
@@ -1811,17 +2035,19 @@ $("reloadCatalog").addEventListener("click", loadCatalog);
 $("versionSelect").addEventListener("change", () => {
   state.offset = 0;
   state.stockRequest++;
-  if (!state.timelineNavigation) {
-    state.timeline = null;
-    state.timelineContext = null;
-    state.timelineRequest++;
-    renderTimeline(null);
-  }
+  if (!state.timelineNavigation) invalidateTimeline();
   $("queryStock").disabled = false;
   clearResult();
   loadPage();
   loadReadiness();
 });
+for (const id of ["symbolInput", "windowInput"]) {
+  $(id).addEventListener("input", () => {
+    state.stockRequest++;
+    $("queryStock").disabled = false;
+    if (!state.timelineNavigation) invalidateTimeline();
+  });
+}
 $("marketSelect").addEventListener("change", () => {
   state.offset = 0;
   loadPage();

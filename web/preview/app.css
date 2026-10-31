@@ -385,6 +385,17 @@ footer {
   gap: 5px 10px;
   font-size: 12px;
 }
+
+.timeline-change-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+}
+
+#stockResult.timeline-only > :not(.identity-box):not(.timeline-research) {
+  display: none;
+}
 .profile-detail-meta dt {
   color: #647987;
 }

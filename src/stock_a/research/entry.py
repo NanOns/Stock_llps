@@ -4069,6 +4069,7 @@ def research_stock_pg_history_preview(
     namespace_id: str,
     profile_contract: dict[str, Any],
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
+    include_profile_preview: bool = True,
 ) -> dict[str, Any]:
     """把明确PG Raw窗口适配至现役Core和Profile11研究预览。"""
     target = _parse_target(target_session)
@@ -4269,25 +4270,27 @@ def research_stock_pg_history_preview(
     source_snapshot_id = (
         f"STOCK_A_PG_RAW_HISTORY:{namespace_id}:{package_sha256}:{target.isoformat()}"
     )
-    profile_preview = _build_profile_preview(
-        symbol=normalized,
-        target_session=target,
-        source_last_session=target,
-        source_sha256=package_sha256,
-        target_bar=target_bar,
-        history=tuple(history),
-        core=core,
-        calendar_revision=calendar_revision,
-        contract=profile_contract,
-        closed_period_bars=closed_period_bars,
-        source_snapshot_id=source_snapshot_id,
-        source_snapshot_role="PG_CAPTURE_HISTORY_ID_NOT_CAPTURED_AVAILABLE_AT",
-    )
-    profile_components = profile_preview.get("components", [])
-    if len(profile_components) != 11:
-        raise ResearchEntryError(
-            "PG_PROFILE_RULE_COUNT_INVALID", "Profile现役规则数异常"
+    profile_preview = None
+    if include_profile_preview:
+        profile_preview = _build_profile_preview(
+            symbol=normalized,
+            target_session=target,
+            source_last_session=target,
+            source_sha256=package_sha256,
+            target_bar=target_bar,
+            history=tuple(history),
+            core=core,
+            calendar_revision=calendar_revision,
+            contract=profile_contract,
+            closed_period_bars=closed_period_bars,
+            source_snapshot_id=source_snapshot_id,
+            source_snapshot_role="PG_CAPTURE_HISTORY_ID_NOT_CAPTURED_AVAILABLE_AT",
         )
+        profile_components = profile_preview.get("components", [])
+        if len(profile_components) != 11:
+            raise ResearchEntryError(
+                "PG_PROFILE_RULE_COUNT_INVALID", "Profile现役规则数异常"
+            )
     actual_bars = status_counts["TARGET_PRESENT"]
     gaps = sum(status_counts.values()) - status_counts["TARGET_PRESENT"]
     target_bar_status = {
@@ -4698,6 +4701,7 @@ def research_stock_pg_history_timeline(
                 missing_history_sessions=prefix_missing,
                 namespace_id=namespace_id,
                 profile_contract=profile_contract,
+                include_profile_preview=False,
             )
             raw_close_field = preview["raw"]["close"]
             core_fields = preview["core"]["fields"]

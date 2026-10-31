@@ -945,6 +945,7 @@ LIMIT %s OFFSET %s""",
         row.pop("filtered_total", None)
     return {
         "status": "AVAILABLE",
+        "namespace_id": namespace_id,
         "before_snapshot": before,
         "after_snapshot": after,
         "summary": {key: int(value or 0) for key, value in summary.items()},
