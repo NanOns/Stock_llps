@@ -363,8 +363,7 @@
                 name="symbol"
                 placeholder="例如：交易所代码.证券代码"
                 autocomplete="off"
-                maxlength="9"
-                required /></label
+                maxlength="9" /></label
             ><label
               >目标日前官方交易会话数<input
                 id="windowInput"
@@ -489,6 +488,7 @@
                       <tr>
                         <th>官方会话</th>
                         <th>Raw行 / Bar / 价格质量</th>
+                        <th>RAW OHLC · RAW_UNADJUSTED</th>
                         <th>RAW收盘</th>
                         <th>Core MA20</th>
                         <th>收盘相对MA20</th>
@@ -500,7 +500,7 @@
                     </thead>
                     <tbody id="timelineRows">
                       <tr>
-                        <td colspan="9" class="muted">等待历史轨迹查询。</td>
+                        <td colspan="10" class="muted">等待历史轨迹查询。</td>
                       </tr>
                     </tbody>
                   </table>

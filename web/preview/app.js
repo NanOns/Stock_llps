@@ -1171,6 +1171,7 @@ async function queryStock(event) {
     );
   };
   if (!symbol || !Number.isInteger(count) || count < 1 || count > 75) {
+    clearResult();
     setMessage("来源代码与会话数无效；会话数须为1至75。");
     return;
   }
@@ -1886,7 +1887,6 @@ function renderCandlestickChart(data) {
       state.chartSelection = { mode, index };
       if (mode === "day") {
         pointDetail(item.point);
-        if (item.point.raw_row_present) openTimelineSession(item.point);
       } else {
         periodDetail(item.period, mode);
       }
@@ -2011,11 +2011,24 @@ function renderTimeline(data, errorMessage = "") {
   renderTimelineReturnControls(state.timelineContext, selectedVersion());
   for (const point of data.points || []) {
     const tr = document.createElement("tr");
+    const rawOhlc = point.raw_ohlc;
+    const rawOhlcText = rawOhlc
+      ? [
+          `O ${timelineField(rawOhlc.open)}`,
+          `H ${timelineField(rawOhlc.high)}`,
+          `L ${timelineField(rawOhlc.low)}`,
+          `C ${timelineField(rawOhlc.close)}`,
+          rawOhlc.quality === "OBSERVED"
+            ? "OBSERVED"
+            : `${text(rawOhlc.quality)} · ${text(rawOhlc.reason)}`,
+        ].join(" · ")
+      : "UNKNOWN · 轨迹未提供RAW OHLC字段";
     cell(tr, point.session_date);
     cell(
       tr,
       `${text(point.raw_status)} · ${text(point.price_quality)}${point.price_reason ? ` · ${point.price_reason}` : ""}`,
     );
+    cell(tr, rawOhlcText);
     cell(tr, timelineField(point.raw_close));
     cell(tr, timelineField(point.core_ma20));
     cell(
@@ -2068,7 +2081,7 @@ function renderTimeline(data, errorMessage = "") {
     rows.append(tr);
   }
   if (!data.points?.length)
-    tableRow(rows, ["无官方会话轨迹", "", "", "", "", "", "", "", ""]);
+    tableRow(rows, ["无官方会话轨迹", "", "", "", "", "", "", "", "", ""]);
   renderCandlestickChart(data);
 }
 async function queryTimeline(binding = null) {

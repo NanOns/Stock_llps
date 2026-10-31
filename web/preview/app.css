@@ -918,6 +918,9 @@ button {
   white-space: nowrap;
 }
 @media (max-width: 620px) {
+  .change-browser {
+    overflow-x: clip;
+  }
   .period-trends {
     grid-template-columns: 1fr;
   }

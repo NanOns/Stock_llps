@@ -563,9 +563,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         self._send(status, body, "application/json; charset=utf-8")
 
     def _error(self, error: PreviewHttpError) -> None:
-        self._send_json(
-            error.status, {"ok": False, "code": error.code, "message": error.message}
-        )
+        payload = {"ok": False, "code": error.code, "message": error.message}
+        request_context = getattr(self, "_raw_period_request_context", None)
+        if request_context is not None:
+            payload["request_context"] = request_context
+        self._send_json(error.status, payload)
 
     def _ensure_local_host(self) -> bool:
         if self._host_allowed():
@@ -1010,6 +1012,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "source_set_id",
                     },
                 )
+                self._raw_period_request_context = {
+                    "target_session": values.get("target_session"),
+                    "symbol": values.get("symbol"),
+                    "package_sha256": values.get("package_sha256"),
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "namespace_id": values.get("namespace_id"),
+                    "source_set_id": values.get("source_set_id"),
+                    "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
+                    "identity_status": "REQUEST_NOT_RESOLVED",
+                }
                 required = {"target_session", "package_sha256", "symbol"}
                 if set(values) != required:
                     if not required.issubset(values):
@@ -1091,6 +1103,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         and source_context["status"] != "AVAILABLE"
                     )
                 ):
+                    self._raw_period_request_context.update(
+                        {
+                            "resolved_namespace_id": history["namespace_id"],
+                            "resolved_source_set_id": source_context["source_set_id"],
+                            "identity_status": "REQUEST_IDENTITY_MISMATCH",
+                        }
+                    )
                     raise PreviewHttpError(
                         409,
                         "PREVIEW_SOURCE_IDENTITY_MISMATCH",
