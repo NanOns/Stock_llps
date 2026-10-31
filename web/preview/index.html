@@ -476,6 +476,47 @@
                   <p id="chartIdentity" class="muted"></p>
                   <div id="chartNotice" class="population" role="status"></div>
                   <div id="candlestickChart" class="candlestick-chart"></div>
+                  <section
+                    id="priceStructurePanel"
+                    class="price-structure-panel"
+                    aria-labelledby="priceStructureTitle"
+                    aria-live="polite"
+                  >
+                    <h4 id="priceStructureTitle">RAW价格结构观察</h4>
+                    <p id="priceStructureIdentity" class="muted"></p>
+                    <div
+                      id="priceStructureSummary"
+                      class="price-structure-summary"
+                    ></div>
+                    <div class="table-wrap">
+                      <table class="price-structure-table">
+                        <thead>
+                          <tr>
+                            <th>观察字段</th>
+                            <th>数值与质量</th>
+                            <th>收盘位置 / 原因</th>
+                            <th>实际窗口</th>
+                          </tr>
+                        </thead>
+                        <tbody id="priceStructureRows"></tbody>
+                      </table>
+                    </div>
+                    <h5>精确快照中的Profile11价格相关状态</h5>
+                    <p id="priceStructureProfileStatus" class="muted"></p>
+                    <div class="table-wrap">
+                      <table class="price-structure-table">
+                        <thead>
+                          <tr>
+                            <th>分项</th>
+                            <th>状态</th>
+                            <th>质量</th>
+                            <th>原因</th>
+                          </tr>
+                        </thead>
+                        <tbody id="priceStructureProfileRows"></tbody>
+                      </table>
+                    </div>
+                  </section>
                   <div
                     id="chartDetail"
                     class="chart-detail"

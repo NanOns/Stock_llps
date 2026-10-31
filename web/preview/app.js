@@ -1269,6 +1269,8 @@ async function queryStock(event) {
         source_set_id: b.source_set_id || null,
         origin: previousTimelineContext?.origin || "manual",
         returnSelection: previousTimelineContext?.returnSelection || null,
+        persistedProfileSnapshot:
+          previousTimelineContext?.persistedProfileSnapshot || null,
       });
     }
   } catch (error) {
@@ -1292,7 +1294,10 @@ function timelineField(field) {
   if (!field) return "—";
   if (field.quality !== "OBSERVED")
     return `UNKNOWN · ${text(field.reason || field.quality)}`;
-  return text(field.value);
+  const value = field.value;
+  if (value && typeof value === "object")
+    return text(value.decimal ?? value.exact ?? value);
+  return text(value);
 }
 function priorHighRelationLabel(relation) {
   const labels = {
@@ -1301,6 +1306,183 @@ function priorHighRelationLabel(relation) {
     EQUAL: "等于前20会话最高价",
   };
   return labels[relation] || "UNKNOWN";
+}
+const priceProfileFieldIds = new Set([
+  "profile.trend",
+  "profile.position",
+  "profile.ma_structure",
+  "profile.compression",
+  "profile.extension",
+  "profile.near_high20",
+  "profile.drawdown60",
+  "profile.closed_week_trend",
+  "profile.closed_month_trend",
+]);
+const timelinePriceFieldLabels = {
+  "core.ma5": "MA5",
+  "core.ma10": "MA10",
+  "core.ma20": "MA20",
+  "core.ma60": "MA60",
+  "core.atr20": "ATR20",
+  "core.prior_high20": "严格前20会话最高价",
+};
+function closeRelationLabel(relation, reason) {
+  if (relation === "ABOVE") return "收盘高于均线";
+  if (relation === "BELOW") return "收盘低于均线";
+  if (relation === "EQUAL") return "收盘等于均线";
+  return `UNKNOWN · ${text(reason || "PRICE_RELATION_UNKNOWN")}`;
+}
+function formatMovingAverageOrder(order) {
+  if (order?.quality !== "OBSERVED")
+    return `UNKNOWN · ${text(order?.reason || "均线字段未全部可观测")}`;
+  return (order.groups || [])
+    .map((group) =>
+      group
+        .map((fieldId) => timelinePriceFieldLabels[fieldId] || fieldId)
+        .join(" = "),
+    )
+    .join(" > ");
+}
+function renderPersistedProfileObservation(point) {
+  const status = $("priceStructureProfileStatus");
+  const rows = $("priceStructureProfileRows");
+  rows.replaceChildren();
+  const snapshot = state.timelineContext?.persistedProfileSnapshot;
+  const selectedSourceSet =
+    state.timeline?.selection?.source_set_id ||
+    state.timeline?.formal_source_set?.source_set_id ||
+    null;
+  const exactMatch = Boolean(
+    snapshot?.profile_revision &&
+    snapshot.target_session === point.session_date &&
+    snapshot.package_sha256 === point.package_sha256 &&
+    snapshot.namespace_id === point.namespace_id &&
+    snapshot.source_set_id === selectedSourceSet &&
+    snapshot.field_ids?.length,
+  );
+  if (!exactMatch) {
+    status.textContent =
+      "本次轨迹未附带与所选日期、source_set、完整包SHA及profile_revision一致的Profile11快照；此处仅展示RAW Core事实，不重新评价持久画像或选股状态。";
+    tableRow(rows, [
+      "未绑定精确Profile11",
+      "NOT_EVALUATED",
+      "UNKNOWN",
+      "本次轨迹未提供精确Profile11快照；不据此推断PG中不存在其它持久画像。",
+    ]);
+    return;
+  }
+  const comparable = snapshot.semantic_compatible === true;
+  status.textContent =
+    `已绑定PG持久化快照 · ${snapshot.target_session} · source_set ${snapshot.source_set_id} · 包SHA ${snapshot.package_sha256} · Profile修订 ${snapshot.profile_revision}。` +
+    (comparable
+      ? " 此快照与两日变化合同兼容。"
+      : " 仅展示本快照原值；两期语义不兼容，不能作变化比较。") +
+    " 选股资格仍为未评价。";
+  let shown = 0;
+  snapshot.field_ids.forEach((fieldId, index) => {
+    if (!priceProfileFieldIds.has(fieldId)) return;
+    tableRow(rows, [
+      `${profileLabels[fieldId] || fieldId} · ${fieldId}`,
+      snapshot.statuses?.[index] ?? "UNKNOWN",
+      snapshot.qualities?.[index] ?? "UNKNOWN",
+      snapshot.reasons?.[index] ?? "未提供原因",
+    ]);
+    shown++;
+  });
+  if (!shown)
+    tableRow(rows, [
+      "无价格相关分项",
+      "NOT_EVALUATED",
+      "UNKNOWN",
+      "精确快照没有返回可展示的价格相关Profile11字段。",
+    ]);
+}
+function renderPriceStructureObservation(point) {
+  const panel = $("priceStructurePanel");
+  const summary = $("priceStructureSummary");
+  const rows = $("priceStructureRows");
+  if (!panel || !summary || !rows) return;
+  summary.replaceChildren();
+  rows.replaceChildren();
+  if (!point) {
+    $("priceStructureIdentity").textContent = "";
+    $("priceStructureProfileStatus").textContent = "";
+    $("priceStructureProfileRows").replaceChildren();
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+  const sourceSetId =
+    state.timeline?.formal_source_set?.source_set_id ||
+    state.timeline?.selection?.source_set_id ||
+    "UNKNOWN";
+  $("priceStructureIdentity").textContent =
+    `${point.session_date} · ${state.timeline?.symbol || "—"} · RAW_UNADJUSTED / ${state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · namespace ${point.namespace_id || "UNKNOWN"} · 轨迹截止日source_set ${sourceSetId} · 包SHA ${point.package_sha256 || "UNKNOWN"}`;
+  const ohlc = dayOhlc(point);
+  const summaries = [
+    [
+      "RAW OHLC与收盘",
+      ohlc
+        ? `O ${ohlc.open.exact} · H ${ohlc.high.exact} · L ${ohlc.low.exact} · C ${ohlc.close.exact}`
+        : `无合法OHLC · ${text(point.raw_ohlc?.reason || point.price_reason || point.raw_status)}`,
+    ],
+    [
+      "MA5 / 10 / 20 / 60排列",
+      formatMovingAverageOrder(point.moving_average_order),
+    ],
+    ["观察边界", "来源代码RAW事实 · NON_PIT · 选股NOT_EVALUATED"],
+  ];
+  for (const [label, value] of summaries) {
+    const card = document.createElement("div");
+    card.className = "price-structure-stat";
+    appendText(card, "span", label);
+    appendText(card, "strong", value);
+    summary.append(card);
+  }
+  const fieldRows = [
+    ...["core.ma5", "core.ma10", "core.ma20", "core.ma60"].map((fieldId) => ({
+      fieldId,
+      relation: point.close_vs_ma?.[fieldId],
+      window: point.moving_average_windows?.[fieldId],
+    })),
+    { fieldId: "core.atr20", window: point.atr20_window },
+    { fieldId: "core.prior_high20", window: point.prior_high20_window },
+  ];
+  for (const item of fieldRows) {
+    const fieldId = item.fieldId;
+    const field =
+      point.core_price_fields?.[fieldId] ||
+      {
+        "core.ma5": point.core_ma5,
+        "core.ma10": point.core_ma10,
+        "core.ma20": point.core_ma20,
+        "core.ma60": point.core_ma60,
+        "core.atr20": point.core_atr20,
+        "core.prior_high20": point.core_prior_high20,
+      }[fieldId];
+    const relation = item.relation
+      ? closeRelationLabel(item.relation.relation, item.relation.reason)
+      : fieldId === "core.prior_high20"
+        ? point.close_vs_prior_high20
+          ? priorHighRelationLabel(point.close_vs_prior_high20)
+          : `UNKNOWN · ${text(point.prior_high20_relation_unknown_reason)}`
+        : fieldId.startsWith("core.ma")
+          ? closeRelationLabel(null, field?.reason || "PRICE_RELATION_UNKNOWN")
+          : "不适用：显示Core字段质量和原因";
+    const window = item.window;
+    const windowText = window
+      ? `${window.valid_bar_count}/${window.required_valid_bar_count}个有效Bar；${window.official_session_count}个官方会话`
+      : "窗口统计未提供";
+    tableRow(rows, [
+      fieldId === "core.prior_high20"
+        ? `${timelinePriceFieldLabels[fieldId]}（排除本日）`
+        : timelinePriceFieldLabels[fieldId],
+      `${timelineField(field)} · ${text(field?.quality || "UNKNOWN")}`,
+      relation,
+      windowText,
+    ]);
+  }
+  renderPersistedProfileObservation(point);
 }
 function invalidateTimeline(errorMessage = "") {
   state.timelineRequest++;
@@ -1331,6 +1513,22 @@ function openTimelineSession(point) {
     )
   )
     return;
+  if (context.origin !== "change" && !context.returnSelection) {
+    state.timelineContext = {
+      ...context,
+      returnSelection: {
+        target_session: context.target_session,
+        package_sha256: context.package_sha256,
+        symbol: context.symbol,
+        session_count: context.session_count,
+        namespace_id: context.namespace_id || state.timeline.namespace_id,
+        source_set_id:
+          context.source_set_id ||
+          state.timeline.selection?.source_set_id ||
+          null,
+      },
+    };
+  }
   state.timelineNavigation = true;
   state.chartSelection = null;
   state.chartPeriodContext = {
@@ -1349,22 +1547,25 @@ function openTimelineSession(point) {
 }
 function returnToTimelineCutoff() {
   const context = state.timelineContext;
-  if (!context) return;
-  const value = `${context.target_session}|${context.package_sha256}`;
+  const selection = context?.returnSelection;
+  if (!context || !selection || context.origin === "change") return;
+  const value = `${selection.target_session}|${selection.package_sha256}`;
   if (
     !Array.from($("versionSelect").options).some((item) => item.value === value)
   )
     return;
   state.timelineNavigation = true;
   state.chartPeriodContext = {
-    target_session: context.target_session,
-    package_sha256: context.package_sha256,
-    symbol: context.symbol,
-    namespace_id: context.namespace_id || state.timeline?.namespace_id,
-    source_set_id: context.source_set_id || null,
+    target_session: selection.target_session,
+    package_sha256: selection.package_sha256,
+    symbol: selection.symbol || context.symbol,
+    namespace_id: selection.namespace_id || state.timeline?.namespace_id,
+    source_set_id: selection.source_set_id || null,
   };
-  $("symbolInput").value = context.symbol;
-  $("windowInput").value = String(context.session_count);
+  $("symbolInput").value = selection.symbol || context.symbol;
+  $("windowInput").value = String(
+    selection.session_count || context.session_count,
+  );
   $("versionSelect").value = value;
   $("stockForm").requestSubmit();
 }
@@ -1403,14 +1604,15 @@ function renderTimelineReturnControls(context, selected) {
     returnRoot.append(button);
   }
   if (
-    context &&
+    context?.origin !== "change" &&
+    context?.returnSelection &&
     selected &&
-    selected.target_session !== context.target_session
+    selected.target_session !== context.returnSelection.target_session
   ) {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "quiet";
-    button.textContent = `返回轨迹截止日 ${context.target_session}`;
+    button.textContent = `返回轨迹截止日 ${context.returnSelection.target_session}`;
     button.addEventListener("click", returnToTimelineCutoff);
     returnRoot.append(button);
   }
@@ -1499,6 +1701,7 @@ function pointDetail(point) {
   const values = dayOhlc(point);
   const source = state.timeline?.formal_source_set || {};
   const root = $("chartDetail");
+  renderPriceStructureObservation(point);
   root.replaceChildren();
   appendText(root, "h4", `${point.session_date} · 日K来源与Core观察`);
   const details = document.createElement("dl");
@@ -1529,7 +1732,7 @@ function pointDetail(point) {
       `${state.timeline?.target_session || "—"} · ${state.timeline?.symbol || "—"} · ${point.package_sha256}`,
     ],
     [
-      "namespace / source_set",
+      "namespace / 轨迹截止日source_set",
       `${point.namespace_id || state.timeline?.namespace_id || "—"} · ${source.source_set_id || state.timeline?.selection?.source_set_id || "UNKNOWN"}`,
     ],
     [
@@ -1693,6 +1896,7 @@ function renderCandlestickChart(data) {
     identity.textContent = "";
     notice.textContent = "查询轨迹后可查看与历史证据绑定的K线图。";
     if (!state.chartSelection) detail.replaceChildren();
+    renderPriceStructureObservation(null);
     return;
   }
   const timelineBinding = chartContextForTimeline(data);
@@ -1937,6 +2141,10 @@ function renderCandlestickChart(data) {
       if (mode === "day") pointDetail(selected.point);
       else periodDetail(selected.period, mode);
     }
+  } else if (mode === "day" && items.length) {
+    const index = items.length - 1;
+    state.chartSelection = { mode, index };
+    pointDetail(items[index].point);
   } else {
     detail.replaceChildren();
     appendText(
@@ -2109,6 +2317,7 @@ async function queryTimeline(binding = null) {
     namespace_id: binding?.namespace_id || null,
     source_set_id: binding?.source_set_id || null,
     origin: binding?.origin || "manual",
+    persistedProfileSnapshot: binding?.persistedProfileSnapshot || null,
     returnSelection: binding?.returnSelection || null,
   };
   state.timelineContext = context;
@@ -2544,6 +2753,18 @@ function openChangeTimeline(item, side) {
     origin: "change",
     source_set_id: snapshot.source_set_id,
     namespace_id: state.changeBinding.namespace_id,
+    persistedProfileSnapshot: {
+      target_session: snapshot.target_session,
+      package_sha256: snapshot.package_sha256,
+      source_set_id: snapshot.source_set_id,
+      namespace_id: state.changeBinding.namespace_id,
+      profile_revision: item[`${side}_profile_revision`],
+      field_ids: item[`${side}_profile_field_ids`] || [],
+      statuses: item[`${side}_profile_statuses`] || [],
+      qualities: item[`${side}_profile_qualities`] || [],
+      reasons: item[`${side}_profile_reasons`] || [],
+      semantic_compatible: item.profile_compatible === true,
+    },
     returnSelection: {
       target_session: returnDate,
       package_sha256: returnSha,

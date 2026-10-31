@@ -4689,6 +4689,13 @@ def research_stock_pg_history_timeline(
     valid_price_bar_count = 0
     first_evaluable_session = None
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
+    ma_field_ids = (
+        "core.ma5",
+        "core.ma10",
+        "core.ma20",
+        "core.ma60",
+    )
+    price_field_ids = (*ma_field_ids, "core.atr20", "core.prior_high20")
     for index, session in enumerate(sessions):
         row = rows_by_session.get(session)
         raw_status = row.get("bar_status") if row else "HISTORY_ROW_NOT_STORED"
@@ -4726,6 +4733,23 @@ def research_stock_pg_history_timeline(
             prior_high_field = dict(ma20_field)
             amount_ratio_field = dict(ma20_field)
             volume_ratio_field = dict(ma20_field)
+            core_price_fields = {
+                field_id: dict(ma20_field) for field_id in price_field_ids
+            }
+            close_vs_ma = {
+                field_id: {
+                    "relation": None,
+                    "quality": "UNKNOWN",
+                    "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+                }
+                for field_id in ma_field_ids
+            }
+            moving_average_order = {
+                "quality": "UNKNOWN",
+                "groups": [],
+                "unknown_fields": list(ma_field_ids),
+                "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+            }
             relation = None
             relation_reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
             prior_high_relation = None
@@ -4751,6 +4775,57 @@ def research_stock_pg_history_timeline(
             )
             raw_close_field = preview["raw"]["close"]
             core_fields = preview["core"]["fields"]
+            core_price_fields = {
+                field_id: core_fields[field_id] for field_id in price_field_ids
+            }
+            close_vs_ma = {}
+            for field_id in ma_field_ids:
+                ma_relation, ma_reason = _timeline_relation(
+                    raw_close_field, core_price_fields[field_id]
+                )
+                close_vs_ma[field_id] = {
+                    "relation": ma_relation,
+                    "quality": "OBSERVED" if ma_relation else "UNKNOWN",
+                    "reason": ma_reason,
+                }
+            unknown_ma_fields = [
+                field_id
+                for field_id in ma_field_ids
+                if core_price_fields[field_id].get("quality") != "OBSERVED"
+            ]
+            if unknown_ma_fields:
+                reasons = [
+                    core_price_fields[field_id].get("reason")
+                    or core_price_fields[field_id].get("quality")
+                    or "UNKNOWN_REASON_NOT_PROVIDED"
+                    for field_id in unknown_ma_fields
+                ]
+                moving_average_order = {
+                    "quality": "UNKNOWN",
+                    "groups": [],
+                    "unknown_fields": unknown_ma_fields,
+                    "reason": ";".join(dict.fromkeys(reasons)),
+                }
+            else:
+                exact_ma_values = []
+                for field_id in ma_field_ids:
+                    value = core_price_fields[field_id]["value"]
+                    exact = value.get("exact") if isinstance(value, Mapping) else value
+                    exact_ma_values.append((field_id, Fraction(str(exact))))
+                exact_ma_values.sort(key=lambda item: item[1], reverse=True)
+                ma_groups: list[list[str]] = []
+                previous_value = None
+                for field_id, value in exact_ma_values:
+                    if previous_value is None or value != previous_value:
+                        ma_groups.append([])
+                    ma_groups[-1].append(field_id)
+                    previous_value = value
+                moving_average_order = {
+                    "quality": "OBSERVED",
+                    "groups": ma_groups,
+                    "unknown_fields": [],
+                    "reason": None,
+                }
             ma20_field = core_fields["core.ma20"]
             prior_high_field = core_fields["core.prior_high20"]
             amount_ratio_field = core_fields["core.amount_ratio20"]
@@ -4774,6 +4849,15 @@ def research_stock_pg_history_timeline(
             unknown_reason = None
             if first_evaluable_session is None:
                 first_evaluable_session = session.isoformat()
+        ma_windows = {}
+        for field_id, required in zip(ma_field_ids, (5, 10, 20, 60), strict=True):
+            window_sessions = sessions[max(0, index - required + 1) : index + 1]
+            ma_windows[field_id] = {
+                "official_session_count": len(window_sessions),
+                "valid_bar_count": sum(valid_bar(day) for day in window_sessions),
+                "required_valid_bar_count": required,
+            }
+        atr20_sessions = sessions[max(0, index - 20) : index + 1]
         point = {
             "session_date": session.isoformat(),
             "raw_row_present": row is not None,
@@ -4784,8 +4868,15 @@ def research_stock_pg_history_timeline(
             else "UNKNOWN_HISTORY_SESSION_NOT_STORED",
             "raw_ohlc": _timeline_raw_ohlc(row),
             "raw_close": raw_close_field,
+            "core_price_fields": core_price_fields,
+            "close_vs_ma": close_vs_ma,
+            "moving_average_order": moving_average_order,
             "core_ma20": ma20_field,
             "core_prior_high20": prior_high_field,
+            "core_ma5": core_price_fields["core.ma5"],
+            "core_ma10": core_price_fields["core.ma10"],
+            "core_ma60": core_price_fields["core.ma60"],
+            "core_atr20": core_price_fields["core.atr20"],
             "core_amount_ratio20": amount_ratio_field,
             "core_volume_ratio20": volume_ratio_field,
             "raw_amount_quality": row.get("raw_amount_quality", "UNKNOWN")
@@ -4805,12 +4896,20 @@ def research_stock_pg_history_timeline(
                 "valid_bar_count": sum(valid_bar(day) for day in ma20_window),
                 "required_valid_bar_count": 20,
             },
+            "moving_average_windows": ma_windows,
+            "atr20_window": {
+                "official_session_count": len(atr20_sessions),
+                "valid_bar_count": sum(valid_bar(day) for day in atr20_sessions),
+                "required_valid_bar_count": 21,
+            },
             "prior_high20_window": {
                 "official_session_count": len(prior_window),
                 "valid_bar_count": sum(valid_bar(day) for day in prior_window),
                 "required_valid_bar_count": 20,
             },
+            "prior_high20_excludes_target_session": True,
             "coordinate_id": coordinate_id,
+            "namespace_id": namespace_id,
             "package_sha256": package_sha256,
             "producer": "stock_a.research.core:calculate_core",
             "semantic_version": "CORE_PRIMITIVES_FIELDSET_R2",
