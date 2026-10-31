@@ -1326,6 +1326,18 @@ const timelinePriceFieldLabels = {
   "core.atr20": "ATR20",
   "core.prior_high20": "严格前20会话最高价",
 };
+const priceRelationKindLabels = {
+  STRICT_CROSS_UP: "严格上穿",
+  STRICT_CROSS_DOWN: "严格下破",
+  EQUAL_BOUNDARY: "等值边界变化",
+  RELATIVE_PRIOR_HIGH_POSITION_CHANGED: "相对各自滚动前高的位置变化",
+  NOT_COMPARABLE: "UNKNOWN / 不可比",
+};
+const priceRelationLabels = {
+  BELOW: "低于",
+  EQUAL: "等于",
+  ABOVE: "高于",
+};
 function closeRelationLabel(relation, reason) {
   if (relation === "ABOVE") return "收盘高于均线";
   if (relation === "BELOW") return "收盘低于均线";
@@ -1354,11 +1366,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-    snapshot.target_session === point.session_date &&
-    snapshot.package_sha256 === point.package_sha256 &&
-    snapshot.namespace_id === point.namespace_id &&
-    snapshot.source_set_id === selectedSourceSet &&
-    snapshot.field_ids?.length,
+      snapshot.target_session === point.session_date &&
+      snapshot.package_sha256 === point.package_sha256 &&
+      snapshot.namespace_id === point.namespace_id &&
+      snapshot.source_set_id === selectedSourceSet &&
+      snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -1484,6 +1496,151 @@ function renderPriceStructureObservation(point) {
   }
   renderPersistedProfileObservation(point);
 }
+function priceRelationEvidenceText(evidence) {
+  if (!evidence) return "无字段证据";
+  const rendered = timelineField(evidence);
+  return evidence.reason && evidence.quality !== "OBSERVED"
+    ? `${rendered} · 原因 ${text(evidence.reason)}`
+    : `${rendered} · ${text(evidence.quality || "UNKNOWN")}`;
+}
+
+function priceRelationSideText(observation, side) {
+  const isBefore = side === "before";
+  const close = observation[`${side}_close`];
+  const threshold = observation[`${side}_threshold`];
+  const relation = observation[`${side}_relation`];
+  const thresholdName =
+    observation.field_id === "core.prior_high20" ? "前20会话最高价" : "均线";
+  return `收盘 ${priceRelationEvidenceText(close)}；${thresholdName} ${priceRelationEvidenceText(threshold)}；关系 ${priceRelationLabels[relation] || (relation ? text(relation) : "UNKNOWN")}${isBefore ? "（前态）" : "（当日）"}`;
+}
+
+function locatePriceRelationObservation(observation) {
+  const points = state.timeline?.points || [];
+  const index = points.findIndex(
+    (point) => point.session_date === observation.session_date,
+  );
+  if (index < 0) return;
+  state.chartMode = "day";
+  state.chartSelection = { mode: "day", index };
+  renderCandlestickChart(state.timeline);
+  $("priceStructurePanel")?.scrollIntoView({ block: "start" });
+}
+
+function renderPriceRelationHistory(history) {
+  const panel = $("priceRelationHistory");
+  const summary = $("priceRelationHistorySummary");
+  const status = $("priceRelationHistoryStatus");
+  const rows = $("priceRelationHistoryRows");
+  if (!panel || !summary || !status || !rows) return;
+  summary.replaceChildren();
+  rows.replaceChildren();
+  if (!history) {
+    panel.hidden = true;
+    status.textContent = "";
+    return;
+  }
+  panel.hidden = false;
+  const selectedSourceSet =
+    state.timeline?.selection?.source_set_id || "无SEALED source_set";
+  for (const [label, value] of [
+    [
+      "官方会话 / 紧邻对",
+      `${history.official_session_count} / ${history.official_session_pair_count}`,
+    ],
+    [
+      "可比较会话对 / 全字段可比",
+      `${history.comparable_session_pair_count} / ${history.fully_comparable_session_pair_count}`,
+    ],
+    [
+      "变化事件 / 不可比字段",
+      `${history.event_count} / ${history.unknown_count}`,
+    ],
+  ]) {
+    const card = document.createElement("div");
+    card.className = "price-relation-history-stat";
+    card.textContent = `${label}：${text(value)}`;
+    summary.append(card);
+  }
+  const fieldSummary = document.createElement("p");
+  fieldSummary.className = "muted";
+  fieldSummary.textContent = Object.entries(history.field_statistics || {})
+    .map(([fieldId, counts]) => {
+      const fieldLabel = timelinePriceFieldLabels[fieldId] || fieldId;
+      return `${fieldLabel}：可比${counts.comparable_count}，变化${counts.change_count}，未变化${counts.no_relation_change_count}，不可比${counts.not_comparable_count}`;
+    })
+    .join("；");
+  summary.append(fieldSummary);
+  const identity = state.timeline?.snapshot_identity || {};
+  status.textContent =
+    `${state.timeline?.symbol || "—"} · ${state.timeline?.target_session || "—"} · ` +
+    `source_set ${selectedSourceSet} · namespace ${state.timeline?.namespace_id || "UNKNOWN"} · ` +
+    `完整包SHA ${state.timeline?.package_sha256 || "UNKNOWN"} · ` +
+    `事件身份SHA ${text(history.identity_ref || identity.identity_sha256 || "UNKNOWN")}。` +
+    "已知关系未变化不列为事件；UNKNOWN / 不可比原因独立统计。";
+
+  const fieldFilter = $("priceRelationFieldFilter").value;
+  const kindFilter = $("priceRelationKindFilter").value;
+  const showUnknown = $("showPriceRelationUnknown").checked;
+  const visible = (history.observations || []).filter((observation) => {
+    const unknown = observation.comparison_status === "NOT_COMPARABLE";
+    if (fieldFilter !== "ALL" && observation.field_id !== fieldFilter)
+      return false;
+    if (kindFilter === "NOT_COMPARABLE") return unknown;
+    if (unknown) return showUnknown && kindFilter === "ALL";
+    if (observation.comparison_status !== "RELATION_CHANGED") return false;
+    return kindFilter === "ALL" || observation.event_kind === kindFilter;
+  });
+  for (const observation of visible) {
+    const unknown = observation.comparison_status === "NOT_COMPARABLE";
+    const row = document.createElement("tr");
+    row.dataset.status = observation.comparison_status;
+    cell(row, observation.session_date);
+    cell(row, observation.previous_official_session);
+    cell(
+      row,
+      timelinePriceFieldLabels[observation.field_id] || observation.field_id,
+    );
+    cell(row, priceRelationSideText(observation, "before"));
+    cell(row, priceRelationSideText(observation, "after"));
+    cell(
+      row,
+      unknown
+        ? observation.reason_summary || "存在不可比依赖，原因未提供"
+        : priceRelationKindLabels[observation.event_kind] ||
+            observation.event_kind,
+    );
+    const captureText = `${text(observation.before_source_capture_id || "无前态捕获引用")} → ${text(observation.after_source_capture_id || "无当日捕获引用")}`;
+    cell(
+      row,
+      `${observation.before_close?.quality || "UNKNOWN"} / ${observation.before_threshold?.quality || "UNKNOWN"} → ${observation.after_close?.quality || "UNKNOWN"} / ${observation.after_threshold?.quality || "UNKNOWN"}；${text(observation.producer)} · ${text(observation.semantic_version)}；捕获 ${captureText}；身份 ${text(observation.identity_ref || "UNKNOWN")}`,
+    );
+    const action = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = "定位K线 / Core";
+    button.addEventListener("click", () =>
+      locatePriceRelationObservation(observation),
+    );
+    action.append(button);
+    row.append(action);
+    rows.append(row);
+  }
+  if (visible.length) {
+    status.textContent += ` 当前筛选显示${visible.length}条变化或不可比记录。`;
+  } else if (kindFilter === "NOT_COMPARABLE" || showUnknown) {
+    status.textContent += "当前字段与筛选下没有可显示的匹配记录。";
+  } else if (history.event_count === 0 && history.unknown_count > 0) {
+    status.textContent += `当前已计算但没有变化事件；另有${history.unknown_count}条不可比字段，可勾选显示未知原因。`;
+  } else if (history.event_count === 0) {
+    status.textContent +=
+      "已计算，但没有满足变化条件的事件；UNKNOWN已另行统计。";
+  } else {
+    status.textContent +=
+      "当前筛选下没有匹配事件；可恢复全部字段和变化类型查看完整集合。";
+  }
+}
+
 function invalidateTimeline(errorMessage = "") {
   state.timelineRequest++;
   state.timeline = null;
@@ -2200,6 +2357,7 @@ function renderTimeline(data, errorMessage = "") {
       renderTimelineReturnControls(state.timelineContext, selectedVersion());
     }
     renderCandlestickChart(null);
+    renderPriceRelationHistory(null);
     return;
   }
   panel.hidden = false;
@@ -2217,6 +2375,7 @@ function renderTimeline(data, errorMessage = "") {
     `${data.producer || "stock_a.research.core:calculate_core"} · ${data.semantic_version || "CORE_PRIMITIVES_FIELDSET_R2"}。` +
     "身份SOURCE_SYMBOL_ONLY/NON_PIT；选股NOT_EVALUATED/NOT_CONNECTED；严格PIT、复权与RPS资格UNKNOWN；Raw候选数不等于官方上市总体。";
   renderTimelineReturnControls(state.timelineContext, selectedVersion());
+  renderPriceRelationHistory(data.price_relation_history);
   for (const point of data.points || []) {
     const tr = document.createElement("tr");
     const rawOhlc = point.raw_ohlc;
@@ -2355,6 +2514,8 @@ async function queryTimeline(binding = null) {
       }),
     });
     if (!requestIsCurrent()) return;
+    const relationHistory = data.price_relation_history;
+    const identityRef = data.snapshot_identity?.identity_sha256;
     if (
       data.snapshot_identity?.namespace_id !== data.namespace_id ||
       data.snapshot_identity?.target_session !== version.target_session ||
@@ -2370,6 +2531,43 @@ async function queryTimeline(binding = null) {
         data.snapshot_identity?.source_set_id !== context.source_set_id)
     )
       throw new Error("轨迹响应身份与精确变化快照不一致，已拒绝展示。");
+    if (
+      !relationHistory ||
+      relationHistory.identity_ref !== identityRef ||
+      relationHistory.official_session_count !== data.total_session_count ||
+      relationHistory.comparison_count !==
+        Math.max(0, data.total_session_count - 1) * 5
+    )
+      throw new Error(
+        "价格变化记录没有绑定当前完整轨迹身份或官方会话分母，已拒绝展示。",
+      );
+    const pointDates = (data.points || []).map((point) => point.session_date);
+    for (const item of relationHistory.observations || []) {
+      const index = pointDates.indexOf(item.session_date);
+      if (
+        item.identity_ref !== identityRef ||
+        index < 1 ||
+        pointDates[index - 1] !== item.previous_official_session
+      )
+        throw new Error(
+          "价格变化记录不是同一精确轨迹中的紧邻官方会话，已拒绝展示。",
+        );
+    }
+    const eventKeys = new Set(
+      (relationHistory.events || []).map((item) => item.event_key),
+    );
+    if (
+      [...eventKeys].some(
+        (eventKey) =>
+          !(relationHistory.observations || []).some(
+            (item) =>
+              `${item.session_date}|${item.field_id}|${item.event_kind}` ===
+                eventKey && item.comparison_status === "RELATION_CHANGED",
+          ),
+      ) ||
+      eventKeys.size !== relationHistory.event_count
+    )
+      throw new Error("价格变化事件与关系观察集合不一致，已拒绝展示。");
     state.timeline = data;
     state.chartPeriodContext = chartContextForTimeline(data);
     renderTimeline(data);
@@ -3334,5 +3532,14 @@ $("changeLast").addEventListener("click", () => {
     loadChanges();
   }
 });
+$("priceRelationFieldFilter").addEventListener("change", () =>
+  renderPriceRelationHistory(state.timeline?.price_relation_history || null),
+);
+$("priceRelationKindFilter").addEventListener("change", () =>
+  renderPriceRelationHistory(state.timeline?.price_relation_history || null),
+);
+$("showPriceRelationUnknown").addEventListener("change", () =>
+  renderPriceRelationHistory(state.timeline?.price_relation_history || null),
+);
 loadProfileSnapshots();
 loadCatalog();

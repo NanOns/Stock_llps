@@ -1499,6 +1499,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "namespace_id": history["namespace_id"],
                     "source_set_id": source_context["source_set_id"],
                 }
+                relation_history = result.get("price_relation_history")
+                if isinstance(relation_history, dict):
+                    identity_ref = identity["identity_sha256"]
+                    relation_history["identity_ref"] = identity_ref
+                    for collection_name in ("observations", "events"):
+                        for item in relation_history.get(collection_name, ()):
+                            if isinstance(item, dict):
+                                item["identity_ref"] = identity_ref
                 self._send_json(200, result)
                 return
             source_context = _preview_source_context(

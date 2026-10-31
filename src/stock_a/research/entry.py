@@ -4613,6 +4613,410 @@ def _timeline_transition(
     }
 
 
+_PRICE_RELATION_FIELDS = (
+    "core.ma5",
+    "core.ma10",
+    "core.ma20",
+    "core.ma60",
+    "core.prior_high20",
+)
+_PRICE_RELATION_VALUES = frozenset({"BELOW", "EQUAL", "ABOVE"})
+
+
+def _timeline_relation_evidence(
+    point: Mapping[str, Any], field_id: str
+) -> tuple[str | None, list[dict[str, str]]]:
+    """从已生成point提取单字段关系，并保留字段级不可比原因。"""
+    issues: list[dict[str, str]] = []
+    raw_status = point.get("raw_status")
+    if point.get("raw_row_present") is not True:
+        code = str(raw_status or "HISTORY_ROW_NOT_STORED")
+        messages = {
+            "HISTORY_ROW_NOT_STORED": "该官方会话的历史Raw行未保存",
+            "TARGET_MISSING": "存在PG Raw行，但来源数据中缺少目标会话Bar",
+            "READ_FAILED": "存在PG Raw行，但目标会话来源读取失败",
+        }
+        issues.append(
+            {
+                "code": code,
+                "message": messages.get(
+                    code, f"该官方会话没有可用的历史Raw行（{code}）"
+                ),
+            }
+        )
+    elif raw_status != "TARGET_PRESENT":
+        code = str(raw_status or "RAW_BAR_UNKNOWN")
+        issues.append(
+            {
+                "code": code,
+                "message": (
+                    f"存在PG Raw行，但该官方会话Bar状态为{code}"
+                    + (
+                        f"；来源原因：{point.get('price_reason')}"
+                        if point.get("price_reason")
+                        else ""
+                    )
+                ),
+            }
+        )
+    if point.get("price_quality") != "OBSERVED":
+        code = str(point.get("price_quality") or "PRICE_QUALITY_UNKNOWN")
+        issues.append(
+            {
+                "code": code,
+                "message": (
+                    f"该会话价格质量为{code}，未达到OBSERVED"
+                    + (
+                        f"；来源原因：{point.get('price_reason')}"
+                        if point.get("price_reason")
+                        else ""
+                    )
+                ),
+            }
+        )
+    close_field = point.get("raw_close")
+    if not isinstance(close_field, Mapping) or close_field.get("quality") != "OBSERVED":
+        code = (
+            str(close_field.get("quality") or "RAW_CLOSE_UNKNOWN")
+            if isinstance(close_field, Mapping)
+            else "RAW_CLOSE_MISSING"
+        )
+        issues.append(
+            {
+                "code": code,
+                "message": (
+                    f"收盘字段质量为{code}"
+                    + (
+                        f"；字段原因：{close_field.get('reason')}"
+                        if isinstance(close_field, Mapping)
+                        and close_field.get("reason")
+                        else ""
+                    )
+                ),
+            }
+        )
+    raw_ohlc = point.get("raw_ohlc")
+    if not isinstance(raw_ohlc, Mapping) or raw_ohlc.get("quality") != "OBSERVED":
+        code = (
+            str(raw_ohlc.get("quality") or "RAW_OHLC_UNKNOWN")
+            if isinstance(raw_ohlc, Mapping)
+            else "RAW_OHLC_MISSING"
+        )
+        issues.append(
+            {
+                "code": code,
+                "message": (
+                    f"完整OHLC质量为{code}"
+                    + (
+                        f"；字段原因：{raw_ohlc.get('reason')}"
+                        if isinstance(raw_ohlc, Mapping) and raw_ohlc.get("reason")
+                        else ""
+                    )
+                ),
+            }
+        )
+
+    core_fields = point.get("core_price_fields")
+    threshold = core_fields.get(field_id) if isinstance(core_fields, Mapping) else None
+    if not isinstance(threshold, Mapping) or threshold.get("quality") != "OBSERVED":
+        code = (
+            str(threshold.get("quality") or "CORE_THRESHOLD_UNKNOWN")
+            if isinstance(threshold, Mapping)
+            else "CORE_THRESHOLD_MISSING"
+        )
+        issues.append(
+            {
+                "code": code,
+                "message": (
+                    f"{field_id}Core阈值质量为{code}"
+                    + (
+                        f"；Core原因：{threshold.get('reason')}"
+                        if isinstance(threshold, Mapping) and threshold.get("reason")
+                        else ""
+                    )
+                ),
+            }
+        )
+    elif threshold.get("value") is None:
+        issues.append(
+            {"code": "CORE_THRESHOLD_VALUE_MISSING", "message": "Core阈值没有数值"}
+        )
+
+    if field_id == "core.prior_high20":
+        window = point.get("prior_high20_window")
+        relation = point.get("close_vs_prior_high20")
+        relation_reason = point.get("prior_high20_relation_unknown_reason")
+        if point.get("prior_high20_excludes_target_session") is not True:
+            issues.append(
+                {
+                    "code": "PRIOR_HIGH_TARGET_INCLUDED_OR_UNPROVEN",
+                    "message": "prior_high20未证明严格排除目标会话",
+                }
+            )
+        required = 20
+    else:
+        window = (point.get("moving_average_windows") or {}).get(field_id)
+        relation_payload = (point.get("close_vs_ma") or {}).get(field_id)
+        if isinstance(relation_payload, Mapping):
+            relation = relation_payload.get("relation")
+            relation_reason = relation_payload.get("reason")
+            if relation_payload.get("quality") != "OBSERVED":
+                issues.append(
+                    {
+                        "code": str(
+                            relation_payload.get("quality") or "MA_RELATION_UNKNOWN"
+                        ),
+                        "message": (
+                            f"{field_id}收盘关系未达到OBSERVED"
+                            + (
+                                f"；字段原因：{relation_reason}"
+                                if relation_reason
+                                else ""
+                            )
+                        ),
+                    }
+                )
+        else:
+            relation = None
+            relation_reason = None
+            issues.append(
+                {
+                    "code": "MA_RELATION_MISSING",
+                    "message": f"没有{field_id}的收盘关系",
+                }
+            )
+        required = int(field_id.removeprefix("core.ma"))
+
+    if not isinstance(window, Mapping):
+        issues.append(
+            {
+                "code": "CORE_WINDOW_MISSING",
+                "message": f"没有{field_id}的实际官方会话窗口",
+            }
+        )
+    else:
+        window_count = window.get("official_session_count")
+        valid_count = window.get("valid_bar_count")
+        required_count = window.get("required_valid_bar_count")
+        if (
+            required_count != required
+            or window_count != required
+            or valid_count != required
+        ):
+            issues.append(
+                {
+                    "code": "CORE_WINDOW_INCOMPLETE",
+                    "message": (
+                        f"{field_id}實際窗口為{valid_count}/{required_count}個有效Bar、"
+                        f"{window_count}個官方會話；需要完整{required}會話"
+                    ),
+                }
+            )
+    if relation not in _PRICE_RELATION_VALUES:
+        code = "RELATION_VALUE_INVALID" if relation is not None else "RELATION_UNKNOWN"
+        issues.append(
+            {
+                "code": code,
+                "message": (
+                    f"{field_id}收盘关系为UNKNOWN"
+                    + (f"；字段原因：{relation_reason}" if relation_reason else "")
+                ),
+            }
+        )
+    return relation if relation in _PRICE_RELATION_VALUES else None, issues
+
+
+def _timeline_value_evidence(field: Any) -> dict[str, Any]:
+    if not isinstance(field, Mapping):
+        return {"value": None, "quality": "UNKNOWN", "reason": "FIELD_MISSING"}
+    return {
+        "value": field.get("value"),
+        "quality": field.get("quality") or "UNKNOWN",
+        "reason": field.get("reason"),
+    }
+
+
+def _timeline_price_relation_history(
+    points: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """只消费已投影的Core与关系字段，按相邻官方会话生成价格变化观察。"""
+    statistics = {
+        field_id: {
+            "comparison_count": 0,
+            "comparable_count": 0,
+            "change_count": 0,
+            "no_relation_change_count": 0,
+            "not_comparable_count": 0,
+            "reason_counts": {},
+        }
+        for field_id in _PRICE_RELATION_FIELDS
+    }
+    observations: list[dict[str, Any]] = []
+    pair_statuses: list[list[str]] = []
+    identity_keys = (
+        "source_symbol",
+        "namespace_id",
+        "package_sha256",
+        "coordinate_id",
+        "producer",
+        "semantic_version",
+    )
+    side_labels = {"BEFORE": "前一官方会话", "AFTER": "当日", "PAIR": "前后身份"}
+    for previous, current in zip(points, points[1:], strict=False):
+        pair_status: list[str] = []
+        previous_session = str(previous.get("session_date") or "")
+        current_session = str(current.get("session_date") or "")
+        for field_id in _PRICE_RELATION_FIELDS:
+            before_relation, before_issues = _timeline_relation_evidence(
+                previous, field_id
+            )
+            after_relation, after_issues = _timeline_relation_evidence(
+                current, field_id
+            )
+            issues: list[dict[str, str]] = []
+            for key in identity_keys:
+                if previous.get(key) != current.get(key):
+                    issues.append(
+                        {
+                            "side": "PAIR",
+                            "code": f"{key.upper()}_MISMATCH",
+                            "message": f"前后会话的{key}不一致",
+                        }
+                    )
+            issues.extend({"side": "BEFORE", **issue} for issue in before_issues)
+            issues.extend({"side": "AFTER", **issue} for issue in after_issues)
+            if issues:
+                status = "NOT_COMPARABLE"
+                event_kind = None
+                summary = "；".join(
+                    f"{side_labels[item['side']]}：{item['message']}（{item['code']}）"
+                    for item in issues
+                )
+            elif before_relation == after_relation:
+                status = "NO_RELATION_CHANGE"
+                event_kind = None
+                summary = None
+            else:
+                status = "RELATION_CHANGED"
+                if "EQUAL" in (before_relation, after_relation):
+                    event_kind = "EQUAL_BOUNDARY"
+                elif field_id == "core.prior_high20":
+                    event_kind = "RELATIVE_PRIOR_HIGH_POSITION_CHANGED"
+                elif before_relation == "BELOW" and after_relation == "ABOVE":
+                    event_kind = "STRICT_CROSS_UP"
+                elif before_relation == "ABOVE" and after_relation == "BELOW":
+                    event_kind = "STRICT_CROSS_DOWN"
+                else:
+                    status = "NOT_COMPARABLE"
+                    event_kind = None
+                    issues.append(
+                        {
+                            "side": "PAIR",
+                            "code": "RELATION_TRANSITION_INVALID",
+                            "message": "前后关系组合不属于允许的严格跨越或等值边界变化",
+                        }
+                    )
+                    summary = "；".join(
+                        f"{side_labels[item['side']]}："
+                        f"{item['message']}（{item['code']}）"
+                        for item in issues
+                    )
+                if status == "RELATION_CHANGED":
+                    summary = None
+
+            stats = statistics[field_id]
+            stats["comparison_count"] += 1
+            if status == "NOT_COMPARABLE":
+                stats["not_comparable_count"] += 1
+                for item in issues:
+                    code = item["code"]
+                    stats["reason_counts"][code] = (
+                        stats["reason_counts"].get(code, 0) + 1
+                    )
+            else:
+                stats["comparable_count"] += 1
+                if status == "NO_RELATION_CHANGE":
+                    stats["no_relation_change_count"] += 1
+                else:
+                    stats["change_count"] += 1
+
+            core_fields_before = previous.get("core_price_fields") or {}
+            core_fields_after = current.get("core_price_fields") or {}
+            observation = {
+                "observation_key": f"{current_session}|{field_id}",
+                "session_date": current_session,
+                "previous_official_session": previous_session,
+                "field_id": field_id,
+                "comparison_status": status,
+                "event_kind": event_kind,
+                "before_relation": before_relation,
+                "after_relation": after_relation,
+                "before_close": _timeline_value_evidence(previous.get("raw_close")),
+                "before_threshold": _timeline_value_evidence(
+                    core_fields_before.get(field_id)
+                ),
+                "after_close": _timeline_value_evidence(current.get("raw_close")),
+                "after_threshold": _timeline_value_evidence(
+                    core_fields_after.get(field_id)
+                ),
+                "reason_codes": [item["code"] for item in issues],
+                "reason_summary": summary,
+                "coordinate_id": current.get("coordinate_id"),
+                "producer": current.get("producer"),
+                "semantic_version": current.get("semantic_version"),
+                "before_source_capture_id": previous.get("source_capture_id"),
+                "after_source_capture_id": current.get("source_capture_id"),
+            }
+            observations.append(observation)
+            pair_status.append(status)
+        pair_statuses.append(pair_status)
+
+    observations.sort(key=lambda item: item["session_date"], reverse=True)
+    events = [
+        {
+            **observation,
+            "event_key": (
+                f"{observation['session_date']}|{observation['field_id']}|"
+                f"{observation['event_kind']}"
+            ),
+        }
+        for observation in observations
+        if observation["comparison_status"] == "RELATION_CHANGED"
+    ]
+    comparison_count = sum(item["comparison_count"] for item in statistics.values())
+    not_comparable_count = sum(
+        item["not_comparable_count"] for item in statistics.values()
+    )
+    comparable_pair_count = sum(
+        any(status != "NOT_COMPARABLE" for status in statuses)
+        for statuses in pair_statuses
+    )
+    fully_comparable_pair_count = sum(
+        all(status != "NOT_COMPARABLE" for status in statuses)
+        for statuses in pair_statuses
+    )
+    return {
+        "contract": "STOCK_A_PG_PRICE_RELATION_HISTORY_R1",
+        "semantic_version": "PRICE_RELATION_EVENT_HISTORY_R1",
+        "producer": "stock_a.research.entry:_timeline_price_relation_history",
+        "official_session_count": len(points),
+        "official_session_pair_count": max(0, len(points) - 1),
+        "comparable_session_pair_count": comparable_pair_count,
+        "fully_comparable_session_pair_count": fully_comparable_pair_count,
+        "comparison_count": comparison_count,
+        "comparable_comparison_count": comparison_count - not_comparable_count,
+        "not_comparable_comparison_count": not_comparable_count,
+        "no_relation_change_count": sum(
+            item["no_relation_change_count"] for item in statistics.values()
+        ),
+        "event_count": len(events),
+        "unknown_count": not_comparable_count,
+        "field_statistics": statistics,
+        "observations": observations,
+        "events": events,
+    }
+
+
 def research_stock_pg_history_timeline(
     *,
     symbol: str,
@@ -4860,6 +5264,7 @@ def research_stock_pg_history_timeline(
         atr20_sessions = sessions[max(0, index - 20) : index + 1]
         point = {
             "session_date": session.isoformat(),
+            "source_symbol": normalized,
             "raw_row_present": row is not None,
             "raw_status": raw_status,
             "price_quality": price_quality,
@@ -4928,6 +5333,7 @@ def research_stock_pg_history_timeline(
         event = transition["event"]
         event_counts[event] = event_counts.get(event, 0) + 1
 
+    price_relation_history = _timeline_price_relation_history(points)
     known_count = sum(point["close_vs_ma20"] is not None for point in points)
     return {
         "ok": True,
@@ -4968,6 +5374,7 @@ def research_stock_pg_history_timeline(
         "producer": "stock_a.research.core:calculate_core",
         "semantic_version": "CORE_PRIMITIVES_FIELDSET_R2",
         "points": points,
+        "price_relation_history": price_relation_history,
         "future_session_rows_used": 0,
         "database_write": False,
         "ddl_executed": False,

@@ -523,6 +523,76 @@
                     aria-live="polite"
                   ></div>
                 </section>
+                <section
+                  id="priceRelationHistory"
+                  class="price-relation-history"
+                  aria-labelledby="priceRelationHistoryTitle"
+                >
+                  <h4 id="priceRelationHistoryTitle">75会话价格关系变化记录</h4>
+                  <p class="muted">
+                    仅比较直接相邻的官方会话，读取现役Core与收盘关系；严格上穿/下破、等值边界和未知原因分开显示。
+                    prior_high20使用每个会话各自排除当日的前20会话阈值，位置变化不代表突破同一固定前高或交易信号。
+                  </p>
+                  <div
+                    id="priceRelationHistorySummary"
+                    class="price-relation-history-summary"
+                    role="status"
+                  ></div>
+                  <div class="price-relation-history-controls">
+                    <label for="priceRelationFieldFilter">
+                      变化字段
+                      <select id="priceRelationFieldFilter">
+                        <option value="ALL">全部字段</option>
+                        <option value="core.ma5">MA5</option>
+                        <option value="core.ma10">MA10</option>
+                        <option value="core.ma20">MA20</option>
+                        <option value="core.ma60">MA60</option>
+                        <option value="core.prior_high20">
+                          严格前20会话最高价
+                        </option>
+                      </select>
+                    </label>
+                    <label for="priceRelationKindFilter">
+                      关系变化类型
+                      <select id="priceRelationKindFilter">
+                        <option value="ALL">全部变化</option>
+                        <option value="STRICT_CROSS_UP">严格上穿</option>
+                        <option value="STRICT_CROSS_DOWN">严格下破</option>
+                        <option value="EQUAL_BOUNDARY">等值边界</option>
+                        <option value="RELATIVE_PRIOR_HIGH_POSITION_CHANGED">
+                          相对滚动前高位置变化
+                        </option>
+                        <option value="NOT_COMPARABLE">UNKNOWN / 不可比</option>
+                      </select>
+                    </label>
+                    <label class="price-relation-unknown-toggle">
+                      <input id="showPriceRelationUnknown" type="checkbox" />
+                      显示UNKNOWN / 不可比原因
+                    </label>
+                  </div>
+                  <p
+                    id="priceRelationHistoryStatus"
+                    class="population"
+                    role="status"
+                  ></p>
+                  <div class="table-wrap price-relation-history-table-wrap">
+                    <table class="price-relation-history-table">
+                      <thead>
+                        <tr>
+                          <th>事件日期</th>
+                          <th>上一紧邻官方会话</th>
+                          <th>关系字段</th>
+                          <th>前态收盘 / 阈值 / 关系</th>
+                          <th>当日收盘 / 阈值 / 关系</th>
+                          <th>变化或不可比原因</th>
+                          <th>证据与质量</th>
+                          <th>定位</th>
+                        </tr>
+                      </thead>
+                      <tbody id="priceRelationHistoryRows"></tbody>
+                    </table>
+                  </div>
+                </section>
                 <div class="table-wrap">
                   <table class="timeline-table">
                     <thead>

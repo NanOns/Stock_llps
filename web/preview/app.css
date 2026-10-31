@@ -888,6 +888,80 @@ button {
 .price-structure-table td {
   overflow-wrap: anywhere;
 }
+.price-relation-history {
+  margin: 18px 0;
+  padding: 14px;
+  border: 1px solid #d9e5ec;
+  border-radius: 9px;
+  background: #fff;
+}
+.price-relation-history h4 {
+  margin: 0 0 6px;
+}
+.price-relation-history > p {
+  margin: 6px 0;
+  overflow-wrap: anywhere;
+}
+.price-relation-history-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(190px, 1fr));
+  gap: 8px;
+  margin: 10px 0;
+}
+.price-relation-history-stat {
+  min-width: 0;
+  padding: 9px 10px;
+  border: 1px solid #d9e5ec;
+  border-radius: 7px;
+  background: #f7fafc;
+  overflow-wrap: anywhere;
+}
+.price-relation-history-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 12px 18px;
+  margin: 10px 0;
+}
+.price-relation-history-controls label {
+  display: grid;
+  gap: 4px;
+  min-width: 210px;
+  color: #344b59;
+  font-weight: 600;
+}
+.price-relation-history-controls select {
+  min-width: 210px;
+}
+.price-relation-history-controls .price-relation-unknown-toggle {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  min-height: 36px;
+  font-weight: 500;
+}
+.price-relation-history-table-wrap {
+  max-height: 390px;
+  overflow: auto;
+}
+.price-relation-history-table {
+  min-width: 1420px;
+}
+.price-relation-history-table td,
+.price-relation-history-table th {
+  vertical-align: top;
+}
+.price-relation-history-table td {
+  overflow-wrap: anywhere;
+  max-width: 300px;
+}
+.price-relation-history-table tr[data-status="NOT_COMPARABLE"] {
+  background: #fff8eb;
+}
+.price-relation-history-table tr[data-status="RELATION_CHANGED"] {
+  background: #f3f9fc;
+}
 .chart-detail h4 {
   margin: 8px 0 4px;
 }
