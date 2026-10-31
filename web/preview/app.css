@@ -751,6 +751,55 @@ button {
 #timelineReturn {
   margin: 8px 0;
 }
+.change-highlights {
+  margin-top: 18px;
+  border-top: 1px solid #dfe7ec;
+  padding-top: 14px;
+}
+.highlights-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+.highlights-head h3 {
+  margin: 0 0 5px;
+}
+.highlights-head p {
+  margin: 0;
+  color: #526977;
+  max-width: 780px;
+}
+.highlights-table {
+  min-width: 1320px;
+}
+.highlights-table td,
+.highlights-table th {
+  vertical-align: top;
+}
+.highlights-table td {
+  overflow-wrap: anywhere;
+}
+.highlight-reason-list,
+.highlight-quality,
+.highlight-identity {
+  display: grid;
+  gap: 4px;
+  min-width: 180px;
+}
+.highlight-identity details summary {
+  cursor: pointer;
+  color: #1d5f81;
+}
+.highlight-identity details div {
+  max-width: 340px;
+  overflow-wrap: anywhere;
+  margin-top: 5px;
+  color: #526977;
+}
+.highlight-detail-action {
+  white-space: nowrap;
+}
 @media (max-width: 620px) {
   .period-trends {
     grid-template-columns: 1fr;
@@ -759,6 +808,10 @@ button {
     max-width: 78vw;
   }
   .timeline-research > .panel-head {
+    display: grid;
+    grid-template-columns: 1fr;
+  }
+  .highlights-head {
     display: grid;
     grid-template-columns: 1fr;
   }

@@ -40,10 +40,10 @@
         </div>
         <div class="change-controls">
           <label
-            >比较前日<select id="changeBeforeSelect" disabled></select
+            >比较起始快照<select id="changeBeforeSelect" disabled></select
           ></label>
           <label
-            >比较后日<select id="changeAfterSelect" disabled></select
+            >比较结束快照<select id="changeAfterSelect" disabled></select
           ></label>
           <label
             >变化类型<select id="changeTypeSelect">
@@ -66,6 +66,42 @@
           /></label>
           <button id="searchChanges" type="button">查询变化</button>
         </div>
+        <section
+          class="change-highlights"
+          aria-labelledby="changeHighlightsTitle"
+        >
+          <div class="highlights-head">
+            <div>
+              <h3 id="changeHighlightsTitle">重点变化观察（最多30只）</h3>
+              <p>
+                从同版本PG两日变化全集按可解释类别筛选；先读收盘/MA20关系，再读Bar、窗口、Profile、Core质量和来源集合变化。同类按来源代码升序。排序只用于研究阅读，不代表收益概率、正式选股或交易优先级。
+              </p>
+            </div>
+            <span id="changeHighlightsCount" class="count">等待精确快照</span>
+          </div>
+          <div id="changeHighlightsSummary" class="population" role="status">
+            请选择两个完整PG画像快照。
+          </div>
+          <div class="table-wrap">
+            <table class="change-table highlights-table">
+              <thead>
+                <tr>
+                  <th>来源代码</th>
+                  <th>主要类别与全部变化原因</th>
+                  <th>收盘 / MA20关系</th>
+                  <th>数据质量与UNKNOWN</th>
+                  <th>来源身份</th>
+                  <th>详情</th>
+                </tr>
+              </thead>
+              <tbody id="changeHighlightsRows">
+                <tr>
+                  <td colspan="6" class="muted">等待精确的两日画像版本。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </section>
         <div id="changeSummary" class="population" role="status">
           请选择前后两个完整PG画像版本。
         </div>

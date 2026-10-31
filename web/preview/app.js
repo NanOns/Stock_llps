@@ -49,8 +49,16 @@ const labels = {
   TDX_TARGET_BAR_PRESENT: "目标日有Bar",
   TDX_TARGET_BAR_MISSING: "目标日缺Bar",
   TDX_READ_FAILED: "目标日读取失败",
+  TARGET_SESSION_BAR_MISSING: "目标会话缺少Bar",
   RECORDS_COMPLETE: "PG窗口记录齐全",
   HISTORY_ROW_NOT_STORED: "历史Raw行未保存",
+  SOURCE_SYMBOL_ONLY: "来源代码级，未核稳定证券身份",
+  STABLE_SECURITY_ID_UNVERIFIED: "稳定security_id未核验",
+  LISTING_STATUS_UNKNOWN: "上市状态未知",
+  SUSPENSION_STATUS_UNKNOWN: "停牌状态未知",
+  NON_PIT_RETROSPECTIVE: "NON_PIT回溯研究",
+  UNKNOWN_NOT_CONNECTED: "官方上市总体未接通",
+  RAW_UNADJUSTED: "原始未复权坐标",
   USABLE: "价格窗口可用",
   INSUFFICIENT_VALID_BARS: "有效Bar不足",
   PRICE_FIELDS_UNKNOWN: "价格字段未知",
@@ -1553,14 +1561,173 @@ function showProfileDetail(item) {
   root.append(profileWrap);
 }
 const changeTypeLabels = {
-  BEFORE_ONLY: "仅前日存在",
-  AFTER_ONLY: "仅后日存在",
+  BEFORE_ONLY: "仅起始快照存在",
+  AFTER_ONLY: "仅结束快照存在",
   TARGET_BAR_STATUS_CHANGED: "目标Bar状态变化",
   PRICE_WINDOW_STATUS_CHANGED: "价格窗口变化",
   RAW_CLOSE_VS_MA20_CHANGED: "收盘/MA20关系变化",
   PROFILE_STATE_CHANGED: "Profile状态/质量变化",
   CORE_QUALITY_CHANGED: "Core质量/原因变化",
 };
+const highlightCategoryLabels = {
+  CLOSE_MA20_BELOW_TO_ABOVE: "收盘由MA20下方转到上方",
+  CLOSE_MA20_ABOVE_TO_BELOW: "收盘由MA20上方转到下方",
+  CLOSE_MA20_EQUAL_TRANSITION: "收盘与MA20相等关系进入或离开",
+  TARGET_BAR_STATUS: "目标Bar状态变化",
+  PRICE_WINDOW_STATUS: "价格窗口状态或原因变化",
+  PROFILE_STATE: "Profile状态或质量变化",
+  CORE_QUALITY: "Core质量或原因变化",
+  SOURCE_SET_MEMBERSHIP: "来源集合成员变化",
+  RECORDED_CHANGE: "其它已记录变化",
+};
+function sessionRelationLabel(relation) {
+  if (relation?.status === "CONSECUTIVE_OFFICIAL_SESSIONS")
+    return `${relation.before_session}（前一官方会话）→ ${relation.after_session}（当日）`;
+  if (relation?.status === "NONCONSECUTIVE_OFFICIAL_SESSIONS")
+    return `${relation.before_session} → ${relation.after_session}（非相邻官方会话，仅描述所选日期关系变化）`;
+  return `${relation?.before_session || "起始快照"} → ${relation?.after_session || "结束快照"}（官方会话相邻性未知，仅描述所选日期关系变化）`;
+}
+function changeRelationReason(item, relation) {
+  const before = text(item.before_close_ma20_relation);
+  const after = text(item.after_close_ma20_relation);
+  if (
+    relation?.status === "CONSECUTIVE_OFFICIAL_SESSIONS" &&
+    item.highlight_category === "CLOSE_MA20_BELOW_TO_ABOVE"
+  )
+    return `前一官方会话收盘低于MA20 → 当日收盘高于MA20（两端价格与MA20均可观察）`;
+  if (
+    relation?.status === "CONSECUTIVE_OFFICIAL_SESSIONS" &&
+    item.highlight_category === "CLOSE_MA20_ABOVE_TO_BELOW"
+  )
+    return `前一官方会话收盘高于MA20 → 当日收盘低于MA20（两端价格与MA20均可观察）`;
+  return `所选两期关系：${before} → ${after}；仅当两端价格与MA20质量均为OBSERVED且Core语义、RAW坐标兼容时分类。`;
+}
+function highlightQualityText(item) {
+  const price = `收盘 ${text(item.before_raw_price_quality)} → ${text(item.after_raw_price_quality)}`;
+  const priceReason =
+    item.after_raw_price_quality === "OBSERVED"
+      ? item.before_raw_price_reason
+      : item.after_raw_price_reason || item.before_raw_price_reason;
+  const ma20 = `MA20 ${text(item.before_ma20_quality)} → ${text(item.after_ma20_quality)}`;
+  const ma20Reason =
+    item.after_ma20_quality === "OBSERVED"
+      ? item.before_ma20_reason
+      : item.after_ma20_reason || item.before_ma20_reason;
+  const reasons = [priceReason, ma20Reason, item.after_window_reason]
+    .filter(Boolean)
+    .map(text);
+  return [
+    `${price}；${ma20}`,
+    `目标Bar ${text(item.before_bar_status)} → ${text(item.after_bar_status)}`,
+    `窗口 ${text(item.before_window_status)} → ${text(item.after_window_status)}`,
+    `Core语义 ${item.core_compatible ? "兼容" : "UNKNOWN/不可比"} · Profile语义 ${item.profile_compatible ? "兼容" : "UNKNOWN/不可比"}`,
+    reasons.length
+      ? `原因：${[...new Set(reasons)].join("；")}`
+      : "价格原因：—",
+  ].join("；");
+}
+function appendHighlightSourceIdentity(parent, item, data) {
+  const source = document.createElement("div");
+  source.className = "highlight-identity";
+  const short = (value, length = 8) =>
+    value ? `${value.slice(0, length)}…` : "UNKNOWN";
+  const identitySide = item.after_present ? "after" : "before";
+  const identity = document.createElement("span");
+  identity.textContent = `${text(item[`${identitySide}_identity_status`])} · ${short(item.before_source_set_id)}→${short(item.after_source_set_id)} · SHA ${short(item[`${identitySide}_package_sha256`], 12)} · rev ${short(item.before_profile_revision, 12)}→${short(item.after_profile_revision, 12)}`;
+  source.append(identity);
+  const qualityIdentity = document.createElement("span");
+  qualityIdentity.textContent = `security_id ${text(item[`${identitySide}_stable_security_id_status`])} · 上市 ${text(item[`${identitySide}_listing_status`])} · 停牌 ${text(item[`${identitySide}_suspension_status`])} · ${text(item[`${identitySide}_pit_status`])} · ${text(data.formal_listing_universe || "UNKNOWN_NOT_CONNECTED")}`;
+  source.append(qualityIdentity);
+  const details = document.createElement("details");
+  const summary = document.createElement("summary");
+  summary.textContent = "展开完整来源版本身份";
+  details.append(summary);
+  const full = document.createElement("div");
+  full.textContent = `namespace ${data.namespace_id}；前 source_set ${item.before_source_set_id}；后 source_set ${item.after_source_set_id}；前包SHA ${item.before_package_sha256}；后包SHA ${item.after_package_sha256}；前 profile_revision ${item.before_profile_revision}；后 profile_revision ${item.after_profile_revision}；前后坐标 ${text(item.before_price_coordinate)} → ${text(item.after_price_coordinate)}`;
+  details.append(full);
+  source.append(details);
+  parent.append(source);
+}
+function renderChangeHighlights(data, relation) {
+  const root = $("changeHighlightsRows");
+  const summary = $("changeHighlightsSummary");
+  const count = $("changeHighlightsCount");
+  root.replaceChildren();
+  const highlights = data.highlights;
+  if (!highlights || !Array.isArray(highlights.rows)) {
+    count.textContent = "摘要不可用";
+    summary.textContent =
+      "服务端没有返回同版本重点变化摘要，不能用当前分页替代。";
+    tableRow(root, [summary.textContent, "", "", "", "", ""]);
+    return;
+  }
+  const validCounts =
+    Number.isInteger(highlights.eligible_count) &&
+    Number.isInteger(highlights.display_count) &&
+    Number.isInteger(highlights.undisplayed_count) &&
+    highlights.display_count === highlights.rows.length &&
+    highlights.display_count <= 30 &&
+    highlights.eligible_count ===
+      highlights.display_count + highlights.undisplayed_count;
+  if (!validCounts) {
+    count.textContent = "摘要计数异常";
+    summary.textContent = "重点变化计数未闭合；已隐藏结果，等待检查。";
+    tableRow(root, [summary.textContent, "", "", "", "", ""]);
+    return;
+  }
+  count.textContent = `${highlights.display_count}/30`;
+  summary.textContent =
+    highlights.eligible_count === 0
+      ? "已查询、没有符合展示规则的变化。此结果与未计算、来源不可用分开；30只展示上限不是市场分母。"
+      : `同版本变化全集按规则命中 ${highlights.eligible_count} 只；显示 ${highlights.display_count}/30，命中但未显示 ${highlights.undisplayed_count} 只。此列表不是全市场分母，原全集仍可搜索和分页。`;
+  for (const item of highlights.rows) {
+    const row = document.createElement("tr");
+    cell(row, item.source_symbol);
+    const reasonCell = document.createElement("td");
+    const reasonList = document.createElement("div");
+    reasonList.className = "highlight-reason-list";
+    const primary = document.createElement("strong");
+    primary.textContent =
+      highlightCategoryLabels[item.highlight_category] ||
+      item.highlight_category ||
+      "已记录变化";
+    reasonList.append(primary);
+    if (item.highlight_category?.startsWith("CLOSE_MA20_")) {
+      const transition = document.createElement("span");
+      transition.textContent = changeRelationReason(item, relation);
+      reasonList.append(transition);
+    }
+    const allReasons = document.createElement("span");
+    allReasons.textContent = `全部变化原因：${(item.change_types || [])
+      .map((type) => changeTypeLabels[type] || type)
+      .join("、")}`;
+    reasonList.append(allReasons);
+    reasonCell.append(reasonList);
+    row.append(reasonCell);
+    cell(
+      row,
+      `${text(item.before_close_ma20_relation)} → ${text(item.after_close_ma20_relation)}`,
+    );
+    const qualityCell = document.createElement("td");
+    qualityCell.className = "highlight-quality";
+    qualityCell.textContent = highlightQualityText(item);
+    row.append(qualityCell);
+    const identityCell = document.createElement("td");
+    appendHighlightSourceIdentity(identityCell, item, data);
+    row.append(identityCell);
+    const detail = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet highlight-detail-action";
+    button.textContent = "查看变化详情";
+    button.addEventListener("click", () => showChangeDetail(item));
+    detail.append(button);
+    row.append(detail);
+    root.append(row);
+  }
+  if (!highlights.rows.length)
+    tableRow(root, ["已查询，没有符合展示规则的对象。", "", "", "", "", ""]);
+}
 function resetChangeDetail() {
   $("changeDetail").hidden = true;
   $("changeDetail").replaceChildren();
@@ -1640,8 +1807,8 @@ function appendChangeTimelineLinks(root, item) {
   const actions = document.createElement("div");
   actions.className = "timeline-change-actions";
   for (const [side, label] of [
-    ["before", "前日"],
-    ["after", "后日"],
+    ["before", "起始快照"],
+    ["after", "结束快照"],
   ]) {
     const { snapshot, member, rawStored, exactVersion } =
       changeTimelineSnapshot(item, side);
@@ -1697,8 +1864,16 @@ function showChangeDetail(item) {
       `${item.core_compatible ? "Core可比" : "Core不可比"} · ${item.profile_compatible ? "Profile可比" : "Profile不可比"}`,
     ],
     [
+      "官方会话关系",
+      sessionRelationLabel(state.changeBinding?.session_relation),
+    ],
+    [
+      "来源身份与坐标",
+      `${text(item.before_identity_status)} → ${text(item.after_identity_status)} · ${text(item.before_price_coordinate)} → ${text(item.after_price_coordinate)} · security_id ${text(item.after_stable_security_id_status)} · 上市 ${text(item.after_listing_status)} · 停牌 ${text(item.after_suspension_status)} · PIT ${text(item.after_pit_status)}`,
+    ],
+    [
       "收盘 / MA20关系",
-      `前日收盘 ${text(item.before_raw_close)} (${text(item.before_raw_price_quality)} / ${text(item.before_raw_price_reason)}) vs MA20 ${text(item.before_ma20)} (${text(item.before_ma20_quality)} / ${text(item.before_ma20_reason)}) → ${text(item.before_close_ma20_relation)}；后日收盘 ${text(item.after_raw_close)} (${text(item.after_raw_price_quality)} / ${text(item.after_raw_price_reason)}) vs MA20 ${text(item.after_ma20)} (${text(item.after_ma20_quality)} / ${text(item.after_ma20_reason)}) → ${text(item.after_close_ma20_relation)}`,
+      `起始快照收盘 ${text(item.before_raw_close)} (${text(item.before_raw_price_quality)} / ${text(item.before_raw_price_reason)}) vs MA20 ${text(item.before_ma20)} (${text(item.before_ma20_quality)} / ${text(item.before_ma20_reason)}) → ${text(item.before_close_ma20_relation)}；结束快照收盘 ${text(item.after_raw_close)} (${text(item.after_raw_price_quality)} / ${text(item.after_raw_price_reason)}) vs MA20 ${text(item.after_ma20)} (${text(item.after_ma20_quality)} / ${text(item.after_ma20_reason)}) → ${text(item.after_close_ma20_relation)}`,
     ],
     [
       "目标Bar / 窗口",
@@ -1753,6 +1928,7 @@ function showChangeDetail(item) {
     wrap.append(table);
     root.append(wrap);
   } else appendText(root, "p", "此对象没有Core质量或原因变化。", "muted");
+  root.scrollIntoView({ behavior: "smooth", block: "start" });
 }
 function populateChangeSnapshots(snapshots) {
   const complete = snapshots
@@ -1761,7 +1937,7 @@ function populateChangeSnapshots(snapshots) {
     .sort((a, b) => a.target_session.localeCompare(b.target_session));
   for (const id of ["changeBeforeSelect", "changeAfterSelect"]) {
     const select = $(id);
-    select.replaceChildren(new Option("— 选择完整PG画像日期 —", ""));
+    select.replaceChildren(new Option("— 选择完整PG画像快照 —", ""));
     for (const item of complete)
       select.append(
         new Option(
@@ -1780,6 +1956,18 @@ function populateChangeSnapshots(snapshots) {
     $("searchChanges").disabled = true;
     $("changeSummary").textContent =
       "需要两个不同日期且分母闭合的已保存画像版本才能比较。";
+    $("changeHighlightsCount").textContent = "等待精确快照";
+    $("changeHighlightsSummary").textContent =
+      "需要两个不同日期且分母闭合的已保存画像版本；未评价不表示没有变化。";
+    $("changeHighlightsRows").replaceChildren();
+    tableRow($("changeHighlightsRows"), [
+      "等待精确的两日画像版本。",
+      "",
+      "",
+      "",
+      "",
+      "",
+    ]);
   }
 }
 async function loadChanges() {
@@ -1790,8 +1978,23 @@ async function loadChanges() {
   const requestId = ++state.changeRequest;
   resetChangeDetail();
   $("changeRows").replaceChildren();
+  $("changeHighlightsRows").replaceChildren();
+  $("changeHighlightsCount").textContent = "查询中";
+  $("changeHighlightsSummary").textContent =
+    "正在读取所选两日的完整PG变化全集…";
   if (!before || !after || before >= after) {
-    $("changeSummary").textContent = "请选择递增的前后画像日期。";
+    $("changeSummary").textContent = "请选择递增的起始与结束画像日期。";
+    $("changeHighlightsCount").textContent = "等待精确快照";
+    $("changeHighlightsSummary").textContent =
+      "请选择两个递增且完整的PG画像快照。";
+    tableRow($("changeHighlightsRows"), [
+      "等待精确的两日画像版本。",
+      "",
+      "",
+      "",
+      "",
+      "",
+    ]);
     $("changePageStatus").textContent = "—";
     $("changePrev").disabled =
       $("changeNext").disabled =
@@ -1823,15 +2026,17 @@ async function loadChanges() {
       after_snapshot: data.after_snapshot,
       before_session: before,
       after_session: after,
+      session_relation: data.session_relation,
       offset: p.offset,
       limit: p.limit,
       change_type: $("changeTypeSelect").value,
       symbol: $("changeSymbolInput").value.trim(),
     };
+    renderChangeHighlights(data, data.session_relation);
     state.changeTotal = p.total;
     $("changeCount").textContent = `${s.changed_source_symbol_count}个变化对象`;
     $("changeSummary").textContent =
-      `${before} → ${after} · 快照 ${data.before_snapshot.source_symbol_count}/${data.before_snapshot.expected_source_symbol_count} 与 ${data.after_snapshot.source_symbol_count}/${data.after_snapshot.expected_source_symbol_count} · 交集 ${s.intersection_count} · 前日独有 ${s.before_only_count} · 后日独有 ${s.after_only_count} · Core/Profile不可比 ${s.core_semantics_incomparable_count}/${s.profile_semantics_incomparable_count} · 收盘/MA20未知 ${s.close_ma20_unknown_count} · Profile未观察 ${s.profile_unobserved_pair_count} · 筛选变化 ${p.total} · 选股未评价。`;
+      `${sessionRelationLabel(data.session_relation)} · 快照分母 ${data.before_snapshot.source_symbol_count}/${data.before_snapshot.expected_source_symbol_count} 与 ${data.after_snapshot.source_symbol_count}/${data.after_snapshot.expected_source_symbol_count} · 并集 ${s.source_symbol_union_count} · 交集 ${s.intersection_count} · 起始独有 ${s.before_only_count} · 结束独有 ${s.after_only_count} · 跨source_set ${s.cross_source_set_pair_count} · 跨价格坐标 ${s.cross_price_coordinate_pair_count} · Core/Profile不可比 ${s.core_semantics_incomparable_count}/${s.profile_semantics_incomparable_count} · 收盘/MA20未知 ${s.close_ma20_unknown_count} · Profile未观察 ${s.profile_unobserved_pair_count} · 完整变化 ${s.changed_source_symbol_count} · 当前筛选 ${p.total} · 选股未评价。`;
     $("changePageStatus").textContent =
       `偏移 ${p.offset} · 本页 ${p.count}/${p.limit} · 筛选总计 ${p.total}`;
     $("changePrev").disabled = p.offset === 0;
@@ -1885,6 +2090,10 @@ async function loadChanges() {
     }
   } catch (error) {
     if (requestId !== state.changeRequest) return;
+    $("changeHighlightsCount").textContent = "摘要查询失败";
+    $("changeHighlightsSummary").textContent =
+      `PG重点变化摘要不可用：${error.message}`;
+    tableRow($("changeHighlightsRows"), [error.message, "", "", "", "", ""]);
     tableRow($("changeRows"), [error.message, "", "", "", "", ""]);
     $("changeCount").textContent = "变化查询失败";
     $("changeSummary").textContent = `PG变化查询未完成：${error.message}`;

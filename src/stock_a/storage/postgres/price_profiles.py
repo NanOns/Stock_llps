@@ -491,7 +491,8 @@ def _snapshot_for_session(
 ) -> dict[str, Any]:
     cursor.execute(
         """SELECT p.target_session, p.source_set_id::text, p.package_sha256,
-       p.profile_revision, p.history_window_start, p.history_window_end,
+       p.profile_revision, p.history_calendar_id, p.history_calendar_revision,
+       p.history_window_start, p.history_window_end,
        p.history_requested_session_count, count(*)::bigint,
        min(s.raw_row_count), count(*)=min(s.raw_row_count)
 FROM stock.source_symbol_price_profiles p
@@ -500,6 +501,7 @@ JOIN stock.source_sets s ON s.namespace_id=p.namespace_id
   AND s.package_sha256=p.package_sha256 AND s.seal_status='SEALED'
 WHERE p.namespace_id=%s::uuid AND p.target_session=%s AND p.target_session<=%s
 GROUP BY p.target_session, p.source_set_id, p.package_sha256, p.profile_revision,
+         p.history_calendar_id, p.history_calendar_revision,
          p.history_window_start, p.history_window_end, p.history_requested_session_count
 ORDER BY p.source_set_id, p.profile_revision""",
         (namespace_id, target_session, max_target_session),
@@ -521,12 +523,14 @@ ORDER BY p.source_set_id, p.profile_revision""",
         "source_set_id": row[1],
         "package_sha256": str(row[2]).strip(),
         "profile_revision": str(row[3]).strip(),
-        "window_start": row[4],
-        "window_end": row[5],
-        "history_session_count": int(row[6]),
-        "source_symbol_count": int(row[7]),
-        "expected_source_symbol_count": int(row[8]),
-        "complete": bool(row[9]),
+        "history_calendar_id": row[4],
+        "history_calendar_revision": row[5],
+        "window_start": row[6],
+        "window_end": row[7],
+        "history_session_count": int(row[8]),
+        "source_symbol_count": int(row[9]),
+        "expected_source_symbol_count": int(row[10]),
+        "complete": bool(row[11]),
     }
     if not snapshot["complete"]:
         raise PriceProfilePgError(
@@ -563,6 +567,20 @@ WITH old_rows AS (
     SELECT COALESCE(o.source_symbol, n.source_symbol) AS source_symbol,
            o.source_symbol IS NOT NULL AS before_present,
            n.source_symbol IS NOT NULL AS after_present,
+           o.source_set_id::text AS before_source_set_id,
+           n.source_set_id::text AS after_source_set_id,
+           o.package_sha256::text AS before_package_sha256,
+           n.package_sha256::text AS after_package_sha256,
+           o.identity_status AS before_identity_status,
+           n.identity_status AS after_identity_status,
+           o.stable_security_id_status AS before_stable_security_id_status,
+           n.stable_security_id_status AS after_stable_security_id_status,
+           o.listing_status AS before_listing_status,
+           n.listing_status AS after_listing_status,
+           o.suspension_status AS before_suspension_status,
+           n.suspension_status AS after_suspension_status,
+           o.pit_status AS before_pit_status,
+           n.pit_status AS after_pit_status,
            o.target_bar_status AS before_bar_status,
            n.target_bar_status AS after_bar_status,
            o.price_window_status AS before_window_status,
@@ -719,6 +737,60 @@ WITH old_rows AS (
 """
 
 
+_PROFILE_CHANGE_HIGHLIGHT_CTES = (
+    _PROFILE_CHANGE_CTES
+    + """
+, highlight_classified AS (
+    SELECT *,
+           CASE
+             WHEN before_close_ma20_relation='BELOW'
+                  AND after_close_ma20_relation='ABOVE'
+               THEN 'CLOSE_MA20_BELOW_TO_ABOVE'::text
+             WHEN before_close_ma20_relation='ABOVE'
+                  AND after_close_ma20_relation='BELOW'
+               THEN 'CLOSE_MA20_ABOVE_TO_BELOW'::text
+             WHEN before_close_ma20_relation IS NOT NULL
+                  AND after_close_ma20_relation IS NOT NULL
+                  AND before_close_ma20_relation IS DISTINCT FROM after_close_ma20_relation
+                  AND (before_close_ma20_relation='EQUAL'
+                       OR after_close_ma20_relation='EQUAL')
+               THEN 'CLOSE_MA20_EQUAL_TRANSITION'::text
+             WHEN 'TARGET_BAR_STATUS_CHANGED'=ANY(change_types)
+               THEN 'TARGET_BAR_STATUS'::text
+             WHEN 'PRICE_WINDOW_STATUS_CHANGED'=ANY(change_types)
+               THEN 'PRICE_WINDOW_STATUS'::text
+             WHEN 'PROFILE_STATE_CHANGED'=ANY(change_types)
+               THEN 'PROFILE_STATE'::text
+             WHEN 'CORE_QUALITY_CHANGED'=ANY(change_types)
+               THEN 'CORE_QUALITY'::text
+             WHEN 'BEFORE_ONLY'=ANY(change_types) OR 'AFTER_ONLY'=ANY(change_types)
+               THEN 'SOURCE_SET_MEMBERSHIP'::text
+             ELSE 'RECORDED_CHANGE'::text
+           END AS highlight_category
+    FROM classified
+    WHERE cardinality(change_types)>0
+), highlight_candidates AS (
+    SELECT *,
+           CASE highlight_category
+             WHEN 'CLOSE_MA20_BELOW_TO_ABOVE' THEN 1
+             WHEN 'CLOSE_MA20_ABOVE_TO_BELOW' THEN 1
+             WHEN 'CLOSE_MA20_EQUAL_TRANSITION' THEN 1
+             WHEN 'TARGET_BAR_STATUS' THEN 2
+             WHEN 'PRICE_WINDOW_STATUS' THEN 3
+             WHEN 'PROFILE_STATE' THEN 4
+             WHEN 'CORE_QUALITY' THEN 5
+             WHEN 'SOURCE_SET_MEMBERSHIP' THEN 6
+             ELSE 7
+           END::integer AS highlight_priority
+    FROM highlight_classified
+)
+"""
+)
+
+
+MAX_PROFILE_CHANGE_HIGHLIGHTS = 30
+
+
 def _profile_change_snapshot_parameters(
     namespace_id: str, snapshot: Mapping[str, Any]
 ) -> tuple[Any, ...]:
@@ -803,11 +875,15 @@ def read_profile_change_page(
             *_profile_change_snapshot_parameters(namespace_id, after),
         )
         cursor.execute(
-            _PROFILE_CHANGE_CTES
+            _PROFILE_CHANGE_HIGHLIGHT_CTES
             + """SELECT count(*)::bigint AS source_symbol_union_count,
        count(*) FILTER (WHERE before_present AND after_present)::bigint AS intersection_count,
        count(*) FILTER (WHERE before_present AND NOT after_present)::bigint AS before_only_count,
        count(*) FILTER (WHERE NOT before_present AND after_present)::bigint AS after_only_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND before_source_set_id IS DISTINCT FROM after_source_set_id)::bigint AS cross_source_set_pair_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND before_price_coordinate IS DISTINCT FROM after_price_coordinate)::bigint AS cross_price_coordinate_pair_count,
        count(*) FILTER (WHERE before_present AND after_present AND NOT core_compatible)::bigint AS core_semantics_incomparable_count,
        count(*) FILTER (WHERE before_present AND after_present AND NOT profile_compatible)::bigint AS profile_semantics_incomparable_count,
        count(*) FILTER (WHERE before_present AND after_present
@@ -816,7 +892,8 @@ def read_profile_change_page(
            array_position(before_profile_qualities, 'OBSERVED') IS NULL
            OR array_position(after_profile_qualities, 'OBSERVED') IS NULL))::bigint AS profile_unobserved_pair_count,
        count(*) FILTER (WHERE cardinality(change_types)>0)::bigint AS changed_source_symbol_count,
-       count(*) FILTER (WHERE cardinality(change_types)=0)::bigint AS unchanged_source_symbol_count
+       count(*) FILTER (WHERE cardinality(change_types)=0)::bigint AS unchanged_source_symbol_count,
+       (SELECT count(*)::bigint FROM highlight_candidates) AS highlight_eligible_count
 FROM classified""",
             base_parameters,
         )
@@ -824,13 +901,21 @@ FROM classified""",
         summary_names = [item.name for item in cursor.description]
         summary = dict(zip(summary_names, summary_row, strict=True))
         cursor.execute(
-            _PROFILE_CHANGE_CTES
+            _PROFILE_CHANGE_HIGHLIGHT_CTES
             + """SELECT source_symbol, before_present, after_present,
+       before_source_set_id, after_source_set_id,
+       before_package_sha256, after_package_sha256,
+       before_identity_status, after_identity_status,
+       before_stable_security_id_status, after_stable_security_id_status,
+       before_listing_status, after_listing_status,
+       before_suspension_status, after_suspension_status,
+       before_pit_status, after_pit_status,
        before_bar_status, after_bar_status,
        before_window_status, after_window_status, before_window_reason, after_window_reason,
        before_raw_close, after_raw_close, before_raw_price_quality, after_raw_price_quality,
        before_raw_price_reason, after_raw_price_reason,
        before_ma20, after_ma20, before_ma20_quality, after_ma20_quality,
+       before_ma20_reason, after_ma20_reason,
        before_close_ma20_relation, after_close_ma20_relation,
        core_compatible, profile_compatible, change_types, core_quality_changed_fields,
        before_profile_field_ids, after_profile_field_ids,
@@ -846,7 +931,58 @@ FROM classified""",
        before_semantics_sha256, after_semantics_sha256,
        before_ma5_quality, after_ma5_quality, before_ma5_reason, after_ma5_reason,
        before_ma10_quality, after_ma10_quality, before_ma10_reason, after_ma10_reason,
-       before_ma20_quality, after_ma20_quality, before_ma20_reason, after_ma20_reason,
+       before_ma20_quality, after_ma20_quality, before_ma60_quality, after_ma60_quality,
+       before_ma60_reason, after_ma60_reason,
+       before_atr20_quality, after_atr20_quality, before_atr20_reason, after_atr20_reason,
+       before_clv_quality, after_clv_quality, before_clv_reason, after_clv_reason,
+       before_prior_high20_quality, after_prior_high20_quality,
+       before_prior_high20_reason, after_prior_high20_reason,
+       before_ret20_quality, after_ret20_quality, before_ret20_reason, after_ret20_reason,
+       before_pos60_quality, after_pos60_quality, before_pos60_reason, after_pos60_reason,
+       before_bias20_atr_quality, after_bias20_atr_quality,
+       before_bias20_atr_reason, after_bias20_atr_reason,
+       highlight_category, highlight_priority
+FROM highlight_candidates
+ORDER BY highlight_priority, source_symbol COLLATE "C"
+LIMIT %s""",
+            (*base_parameters, MAX_PROFILE_CHANGE_HIGHLIGHTS),
+        )
+        highlight_names = [item.name for item in cursor.description]
+        highlight_rows = [
+            dict(zip(highlight_names, row, strict=True)) for row in cursor.fetchall()
+        ]
+        cursor.execute(
+            _PROFILE_CHANGE_CTES
+            + """SELECT source_symbol, before_present, after_present,
+       before_source_set_id, after_source_set_id,
+       before_package_sha256, after_package_sha256,
+       before_identity_status, after_identity_status,
+       before_stable_security_id_status, after_stable_security_id_status,
+       before_listing_status, after_listing_status,
+       before_suspension_status, after_suspension_status,
+       before_pit_status, after_pit_status,
+       before_bar_status, after_bar_status,
+       before_window_status, after_window_status, before_window_reason, after_window_reason,
+       before_raw_close, after_raw_close, before_raw_price_quality, after_raw_price_quality,
+       before_raw_price_reason, after_raw_price_reason,
+       before_ma20, after_ma20, before_ma20_quality, after_ma20_quality,
+       before_ma20_reason, after_ma20_reason,
+       before_close_ma20_relation, after_close_ma20_relation,
+       core_compatible, profile_compatible, change_types, core_quality_changed_fields,
+       before_profile_field_ids, after_profile_field_ids,
+       before_profile_statuses, after_profile_statuses,
+       before_profile_qualities, after_profile_qualities,
+       before_profile_reasons, after_profile_reasons,
+       before_source_available_at, after_source_available_at,
+       before_source_time_quality, after_source_time_quality,
+       before_price_coordinate, after_price_coordinate,
+       before_window_start, after_window_start, before_window_end, after_window_end,
+       before_window_count, after_window_count,
+       before_profile_revision, after_profile_revision,
+       before_semantics_sha256, after_semantics_sha256,
+       before_ma5_quality, after_ma5_quality, before_ma5_reason, after_ma5_reason,
+       before_ma10_quality, after_ma10_quality, before_ma10_reason, after_ma10_reason,
+       before_ma20_quality, after_ma20_quality,
        before_ma60_quality, after_ma60_quality, before_ma60_reason, after_ma60_reason,
        before_atr20_quality, after_atr20_quality, before_atr20_reason, after_atr20_reason,
        before_clv_quality, after_clv_quality, before_clv_reason, after_clv_reason,
@@ -859,7 +995,7 @@ FROM classified
 WHERE cardinality(change_types)>0
   AND (%s='ALL' OR %s=ANY(change_types))
   AND (%s::text IS NULL OR strpos(source_symbol,%s::text)>0)
-ORDER BY source_symbol
+ORDER BY source_symbol COLLATE "C"
 LIMIT %s OFFSET %s""",
             (
                 *base_parameters,
@@ -874,7 +1010,7 @@ LIMIT %s OFFSET %s""",
         names = [item.name for item in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
 
-    for row in rows:
+    for row in (*rows, *highlight_rows):
         row["change_types"] = list(row["change_types"] or [])
         row["core_quality_changed_fields"] = list(
             row["core_quality_changed_fields"] or []
@@ -949,6 +1085,16 @@ LIMIT %s OFFSET %s""",
         "before_snapshot": before,
         "after_snapshot": after,
         "summary": {key: int(value or 0) for key, value in summary.items()},
+        "highlights": {
+            "status": "AVAILABLE",
+            "limit": MAX_PROFILE_CHANGE_HIGHLIGHTS,
+            "eligible_count": int(summary["highlight_eligible_count"] or 0),
+            "display_count": len(highlight_rows),
+            "undisplayed_count": int(summary["highlight_eligible_count"] or 0)
+            - len(highlight_rows),
+            "ordering": "CATEGORY_PRIORITY_THEN_SOURCE_SYMBOL_ASC",
+            "rows": highlight_rows,
+        },
         "page": {
             "offset": offset,
             "limit": limit,

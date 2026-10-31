@@ -17,6 +17,7 @@ from stock_a.application.pg_research import (
 from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.research.entry import (
     ResearchEntryError,
+    _load_calendar,
     research_universe_pg_history_preview,
 )
 from stock_a.storage.postgres.price_profiles import (
@@ -600,7 +601,65 @@ def query_source_symbol_price_profile_changes(
     config: Mapping[str, Any], **kwargs: Any
 ) -> dict[str, Any]:
     try:
-        return read_profile_change_page(config, **kwargs)
+        result = read_profile_change_page(config, **kwargs)
+        before = result["before_snapshot"]
+        after = result["after_snapshot"]
+        session_relation = {
+            "status": "UNKNOWN",
+            "before_session": before["target_session"].isoformat(),
+            "after_session": after["target_session"].isoformat(),
+            "calendar_id": None,
+            "calendar_revision": None,
+            "reason": "OFFICIAL_SESSION_ADJACENCY_NOT_PROVEN",
+        }
+        if (
+            before["history_calendar_id"] == after["history_calendar_id"]
+            and before["history_calendar_revision"]
+            == after["history_calendar_revision"]
+        ):
+            try:
+                payload, _metadata, revision, sessions = _load_calendar(
+                    after["target_session"]
+                )
+            except ResearchEntryError:
+                pass
+            else:
+                session_relation.update(
+                    {
+                        "calendar_id": payload["calendar_id"],
+                        "calendar_revision": revision,
+                        "reason": None,
+                    }
+                )
+                if revision == after["history_calendar_revision"]:
+                    before_index = next(
+                        (
+                            index
+                            for index, day in enumerate(sessions)
+                            if day == before["target_session"]
+                        ),
+                        None,
+                    )
+                    after_index = next(
+                        (
+                            index
+                            for index, day in enumerate(sessions)
+                            if day == after["target_session"]
+                        ),
+                        None,
+                    )
+                    if before_index is not None and after_index is not None:
+                        session_relation["status"] = (
+                            "CONSECUTIVE_OFFICIAL_SESSIONS"
+                            if after_index == before_index + 1
+                            else "NONCONSECUTIVE_OFFICIAL_SESSIONS"
+                        )
+                    else:
+                        session_relation["reason"] = "SESSION_NOT_IN_PROFILE_CALENDAR"
+                else:
+                    session_relation["reason"] = "PROFILE_CALENDAR_REVISION_MISMATCH"
+        result["session_relation"] = session_relation
+        return result
     except (RawSourcePgError, PriceProfilePgError) as error:
         raise PgPriceProfileError(
             getattr(error, "code", "PROFILE_CHANGE_READ_FAILED"), str(error)
