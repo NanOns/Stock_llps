@@ -86,6 +86,7 @@ from stock_a.application.pg_research import (
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
     SOURCE_SYMBOL_PROFILE_SCOPE,
+    query_source_symbol_price_profile_changes,
     query_source_symbol_price_profiles,
     run_source_symbol_price_profile,
     source_symbol_price_profile_snapshots,
@@ -925,9 +926,31 @@ def _parser() -> argparse.ArgumentParser:
     )
     price_profile.add_argument(
         "--action",
-        choices=("compute", "query", "snapshots"),
+        choices=("compute", "query", "snapshots", "changes"),
         required=True,
-        help="compute按PG Raw批量计算并保存；query按精确键分页；snapshots列出现存画像版本",
+        help="compute计算保存；query按精确键分页；snapshots列出现存版本；changes比较两日画像",
+    )
+    price_profile.add_argument(
+        "--research-cutoff",
+        required=True,
+        help="必填研究截止交易日；此日之后的查询和计算一律拒绝",
+    )
+    price_profile.add_argument("--before-session", help="变化查询的前一画像日期")
+    price_profile.add_argument("--after-session", help="变化查询的后一画像日期")
+    price_profile.add_argument(
+        "--change-type",
+        choices=(
+            "ALL",
+            "BEFORE_ONLY",
+            "AFTER_ONLY",
+            "TARGET_BAR_STATUS_CHANGED",
+            "PRICE_WINDOW_STATUS_CHANGED",
+            "RAW_CLOSE_VS_MA20_CHANGED",
+            "PROFILE_STATE_CHANGED",
+            "CORE_QUALITY_CHANGED",
+        ),
+        default="ALL",
+        help="changes动作的变化类型过滤",
     )
     price_profile.add_argument("--target-session", help="精确目标交易会话YYYY-MM-DD")
     price_profile.add_argument("--source-set-id", help="正式SEALED P03 source_set UUID")
@@ -1005,7 +1028,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     price_profile.add_argument("--offset", type=int, default=0, help="查询偏移，默认0")
     price_profile.add_argument(
-        "--limit", type=int, default=100, help="查询页大小，1至100，默认100"
+        "--limit", type=int, default=30, help="查询页大小，默认30；changes最多30"
     )
     price_profile.add_argument(
         "--format",
@@ -1038,6 +1061,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     preview_serve.add_argument(
         "--port", type=int, default=28766, help="固定开发端口28766"
+    )
+    preview_serve.add_argument(
+        "--research-cutoff",
+        required=True,
+        help="显式冻结研究截止日；之后的页面查询在访问PG前拒绝",
     )
     return parser
 
@@ -2413,8 +2441,28 @@ def _run_source_raw_catalog(args: argparse.Namespace) -> int:
 def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config()
     try:
+        max_target_session = _parse_source_set_date(args.research_cutoff)
         if args.action == "snapshots":
-            result = source_symbol_price_profile_snapshots(config)
+            result = source_symbol_price_profile_snapshots(
+                config, max_target_session=max_target_session
+            )
+        elif args.action == "changes":
+            if not args.before_session or not args.after_session:
+                raise DiagnosticError(
+                    "PROFILE_CHANGE_QUERY_REQUIRED",
+                    "变化查询必须显式指定--before-session和--after-session",
+                    _EXIT_ARGUMENT,
+                )
+            result = query_source_symbol_price_profile_changes(
+                config,
+                before_session=_parse_source_set_date(args.before_session),
+                after_session=_parse_source_set_date(args.after_session),
+                max_target_session=max_target_session,
+                offset=args.offset,
+                limit=args.limit,
+                source_symbol=args.symbol,
+                change_type=args.change_type,
+            )
         elif args.action == "query":
             if not all(
                 (
@@ -2438,6 +2486,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
             result = query_source_symbol_price_profiles(
                 config,
                 target_session=_parse_source_set_date(args.target_session),
+                max_target_session=max_target_session,
                 source_set_id=args.source_set_id,
                 package_sha256=args.package_sha256,
                 profile_revision=args.profile_revision,
@@ -2471,17 +2520,21 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                     "完整TDX包SHA必须是64位小写十六进制值",
                     _EXIT_ARGUMENT,
                 )
+            target_session = _parse_source_set_date(args.target_session)
+            if target_session > max_target_session:
+                raise PgPriceProfileError(
+                    "PROFILE_DATE_AFTER_CUTOFF", "画像计算目标日超过显式研究截止日"
+                )
             loaded_contract = load_day_chain_contract(_CONFIG_ROOT)
             result = run_source_symbol_price_profile(
                 config,
-                target_session=_parse_source_set_date(args.target_session),
+                target_session=target_session,
                 source_set_id=args.source_set_id,
                 package_sha256=args.package_sha256,
                 scope=args.scope,
                 session_count=args.session_count,
                 page_size=args.page_size,
                 profile_contract=loaded_contract.document,
-                profile_contract_sha256=loaded_contract.assembled_sha256,
             )
     except (PgPriceProfileError, DayChainContractError) as error:
         _emit(
@@ -2518,6 +2571,16 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 f"source_set={result.get('source_set_id')} offset={page.get('offset')} "
                 f"limit={page.get('limit')} rows={page.get('count')} total={page.get('total')} "
                 f"next={page.get('next_offset')} status={result.get('status')}\n"
+            )
+        elif args.action == "changes":
+            page = result.get("page", {})
+            summary = result.get("summary", {})
+            sys.stdout.write(
+                f"PG画像变化 {result.get('before_snapshot', {}).get('target_session')}→"
+                f"{result.get('after_snapshot', {}).get('target_session')} "
+                f"变更={summary.get('changed_source_symbol_count')} "
+                f"本页={page.get('count')} / {page.get('total')} "
+                f"偏移={page.get('offset')}\n"
             )
         elif args.action == "compute":
             sys.stdout.write(
@@ -5225,7 +5288,11 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "preview-serve":
             from stock_a.service.preview_http import run_preview_server
 
-            return run_preview_server(host=args.host, port=args.port)
+            return run_preview_server(
+                host=args.host,
+                port=args.port,
+                research_cutoff=_parse_source_set_date(args.research_cutoff),
+            )
     except DiagnosticError as error:
         _emit(
             {

@@ -196,6 +196,7 @@ class ClosedPeriodBar:
     calendar_coverage_proven: bool
     fact_identity_trusted: bool
     fact_dependency_closure_bound: bool
+    action_selection_status: str
     period_fact_digest: str
     selection_context_digest: str
 
@@ -658,6 +659,7 @@ def build_closed_period_bars(
                 proof_covers_period,
                 fact_identity_trusted,
                 dependency_closure_bound,
+                action_selection_status,
                 period_fact_digest,
                 selection_context_digest,
             )

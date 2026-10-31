@@ -9,7 +9,7 @@ from hashlib import sha256
 import json
 from typing import Any, Mapping
 
-from stock_a import __version__
+from stock_a.canonical.adjustment_periods import PERIOD_AGGREGATION_VERSION
 from stock_a.application.pg_research import (
     PgResearchBindingError,
     read_sealed_source_context,
@@ -23,6 +23,7 @@ from stock_a.storage.postgres.price_profiles import (
     PriceProfilePgError,
     list_profile_snapshots,
     persist_profile_records,
+    read_profile_change_page,
     read_profile_page,
 )
 from stock_a.storage.postgres.source_raw import (
@@ -32,7 +33,29 @@ from stock_a.storage.postgres.source_raw import (
 
 
 SOURCE_SYMBOL_PROFILE_SCOPE = "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE"
-_PRODUCER_CONTRACT = "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1"
+_PRODUCER_CONTRACT = "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R2"
+_PRODUCER_SEMANTICS_VERSION = "CORE43_PROFILE11_SOURCE_SYMBOL_R2"
+_FIELD_SEMANTIC_KEYS = (
+    "field_id",
+    "producer_stage",
+    "producer_symbol",
+    "value_type",
+    "unit",
+    "expression_ref",
+    "algorithm_version",
+    "parameter_version",
+    "input_fields",
+    "window_contract",
+    "coordinate_role",
+    "temporal_binding",
+    "context_dependencies",
+    "output_artifact",
+    "period_selection",
+    "minimum_closed_period_count",
+    "value_schema",
+    "formula",
+    "parameters",
+)
 _CORE_FIELDS = {
     "core.ma5": "ma5",
     "core.ma10": "ma10",
@@ -84,6 +107,16 @@ def _canonical(value: Any) -> Any:
     return value
 
 
+def _semantic_json_value(value: Any) -> Any:
+    if isinstance(value, (date, datetime, Decimal)):
+        return _canonical(value)
+    if isinstance(value, Mapping):
+        return {str(key): _semantic_json_value(item) for key, item in value.items()}
+    if isinstance(value, (tuple, list)):
+        return [_semantic_json_value(item) for item in value]
+    return value
+
+
 def _history_window_sha256(rows: list[Mapping[str, Any]]) -> str:
     inputs = [
         {name: _canonical(row.get(name)) for name in _HISTORY_HASH_FIELDS}
@@ -99,26 +132,105 @@ def _history_window_sha256(rows: list[Mapping[str, Any]]) -> str:
     return sha256(payload).hexdigest()
 
 
+def _profile_semantics_sha256(profile_contract: Mapping[str, Any]) -> str:
+    """只摘要FOUNDATION真实消费的Core字段与Profile11规则语义。"""
+    foundation = profile_contract.get("scope_bindings", {}).get("FOUNDATION_EOD", {})
+    registry = foundation.get("field_registry", ())
+    rules = foundation.get("profile_expression_registry", {})
+    if not isinstance(registry, (tuple, list)) or not isinstance(rules, Mapping):
+        raise PgPriceProfileError(
+            "PROFILE_SEMANTICS_UNBOUND", "FOUNDATION Core/Profile语义登记缺失"
+        )
+    definitions = {
+        item.get("field_id"): item
+        for item in registry
+        if isinstance(item, Mapping) and isinstance(item.get("field_id"), str)
+    }
+    if len(definitions) != len(registry) or len(rules) != 11:
+        raise PgPriceProfileError(
+            "PROFILE_SEMANTICS_UNBOUND", "Core字段或Profile规则登记重复、缺项"
+        )
+    rule_semantics: dict[str, Any] = {}
+    pending: set[str] = set()
+    for rule_id, rule in rules.items():
+        if not isinstance(rule_id, str) or not isinstance(rule, Mapping):
+            raise PgPriceProfileError(
+                "PROFILE_SEMANTICS_UNBOUND", "Profile规则标识或表达式非法"
+            )
+        rule_semantics[rule_id] = rule
+        input_fields = rule.get("input_fields", ())
+        if not isinstance(input_fields, (tuple, list)) or any(
+            not isinstance(item, str) for item in input_fields
+        ):
+            raise PgPriceProfileError(
+                "PROFILE_SEMANTICS_UNBOUND", "Profile输入字段登记非法：" + rule_id
+            )
+        pending.update(input_fields)
+
+    consumed_fields: set[str] = set()
+    while pending:
+        field_id = pending.pop()
+        if field_id in consumed_fields:
+            continue
+        consumed_fields.add(field_id)
+        definition = definitions.get(field_id)
+        if definition is None:
+            continue
+        dependencies = definition.get("input_fields", ())
+        if isinstance(dependencies, (tuple, list)):
+            pending.update(item for item in dependencies if isinstance(item, str))
+
+    fields = {
+        field_id: {
+            key: definitions[field_id][key]
+            for key in _FIELD_SEMANTIC_KEYS
+            if key in definitions[field_id]
+        }
+        for field_id in sorted(consumed_fields)
+        if field_id in definitions
+    }
+    missing_fields = sorted(consumed_fields - definitions.keys())
+    if missing_fields:
+        raise PgPriceProfileError(
+            "PROFILE_SEMANTICS_UNBOUND",
+            "FOUNDATION消费了未登记字段：" + ", ".join(missing_fields),
+        )
+    payload = {
+        "producer_semantics_version": _PRODUCER_SEMANTICS_VERSION,
+        "profile_rules": rule_semantics,
+        "consumed_field_definitions": fields,
+        "unregistered_consumed_field_ids": missing_fields,
+        "period_aggregation_version": PERIOD_AGGREGATION_VERSION,
+    }
+    encoded = json.dumps(
+        _semantic_json_value(payload),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+        allow_nan=False,
+    ).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
 def _profile_revision(
     *,
     scope: str,
-    contract_sha256: str,
+    semantics_sha256: str,
     calendar_id: str,
     calendar_revision: str,
-    session_dates: tuple[date, ...],
+    history_session_count: int,
 ) -> str:
     identity = {
         "scope": scope,
         "producer_contract": _PRODUCER_CONTRACT,
-        "producer_version": __version__,
-        "producer_contract_sha256": contract_sha256,
+        "producer_semantics_version": _PRODUCER_SEMANTICS_VERSION,
+        "producer_contract_sha256": semantics_sha256,
         "price_coordinate": "RAW_UNADJUSTED",
         "window_contract": "TECH_ACTUAL_R1",
         "calendar_id": calendar_id,
         "calendar_revision": calendar_revision,
-        "session_dates": [item.isoformat() for item in session_dates],
+        "history_session_count": history_session_count,
         "core_fields": sorted(_CORE_FIELDS),
-        "profile_component_contract": "DAY_CHAIN_PROFILE_EXPRESSION_REGISTRY_R1",
     }
     return sha256(
         json.dumps(
@@ -184,7 +296,7 @@ def _records_for_page(
             "profile_revision": profile_revision,
             "calculation_scope": SOURCE_SYMBOL_PROFILE_SCOPE,
             "producer_contract": _PRODUCER_CONTRACT,
-            "producer_version": __version__,
+            "producer_version": _PRODUCER_SEMANTICS_VERSION,
             "producer_contract_sha256": producer_contract_sha256,
             "price_coordinate": "RAW_UNADJUSTED",
             "identity_status": "SOURCE_SYMBOL_ONLY",
@@ -299,7 +411,6 @@ def run_source_symbol_price_profile(
     session_count: int,
     page_size: int,
     profile_contract: dict[str, Any],
-    profile_contract_sha256: str,
 ) -> dict[str, Any]:
     """按SQL分页读取已封口Raw，复用现役Core43/Profile11并保存typed摘要。"""
     if scope != SOURCE_SYMBOL_PROFILE_SCOPE:
@@ -330,6 +441,7 @@ def run_source_symbol_price_profile(
         raise PgPriceProfileError(
             "PROFILE_CONTRACT_INVALID", "现役FOUNDATION合同不是Core43/Profile11"
         )
+    semantics_sha256 = _profile_semantics_sha256(profile_contract)
     try:
         resolved_target, session_dates, calendar_revision = resolve_pg_history_window(
             target_session.isoformat(), session_count
@@ -393,7 +505,7 @@ def run_source_symbol_price_profile(
                 target_session=target_session,
                 package_sha256=package_sha256,
                 profile_revision="0" * 64,
-                producer_contract_sha256=profile_contract_sha256,
+                producer_contract_sha256=semantics_sha256,
                 source_context=source_context,
             )
             consumer_failures += sum(
@@ -422,10 +534,10 @@ def run_source_symbol_price_profile(
             )
         profile_revision = _profile_revision(
             scope=scope,
-            contract_sha256=profile_contract_sha256,
+            semantics_sha256=semantics_sha256,
             calendar_id=calendar_id,
             calendar_revision=calendar_revision,
-            session_dates=tuple(first_window),
+            history_session_count=len(first_window),
         )
         for record in records:
             record["profile_revision"] = profile_revision
@@ -461,9 +573,11 @@ def run_source_symbol_price_profile(
         raise PgPriceProfileError(code, str(error)) from error
 
 
-def source_symbol_price_profile_snapshots(config: Mapping[str, Any]) -> dict[str, Any]:
+def source_symbol_price_profile_snapshots(
+    config: Mapping[str, Any], *, max_target_session: date
+) -> dict[str, Any]:
     try:
-        return list_profile_snapshots(config)
+        return list_profile_snapshots(config, max_target_session=max_target_session)
     except (RawSourcePgError, PriceProfilePgError) as error:
         raise PgPriceProfileError(
             getattr(error, "code", "PROFILE_READ_FAILED"), str(error)
@@ -479,4 +593,15 @@ def query_source_symbol_price_profiles(
     except (RawSourcePgError, PriceProfilePgError) as error:
         raise PgPriceProfileError(
             getattr(error, "code", "PROFILE_READ_FAILED"), str(error)
+        ) from error
+
+
+def query_source_symbol_price_profile_changes(
+    config: Mapping[str, Any], **kwargs: Any
+) -> dict[str, Any]:
+    try:
+        return read_profile_change_page(config, **kwargs)
+    except (RawSourcePgError, PriceProfilePgError) as error:
+        raise PgPriceProfileError(
+            getattr(error, "code", "PROFILE_CHANGE_READ_FAILED"), str(error)
         ) from error

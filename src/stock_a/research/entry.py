@@ -20,7 +20,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from uuid import uuid4
 
 from stock_a.canonical.selection import CanonicalReadSelection, build_tdx_read_selection
-from stock_a.domain import FieldValue, exact_number, unknown
+from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 from stock_a.research.core import (
     CORE_MAX_ACTUAL_LOOKBACK,
     CoreObservation,
@@ -32,6 +32,7 @@ from stock_a.research.profile import (
     ProfileInput,
     RuntimeProducerBinding,
     WindowIdentity,
+    evaluate_closed_period_trend,
     evaluate_profile_kernel,
 )
 from stock_a.sources.baostock.identity import (
@@ -81,15 +82,17 @@ _PROFILE_CORE_WINDOW_SPECS = {
     "core.ret5": (6, False),
     "core.clv": (1, False),
 }
-_PROFILE_NOT_IMPLEMENTED = {
+_PROFILE_PERIOD_INPUTS = {
     "profile.closed_week_trend": {
-        "status": "NOT_IMPLEMENTED",
-        "reason": "缺少经官方周历闭合、状态完整且与目标日同坐标的period.closed_week生产输入；本只读TDX日线入口未接入周线聚合。",
+        "status": "UNKNOWN",
+        "quality": "UNKNOWN_DATA",
+        "reason": "CLOSED_PERIOD_INPUT_UNAVAILABLE：缺少官方周历覆盖证明、目标坐标规范ACTUAL日线、逐会话状态及公司行为选集闭包；保持UNKNOWN。",
         "missing_inputs": ("period.closed_week",),
     },
     "profile.closed_month_trend": {
-        "status": "NOT_IMPLEMENTED",
-        "reason": "缺少经官方月历闭合、状态完整且与目标日同坐标的period.closed_month生产输入；本只读TDX日线入口未接入月线聚合。",
+        "status": "UNKNOWN",
+        "quality": "UNKNOWN_DATA",
+        "reason": "CLOSED_PERIOD_INPUT_UNAVAILABLE：缺少官方月历覆盖证明、目标坐标规范ACTUAL日线、逐会话状态及公司行为选集闭包；保持UNKNOWN。",
         "missing_inputs": ("period.closed_month",),
     },
     "profile.relative": {
@@ -2099,6 +2102,7 @@ def _build_profile_preview(
     core: dict[str, FieldValue],
     calendar_revision: str,
     contract: dict[str, Any],
+    closed_period_bars: Mapping[str, Sequence[object]] | None = None,
     source_snapshot_id: str | None = None,
     source_snapshot_role: str = "LOCAL_FILE_SNAPSHOT_ID_NOT_CAPTURED_AVAILABLE_AT",
 ) -> dict[str, Any]:
@@ -2169,8 +2173,51 @@ def _build_profile_preview(
             raise ResearchEntryError(
                 "PROFILE_PREVIEW_CONTRACT_INVALID", "Profile规则缺少field_id"
             )
-        unavailable = _PROFILE_NOT_IMPLEMENTED.get(field_id)
+        unavailable = _PROFILE_PERIOD_INPUTS.get(field_id)
         if unavailable is not None:
+            period_field_id = unavailable["missing_inputs"][0]
+            supplied_period_bars = (
+                closed_period_bars.get(period_field_id)
+                if isinstance(closed_period_bars, Mapping)
+                else None
+            )
+            if supplied_period_bars:
+                try:
+                    period_source_sha = _profile_preview_source_digest(
+                        package_root / "canonical" / "adjustment_periods.py",
+                        "build_closed_period_bars",
+                    )
+                    period_result = evaluate_closed_period_trend(
+                        field_id,
+                        supplied_period_bars,
+                        target_session=target_session,
+                        coordinate_id=coordinate_id,
+                        coordinate_contract_version="RAW_UNADJUSTED",
+                        producer_source_sha256=period_source_sha,
+                        rules=rules,
+                        field_registry=canonical_registry,
+                    )
+                except ContractError as error:
+                    raise ResearchEntryError(
+                        "PROFILE_PERIOD_INPUT_INVALID",
+                        f"{field_id}闭合周期输入不符合精确Profile交接合同：{error}",
+                    ) from error
+                components.append(
+                    {
+                        "field_id": field_id,
+                        "rule_id": rule.get("expression_ref"),
+                        "expression_ref": rule.get("expression_ref"),
+                        "status": "EVALUATED"
+                        if period_result.quality == "OBSERVED"
+                        else "UNKNOWN",
+                        "quality": period_result.quality,
+                        "value": _render_field(period_result)["value"],
+                        "reason": period_result.reason,
+                        "production_eligibility": "PREVIEW_ONLY_RAW_NON_PIT",
+                        "input_fields": [period_field_id],
+                    }
+                )
+                continue
             missing_inputs = []
             for missing_id in unavailable["missing_inputs"]:
                 field_spec = registry_by_id.get(missing_id, {})
@@ -2188,6 +2235,7 @@ def _build_profile_preview(
                     "rule_id": rule_id,
                     "expression_ref": rule.get("expression_ref"),
                     "status": unavailable["status"],
+                    "quality": unavailable["quality"],
                     "production_eligibility": "NOT_ELIGIBLE",
                     "reason": unavailable["reason"],
                     "missing_inputs": missing_inputs,
@@ -4020,6 +4068,7 @@ def research_stock_pg_history_preview(
     missing_history_sessions: Sequence[date] | None = None,
     namespace_id: str,
     profile_contract: dict[str, Any],
+    closed_period_bars: Mapping[str, Sequence[object]] | None = None,
 ) -> dict[str, Any]:
     """把明确PG Raw窗口适配至现役Core和Profile11研究预览。"""
     target = _parse_target(target_session)
@@ -4230,6 +4279,7 @@ def research_stock_pg_history_preview(
         core=core,
         calendar_revision=calendar_revision,
         contract=profile_contract,
+        closed_period_bars=closed_period_bars,
         source_snapshot_id=source_snapshot_id,
         source_snapshot_role="PG_CAPTURE_HISTORY_ID_NOT_CAPTURED_AVAILABLE_AT",
     )
@@ -4430,6 +4480,8 @@ def research_universe_pg_history_preview(
     session_dates: Sequence[date],
     page: Mapping[str, Any],
     profile_contract: dict[str, Any],
+    closed_period_bars_by_symbol: Mapping[str, Mapping[str, Sequence[object]]]
+    | None = None,
 ) -> dict[str, Any]:
     """以PG SQL分页候选结果生成来源符号级Core/Profile质量摘要。"""
     results: list[dict[str, Any]] = []
@@ -4447,6 +4499,11 @@ def research_universe_pg_history_preview(
                 ),
                 namespace_id=page["namespace_id"],
                 profile_contract=profile_contract,
+                closed_period_bars=(
+                    closed_period_bars_by_symbol.get(symbol)
+                    if isinstance(closed_period_bars_by_symbol, Mapping)
+                    else None
+                ),
             )
         except ResearchEntryError as error:
             field_registry = (

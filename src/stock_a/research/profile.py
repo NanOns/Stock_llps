@@ -752,3 +752,177 @@ def closed_prices_from_period_bars(
         target_session,
         coordinate_id,
     )
+
+
+def evaluate_closed_period_trend(
+    field_id: str,
+    period_bars: Sequence[object],
+    *,
+    target_session: date,
+    coordinate_id: str,
+    coordinate_contract_version: str,
+    producer_source_sha256: str,
+    rules: Mapping,
+    field_registry: list[Mapping],
+) -> FieldValue:
+    """以闭合周期生产结果调用现役周/月Profile趋势规则。"""
+    if field_id not in {
+        "profile.closed_week_trend",
+        "profile.closed_month_trend",
+    }:
+        raise ContractError("闭合周期消费仅支持profile.closed_week/month_trend")
+    rule = _rule_for(field_id, rules)
+    _validate_rule(rule)
+    if (
+        type(target_session) is not date
+        or not coordinate_id
+        or not coordinate_contract_version
+        or len(producer_source_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in producer_source_sha256)
+    ):
+        raise ContractError("闭合周期Profile消费缺少精确目标、坐标或生产者身份")
+    input_fields = rule.get("input_fields")
+    if not isinstance(input_fields, list) or len(input_fields) != 1:
+        raise ContractError("闭合周期趋势规则必须绑定唯一period输入")
+    period_field_id = input_fields[0]
+    minimum_count = (
+        rule.get("input_domains", {}).get(period_field_id, {}).get("minimum_count")
+    )
+    if type(minimum_count) is not int or minimum_count not in {4, 6}:
+        raise ContractError("闭合周期趋势规则必须采用6周或4月窗口")
+    selected = tuple(period_bars[-minimum_count:])
+    if not selected:
+        return unknown(
+            f"INSUFFICIENT_CLOSED_PERIODS:0/{minimum_count};{period_field_id}"
+        )
+    if any(
+        getattr(row, "target_session", None) != target_session
+        or getattr(row, "coordinate_id", None) != coordinate_id
+        for row in selected
+    ):
+        raise ContractError("闭合周期输入目标日期或价格坐标身份错配")
+    source_cutoff_value = getattr(selected[-1], "source_cutoff", None)
+    if not hasattr(source_cutoff_value, "isoformat"):
+        raise ContractError("闭合周期输入缺少明确来源截止时刻")
+    source_cutoff = source_cutoff_value.isoformat()
+    closed_prices = closed_prices_from_period_bars(
+        selected,
+        minimum_count=minimum_count,
+        target_session=target_session,
+        source_cutoff=source_cutoff,
+        coordinate_id=coordinate_id,
+    )
+    blocking_reasons = []
+    if len(selected) < minimum_count:
+        blocking_reasons.append(
+            f"INSUFFICIENT_CLOSED_PERIODS:{len(selected)}/{minimum_count}"
+        )
+    for row in selected:
+        if getattr(row, "calendar_coverage_proven", False) is not True:
+            blocking_reasons.append("CALENDAR_COVERAGE_UNPROVEN")
+        if getattr(row, "fact_identity_trusted", False) is not True:
+            blocking_reasons.append("ENTITY_SOURCE_BINDING_UNVERIFIED")
+        if getattr(row, "fact_dependency_closure_bound", False) is not True:
+            blocking_reasons.append("PERIOD_DEPENDENCY_CLOSURE_UNBOUND")
+        if getattr(row, "action_selection_status", None) != "ACTION_SELECTION_COMPLETE":
+            blocking_reasons.append(
+                str(getattr(row, "action_selection_status", "ACTION_SELECTION_UNKNOWN"))
+            )
+        if getattr(row, "eligible_closed_period", False) is not True:
+            blocking_reasons.append(str(getattr(row, "state", "PERIOD_NOT_ELIGIBLE")))
+        if getattr(getattr(row, "close", None), "quality", None) != "OBSERVED":
+            blocking_reasons.append(
+                "PERIOD_CLOSE_UNKNOWN:"
+                + str(getattr(getattr(row, "close", None), "reason", "MISSING"))
+            )
+    if not all(closed_prices.complete):
+        blocking_reasons.append("CLOSED_PERIOD_SLOT_OR_COORDINATE_INCOMPLETE")
+    if blocking_reasons:
+        period_value = unknown(";".join(dict.fromkeys(blocking_reasons)))
+    else:
+        period_value = FieldValue(closed_prices)
+
+    definitions = {
+        item.get("field_id"): item
+        for item in field_registry
+        if isinstance(item, Mapping) and isinstance(item.get("field_id"), str)
+    }
+    definition = definitions.get(period_field_id)
+    if not isinstance(definition, Mapping):
+        raise ContractError("闭合周期趋势输入未登记：" + period_field_id)
+    producer_symbol = definition.get("producer_symbol")
+    if not isinstance(producer_symbol, str) or not producer_symbol:
+        raise ContractError("闭合周期生产者符号缺失")
+    if not all(
+        isinstance(definition.get(name), str) and definition[name]
+        for name in ("unit", "producer_stage", "expression_ref", "parameter_version")
+    ):
+        raise ContractError("闭合周期输入缺少字段、参数或版本合同")
+    revisions = {
+        getattr(row, name, None)
+        for row in selected
+        for name in ("calendar_revision", "status_revision", "action_revision")
+    }
+    if None in revisions or "" in revisions:
+        raise ContractError("闭合周期窗口缺少日历、状态或公司行为版本")
+    calendar_refs = {
+        f"{getattr(row, 'calendar_id', '')}:{getattr(row, 'calendar_revision', '')}"
+        for row in selected
+    }
+    action_revisions = {getattr(row, "action_revision", "") for row in selected}
+    if len(calendar_refs) != 1 or len(action_revisions) != 1:
+        raise ContractError("闭合周期Profile窗口混用日历或公司行为版本")
+    row_digests = "\n".join(
+        str(getattr(row, "period_fact_digest", ""))
+        + ":"
+        + str(getattr(row, "selection_context_digest", ""))
+        for row in selected
+    )
+    if any(len(part) != 64 for part in row_digests.replace(":", "\n").splitlines()):
+        raise ContractError("闭合周期输入缺少稳定内容摘要")
+    window = WindowIdentity(
+        contract=str(definition.get("window_contract", "")),
+        first_endpoint=selected[0].planned_last_session,
+        last_endpoint=selected[-1].planned_last_session,
+        selected_rows_digest=sha256(row_digests.encode("utf-8")).hexdigest(),
+        calendar_revision=selected[-1].calendar_revision,
+        status_revision=selected[-1].status_revision,
+    )
+    context = {
+        "context.target_session": target_session,
+        "context.source_cutoff": source_cutoff,
+        "context.calendar_ref": next(iter(calendar_refs)),
+        "context.sealed_actions_revision": selected[-1].action_revision,
+        "context.coordinate_contract_version": coordinate_contract_version,
+    }
+    supplied = ProfileInput(
+        field_id=period_field_id,
+        field=period_value,
+        unit=definition["unit"],
+        producer_stage=definition["producer_stage"],
+        producer_symbol=producer_symbol,
+        producer_source_sha256=producer_source_sha256,
+        expression_ref=definition["expression_ref"],
+        algorithm_version=definition.get("algorithm_version"),
+        parameter_version=definition["parameter_version"],
+        window=window,
+        coordinate_role=definition.get("coordinate_role"),
+        coordinate_id=coordinate_id,
+        context=context,
+    )
+    handoff = ProfileHandoff(
+        inputs={period_field_id: supplied},
+        target_session=target_session,
+        source_cutoff=source_cutoff,
+        target_coordinate_id=coordinate_id,
+        expected_windows={period_field_id: window},
+        expected_context={period_field_id: context},
+        runtime_producers={
+            producer_symbol: RuntimeProducerBinding(
+                symbol=producer_symbol,
+                source_sha256=producer_source_sha256,
+                algorithm_version=definition.get("algorithm_version"),
+            )
+        },
+    )
+    return evaluate_profile_kernel(field_id, handoff, rules, field_registry)

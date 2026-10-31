@@ -32,6 +32,7 @@ from stock_a.application.pg_research import (
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
     query_source_symbol_price_profiles,
+    query_source_symbol_price_profile_changes,
     source_symbol_price_profile_snapshots,
 )
 from stock_a.application.source_ingress import build_source_ingress_plan
@@ -75,6 +76,15 @@ class PreviewHttpError(Exception):
         self.code = code
         self.message = message
         super().__init__(message)
+
+
+def _require_research_cutoff(target_session: date, max_target_session: date) -> None:
+    if target_session > max_target_session:
+        raise PreviewHttpError(
+            400,
+            "RESEARCH_CUTOFF_EXCEEDED",
+            f"研究日期不能晚于冻结截止日{max_target_session.isoformat()}",
+        )
 
 
 def _iso_date(value: Any, field: str = "target_session") -> date:
@@ -278,7 +288,10 @@ def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class _PreviewState:
-    def __init__(self) -> None:
+    def __init__(self, *, research_cutoff: date) -> None:
+        if type(research_cutoff) is not date:
+            raise DiagnosticError("RESEARCH_CUTOFF_REQUIRED", "必须显式绑定研究截止日")
+        self.research_cutoff = research_cutoff
         self.config, self.config_path = load_runtime_config()
         services = self.config.get("services")
         development = (
@@ -484,6 +497,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "PROFILE_SOURCE_SET_ID_INVALID",
                 "PROFILE_REVISION_INVALID",
                 "PROFILE_SYMBOL_INVALID",
+                "PROFILE_DATE_AFTER_CUTOFF",
+                "PROFILE_CUTOFF_REQUIRED",
+                "PROFILE_CHANGE_DATE_INVALID",
             }:
                 status = 400
             elif error.code in {
@@ -598,6 +614,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         )
                 catalog = read_raw_daily_catalog(
                     self.preview_server.state.config,
+                    max_target_session=self.preview_server.state.research_cutoff,
                     year=year,
                     offset=offset,
                     limit=limit,
@@ -630,7 +647,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "画像版本目录不接受隐式筛选或latest参数",
                     )
                 snapshots = source_symbol_price_profile_snapshots(
-                    self.preview_server.state.config
+                    self.preview_server.state.config,
+                    max_target_session=self.preview_server.state.research_cutoff,
                 )
                 self._send_json(
                     200,
@@ -638,11 +656,63 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE",
                         "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
+                        "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
                         "snapshots": snapshots["snapshots"],
                         "database_write": False,
                         "ddl_executed": False,
                     },
                 )
+                return
+            if parsed.path == "/api/source-symbol-price-profile-changes":
+                values = _query(
+                    self.path,
+                    {
+                        "before_session",
+                        "after_session",
+                        "offset",
+                        "limit",
+                        "symbol",
+                        "change_type",
+                    },
+                )
+                if not {"before_session", "after_session"}.issubset(values):
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_CHANGE_QUERY_REQUIRED",
+                        "变化查询必须显式提供前后两个画像日期",
+                    )
+                before_session = _iso_date(values["before_session"], "before_session")
+                after_session = _iso_date(values["after_session"], "after_session")
+                _require_research_cutoff(
+                    before_session, self.preview_server.state.research_cutoff
+                )
+                _require_research_cutoff(
+                    after_session, self.preview_server.state.research_cutoff
+                )
+                symbol = _symbol(values["symbol"]) if "symbol" in values else None
+                result = query_source_symbol_price_profile_changes(
+                    self.preview_server.state.config,
+                    before_session=before_session,
+                    after_session=after_session,
+                    max_target_session=self.preview_server.state.research_cutoff,
+                    offset=_nonnegative_int(values.get("offset", "0"), "offset"),
+                    limit=_positive_int(
+                        _nonnegative_int(values.get("limit", "30"), "limit", 30) or 0,
+                        "limit",
+                        30,
+                    ),
+                    source_symbol=symbol,
+                    change_type=values.get("change_type", "ALL"),
+                )
+                result.update(
+                    {
+                        "ok": True,
+                        "research_mode": "ACCEPTED_PG_PROFILE_CHANGE_OBSERVATION",
+                        "database_write": False,
+                        "ddl_executed": False,
+                    }
+                )
+                self._send_json(200, result)
                 return
             if parsed.path == "/api/source-symbol-price-profiles":
                 values = _query(
@@ -676,6 +746,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "画像查询必须显式绑定日期、source_set、包SHA和画像修订",
                     )
                 target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
                 package_sha = _sha(values["package_sha256"])
                 offset = _nonnegative_int(values.get("offset", "0"), "offset")
                 limit = _positive_int(
@@ -687,6 +760,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 result = query_source_symbol_price_profiles(
                     self.preview_server.state.config,
                     target_session=target,
+                    max_target_session=self.preview_server.state.research_cutoff,
                     source_set_id=values["source_set_id"],
                     package_sha256=package_sha,
                     profile_revision=values["profile_revision"],
@@ -727,6 +801,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "数据链准备状态必须显式提供目标日期和完整来源包SHA",
                     )
                 target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
                 package_sha = _sha(values["package_sha256"])
                 source_version = read_raw_daily_readiness(
                     self.preview_server.state.config,
@@ -771,6 +848,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "Raw查询必须显式提供日期、完整SHA和来源代码",
                     )
                 target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
                 package_sha = _sha(values["package_sha256"])
                 symbol = _symbol(values["symbol"])
                 row = read_raw_daily_stock(
@@ -829,6 +909,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "候选分页必须显式提供目标日期和来源包SHA",
                     )
                 target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
                 package_sha = _sha(values["package_sha256"])
                 offset = _nonnegative_int(values.get("offset", "0"), "offset")
                 limit = _nonnegative_int(
@@ -975,6 +1058,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             symbol = _symbol(body["symbol"])
             target_text = body["target_session"]
             target = _iso_date(target_text)
+            _require_research_cutoff(target, self.preview_server.state.research_cutoff)
             package_sha = _sha(body["package_sha256"])
             session_count = _positive_int(body["session_count"], "session_count", 75)
             resolved_target, sessions, calendar_revision = resolve_pg_history_window(
@@ -1039,7 +1123,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             self._handle_error(error)
 
 
-def run_preview_server(*, host: str = _HOST, port: int = _PORT) -> int:
+def run_preview_server(
+    *, host: str = _HOST, port: int = _PORT, research_cutoff: date
+) -> int:
     """仅以前台显式运行方式启动127.0.0.1:28766。"""
     if host != _HOST or type(port) is not int or port != _PORT:
         print("拒绝启动：本机研究预览只允许绑定127.0.0.1:28766。", file=sys.stderr)
@@ -1056,7 +1142,7 @@ def run_preview_server(*, host: str = _HOST, port: int = _PORT) -> int:
         except OSError:
             pass
     try:
-        state = _PreviewState()
+        state = _PreviewState(research_cutoff=research_cutoff)
         server = _BoundedHTTPServer((_HOST, _PORT), state)
     except (OSError, DiagnosticError, DayChainContractError) as error:
         print(f"预览服务未启动：{type(error).__name__}。", file=sys.stderr)

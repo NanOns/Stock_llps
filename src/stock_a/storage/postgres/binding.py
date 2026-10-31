@@ -54,6 +54,12 @@ _MIGRATIONS = (
         ("migrations", "0007_r02_tdx_source_symbol_price_profile.sql"),
         "0ef16c44b9c07d0aa6f494f6793690fae84651a3e5bcc3fac3a5dc83dbafbc48",
     ),
+    (
+        8,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0008_r02_price_profile_ma10_comment.sql"),
+        "b9128fa7def0dbeeddc8658c11cc5804c7c8e895df6270d4ce115ee9dd2eafb2",
+    ),
 )
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
@@ -61,6 +67,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_P03_SOURCE_SET_BROWSER_RULE_R1": frozenset({5}),
     "R01_R02_P03_FORMAL_TWO_DAY_WRITE_R1": frozenset({6}),
     "R02_TDX_SOURCE_SYMBOL_PRICE_PROFILE_0007_R1": frozenset({7}),
+    "R02_FROZEN_75D_ALGORITHMS_CHANGE_R2": frozenset({8}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -95,6 +102,15 @@ _RELATIONS_BY_MIGRATION_COUNT = {
         "source_set_capabilities",
     },
     7: _R01_TABLES
+    | {
+        "source_raw_daily",
+        "source_set_candidates",
+        "source_set_candidate_inputs",
+        "source_sets",
+        "source_set_capabilities",
+        "source_symbol_price_profiles",
+    },
+    8: _R01_TABLES
     | {
         "source_raw_daily",
         "source_set_candidates",

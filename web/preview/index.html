@@ -21,9 +21,87 @@
     <main>
       <section class="notice">
         <strong>数据边界</strong
-        ><span
-          >当前页面展示来源候选，不代表官方上市总体、稳定证券身份、交易状态或选股结论。入选、行业和名称能力尚未接通。</span
+        ><span id="dataBoundary"
+          >研究截止信息正在从本机服务读取。当前页面展示来源候选，不代表官方上市总体、稳定证券身份、交易状态或选股结论；自动日更、Head发布及生产切换暂停。</span
         >
+      </section>
+      <section
+        class="panel change-browser"
+        aria-labelledby="changeBrowserTitle"
+      >
+        <div class="panel-head">
+          <div>
+            <h2 id="changeBrowserTitle">两日画像变化与早期结构观察</h2>
+            <p>
+              只比较已接受PG画像；MA20关系要求同RAW坐标且两日收盘与MA20均为OBSERVED。
+            </p>
+          </div>
+          <span id="changeCount" class="count">等待PG画像目录</span>
+        </div>
+        <div class="change-controls">
+          <label
+            >比较前日<select id="changeBeforeSelect" disabled></select
+          ></label>
+          <label
+            >比较后日<select id="changeAfterSelect" disabled></select
+          ></label>
+          <label
+            >变化类型<select id="changeTypeSelect">
+              <option value="ALL">所有实际变化</option>
+              <option value="BEFORE_ONLY">仅前日存在</option>
+              <option value="AFTER_ONLY">仅后日存在</option>
+              <option value="TARGET_BAR_STATUS_CHANGED">目标日Bar状态</option>
+              <option value="PRICE_WINDOW_STATUS_CHANGED">价格窗口状态</option>
+              <option value="RAW_CLOSE_VS_MA20_CHANGED">收盘与MA20关系</option>
+              <option value="PROFILE_STATE_CHANGED">Profile状态/质量</option>
+              <option value="CORE_QUALITY_CHANGED">Core质量/原因</option>
+            </select></label
+          >
+          <label
+            >来源代码搜索<input
+              id="changeSymbolInput"
+              placeholder="输入来源代码"
+              autocomplete="off"
+              maxlength="9"
+          /></label>
+          <button id="searchChanges" type="button">查询变化</button>
+        </div>
+        <div id="changeSummary" class="population" role="status">
+          请选择前后两个完整PG画像版本。
+        </div>
+        <div class="table-wrap">
+          <table class="change-table">
+            <thead>
+              <tr>
+                <th>来源代码</th>
+                <th>实际变化</th>
+                <th>RAW收盘 / MA20关系</th>
+                <th>Profile11状态变化</th>
+                <th>Core质量或原因变化</th>
+                <th>详情</th>
+              </tr>
+            </thead>
+            <tbody id="changeRows">
+              <tr>
+                <td colspan="6" class="muted">等待比较两个已保存画像。</td>
+              </tr>
+            </tbody>
+          </table>
+        </div>
+        <div class="pager">
+          <button id="changePrev" class="quiet" disabled>上一页</button>
+          <span id="changePageStatus">—</span>
+          <div class="pager-actions">
+            <button id="changeNext" class="quiet" disabled>下一页</button
+            ><button id="changeLast" class="quiet" disabled>末页</button>
+          </div>
+        </div>
+        <section
+          id="changeDetail"
+          class="profile-detail"
+          hidden
+          aria-live="polite"
+        ></section>
       </section>
       <section
         class="panel profile-browser"
@@ -50,7 +128,7 @@
           ><label
             >精确来源代码<input
               id="profileSymbolInput"
-              placeholder="可留空；例如SH.600000"
+              placeholder="可留空"
               autocomplete="off"
               maxlength="9" /></label
           ><label

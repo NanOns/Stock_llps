@@ -15,6 +15,11 @@ const state = {
   profileOffset: 0,
   profileLimit: 100,
   profileTotal: 0,
+  changeOffset: 0,
+  changeLimit: 30,
+  changeTotal: 0,
+  changeRequest: 0,
+  changeSnapshots: [],
   loading: false,
 };
 const labels = {
@@ -1113,6 +1118,228 @@ function showProfileDetail(item) {
   profileWrap.append(profileTable);
   root.append(profileWrap);
 }
+const changeTypeLabels = {
+  BEFORE_ONLY: "仅前日存在",
+  AFTER_ONLY: "仅后日存在",
+  TARGET_BAR_STATUS_CHANGED: "目标Bar状态变化",
+  PRICE_WINDOW_STATUS_CHANGED: "价格窗口变化",
+  RAW_CLOSE_VS_MA20_CHANGED: "收盘/MA20关系变化",
+  PROFILE_STATE_CHANGED: "Profile状态/质量变化",
+  CORE_QUALITY_CHANGED: "Core质量/原因变化",
+};
+function resetChangeDetail() {
+  $("changeDetail").hidden = true;
+  $("changeDetail").replaceChildren();
+}
+function showChangeDetail(item) {
+  const root = $("changeDetail");
+  root.replaceChildren();
+  root.hidden = false;
+  appendText(
+    root,
+    "h3",
+    `${item.source_symbol} · ${item.before_profile_revision} → ${item.after_profile_revision}`,
+  );
+  const meta = document.createElement("dl");
+  meta.className = "profile-detail-meta";
+  for (const [label, value] of [
+    [
+      "实际变化类型",
+      (item.change_types || [])
+        .map((type) => changeTypeLabels[type] || type)
+        .join("、"),
+    ],
+    [
+      "Core/Profile语义可比",
+      `${item.core_compatible ? "Core可比" : "Core不可比"} · ${item.profile_compatible ? "Profile可比" : "Profile不可比"}`,
+    ],
+    [
+      "收盘 / MA20关系",
+      `前日收盘 ${text(item.before_raw_close)} (${text(item.before_raw_price_quality)} / ${text(item.before_raw_price_reason)}) vs MA20 ${text(item.before_ma20)} (${text(item.before_ma20_quality)} / ${text(item.before_ma20_reason)}) → ${text(item.before_close_ma20_relation)}；后日收盘 ${text(item.after_raw_close)} (${text(item.after_raw_price_quality)} / ${text(item.after_raw_price_reason)}) vs MA20 ${text(item.after_ma20)} (${text(item.after_ma20_quality)} / ${text(item.after_ma20_reason)}) → ${text(item.after_close_ma20_relation)}`,
+    ],
+    [
+      "目标Bar / 窗口",
+      `${text(item.before_bar_status)} → ${text(item.after_bar_status)} · ${text(item.before_window_status)} ${text(item.before_window_reason)} → ${text(item.after_window_status)} ${text(item.after_window_reason)}`,
+    ],
+    ["选股状态", "NOT_EVALUATED：来源变化观察不构成入选或未入选判定"],
+  ])
+    readinessDetail(meta, label, text(value));
+  root.append(meta);
+  appendText(root, "h3", "Profile11状态、质量与UNKNOWN原因");
+  if (!item.profile_compatible) {
+    appendText(
+      root,
+      "p",
+      "字段身份或Profile语义不兼容，不能比较前后状态。",
+      "muted",
+    );
+  } else {
+    const table = document.createElement("table");
+    table.innerHTML =
+      "<thead><tr><th>字段</th><th>前日状态 / 质量 / 原因</th><th>后日状态 / 质量 / 原因</th></tr></thead>";
+    const body = document.createElement("tbody");
+    (item.before_profile_field_ids || []).forEach((field, index) =>
+      tableRow(body, [
+        field,
+        `${text(item.before_profile_statuses?.[index])} / ${text(item.before_profile_qualities?.[index])} / ${text(item.before_profile_reasons?.[index])}`,
+        `${text(item.after_profile_statuses?.[index])} / ${text(item.after_profile_qualities?.[index])} / ${text(item.after_profile_reasons?.[index])}`,
+      ]),
+    );
+    table.append(body);
+    const wrap = document.createElement("div");
+    wrap.className = "table-wrap";
+    wrap.append(table);
+    root.append(wrap);
+  }
+  appendText(root, "h3", "Core质量或原因变化");
+  if (item.core_quality_changes?.length) {
+    const table = document.createElement("table");
+    table.innerHTML =
+      "<thead><tr><th>字段</th><th>前日质量 / 原因</th><th>后日质量 / 原因</th></tr></thead>";
+    const body = document.createElement("tbody");
+    for (const change of item.core_quality_changes)
+      tableRow(body, [
+        change.field_id,
+        `${text(change.before_quality)} / ${text(change.before_reason)}`,
+        `${text(change.after_quality)} / ${text(change.after_reason)}`,
+      ]);
+    table.append(body);
+    const wrap = document.createElement("div");
+    wrap.className = "table-wrap";
+    wrap.append(table);
+    root.append(wrap);
+  } else appendText(root, "p", "此对象没有Core质量或原因变化。", "muted");
+}
+function populateChangeSnapshots(snapshots) {
+  const complete = snapshots
+    .filter((item) => item.complete)
+    .slice()
+    .sort((a, b) => a.target_session.localeCompare(b.target_session));
+  for (const id of ["changeBeforeSelect", "changeAfterSelect"]) {
+    const select = $(id);
+    select.replaceChildren(new Option("— 选择完整PG画像日期 —", ""));
+    for (const item of complete)
+      select.append(
+        new Option(
+          `${item.target_session} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · rev ${item.profile_revision.slice(0, 10)}`,
+          item.target_session,
+        ),
+      );
+    select.disabled = complete.length < 2;
+  }
+  if (complete.length >= 2) {
+    $("changeBeforeSelect").value = complete.at(-2).target_session;
+    $("changeAfterSelect").value = complete.at(-1).target_session;
+    $("searchChanges").disabled = false;
+    loadChanges();
+  } else {
+    $("searchChanges").disabled = true;
+    $("changeSummary").textContent =
+      "需要两个不同日期且分母闭合的已保存画像版本才能比较。";
+  }
+}
+async function loadChanges() {
+  const before = $("changeBeforeSelect").value;
+  const after = $("changeAfterSelect").value;
+  const requestId = ++state.changeRequest;
+  resetChangeDetail();
+  $("changeRows").replaceChildren();
+  if (!before || !after || before >= after) {
+    $("changeSummary").textContent = "请选择递增的前后画像日期。";
+    $("changePageStatus").textContent = "—";
+    $("changePrev").disabled =
+      $("changeNext").disabled =
+      $("changeLast").disabled =
+        true;
+    return;
+  }
+  const params = new URLSearchParams({
+    before_session: before,
+    after_session: after,
+    offset: String(state.changeOffset),
+    limit: String(state.changeLimit),
+    change_type: $("changeTypeSelect").value,
+  });
+  const symbol = $("changeSymbolInput").value.trim();
+  if (symbol) params.set("symbol", symbol);
+  $("changeSummary").textContent = "正在比较精确的PG画像来源版本…";
+  $("searchChanges").disabled = true;
+  try {
+    const data = await api(
+      `/api/source-symbol-price-profile-changes?${params}`,
+    );
+    if (requestId !== state.changeRequest) return;
+    const s = data.summary;
+    const p = data.page;
+    state.changeTotal = p.total;
+    $("changeCount").textContent = `${s.changed_source_symbol_count}个变化对象`;
+    $("changeSummary").textContent =
+      `${before} → ${after} · 快照 ${data.before_snapshot.source_symbol_count}/${data.before_snapshot.expected_source_symbol_count} 与 ${data.after_snapshot.source_symbol_count}/${data.after_snapshot.expected_source_symbol_count} · 交集 ${s.intersection_count} · 前日独有 ${s.before_only_count} · 后日独有 ${s.after_only_count} · Core/Profile不可比 ${s.core_semantics_incomparable_count}/${s.profile_semantics_incomparable_count} · 收盘/MA20未知 ${s.close_ma20_unknown_count} · Profile未观察 ${s.profile_unobserved_pair_count} · 筛选变化 ${p.total} · 选股未评价。`;
+    $("changePageStatus").textContent =
+      `偏移 ${p.offset} · 本页 ${p.count}/${p.limit} · 筛选总计 ${p.total}`;
+    $("changePrev").disabled = p.offset === 0;
+    $("changeNext").disabled = p.next_offset === null;
+    $("changeLast").disabled = p.total === 0 || p.offset + p.limit >= p.total;
+    if (!data.rows.length)
+      tableRow($("changeRows"), [
+        "没有匹配的实际变化；可在下方画像搜索中逐股查看来源池状态和UNKNOWN原因。",
+        "",
+        "",
+        "",
+        "",
+        "",
+      ]);
+    for (const item of data.rows) {
+      const row = document.createElement("tr");
+      cell(row, item.source_symbol);
+      cell(
+        row,
+        (item.change_types || [])
+          .map((type) => changeTypeLabels[type] || type)
+          .join("、"),
+      );
+      cell(
+        row,
+        `${text(item.before_close_ma20_relation)} → ${text(item.after_close_ma20_relation)}`,
+      );
+      cell(
+        row,
+        item.profile_compatible
+          ? (item.profile_field_changes || [])
+              .map((change) => change.field_id)
+              .join("、") || "无"
+          : "不可比",
+      );
+      cell(
+        row,
+        (item.core_quality_changes || [])
+          .map((change) => change.field_id)
+          .join("、") || "无",
+      );
+      const detail = document.createElement("td");
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "quiet";
+      button.textContent = "详情 / 原因";
+      button.addEventListener("click", () => showChangeDetail(item));
+      detail.append(button);
+      row.append(detail);
+      $("changeRows").append(row);
+    }
+  } catch (error) {
+    if (requestId !== state.changeRequest) return;
+    tableRow($("changeRows"), [error.message, "", "", "", "", ""]);
+    $("changeCount").textContent = "变化查询失败";
+    $("changeSummary").textContent = `PG变化查询未完成：${error.message}`;
+    $("changePageStatus").textContent = "查询失败";
+    $("changePrev").disabled =
+      $("changeNext").disabled =
+      $("changeLast").disabled =
+        true;
+  } finally {
+    if (requestId === state.changeRequest) $("searchChanges").disabled = false;
+  }
+}
 async function loadProfileSnapshots() {
   state.profileRequest++;
   $("profileSnapshotSelect").disabled = true;
@@ -1121,7 +1348,10 @@ async function loadProfileSnapshots() {
   );
   try {
     const data = await api("/api/source-symbol-price-profiles/snapshots");
+    $("dataBoundary").textContent =
+      `研究冻结于${data.research_cutoff}。当前页面展示来源候选，不代表官方上市总体、稳定证券身份、交易状态或选股结论；自动日更、Head发布及生产切换暂停。`;
     state.profileSnapshots = data.snapshots || [];
+    populateChangeSnapshots(state.profileSnapshots);
     $("profileSnapshotSelect").replaceChildren(
       new Option("— 请选择精确画像日期 / source_set / revision —", ""),
     );
@@ -1142,7 +1372,10 @@ async function loadProfileSnapshots() {
       ? "请选择精确日期、P03 source_set和窗口修订。搜索仅读取PG持久画像，不回退latest。"
       : "PG画像表中没有已保存记录。";
   } catch (error) {
+    $("dataBoundary").textContent =
+      "研究截止信息读取失败，无法确认当前页面的数据范围；自动日更、Head发布及生产切换暂停。";
     state.profileSnapshots = [];
+    populateChangeSnapshots([]);
     $("profileCount").textContent = "PG画像目录不可用";
     $("profileMessage").textContent = `画像目录读取失败：${error.message}`;
   }
@@ -1311,6 +1544,45 @@ $("profileLast").addEventListener("click", () => {
       Math.floor((state.profileTotal - 1) / state.profileLimit) *
       state.profileLimit;
     loadProfilePage();
+  }
+});
+$("searchChanges").addEventListener("click", () => {
+  state.changeOffset = 0;
+  loadChanges();
+});
+$("changeSymbolInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    state.changeOffset = 0;
+    loadChanges();
+  }
+});
+for (const id of [
+  "changeBeforeSelect",
+  "changeAfterSelect",
+  "changeTypeSelect",
+]) {
+  $(id).addEventListener("change", () => {
+    state.changeOffset = 0;
+    loadChanges();
+  });
+}
+$("changePrev").addEventListener("click", () => {
+  state.changeOffset = Math.max(0, state.changeOffset - state.changeLimit);
+  loadChanges();
+});
+$("changeNext").addEventListener("click", () => {
+  if (state.changeOffset + state.changeLimit < state.changeTotal) {
+    state.changeOffset += state.changeLimit;
+    loadChanges();
+  }
+});
+$("changeLast").addEventListener("click", () => {
+  if (state.changeTotal) {
+    state.changeOffset =
+      Math.floor((state.changeTotal - 1) / state.changeLimit) *
+      state.changeLimit;
+    loadChanges();
   }
 });
 loadProfileSnapshots();

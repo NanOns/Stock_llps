@@ -2008,11 +2008,16 @@ ORDER BY source_symbol LIMIT %s OFFSET %s""",
 def read_raw_daily_catalog(
     config: Mapping[str, Any],
     *,
+    max_target_session: date,
     year: int | None = None,
     offset: int = 0,
     limit: int = 100,
 ) -> dict[str, Any]:
     """只读取PG已保存的Raw日期版本目录，不打开来源ZIP或执行写入。"""
+    if type(max_target_session) is not date:
+        raise RawSourcePgError(
+            "PG_CATALOG_CUTOFF_REQUIRED", "Raw目录必须绑定显式研究截止日期"
+        )
     if year is not None and (type(year) is not int or not 1900 <= year <= 9998):
         raise RawSourcePgError("PG_CATALOG_YEAR_INVALID", "Raw目录年份无效")
     if (
@@ -2026,8 +2031,8 @@ def read_raw_daily_catalog(
         )
 
     def _where(namespace_id: str) -> tuple[str, tuple[Any, ...]]:
-        clauses = ["r.namespace_id=%s::uuid"]
-        params: list[Any] = [namespace_id]
+        clauses = ["r.namespace_id=%s::uuid", "r.session_date<=%s"]
+        params: list[Any] = [namespace_id, max_target_session]
         if year is not None:
             clauses.extend(("r.session_date >= %s", "r.session_date < %s"))
             params.extend((date(year, 1, 1), date(year + 1, 1, 1)))

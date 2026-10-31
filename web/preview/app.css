@@ -349,6 +349,19 @@ footer {
   align-items: end;
   margin-bottom: 12px;
 }
+.change-controls {
+  display: grid;
+  grid-template-columns: repeat(5, minmax(130px, 1fr));
+  gap: 11px;
+  align-items: end;
+  margin-bottom: 12px;
+}
+.change-controls button {
+  min-height: 42px;
+}
+.change-table {
+  min-width: 980px;
+}
 .profile-controls button {
   min-height: 42px;
 }
@@ -385,10 +398,21 @@ footer {
   .profile-controls {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .change-controls {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 @media (max-width: 620px) {
   .profile-controls {
     grid-template-columns: 1fr;
+  }
+  .change-controls {
+    grid-template-columns: 1fr;
+  }
+  .count {
+    overflow-wrap: anywhere;
+    text-align: right;
+    white-space: normal;
   }
   .profile-detail-meta {
     grid-template-columns: 1fr;

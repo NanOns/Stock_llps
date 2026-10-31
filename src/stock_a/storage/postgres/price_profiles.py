@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import date
 from hashlib import sha256
 import json
+import re
 from typing import Any, Mapping, Sequence
 from uuid import UUID
 
@@ -433,7 +434,13 @@ WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid AND target_session=%s
     }
 
 
-def list_profile_snapshots(config: Mapping[str, Any]) -> dict[str, Any]:
+def list_profile_snapshots(
+    config: Mapping[str, Any], *, max_target_session: date
+) -> dict[str, Any]:
+    if type(max_target_session) is not date:
+        raise PriceProfilePgError(
+            "PROFILE_SNAPSHOT_CUTOFF_REQUIRED", "画像目录必须绑定显式研究截止日期"
+        )
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
         cursor.execute(
             """SELECT p.target_session, p.source_set_id::text, p.package_sha256,
@@ -444,11 +451,11 @@ FROM stock.source_symbol_price_profiles p
 JOIN stock.source_sets s ON s.namespace_id=p.namespace_id
   AND s.source_set_id=p.source_set_id AND s.target_session=p.target_session
   AND s.package_sha256=p.package_sha256 AND s.seal_status='SEALED'
-WHERE p.namespace_id=%s::uuid
+WHERE p.namespace_id=%s::uuid AND p.target_session<=%s
 GROUP BY p.target_session, p.source_set_id, p.package_sha256, p.profile_revision,
          p.history_window_start, p.history_window_end, p.history_requested_session_count
 ORDER BY p.target_session DESC, p.source_set_id""",
-            (namespace_id,),
+            (namespace_id, max_target_session),
         )
         snapshots = [
             {
@@ -472,10 +479,492 @@ ORDER BY p.target_session DESC, p.source_set_id""",
     }
 
 
+def _snapshot_for_session(
+    cursor: Any,
+    *,
+    namespace_id: str,
+    target_session: date,
+    max_target_session: date,
+) -> dict[str, Any]:
+    cursor.execute(
+        """SELECT p.target_session, p.source_set_id::text, p.package_sha256,
+       p.profile_revision, p.history_window_start, p.history_window_end,
+       p.history_requested_session_count, count(*)::bigint,
+       min(s.raw_row_count), count(*)=min(s.raw_row_count)
+FROM stock.source_symbol_price_profiles p
+JOIN stock.source_sets s ON s.namespace_id=p.namespace_id
+  AND s.source_set_id=p.source_set_id AND s.target_session=p.target_session
+  AND s.package_sha256=p.package_sha256 AND s.seal_status='SEALED'
+WHERE p.namespace_id=%s::uuid AND p.target_session=%s AND p.target_session<=%s
+GROUP BY p.target_session, p.source_set_id, p.package_sha256, p.profile_revision,
+         p.history_window_start, p.history_window_end, p.history_requested_session_count
+ORDER BY p.source_set_id, p.profile_revision""",
+        (namespace_id, target_session, max_target_session),
+    )
+    rows = cursor.fetchall()
+    if not rows:
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_SNAPSHOT_MISSING",
+            f"PG中没有截止{max_target_session.isoformat()}范围内{target_session.isoformat()}的完整画像快照",
+        )
+    if len(rows) != 1:
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_SNAPSHOT_AMBIGUOUS",
+            f"{target_session.isoformat()}有多个来源版本；必须先明确唯一已保存快照",
+        )
+    row = rows[0]
+    snapshot = {
+        "target_session": row[0],
+        "source_set_id": row[1],
+        "package_sha256": str(row[2]).strip(),
+        "profile_revision": str(row[3]).strip(),
+        "window_start": row[4],
+        "window_end": row[5],
+        "history_session_count": int(row[6]),
+        "source_symbol_count": int(row[7]),
+        "expected_source_symbol_count": int(row[8]),
+        "complete": bool(row[9]),
+    }
+    if not snapshot["complete"]:
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_SNAPSHOT_INCOMPLETE",
+            f"{target_session.isoformat()}画像分母未闭合，不能比较",
+        )
+    return snapshot
+
+
+_PROFILE_CHANGE_CTES = """
+WITH old_rows AS (
+    SELECT p.*, r.raw_close AS joined_raw_close,
+           r.price_quality AS joined_raw_price_quality,
+           r.price_reason AS joined_raw_price_reason
+    FROM stock.source_symbol_price_profiles p
+    LEFT JOIN stock.source_raw_daily r
+      ON r.namespace_id=p.namespace_id AND r.source_symbol=p.source_symbol
+     AND r.session_date=p.target_session AND r.package_sha256=p.package_sha256
+    WHERE p.namespace_id=%s::uuid AND p.target_session=%s
+      AND p.source_set_id=%s::uuid AND p.package_sha256=%s
+      AND p.profile_revision=%s
+), new_rows AS (
+    SELECT p.*, r.raw_close AS joined_raw_close,
+           r.price_quality AS joined_raw_price_quality,
+           r.price_reason AS joined_raw_price_reason
+    FROM stock.source_symbol_price_profiles p
+    LEFT JOIN stock.source_raw_daily r
+      ON r.namespace_id=p.namespace_id AND r.source_symbol=p.source_symbol
+     AND r.session_date=p.target_session AND r.package_sha256=p.package_sha256
+    WHERE p.namespace_id=%s::uuid AND p.target_session=%s
+      AND p.source_set_id=%s::uuid AND p.package_sha256=%s
+      AND p.profile_revision=%s
+), paired AS (
+    SELECT COALESCE(o.source_symbol, n.source_symbol) AS source_symbol,
+           o.source_symbol IS NOT NULL AS before_present,
+           n.source_symbol IS NOT NULL AS after_present,
+           o.target_bar_status AS before_bar_status,
+           n.target_bar_status AS after_bar_status,
+           o.price_window_status AS before_window_status,
+           n.price_window_status AS after_window_status,
+           o.price_window_reason AS before_window_reason,
+           n.price_window_reason AS after_window_reason,
+           o.joined_raw_close AS before_raw_close,
+           n.joined_raw_close AS after_raw_close,
+           o.joined_raw_price_quality AS before_raw_price_quality,
+           n.joined_raw_price_quality AS after_raw_price_quality,
+           o.joined_raw_price_reason AS before_raw_price_reason,
+           n.joined_raw_price_reason AS after_raw_price_reason,
+           o.ma20 AS before_ma20,
+           n.ma20 AS after_ma20,
+           o.ma20_quality AS before_ma20_quality,
+           n.ma20_quality AS after_ma20_quality,
+           o.price_coordinate AS before_price_coordinate,
+           n.price_coordinate AS after_price_coordinate,
+           o.source_available_at AS before_source_available_at,
+           n.source_available_at AS after_source_available_at,
+           o.source_time_quality AS before_source_time_quality,
+           n.source_time_quality AS after_source_time_quality,
+           o.history_window_start AS before_window_start,
+           n.history_window_start AS after_window_start,
+           o.history_window_end AS before_window_end,
+           n.history_window_end AS after_window_end,
+           o.history_requested_session_count AS before_window_count,
+           n.history_requested_session_count AS after_window_count,
+           o.profile_revision::text AS before_profile_revision,
+           n.profile_revision::text AS after_profile_revision,
+           o.profile_field_ids AS before_profile_field_ids,
+           n.profile_field_ids AS after_profile_field_ids,
+           o.profile_statuses AS before_profile_statuses,
+           n.profile_statuses AS after_profile_statuses,
+           o.profile_qualities AS before_profile_qualities,
+           n.profile_qualities AS after_profile_qualities,
+           o.profile_reasons AS before_profile_reasons,
+           n.profile_reasons AS after_profile_reasons,
+           o.producer_contract AS before_producer_contract,
+           n.producer_contract AS after_producer_contract,
+           o.producer_contract_sha256 AS before_semantics_sha256,
+           n.producer_contract_sha256 AS after_semantics_sha256,
+           COALESCE(
+               o.source_symbol IS NOT NULL AND n.source_symbol IS NOT NULL
+               AND o.producer_contract=n.producer_contract
+               AND o.producer_contract_sha256=n.producer_contract_sha256
+               AND o.producer_version=n.producer_version
+               AND o.calculation_scope=n.calculation_scope
+               AND o.price_coordinate=n.price_coordinate,
+               FALSE
+           ) AS core_compatible,
+           COALESCE(
+               o.source_symbol IS NOT NULL AND n.source_symbol IS NOT NULL
+               AND o.producer_contract=n.producer_contract
+               AND o.producer_contract_sha256=n.producer_contract_sha256
+               AND o.producer_version=n.producer_version
+               AND o.calculation_scope=n.calculation_scope
+               AND o.price_coordinate=n.price_coordinate
+               AND o.profile_field_ids=n.profile_field_ids,
+               FALSE
+           ) AS profile_compatible,
+           o.ma5_quality AS before_ma5_quality, n.ma5_quality AS after_ma5_quality,
+           o.ma10_quality AS before_ma10_quality, n.ma10_quality AS after_ma10_quality,
+           o.ma60_quality AS before_ma60_quality, n.ma60_quality AS after_ma60_quality,
+           o.atr20_quality AS before_atr20_quality, n.atr20_quality AS after_atr20_quality,
+           o.clv_quality AS before_clv_quality, n.clv_quality AS after_clv_quality,
+           o.prior_high20_quality AS before_prior_high20_quality, n.prior_high20_quality AS after_prior_high20_quality,
+           o.ret20_quality AS before_ret20_quality, n.ret20_quality AS after_ret20_quality,
+           o.pos60_quality AS before_pos60_quality, n.pos60_quality AS after_pos60_quality,
+           o.bias20_atr_quality AS before_bias20_atr_quality, n.bias20_atr_quality AS after_bias20_atr_quality,
+           o.ma5_reason AS before_ma5_reason, n.ma5_reason AS after_ma5_reason,
+           o.ma10_reason AS before_ma10_reason, n.ma10_reason AS after_ma10_reason,
+           o.ma20_reason AS before_ma20_reason, n.ma20_reason AS after_ma20_reason,
+           o.ma60_reason AS before_ma60_reason, n.ma60_reason AS after_ma60_reason,
+           o.atr20_reason AS before_atr20_reason, n.atr20_reason AS after_atr20_reason,
+           o.clv_reason AS before_clv_reason, n.clv_reason AS after_clv_reason,
+           o.prior_high20_reason AS before_prior_high20_reason, n.prior_high20_reason AS after_prior_high20_reason,
+           o.ret20_reason AS before_ret20_reason, n.ret20_reason AS after_ret20_reason,
+           o.pos60_reason AS before_pos60_reason, n.pos60_reason AS after_pos60_reason,
+           o.bias20_atr_reason AS before_bias20_atr_reason, n.bias20_atr_reason AS after_bias20_atr_reason
+    FROM old_rows o FULL OUTER JOIN new_rows n USING (source_symbol)
+), relations AS (
+    SELECT *,
+           CASE WHEN core_compatible
+                  AND before_raw_price_quality='OBSERVED'
+                  AND before_ma20_quality='OBSERVED'
+                THEN CASE WHEN before_raw_close>before_ma20 THEN 'ABOVE'
+                          WHEN before_raw_close<before_ma20 THEN 'BELOW'
+                          ELSE 'EQUAL' END END AS before_close_ma20_relation,
+           CASE WHEN core_compatible
+                  AND after_raw_price_quality='OBSERVED'
+                  AND after_ma20_quality='OBSERVED'
+                THEN CASE WHEN after_raw_close>after_ma20 THEN 'ABOVE'
+                          WHEN after_raw_close<after_ma20 THEN 'BELOW'
+                          ELSE 'EQUAL' END END AS after_close_ma20_relation
+    FROM paired
+), classified AS (
+    SELECT *,
+           array_remove(ARRAY[
+               CASE WHEN before_present AND NOT after_present THEN 'BEFORE_ONLY'::text END,
+               CASE WHEN NOT before_present AND after_present THEN 'AFTER_ONLY'::text END,
+               CASE WHEN before_present AND after_present
+                         AND before_bar_status IS DISTINCT FROM after_bar_status
+                    THEN 'TARGET_BAR_STATUS_CHANGED'::text END,
+               CASE WHEN before_present AND after_present
+                         AND (before_window_status IS DISTINCT FROM after_window_status
+                              OR before_window_reason IS DISTINCT FROM after_window_reason)
+                    THEN 'PRICE_WINDOW_STATUS_CHANGED'::text END,
+               CASE WHEN before_close_ma20_relation IS NOT NULL
+                         AND after_close_ma20_relation IS NOT NULL
+                         AND before_close_ma20_relation IS DISTINCT FROM after_close_ma20_relation
+                    THEN 'RAW_CLOSE_VS_MA20_CHANGED'::text END,
+               CASE WHEN profile_compatible AND (
+                         before_profile_statuses IS DISTINCT FROM after_profile_statuses
+                         OR before_profile_qualities IS DISTINCT FROM after_profile_qualities)
+                    THEN 'PROFILE_STATE_CHANGED'::text END,
+               CASE WHEN core_compatible AND (
+                         before_ma5_quality IS DISTINCT FROM after_ma5_quality
+                         OR before_ma5_reason IS DISTINCT FROM after_ma5_reason
+                         OR before_ma10_quality IS DISTINCT FROM after_ma10_quality
+                         OR before_ma10_reason IS DISTINCT FROM after_ma10_reason
+                         OR before_ma20_quality IS DISTINCT FROM after_ma20_quality
+                         OR before_ma20_reason IS DISTINCT FROM after_ma20_reason
+                         OR before_ma60_quality IS DISTINCT FROM after_ma60_quality
+                         OR before_ma60_reason IS DISTINCT FROM after_ma60_reason
+                         OR before_atr20_quality IS DISTINCT FROM after_atr20_quality
+                         OR before_atr20_reason IS DISTINCT FROM after_atr20_reason
+                         OR before_clv_quality IS DISTINCT FROM after_clv_quality
+                         OR before_clv_reason IS DISTINCT FROM after_clv_reason
+                         OR before_prior_high20_quality IS DISTINCT FROM after_prior_high20_quality
+                         OR before_prior_high20_reason IS DISTINCT FROM after_prior_high20_reason
+                         OR before_ret20_quality IS DISTINCT FROM after_ret20_quality
+                         OR before_ret20_reason IS DISTINCT FROM after_ret20_reason
+                         OR before_pos60_quality IS DISTINCT FROM after_pos60_quality
+                         OR before_pos60_reason IS DISTINCT FROM after_pos60_reason
+                         OR before_bias20_atr_quality IS DISTINCT FROM after_bias20_atr_quality
+                         OR before_bias20_atr_reason IS DISTINCT FROM after_bias20_atr_reason)
+                    THEN 'CORE_QUALITY_CHANGED'::text END
+           ], NULL) AS change_types,
+           array_remove(ARRAY[
+               CASE WHEN core_compatible AND (before_ma5_quality IS DISTINCT FROM after_ma5_quality OR before_ma5_reason IS DISTINCT FROM after_ma5_reason) THEN 'core.ma5'::text END,
+               CASE WHEN core_compatible AND (before_ma10_quality IS DISTINCT FROM after_ma10_quality OR before_ma10_reason IS DISTINCT FROM after_ma10_reason) THEN 'core.ma10'::text END,
+               CASE WHEN core_compatible AND (before_ma20_quality IS DISTINCT FROM after_ma20_quality OR before_ma20_reason IS DISTINCT FROM after_ma20_reason) THEN 'core.ma20'::text END,
+               CASE WHEN core_compatible AND (before_ma60_quality IS DISTINCT FROM after_ma60_quality OR before_ma60_reason IS DISTINCT FROM after_ma60_reason) THEN 'core.ma60'::text END,
+               CASE WHEN core_compatible AND (before_atr20_quality IS DISTINCT FROM after_atr20_quality OR before_atr20_reason IS DISTINCT FROM after_atr20_reason) THEN 'core.atr20'::text END,
+               CASE WHEN core_compatible AND (before_clv_quality IS DISTINCT FROM after_clv_quality OR before_clv_reason IS DISTINCT FROM after_clv_reason) THEN 'core.clv'::text END,
+               CASE WHEN core_compatible AND (before_prior_high20_quality IS DISTINCT FROM after_prior_high20_quality OR before_prior_high20_reason IS DISTINCT FROM after_prior_high20_reason) THEN 'core.prior_high20'::text END,
+               CASE WHEN core_compatible AND (before_ret20_quality IS DISTINCT FROM after_ret20_quality OR before_ret20_reason IS DISTINCT FROM after_ret20_reason) THEN 'core.ret20'::text END,
+               CASE WHEN core_compatible AND (before_pos60_quality IS DISTINCT FROM after_pos60_quality OR before_pos60_reason IS DISTINCT FROM after_pos60_reason) THEN 'core.pos60'::text END,
+               CASE WHEN core_compatible AND (before_bias20_atr_quality IS DISTINCT FROM after_bias20_atr_quality OR before_bias20_atr_reason IS DISTINCT FROM after_bias20_atr_reason) THEN 'core.bias20_atr'::text END
+           ], NULL) AS core_quality_changed_fields
+    FROM relations
+)
+"""
+
+
+def _profile_change_snapshot_parameters(
+    namespace_id: str, snapshot: Mapping[str, Any]
+) -> tuple[Any, ...]:
+    return (
+        namespace_id,
+        snapshot["target_session"],
+        snapshot["source_set_id"],
+        snapshot["package_sha256"],
+        snapshot["profile_revision"],
+    )
+
+
+def read_profile_change_page(
+    config: Mapping[str, Any],
+    *,
+    before_session: date,
+    after_session: date,
+    max_target_session: date,
+    offset: int,
+    limit: int,
+    source_symbol: str | None = None,
+    change_type: str = "ALL",
+) -> dict[str, Any]:
+    """只比较两组精确PG画像；使用稳定SQL分页，不重算Core。"""
+    change_types = {
+        "ALL",
+        "BEFORE_ONLY",
+        "AFTER_ONLY",
+        "TARGET_BAR_STATUS_CHANGED",
+        "PRICE_WINDOW_STATUS_CHANGED",
+        "RAW_CLOSE_VS_MA20_CHANGED",
+        "PROFILE_STATE_CHANGED",
+        "CORE_QUALITY_CHANGED",
+    }
+    if (
+        type(before_session) is not date
+        or type(after_session) is not date
+        or type(max_target_session) is not date
+        or before_session >= after_session
+        or after_session > max_target_session
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_DATE_INVALID",
+            "变化比较日期必须递增，且不晚于显式研究截止日",
+        )
+    if (
+        type(offset) is not int
+        or not 0 <= offset <= 2**31 - 1
+        or type(limit) is not int
+        or not 1 <= limit <= 30
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_PAGE_INVALID", "变化列表offset须非负且limit须在1到30"
+        )
+    if change_type not in change_types:
+        raise PriceProfilePgError("PROFILE_CHANGE_FILTER_INVALID", "变化类型筛选值无效")
+    if source_symbol is not None and (
+        not isinstance(source_symbol, str)
+        or source_symbol != source_symbol.strip()
+        or len(source_symbol) > 9
+        or re.fullmatch(r"[A-Za-z0-9.]+", source_symbol) is None
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_SYMBOL_INVALID", "来源代码搜索只接受字母、数字和点号"
+        )
+    symbol_search = source_symbol.upper() if source_symbol else None
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        before = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=before_session,
+            max_target_session=max_target_session,
+        )
+        after = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=after_session,
+            max_target_session=max_target_session,
+        )
+        base_parameters = (
+            *_profile_change_snapshot_parameters(namespace_id, before),
+            *_profile_change_snapshot_parameters(namespace_id, after),
+        )
+        cursor.execute(
+            _PROFILE_CHANGE_CTES
+            + """SELECT count(*)::bigint AS source_symbol_union_count,
+       count(*) FILTER (WHERE before_present AND after_present)::bigint AS intersection_count,
+       count(*) FILTER (WHERE before_present AND NOT after_present)::bigint AS before_only_count,
+       count(*) FILTER (WHERE NOT before_present AND after_present)::bigint AS after_only_count,
+       count(*) FILTER (WHERE before_present AND after_present AND NOT core_compatible)::bigint AS core_semantics_incomparable_count,
+       count(*) FILTER (WHERE before_present AND after_present AND NOT profile_compatible)::bigint AS profile_semantics_incomparable_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND (before_close_ma20_relation IS NULL OR after_close_ma20_relation IS NULL))::bigint AS close_ma20_unknown_count,
+       count(*) FILTER (WHERE before_present AND after_present AND (
+           array_position(before_profile_qualities, 'OBSERVED') IS NULL
+           OR array_position(after_profile_qualities, 'OBSERVED') IS NULL))::bigint AS profile_unobserved_pair_count,
+       count(*) FILTER (WHERE cardinality(change_types)>0)::bigint AS changed_source_symbol_count,
+       count(*) FILTER (WHERE cardinality(change_types)=0)::bigint AS unchanged_source_symbol_count
+FROM classified""",
+            base_parameters,
+        )
+        summary_row = cursor.fetchone()
+        summary_names = [item.name for item in cursor.description]
+        summary = dict(zip(summary_names, summary_row, strict=True))
+        cursor.execute(
+            _PROFILE_CHANGE_CTES
+            + """SELECT source_symbol, before_present, after_present,
+       before_bar_status, after_bar_status,
+       before_window_status, after_window_status, before_window_reason, after_window_reason,
+       before_raw_close, after_raw_close, before_raw_price_quality, after_raw_price_quality,
+       before_raw_price_reason, after_raw_price_reason,
+       before_ma20, after_ma20, before_ma20_quality, after_ma20_quality,
+       before_close_ma20_relation, after_close_ma20_relation,
+       core_compatible, profile_compatible, change_types, core_quality_changed_fields,
+       before_profile_field_ids, after_profile_field_ids,
+       before_profile_statuses, after_profile_statuses,
+       before_profile_qualities, after_profile_qualities,
+       before_profile_reasons, after_profile_reasons,
+       before_source_available_at, after_source_available_at,
+       before_source_time_quality, after_source_time_quality,
+       before_price_coordinate, after_price_coordinate,
+       before_window_start, after_window_start, before_window_end, after_window_end,
+       before_window_count, after_window_count,
+       before_profile_revision, after_profile_revision,
+       before_semantics_sha256, after_semantics_sha256,
+       before_ma5_quality, after_ma5_quality, before_ma5_reason, after_ma5_reason,
+       before_ma10_quality, after_ma10_quality, before_ma10_reason, after_ma10_reason,
+       before_ma20_quality, after_ma20_quality, before_ma20_reason, after_ma20_reason,
+       before_ma60_quality, after_ma60_quality, before_ma60_reason, after_ma60_reason,
+       before_atr20_quality, after_atr20_quality, before_atr20_reason, after_atr20_reason,
+       before_clv_quality, after_clv_quality, before_clv_reason, after_clv_reason,
+       before_prior_high20_quality, after_prior_high20_quality, before_prior_high20_reason, after_prior_high20_reason,
+       before_ret20_quality, after_ret20_quality, before_ret20_reason, after_ret20_reason,
+       before_pos60_quality, after_pos60_quality, before_pos60_reason, after_pos60_reason,
+       before_bias20_atr_quality, after_bias20_atr_quality, before_bias20_atr_reason, after_bias20_atr_reason,
+       count(*) OVER ()::bigint AS filtered_total
+FROM classified
+WHERE cardinality(change_types)>0
+  AND (%s='ALL' OR %s=ANY(change_types))
+  AND (%s::text IS NULL OR strpos(source_symbol,%s::text)>0)
+ORDER BY source_symbol
+LIMIT %s OFFSET %s""",
+            (
+                *base_parameters,
+                change_type,
+                change_type,
+                symbol_search,
+                symbol_search,
+                limit,
+                offset,
+            ),
+        )
+        names = [item.name for item in cursor.description]
+        rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+
+    for row in rows:
+        row["change_types"] = list(row["change_types"] or [])
+        row["core_quality_changed_fields"] = list(
+            row["core_quality_changed_fields"] or []
+        )
+        row["profile_field_changes"] = []
+        if row["profile_compatible"]:
+            ids = row["before_profile_field_ids"] or []
+            before_statuses = row["before_profile_statuses"] or []
+            after_statuses = row["after_profile_statuses"] or []
+            before_qualities = row["before_profile_qualities"] or []
+            after_qualities = row["after_profile_qualities"] or []
+            before_reasons = row["before_profile_reasons"] or []
+            after_reasons = row["after_profile_reasons"] or []
+            if (
+                len(ids)
+                == len(before_statuses)
+                == len(after_statuses)
+                == len(before_qualities)
+                == len(after_qualities)
+                == len(before_reasons)
+                == len(after_reasons)
+            ):
+                row["profile_field_changes"] = [
+                    {
+                        "field_id": field_id,
+                        "before_status": before_status,
+                        "after_status": after_status,
+                        "before_quality": before_quality,
+                        "after_quality": after_quality,
+                        "before_reason": before_reason or None,
+                        "after_reason": after_reason or None,
+                    }
+                    for field_id, before_status, after_status, before_quality, after_quality, before_reason, after_reason in zip(
+                        ids,
+                        before_statuses,
+                        after_statuses,
+                        before_qualities,
+                        after_qualities,
+                        before_reasons,
+                        after_reasons,
+                        strict=True,
+                    )
+                    if before_status != after_status or before_quality != after_quality
+                ]
+        row["core_quality_changes"] = [
+            {
+                "field_id": field_id,
+                "before_quality": row.get(
+                    "before_" + field_id.removeprefix("core.") + "_quality"
+                ),
+                "after_quality": row.get(
+                    "after_" + field_id.removeprefix("core.") + "_quality"
+                ),
+                "before_reason": row.get(
+                    "before_" + field_id.removeprefix("core.") + "_reason"
+                ),
+                "after_reason": row.get(
+                    "after_" + field_id.removeprefix("core.") + "_reason"
+                ),
+            }
+            for field_id in row["core_quality_changed_fields"]
+        ]
+        for key, value in tuple(row.items()):
+            if isinstance(value, date):
+                row[key] = value.isoformat()
+    filtered_total = int(rows[0]["filtered_total"]) if rows else 0
+    for row in rows:
+        row.pop("filtered_total", None)
+    return {
+        "status": "AVAILABLE",
+        "before_snapshot": before,
+        "after_snapshot": after,
+        "summary": {key: int(value or 0) for key, value in summary.items()},
+        "page": {
+            "offset": offset,
+            "limit": limit,
+            "count": len(rows),
+            "total": filtered_total,
+            "next_offset": offset + len(rows)
+            if offset + len(rows) < filtered_total
+            else None,
+        },
+        "rows": rows,
+        "database_write": False,
+        "core_recalculated": False,
+    }
+
+
 def read_profile_page(
     config: Mapping[str, Any],
     *,
     target_session: date,
+    max_target_session: date,
     source_set_id: str,
     package_sha256: str,
     profile_revision: str,
@@ -489,7 +978,15 @@ def read_profile_page(
     core_field: str | None = None,
     core_quality: str | None = None,
 ) -> dict[str, Any]:
-    if type(target_session) is not date or type(offset) is not int or offset < 0:
+    if type(max_target_session) is not date:
+        raise PriceProfilePgError(
+            "PROFILE_CUTOFF_REQUIRED", "画像查询必须绑定显式研究截止日期"
+        )
+    if type(target_session) is not date or target_session > max_target_session:
+        raise PriceProfilePgError(
+            "PROFILE_DATE_AFTER_CUTOFF", "画像目标日期晚于显式研究截止日期"
+        )
+    if type(offset) is not int or offset < 0:
         raise PriceProfilePgError("PROFILE_PAGE_INVALID", "画像查询日期或分页偏移无效")
     if type(limit) is not int or not 1 <= limit <= 100:
         raise PriceProfilePgError("PROFILE_PAGE_INVALID", "画像页大小必须为1至100")
