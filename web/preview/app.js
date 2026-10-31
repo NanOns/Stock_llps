@@ -3423,7 +3423,10 @@ for (const id of ["symbolInput", "windowInput"]) {
   $(id).addEventListener("input", () => {
     state.stockRequest++;
     $("queryStock").disabled = false;
-    if (!state.timelineNavigation) invalidateTimeline();
+    if (!state.timelineNavigation) {
+      invalidateTimeline();
+      clearResult();
+    }
   });
 }
 $("marketSelect").addEventListener("change", () => {
