@@ -553,7 +553,7 @@ def build_chain_readiness_payload(
     return {
         "ok": True,
         "status": "FORMAL_FOUNDATION_NOT_READY",
-        "highest_available_scope": "SOURCE_SYMBOL_ONLY / RAW_UNADJUSTED / NON_PIT_QUERY_PREVIEW_CAPABILITY",
+        "highest_available_scope": "TDX_SOURCE_SYMBOL_OBSERVED / RAW_UNADJUSTED / NON_PIT_QUERY_PREVIEW_CAPABILITY",
         "formal_foundation_status": "NOT_CONNECTED",
         "day_chain_complete": False,
         "official_listing_population": "UNKNOWN_NOT_CONNECTED",

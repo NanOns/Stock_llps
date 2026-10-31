@@ -25,6 +25,10 @@ from stock_a.application.runtime_config import (
     load_runtime_config,
 )
 from stock_a.application.research_window import resolve_pg_history_window
+from stock_a.application.pg_research import (
+    PgResearchBindingError,
+    read_sealed_source_context,
+)
 from stock_a.application.source_ingress import build_source_ingress_plan
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
@@ -184,6 +188,16 @@ def _raw_public_fields(row: Mapping[str, Any]) -> dict[str, Any]:
             "source_available_at": _json_value(row.get("source_available_at")),
         },
         "identity_status": "SOURCE_SYMBOL_ONLY",
+        "source_object_status": row.get(
+            "source_object_status", "TDX_SOURCE_SYMBOL_OBSERVED"
+        ),
+        "target_bar_status": row.get("target_bar_status"),
+        "stable_security_id_status": row.get(
+            "stable_security_id_status", "STABLE_SECURITY_ID_UNVERIFIED"
+        ),
+        "listing_status": row.get("listing_status", "LISTING_STATUS_UNKNOWN"),
+        "suspension_status": row.get("suspension_status", "SUSPENSION_STATUS_UNKNOWN"),
+        "official_listing_universe_status": "UNKNOWN",
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "price_coordinate": "RAW_UNADJUSTED",
     }
@@ -199,6 +213,17 @@ def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
             "price_quality": row.get("price_quality"),
             "price_reason": row.get("price_reason"),
             "identity_status": "SOURCE_SYMBOL_ONLY",
+            "source_object_status": row.get(
+                "source_object_status", "TDX_SOURCE_SYMBOL_OBSERVED"
+            ),
+            "target_bar_status": row.get("target_bar_status"),
+            "stable_security_id_status": row.get(
+                "stable_security_id_status", "STABLE_SECURITY_ID_UNVERIFIED"
+            ),
+            "listing_status": row.get("listing_status", "LISTING_STATUS_UNKNOWN"),
+            "suspension_status": row.get(
+                "suspension_status", "SUSPENSION_STATUS_UNKNOWN"
+            ),
         }
         for row in page.get("rows", ())
     ]
@@ -227,7 +252,19 @@ def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
         },
         "results": candidates,
         "identity_status": "SOURCE_SYMBOL_ONLY",
+        "source_object_status": page.get(
+            "source_object_status", "TDX_SOURCE_SYMBOL_OBSERVED"
+        ),
+        "stable_security_id_status": page.get(
+            "stable_security_id_status", "STABLE_SECURITY_ID_UNVERIFIED"
+        ),
+        "listing_status": page.get("listing_status", "LISTING_STATUS_UNKNOWN"),
+        "suspension_status": page.get("suspension_status", "SUSPENSION_STATUS_UNKNOWN"),
+        "official_listing_universe_status": page.get(
+            "official_listing_universe_status", "UNKNOWN"
+        ),
         "pit_status": "NON_PIT_RETROSPECTIVE",
+        "price_coordinate": "RAW_UNADJUSTED",
         "source_zip_opened": False,
         "source_recalculated": False,
         "ddl_executed": False,
@@ -269,6 +306,7 @@ class _PreviewState:
         session_count: int | None = None,
         session_start: str | None = None,
         calendar_revision: str | None = None,
+        source_set_id: str | None = None,
     ) -> dict[str, Any]:
         fields: dict[str, Any] = {
             "identity_type": "PREVIEW_SNAPSHOT_IDENTITY_NON_PIT",
@@ -290,6 +328,8 @@ class _PreviewState:
                 "session_end": target_session,
                 "calendar_revision": calendar_revision,
             }
+        if source_set_id is not None:
+            fields["source_set_id"] = source_set_id
         return {**fields, "identity_sha256": canonical_sha(fields)}
 
 
@@ -425,6 +465,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
     def _handle_error(self, error: Exception) -> None:
         if isinstance(error, PreviewHttpError):
             self._error(error)
+            return
+        if isinstance(error, PgResearchBindingError):
+            status = (
+                409 if error.code == "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE" else 503
+            )
+            self._error(PreviewHttpError(status, error.code, str(error)))
             return
         if isinstance(error, RawSourcePgError):
             invalid = error.code.endswith("INVALID") or error.code in {
@@ -620,11 +666,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PG_SOURCE_NO_MATCH",
                         "PG中没有该明确日期、来源包SHA与来源代码的Raw记录",
                     )
+                source_context = read_sealed_source_context(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    package_sha256=package_sha,
+                    namespace_id=str(row["namespace_id"]),
+                    target_raw_rows=(row,),
+                )
                 raw = _raw_public_fields(row)
                 identity = self.preview_server.state.snapshot_identity(
                     namespace_id=str(row["namespace_id"]),
                     target_session=target.isoformat(),
                     package_sha256=package_sha,
+                    source_set_id=source_context["source_set_id"],
                 )
                 self._send_json(
                     200,
@@ -632,6 +686,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "snapshot_identity": identity,
                         "raw": raw,
+                        "formal_source_set": source_context,
                         "database_write": False,
                     },
                 )
@@ -689,11 +744,20 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PG_SOURCE_NO_MATCH",
                         "PG中没有该明确日期和来源包SHA的Raw来源版本",
                     )
+                source_context = read_sealed_source_context(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    package_sha256=package_sha,
+                    namespace_id=page["namespace_id"],
+                    target_raw_rows=page["rows"],
+                    expected_raw_row_count=page["version_row_count"],
+                )
                 namespace_id = page["namespace_id"]
                 identity = self.preview_server.state.snapshot_identity(
                     namespace_id=namespace_id,
                     target_session=target.isoformat(),
                     package_sha256=package_sha,
+                    source_set_id=source_context["source_set_id"],
                 )
                 self._send_json(
                     200,
@@ -701,6 +765,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "snapshot_identity": identity,
                         "page": _page_public_fields(page),
+                        "formal_source_set": source_context,
                     },
                 )
                 return
@@ -807,12 +872,23 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 package_sha256=package_sha,
                 sessions=sessions,
             )
+            source_context = read_sealed_source_context(
+                self.preview_server.state.config,
+                target_session=target,
+                package_sha256=package_sha,
+                namespace_id=history["namespace_id"],
+                target_raw_rows=history["history_rows"],
+            )
             result = research_entry.research_stock_pg_history_preview(
                 symbol=symbol,
                 target_session=target.isoformat(),
                 package_sha256=package_sha,
                 session_dates=sessions,
                 history_rows=history["history_rows"],
+                missing_history_sessions=tuple(
+                    date.fromisoformat(item)
+                    for item in history["missing_history_sessions"]
+                ),
                 namespace_id=history["namespace_id"],
                 profile_contract=self.preview_server.state.profile_contract,
             )
@@ -823,8 +899,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 session_count=session_count,
                 session_start=sessions[0].isoformat(),
                 calendar_revision=calendar_revision,
+                source_set_id=source_context["source_set_id"],
             )
             result["snapshot_identity"] = identity
+            result["formal_source_set"] = source_context
             result["selection"] = {
                 "source_symbol": symbol,
                 "target_session": target.isoformat(),

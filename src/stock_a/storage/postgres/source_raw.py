@@ -1530,7 +1530,18 @@ WHERE r.namespace_id=%s::uuid AND r.source_symbol=%s AND r.session_date=%s AND r
         result["namespace_id"] = str(result["namespace_id"])
         result["source_capture_id"] = str(result["source_capture_id"])
         result["identity_status"] = "SOURCE_SYMBOL_ONLY"
+        result["source_object_status"] = "TDX_SOURCE_SYMBOL_OBSERVED"
+        result["target_bar_status"] = {
+            "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
+            "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
+            "READ_FAILED": "TDX_READ_FAILED",
+        }[result["bar_status"]]
+        result["stable_security_id_status"] = "STABLE_SECURITY_ID_UNVERIFIED"
+        result["listing_status"] = "LISTING_STATUS_UNKNOWN"
+        result["suspension_status"] = "SUSPENSION_STATUS_UNKNOWN"
+        result["official_listing_universe_status"] = "UNKNOWN"
         result["pit_status"] = "NON_PIT_RETROSPECTIVE"
+        result["price_coordinate"] = "RAW_UNADJUSTED"
         result["amount_unit_status"] = "UNIT_UNVERIFIED"
         result["volume_unit_status"] = "UNIT_UNVERIFIED"
         return result
@@ -1619,6 +1630,16 @@ ORDER BY r.source_symbol, r.session_date""",
         row["namespace_id"] = str(row["namespace_id"])
         row["source_capture_id"] = str(row["source_capture_id"])
         row["identity_status"] = "SOURCE_SYMBOL_ONLY"
+        row["source_object_status"] = "TDX_SOURCE_SYMBOL_OBSERVED"
+        row["target_bar_status"] = {
+            "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
+            "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
+            "READ_FAILED": "TDX_READ_FAILED",
+        }[row["bar_status"]]
+        row["stable_security_id_status"] = "STABLE_SECURITY_ID_UNVERIFIED"
+        row["listing_status"] = "LISTING_STATUS_UNKNOWN"
+        row["suspension_status"] = "SUSPENSION_STATUS_UNKNOWN"
+        row["official_listing_universe_status"] = "UNKNOWN"
         row["pit_status"] = "NON_PIT_RETROSPECTIVE"
         row["price_coordinate"] = "RAW_UNADJUSTED"
         row["amount_unit_status"] = "UNIT_UNVERIFIED"
@@ -1664,15 +1685,20 @@ def read_raw_daily_history_stock(
             package_sha256=package_sha256,
         )
     actual_sessions = tuple(row["session_date"] for row in rows)
-    if actual_sessions != selected_sessions:
-        missing = sorted(set(selected_sessions) - set(actual_sessions))
+    if actual_sessions != tuple(sorted(set(actual_sessions))) or len(
+        actual_sessions
+    ) != len(set(actual_sessions)):
+        raise RawSourcePgError(
+            "PG_HISTORY_SESSION_ORDER_INVALID", "PG历史Raw行重复或未按会话递增"
+        )
+    if target_session not in actual_sessions:
         raise RawSourcePgError(
             "PG_HISTORY_SESSION_MISSING",
-            "PG历史窗口未闭合；缺少明确交易会话："
-            + ",".join(day.isoformat() for day in missing),
+            "PG历史窗口未返回显式目标日Raw行；拒绝用其它日期回退。",
         )
+    missing = tuple(day for day in selected_sessions if day not in set(actual_sessions))
     return {
-        "status": "AVAILABLE",
+        "status": "AVAILABLE" if not missing else "PARTIAL_UNKNOWN",
         "namespace_id": namespace_id,
         "source_symbol": source_symbol,
         "target_session": target_session.isoformat(),
@@ -1681,6 +1707,9 @@ def read_raw_daily_history_stock(
         "session_end": selected_sessions[-1].isoformat(),
         "session_count": len(selected_sessions),
         "history_rows": rows,
+        "history_complete": not missing,
+        "history_status": "COMPLETE" if not missing else "UNKNOWN_HISTORY",
+        "missing_history_sessions": [day.isoformat() for day in missing],
         "source_zip_opened": False,
         "source_recalculated": False,
         "ddl_executed": False,
@@ -1928,6 +1957,20 @@ ORDER BY source_symbol LIMIT %s OFFSET %s""",
             dict(zip(_RAW_COLUMNS, values, strict=True)) for values in cursor.fetchall()
         ]
     page_rows = [{key: _db_scalar(value) for key, value in row.items()} for row in rows]
+    for row in page_rows:
+        row.update(
+            {
+                "source_object_status": "TDX_SOURCE_SYMBOL_OBSERVED",
+                "target_bar_status": {
+                    "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
+                    "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
+                    "READ_FAILED": "TDX_READ_FAILED",
+                }[row["bar_status"]],
+                "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
+                "listing_status": "LISTING_STATUS_UNKNOWN",
+                "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
+            }
+        )
     next_offset = offset + len(rows)
     return {
         "status": "AVAILABLE" if rows else "EMPTY_PAGE",
@@ -1950,6 +1993,12 @@ ORDER BY source_symbol LIMIT %s OFFSET %s""",
         "rows": page_rows,
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
+        "source_object_status": "TDX_SOURCE_SYMBOL_OBSERVED",
+        "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
+        "listing_status": "LISTING_STATUS_UNKNOWN",
+        "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
+        "official_listing_universe_status": "UNKNOWN",
+        "price_coordinate": "RAW_UNADJUSTED",
         "source_zip_opened": False,
         "ddl_executed": False,
         "source_recalculated": False,

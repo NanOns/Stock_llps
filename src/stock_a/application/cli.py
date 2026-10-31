@@ -79,6 +79,10 @@ from stock_a.application.source_set_candidate import (
     prepare_source_set_candidate,
     read_source_set_candidate,
 )
+from stock_a.application.pg_research import (
+    PgResearchBindingError,
+    read_sealed_source_context,
+)
 from stock_a.storage.postgres.source_set_candidate import SourceSetCandidatePgError
 from stock_a.application.source_ingress import (
     SourceIngressError,
@@ -1824,6 +1828,13 @@ def _run_pg_raw_stock(args: argparse.Namespace) -> int:
             target_session=target,
             package_sha256=source_sha,
         )
+        source_context = read_sealed_source_context(
+            config,
+            target_session=target,
+            package_sha256=source_sha,
+            namespace_id=str(row["namespace_id"]) if row is not None else None,
+            target_raw_rows=(row,) if row is not None else (),
+        )
     except RawSourcePgError as error:
         _emit(
             {
@@ -1842,6 +1853,20 @@ def _run_pg_raw_stock(args: argparse.Namespace) -> int:
             if "REJECTED" in error.code or error.code.endswith("INVALID")
             else _EXIT_UNAVAILABLE
         )
+    except PgResearchBindingError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "dml_executed": False,
+                "ddl_executed": False,
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
     result = {
         "ok": True,
         "status": "AVAILABLE" if row is not None else "NO_MATCH",
@@ -1850,6 +1875,7 @@ def _run_pg_raw_stock(args: argparse.Namespace) -> int:
         "package_sha256": source_sha,
         "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_DAILY_FROM_POSTGRESQL",
         "row": row,
+        "formal_source_set": source_context,
         "fallback_attempted": False,
         "database_io_attempted": True,
         "database_write_attempted": False,
@@ -1892,6 +1918,14 @@ def _run_pg_raw_universe(args: argparse.Namespace) -> int:
             market=args.market,
             board=args.board,
         )
+        source_context = read_sealed_source_context(
+            config,
+            target_session=target,
+            package_sha256=source_sha,
+            namespace_id=result["namespace_id"],
+            target_raw_rows=result["rows"],
+            expected_raw_row_count=result["version_row_count"],
+        )
     except RawSourcePgError as error:
         _emit(
             {
@@ -1910,8 +1944,23 @@ def _run_pg_raw_universe(args: argparse.Namespace) -> int:
             if "REJECTED" in error.code or error.code.endswith("INVALID")
             else _EXIT_UNAVAILABLE
         )
+    except PgResearchBindingError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "dml_executed": False,
+                "ddl_executed": False,
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
     result.update(
         {
+            "formal_source_set": source_context,
             "ok": True,
             "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_DAILY_FROM_POSTGRESQL",
             "database_io_attempted": True,
@@ -1997,6 +2046,13 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             package_sha256=source_sha,
             sessions=sessions,
         )
+        source_context = read_sealed_source_context(
+            config,
+            target_session=target,
+            package_sha256=source_sha,
+            namespace_id=history["namespace_id"],
+            target_raw_rows=history["history_rows"],
+        )
         profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
         result = research_stock_pg_history_preview(
             symbol=args.symbol,
@@ -2004,6 +2060,9 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             package_sha256=source_sha,
             session_dates=sessions,
             history_rows=history["history_rows"],
+            missing_history_sessions=tuple(
+                date.fromisoformat(item) for item in history["missing_history_sessions"]
+            ),
             namespace_id=history["namespace_id"],
             profile_contract=profile_contract,
         )
@@ -2021,6 +2080,20 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             error=True,
         )
         return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    except PgResearchBindingError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "source_zip_opened": False,
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
     except (ResearchEntryError, DayChainContractError) as error:
         code = getattr(error, "code", "PROFILE_CONTRACT_UNAVAILABLE")
         _emit(
@@ -2042,6 +2115,7 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             "database_write_attempted": False,
             "dml_executed": False,
             "configuration_path": str(config_path),
+            "formal_source_set": source_context,
         }
     )
     if getattr(args, "output_format", "json") == "summary":
@@ -2057,7 +2131,8 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
         line = [
             f"PG历史研究预览 {result.get('symbol')} {target.isoformat()} "
             f"窗口={result.get('window', {}).get('start_session')}..{result.get('window', {}).get('end_session')} "
-            f"有效Bar={result.get('window', {}).get('real_bar_count')}/{result.get('window', {}).get('requested_sessions')}",
+            f"有效Bar={result.get('window', {}).get('real_bar_count')}/{result.get('window', {}).get('requested_sessions')} "
+            f"P03/P04={source_context.get('source_set_id')}",
         ]
         line.extend(
             f"{name}={_summary_field(fields.get(name))}" for name in core_labels
@@ -2101,6 +2176,20 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             market=args.market,
             board=args.board,
         )
+        target_rows = [
+            row
+            for candidate in page["candidates"]
+            for row in candidate["history_rows"]
+            if row["session_date"] == target
+        ]
+        source_context = read_sealed_source_context(
+            config,
+            target_session=target,
+            package_sha256=source_sha,
+            namespace_id=page["namespace_id"],
+            target_raw_rows=target_rows,
+            expected_raw_row_count=page["version_row_count"],
+        )
         profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
         result = research_universe_pg_history_preview(
             target_session=target.isoformat(),
@@ -2123,6 +2212,19 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             error=True,
         )
         return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    except PgResearchBindingError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
     except DayChainContractError as error:
         _emit(
             {
@@ -2143,6 +2245,7 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             "database_write_attempted": False,
             "dml_executed": False,
             "configuration_path": str(config_path),
+            "formal_source_set": source_context,
         }
     )
     if getattr(args, "output_format", "summary") == "summary":
@@ -2151,7 +2254,7 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             f"PG历史候选页 offset={page_info['offset']} limit={page_info['limit']} "
             f"rows={page_info['page_count']} filtered_total={page_info['total_source_candidates']} "
             f"next={page_info['next_offset']} window={result['session_start']}..{result['session_end']} "
-            f"来源版本={result['source_version_status']} "
+            f"来源版本={result['source_version_status']} P03/P04={source_context.get('source_set_id')} "
             f"实际/期望={result['source_version_row_count']}/{result['source_version_expected_row_count']}",
         ]
         for item in result["results"]:

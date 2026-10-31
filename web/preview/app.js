@@ -369,7 +369,7 @@ function renderFormalSourceSet(data) {
   appendText(
     root,
     "p",
-    "P04证券身份来源未接入；本页仅展示SOURCE_SYMBOL_ONLY原始代码，稳定证券ID保持未知，不推断上市身份或历史PIT。",
+    "本页已按精确日期和包SHA读回SEALED来源集合；TDX市场代码与可验证OHLC可作NON_PIT价格研究。稳定security_id、官方上市总体、上市/停复牌历史及严格PIT分别保持未知。",
   );
   const list = document.createElement("dl");
   list.className = "formal-source-facts";
@@ -754,7 +754,10 @@ async function loadPage() {
       cell(tr, item.source_symbol);
       cell(tr, `${item.market} / ${text(item.board)}`);
       cell(tr, text(item.bar_status));
-      cell(tr, "SOURCE_SYMBOL_ONLY");
+      cell(
+        tr,
+        `${item.source_object_status || "TDX_SOURCE_SYMBOL_OBSERVED"} · ${item.stable_security_id_status || "STABLE_SECURITY_ID_UNVERIFIED"}`,
+      );
       const td = document.createElement("td");
       const button = document.createElement("button");
       button.className = "row-select";
@@ -779,7 +782,7 @@ async function loadPage() {
 }
 labels["TARGET_SESSION_BAR_MISSING"] = "目标日来源记录无Bar，不推断停牌或退市";
 labels["CURRENT_SESSION_UNKNOWN"] = "目标日状态未知";
-function rawItems(raw) {
+function rawItems(raw, formalSourceSet) {
   const pairs = [
     ["目标日Bar", `${text(raw.bar_status)} · ${text(raw.bar_reason)}`],
     [
@@ -805,6 +808,14 @@ function rawItems(raw) {
     ],
     ["来源包SHA", text(raw.source.package_sha256)],
     [
+      "P03 SEALED / P04来源集合",
+      `${text(formalSourceSet?.seal_status)} · ${text(formalSourceSet?.source_set_id)} · revision ${text(formalSourceSet?.revision_id)}`,
+    ],
+    [
+      "来源对象 / 目标日Bar",
+      `${text(raw.source_object_status)} · ${text(raw.target_bar_status)}`,
+    ],
+    [
       "来源时钟",
       `${text(raw.source.source_clock_role)} · ${text(raw.source.source_time_quality)}`,
     ],
@@ -816,6 +827,10 @@ function rawItems(raw) {
     [
       "身份与坐标",
       `${raw.identity_status} · ${raw.price_coordinate} · ${raw.pit_status}`,
+    ],
+    [
+      "身份/上市/停复牌状态",
+      `${text(raw.stable_security_id_status)} · ${text(raw.listing_status)} · ${text(raw.suspension_status)}`,
     ],
   ];
   const root = $("rawSummary");
@@ -902,22 +917,25 @@ async function queryStock(event) {
     if (
       a.namespace_id !== b.namespace_id ||
       a.target_session !== b.target_session ||
-      a.package_sha256 !== b.package_sha256
+      a.package_sha256 !== b.package_sha256 ||
+      a.source_set_id !== b.source_set_id
     )
       throw new Error("RAW与Core/Profile预览身份不一致，已拒绝合并展示。");
     $("stockResult").hidden = false;
     setMessage("研究预览已返回；数值为RAW_UNADJUSTED / NON_PIT。", true);
     $("resultTitle").textContent = `${symbol} · ${v.target_session}`;
     $("resultMode").textContent =
-      `${result.status} · ${result.price_coordinate} · ${result.identity_status} · 正式准入 ${result.formal_foundation_status}`;
+      `${result.status} · ${result.source_object_status} · ${result.target_bar_status} · ${result.price_coordinate} · ${result.identity_status} · 正式准入 ${result.formal_foundation_status}`;
     $("snapshotId").textContent =
       `预览身份SHA256：${result.snapshot_identity.identity_sha256}（非正式context token） · 来源包SHA：${v.package_sha256}`;
     $("windowText").textContent =
       `窗口 ${result.window.start_session} 至 ${result.window.end_session}：` +
       `实际Bar ${result.window.real_bar_count}/${result.window.requested_sessions}，` +
-      `未知会话 ${result.window.gap_count}；未使用未来会话。`;
+      `TDX缺Bar/读取失败 ${result.window.source_bar_gap_count}，` +
+      `PG未保存历史会话 ${result.window.unavailable_history_row_count}；` +
+      `${result.window.history_status}，未使用未来会话。缺Bar不证明停牌、退市或上市前。`;
     $("resultMode").dataset.namespace = result.snapshot_identity.namespace_id;
-    rawItems(raw.raw);
+    rawItems(raw.raw, raw.formal_source_set);
     renderFields($("coreRows"), result.core.fields, coreNames);
     renderFields(
       $("allCoreRows"),

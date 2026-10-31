@@ -4017,6 +4017,7 @@ def research_stock_pg_history_preview(
     package_sha256: str,
     session_dates: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
+    missing_history_sessions: Sequence[date] | None = None,
     namespace_id: str,
     profile_contract: dict[str, Any],
 ) -> dict[str, Any]:
@@ -4057,20 +4058,29 @@ def research_stock_pg_history_preview(
         )
 
     rows = tuple(history_rows)
-    if len(rows) != len(expected_sessions):
-        missing = sorted(
-            set(expected_sessions) - {row.get("session_date") for row in rows}
+    row_dates = tuple(row.get("session_date") for row in rows)
+    if (
+        len(set(row_dates)) != len(row_dates)
+        or any(day not in expected_sessions for day in row_dates)
+        or row_dates != tuple(sorted(row_dates))
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_SESSION_ORDER_INVALID", "PG历史Raw行重复、越界或未按会话递增"
         )
-        return {
-            "ok": False,
-            "status": "HISTORY_WINDOW_INCOMPLETE",
-            "code": "PG_HISTORY_SESSION_MISSING",
-            "message": "PG历史窗口缺少明确交易会话",
-            "symbol": normalized,
-            "missing_sessions": [day.isoformat() for day in missing],
-            "expected_session_count": len(expected_sessions),
-            "actual_session_count": len(rows),
-        }
+    present_dates = set(row_dates)
+    missing_dates = tuple(day for day in expected_sessions if day not in present_dates)
+    if (
+        missing_history_sessions is not None
+        and tuple(missing_history_sessions) != missing_dates
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_MISSING_SESSION_BINDING_INVALID",
+            "PG历史缺失会话清单与实际Raw行不一致",
+        )
+    if target not in present_dates:
+        raise ResearchEntryError(
+            "PG_HISTORY_TARGET_ROW_MISSING", "PG历史Raw没有精确目标日行，拒绝跨日回退"
+        )
     if any(
         row.get("source_symbol") != normalized
         or row.get("package_sha256") != package_sha256
@@ -4080,20 +4090,38 @@ def research_stock_pg_history_preview(
         raise ResearchEntryError(
             "PG_HISTORY_REVISION_MISMATCH", "PG历史行混入不同来源代码、包SHA或namespace"
         )
-    if tuple(row.get("session_date") for row in rows) != expected_sessions:
-        raise ResearchEntryError(
-            "PG_HISTORY_SESSION_ORDER_INVALID", "PG历史行会话与请求日历序列不一致"
-        )
-
-    target_row = rows[-1]
+    rows_by_session = {row["session_date"]: row for row in rows}
+    target_row = rows_by_session[target]
     target_bar = _decoded_day_from_pg_raw(target_row)
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
     history: list[CoreObservation] = []
-    status_counts = {"TARGET_PRESENT": 0, "TARGET_MISSING": 0, "READ_FAILED": 0}
+    status_counts = {
+        "TARGET_PRESENT": 0,
+        "TARGET_MISSING": 0,
+        "READ_FAILED": 0,
+        "HISTORY_ROW_NOT_STORED": 0,
+    }
     price_quality_counts: dict[str, int] = {}
     raw_amount_quality_counts: dict[str, int] = {}
     raw_volume_quality_counts: dict[str, int] = {}
-    for row in rows:
+    for session in expected_sessions:
+        row = rows_by_session.get(session)
+        if row is None:
+            status_counts["HISTORY_ROW_NOT_STORED"] += 1
+            history.append(
+                CoreObservation(
+                    session=session,
+                    state="UNKNOWN",
+                    coordinate_id=coordinate_id,
+                    open=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
+                    high=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
+                    low=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
+                    close=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
+                    amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+                    volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+                )
+            )
+            continue
         state = row.get("bar_status")
         status_counts[state] = status_counts.get(state, 0) + 1
         for counter, key in (
@@ -4211,7 +4239,12 @@ def research_stock_pg_history_preview(
             "PG_PROFILE_RULE_COUNT_INVALID", "Profile现役规则数异常"
         )
     actual_bars = status_counts["TARGET_PRESENT"]
-    gaps = status_counts["TARGET_MISSING"] + status_counts["READ_FAILED"]
+    gaps = sum(status_counts.values()) - status_counts["TARGET_PRESENT"]
+    target_bar_status = {
+        "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
+        "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
+        "READ_FAILED": "TDX_READ_FAILED",
+    }[target_row["bar_status"]]
     return {
         "ok": True,
         "contract": "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1",
@@ -4221,7 +4254,18 @@ def research_stock_pg_history_preview(
         "research_mode": "SOURCE_SYMBOL_NON_PIT_PREVIEW",
         "price_coordinate": "RAW_UNADJUSTED",
         "identity_status": "SOURCE_SYMBOL_ONLY",
+        "source_object_status": "TDX_SOURCE_SYMBOL_OBSERVED",
+        "target_bar_status": target_bar_status,
+        "price_research_status": "AVAILABLE"
+        if target_row.get("price_quality") == "OBSERVED"
+        else "UNKNOWN_DATA",
+        "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
+        "listing_status": "LISTING_STATUS_UNKNOWN",
+        "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
+        "official_listing_universe_status": "UNKNOWN",
         "pit_status": "NON_PIT_RETROSPECTIVE",
+        "history_status": "COMPLETE" if not missing_dates else "UNKNOWN_HISTORY",
+        "missing_history_sessions": [day.isoformat() for day in missing_dates],
         "formal_foundation_status": "NOT_ADMITTED",
         "source": {
             "storage": "POSTGRESQL_TYPED_SOURCE_RAW",
@@ -4243,13 +4287,21 @@ def research_stock_pg_history_preview(
             "end_session": expected_sessions[-1].isoformat(),
             "requested_sessions": len(expected_sessions),
             "evaluated_sessions": len(rows),
+            "stored_sessions": len(rows),
+            "missing_history_sessions": [day.isoformat() for day in missing_dates],
+            "history_complete": not missing_dates,
+            "history_status": "COMPLETE" if not missing_dates else "UNKNOWN_HISTORY",
             "real_bar_count": actual_bars,
             "gap_count": gaps,
+            "source_bar_gap_count": status_counts["TARGET_MISSING"]
+            + status_counts["READ_FAILED"],
+            "unavailable_history_row_count": status_counts["HISTORY_ROW_NOT_STORED"],
             "session_status_counts": status_counts,
             "unknown_session_dates": [
-                row["session_date"].isoformat()
-                for row in rows
-                if row["bar_status"] != "TARGET_PRESENT"
+                session.isoformat()
+                for session in expected_sessions
+                if session not in present_dates
+                or rows_by_session[session]["bar_status"] != "TARGET_PRESENT"
             ],
             "future_session_rows_used": 0,
         },
@@ -4304,22 +4356,15 @@ def research_universe_pg_history_preview(
     results: list[dict[str, Any]] = []
     for candidate in page.get("candidates", ()):
         symbol = candidate["source_symbol"]
-        if not candidate["history_complete"]:
-            results.append(
-                {
-                    "symbol": symbol,
-                    "status": "HISTORY_WINDOW_INCOMPLETE",
-                    "reason": "PG_HISTORY_SESSION_MISSING",
-                    "missing_sessions": candidate["missing_sessions"],
-                }
-            )
-            continue
         preview = research_stock_pg_history_preview(
             symbol=symbol,
             target_session=target_session,
             package_sha256=package_sha256,
             session_dates=session_dates,
             history_rows=candidate["history_rows"],
+            missing_history_sessions=tuple(
+                date.fromisoformat(item) for item in candidate["missing_sessions"]
+            ),
             namespace_id=page["namespace_id"],
             profile_contract=profile_contract,
         )
@@ -4360,8 +4405,16 @@ def research_universe_pg_history_preview(
                 "symbol": symbol,
                 "status": preview.get("status"),
                 "identity_status": preview.get("identity_status"),
+                "source_object_status": preview.get("source_object_status"),
+                "target_bar_status": preview.get("target_bar_status"),
+                "price_research_status": preview.get("price_research_status"),
+                "stable_security_id_status": preview.get("stable_security_id_status"),
+                "listing_status": preview.get("listing_status"),
+                "suspension_status": preview.get("suspension_status"),
                 "pit_status": preview.get("pit_status"),
                 "window": preview.get("window"),
+                "history_status": preview.get("history_status"),
+                "missing_history_sessions": preview.get("missing_history_sessions"),
                 "price_quality_counts": preview.get("quality", {}).get(
                     "price_quality_counts"
                 ),
@@ -4386,6 +4439,10 @@ def research_universe_pg_history_preview(
         "research_mode": "SOURCE_SYMBOL_NON_PIT_PREVIEW",
         "price_coordinate": "RAW_UNADJUSTED",
         "identity_status": "SOURCE_SYMBOL_ONLY",
+        "source_object_status": "TDX_SOURCE_SYMBOL_OBSERVED",
+        "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
+        "listing_status": "LISTING_STATUS_UNKNOWN",
+        "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "official_listing_denominator": "UNKNOWN_NOT_PROVED_BY_SOURCE_CANDIDATES",
         "namespace_id": page["namespace_id"],
