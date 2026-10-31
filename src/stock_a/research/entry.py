@@ -4473,6 +4473,359 @@ def research_stock_pg_history_preview(
     }
 
 
+def _timeline_relation(
+    close_field: Mapping[str, Any], ma20_field: Mapping[str, Any]
+) -> tuple[str | None, str | None]:
+    """用现役Core输出和RAW收盘值精确判定价格相对MA20位置。"""
+    for field in (close_field, ma20_field):
+        if field.get("quality") != "OBSERVED":
+            return None, field.get("reason") or "PRICE_FIELD_UNKNOWN"
+    try:
+        close_value = close_field["value"]
+        ma20_value = ma20_field["value"]
+        close_exact = (
+            Fraction(close_value["exact"])
+            if isinstance(close_value, Mapping) and "exact" in close_value
+            else Fraction(str(close_value))
+        )
+        ma20_exact = (
+            Fraction(ma20_value["exact"])
+            if isinstance(ma20_value, Mapping) and "exact" in ma20_value
+            else Fraction(str(ma20_value))
+        )
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        return None, "PRICE_VALUE_INVALID"
+    if close_exact > ma20_exact:
+        return "ABOVE", None
+    if close_exact < ma20_exact:
+        return "BELOW", None
+    return "EQUAL", None
+
+
+def _timeline_transition(
+    previous: Mapping[str, Any] | None,
+    current: Mapping[str, Any],
+    *,
+    first_evaluable: bool,
+) -> dict[str, Any]:
+    """只比较紧邻官方会话；不会跨未知日寻找更早前态。"""
+    current_relation = current.get("close_vs_ma20")
+    previous_session = previous.get("session_date") if previous else None
+    previous_relation = previous.get("close_vs_ma20") if previous else None
+    if previous is not None and any(
+        previous.get(key) != current.get(key)
+        for key in ("coordinate_id", "package_sha256", "semantic_version")
+    ):
+        return {
+            "status": "NOT_COMPARABLE",
+            "event": "NOT_COMPARABLE",
+            "previous_session": previous_session,
+            "previous_relation": previous_relation,
+            "relation_transition": None,
+            "reason": "PRICE_COORDINATE_PACKAGE_OR_SEMANTIC_VERSION_MISMATCH",
+        }
+    if current_relation is None:
+        return {
+            "status": "NOT_COMPARABLE",
+            "event": "NOT_COMPARABLE",
+            "previous_session": previous_session,
+            "previous_relation": previous_relation,
+            "relation_transition": None,
+            "reason": current.get("relation_unknown_reason")
+            or "CURRENT_RELATION_UNKNOWN",
+        }
+    if previous is None or previous_relation is None:
+        return {
+            "status": "FIRST_EVALUABLE" if first_evaluable else "NOT_COMPARABLE",
+            "event": "FIRST_EVALUABLE" if first_evaluable else "NOT_COMPARABLE",
+            "previous_session": previous_session,
+            "previous_relation": previous_relation,
+            "relation_transition": None,
+            "reason": "NO_EVALUABLE_IMMEDIATE_PREVIOUS_SESSION",
+        }
+    transition = f"{previous_relation}_TO_{current_relation}"
+    if previous_relation == current_relation:
+        event = f"HOLD_{current_relation}"
+    elif previous_relation == "BELOW" and current_relation == "ABOVE":
+        event = "CROSS_ABOVE"
+    elif previous_relation == "ABOVE" and current_relation == "BELOW":
+        event = "CROSS_BELOW"
+    elif current_relation == "EQUAL":
+        event = f"ENTER_EQUAL_FROM_{previous_relation}"
+    else:
+        event = f"LEAVE_EQUAL_TO_{current_relation}"
+    return {
+        "status": "COMPARABLE",
+        "event": event,
+        "previous_session": previous_session,
+        "previous_relation": previous_relation,
+        "relation_transition": transition,
+        "reason": None,
+    }
+
+
+def research_stock_pg_history_timeline(
+    *,
+    symbol: str,
+    target_session: str,
+    package_sha256: str,
+    session_dates: Sequence[date],
+    history_rows: Sequence[Mapping[str, Any]],
+    missing_history_sessions: Sequence[date],
+    namespace_id: str,
+    profile_contract: dict[str, Any],
+) -> dict[str, Any]:
+    """按实际官方会话逐日复用PG Core生产路径，形成单股价格轨迹。"""
+    target = _parse_target(target_session)
+    normalized = _normalize_symbol(symbol)[0]
+    sessions = tuple(session_dates)
+    rows = tuple(history_rows)
+    if (
+        not sessions
+        or len(sessions) > 75
+        or sessions[-1] != target
+        or tuple(sorted(set(sessions))) != sessions
+        or any(type(day) is not date for day in sessions)
+    ):
+        raise ResearchEntryError(
+            "PG_TIMELINE_WINDOW_INVALID", "价格轨迹须绑定递增官方会话且最多75日"
+        )
+    if (
+        not isinstance(package_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
+        or not isinstance(namespace_id, str)
+        or not namespace_id
+    ):
+        raise ResearchEntryError(
+            "PG_TIMELINE_BINDING_INVALID", "价格轨迹缺少完整来源包SHA或namespace"
+        )
+    calendar_payload, _calendar_metadata, calendar_revision, calendar_sessions = (
+        _load_calendar(target)
+    )
+    official_window = tuple(
+        day for day in calendar_sessions if sessions[0] <= day <= target
+    )
+    if sessions != official_window:
+        raise ResearchEntryError(
+            "PG_TIMELINE_CALENDAR_INVALID",
+            "价格轨迹会话没有与版本化官方交易日历闭合",
+        )
+    row_dates = tuple(row.get("session_date") for row in rows)
+    if (
+        tuple(sorted(set(row_dates))) != row_dates
+        or any(day not in sessions for day in row_dates)
+        or any(
+            row.get("source_symbol") != normalized
+            or row.get("package_sha256") != package_sha256
+            or row.get("namespace_id") != namespace_id
+            for row in rows
+        )
+    ):
+        raise ResearchEntryError(
+            "PG_TIMELINE_HISTORY_INVALID",
+            "轨迹Raw行重复、越界或混入其它代码、版本或namespace",
+        )
+    rows_by_session = {row["session_date"]: row for row in rows}
+    missing = tuple(day for day in sessions if day not in rows_by_session)
+    if tuple(missing_history_sessions) != missing:
+        raise ResearchEntryError(
+            "PG_TIMELINE_MISSING_BINDING_INVALID", "Raw缺失会话清单与实际行不一致"
+        )
+
+    points: list[dict[str, Any]] = []
+    status_counts: dict[str, int] = {}
+    price_quality_counts: dict[str, int] = {}
+    event_counts: dict[str, int] = {}
+    unknown_reason_counts: dict[str, int] = {}
+    valid_price_bar_count = 0
+    first_evaluable_session = None
+    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
+    for index, session in enumerate(sessions):
+        row = rows_by_session.get(session)
+        raw_status = row.get("bar_status") if row else "HISTORY_ROW_NOT_STORED"
+        status_counts[raw_status] = status_counts.get(raw_status, 0) + 1
+        price_quality = str(row.get("price_quality") or "UNKNOWN") if row else "UNKNOWN"
+        price_quality_counts[price_quality] = (
+            price_quality_counts.get(price_quality, 0) + 1
+        )
+        ma20_window = sessions[max(0, index - 19) : index + 1]
+        prior_window = sessions[max(0, index - 20) : index]
+
+        def valid_bar(day: date) -> bool:
+            candidate = rows_by_session.get(day)
+            return bool(
+                candidate is not None
+                and candidate.get("bar_status") == "TARGET_PRESENT"
+                and candidate.get("price_quality") == "OBSERVED"
+                and all(
+                    candidate.get(name) is not None
+                    for name in ("raw_open", "raw_high", "raw_low", "raw_close")
+                )
+            )
+
+        if row is None:
+            raw_close_field = {
+                "value": None,
+                "quality": "UNKNOWN",
+                "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+            }
+            ma20_field = {
+                "value": None,
+                "quality": "UNKNOWN",
+                "reason": "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+            }
+            prior_high_field = dict(ma20_field)
+            amount_ratio_field = dict(ma20_field)
+            volume_ratio_field = dict(ma20_field)
+            relation = None
+            relation_reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+            prior_high_relation = None
+            prior_high_relation_reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+        else:
+            prefix_sessions = sessions[: index + 1]
+            prefix_rows = tuple(
+                item for item in rows if item["session_date"] <= session
+            )
+            prefix_missing = tuple(
+                day for day in prefix_sessions if day not in rows_by_session
+            )
+            preview = research_stock_pg_history_preview(
+                symbol=normalized,
+                target_session=session.isoformat(),
+                package_sha256=package_sha256,
+                session_dates=prefix_sessions,
+                history_rows=prefix_rows,
+                missing_history_sessions=prefix_missing,
+                namespace_id=namespace_id,
+                profile_contract=profile_contract,
+            )
+            raw_close_field = preview["raw"]["close"]
+            core_fields = preview["core"]["fields"]
+            ma20_field = core_fields["core.ma20"]
+            prior_high_field = core_fields["core.prior_high20"]
+            amount_ratio_field = core_fields["core.amount_ratio20"]
+            volume_ratio_field = core_fields["core.volume_ratio20"]
+            relation, relation_reason = _timeline_relation(raw_close_field, ma20_field)
+            prior_high_relation, prior_high_relation_reason = _timeline_relation(
+                raw_close_field, prior_high_field
+            )
+            if valid_bar(session):
+                valid_price_bar_count += 1
+        if relation is None:
+            if row is not None and raw_status != "TARGET_PRESENT":
+                relation_reason = row.get("bar_reason") or raw_status
+            elif row is not None and price_quality != "OBSERVED":
+                relation_reason = row.get("price_reason") or price_quality
+            unknown_reason = relation_reason or "PRICE_RELATION_UNKNOWN"
+            unknown_reason_counts[unknown_reason] = (
+                unknown_reason_counts.get(unknown_reason, 0) + 1
+            )
+        else:
+            unknown_reason = None
+            if first_evaluable_session is None:
+                first_evaluable_session = session.isoformat()
+        point = {
+            "session_date": session.isoformat(),
+            "raw_row_present": row is not None,
+            "raw_status": raw_status,
+            "price_quality": price_quality,
+            "price_reason": row.get("price_reason")
+            if row
+            else "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+            "raw_close": raw_close_field,
+            "core_ma20": ma20_field,
+            "core_prior_high20": prior_high_field,
+            "core_amount_ratio20": amount_ratio_field,
+            "core_volume_ratio20": volume_ratio_field,
+            "raw_amount_quality": row.get("raw_amount_quality", "UNKNOWN")
+            if row
+            else "UNKNOWN",
+            "raw_volume_quality": row.get("raw_volume_quality", "UNKNOWN")
+            if row
+            else "UNKNOWN",
+            "amount_unit_status": "UNIT_UNVERIFIED" if row else "UNKNOWN",
+            "volume_unit_status": "UNIT_UNVERIFIED" if row else "UNKNOWN",
+            "close_vs_prior_high20": prior_high_relation,
+            "prior_high20_relation_unknown_reason": prior_high_relation_reason,
+            "close_vs_ma20": relation,
+            "relation_unknown_reason": unknown_reason,
+            "ma20_window": {
+                "official_session_count": len(ma20_window),
+                "valid_bar_count": sum(valid_bar(day) for day in ma20_window),
+                "required_valid_bar_count": 20,
+            },
+            "prior_high20_window": {
+                "official_session_count": len(prior_window),
+                "valid_bar_count": sum(valid_bar(day) for day in prior_window),
+                "required_valid_bar_count": 20,
+            },
+            "coordinate_id": coordinate_id,
+            "package_sha256": package_sha256,
+            "producer": "stock_a.research.core:calculate_core",
+            "semantic_version": "CORE_PRIMITIVES_FIELDSET_R2",
+            "source_capture_id": row.get("source_capture_id") if row else None,
+            "source_content_id": row.get("source_content_id") if row else None,
+            "source_entry_sha256": row.get("source_entry_sha256") if row else None,
+        }
+        points.append(point)
+        transition = _timeline_transition(
+            points[index - 1] if index else None,
+            point,
+            first_evaluable=relation is not None
+            and first_evaluable_session == session.isoformat(),
+        )
+        point["comparison"] = transition
+        event = transition["event"]
+        event_counts[event] = event_counts.get(event, 0) + 1
+
+    known_count = sum(point["close_vs_ma20"] is not None for point in points)
+    return {
+        "ok": True,
+        "contract": "STOCK_A_PG_SOURCE_SYMBOL_PRICE_TIMELINE_R1",
+        "status": "RESEARCH_PREVIEW_NON_PIT",
+        "research_mode": "NON_PIT_RAW_DIAGNOSTIC",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "formal_selection_status": "NOT_CONNECTED",
+        "symbol": normalized,
+        "target_session": target.isoformat(),
+        "package_sha256": package_sha256,
+        "namespace_id": namespace_id,
+        "session_start": sessions[0].isoformat(),
+        "session_end": sessions[-1].isoformat(),
+        "calendar_id": calendar_payload["calendar_id"],
+        "calendar_revision": calendar_revision,
+        "total_session_count": len(sessions),
+        "raw_row_count": len(rows),
+        "valid_price_bar_count": valid_price_bar_count,
+        "known_count": known_count,
+        "unknown_count": len(points) - known_count,
+        "not_comparable_count": sum(
+            point["comparison"]["status"] == "NOT_COMPARABLE" for point in points
+        ),
+        "first_evaluable_count": sum(
+            point["comparison"]["status"] == "FIRST_EVALUABLE" for point in points
+        ),
+        "comparable_transition_count": sum(
+            point["comparison"]["status"] == "COMPARABLE" for point in points
+        ),
+        "first_evaluable_session": first_evaluable_session,
+        "raw_status_counts": dict(sorted(status_counts.items())),
+        "price_quality_counts": dict(sorted(price_quality_counts.items())),
+        "event_counts": dict(sorted(event_counts.items())),
+        "unknown_reason_counts": dict(sorted(unknown_reason_counts.items())),
+        "producer": "stock_a.research.core:calculate_core",
+        "semantic_version": "CORE_PRIMITIVES_FIELDSET_R2",
+        "points": points,
+        "future_session_rows_used": 0,
+        "database_write": False,
+        "ddl_executed": False,
+        "network_access": False,
+        "event_semantics": "仅紧邻官方会话可比；严格BELOW↔ABOVE为CROSS；等值进入、离开和保持分列",
+    }
+
+
 def research_universe_pg_history_preview(
     *,
     target_session: str,

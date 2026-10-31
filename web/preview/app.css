@@ -715,11 +715,40 @@ button {
 .period-detail-table {
   min-width: 1120px;
 }
+.timeline-research {
+  margin-top: 24px;
+  border-top: 1px solid #dfe7ec;
+  padding-top: 14px;
+}
+.timeline-research > .panel-head {
+  align-items: flex-start;
+}
+.timeline-table {
+  min-width: 1280px;
+}
+.timeline-table td,
+.timeline-table th {
+  vertical-align: top;
+}
+.timeline-table td {
+  overflow-wrap: anywhere;
+}
+#timelineStatus,
+#timelineReturn {
+  overflow-wrap: anywhere;
+}
+#timelineReturn {
+  margin: 8px 0;
+}
 @media (max-width: 620px) {
   .period-trends {
     grid-template-columns: 1fr;
   }
   .period-detail-wrap {
     max-width: 78vw;
+  }
+  .timeline-research > .panel-head {
+    display: grid;
+    grid-template-columns: 1fr;
   }
 }

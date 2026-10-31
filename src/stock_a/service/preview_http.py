@@ -1202,12 +1202,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
     def do_POST(self) -> None:
         if not self._ensure_local_host():
             return
-        if self.path.split("?", 1)[0] != "/api/preview/stock":
+        post_path = self.path.split("?", 1)[0]
+        if post_path not in {
+            "/api/preview/stock",
+            "/api/preview/stock-timeline",
+        }:
             self._error(
                 PreviewHttpError(
                     404,
                     "PREVIEW_ROUTE_NOT_FOUND",
-                    "POST仅用于用户明确触发的单股研究预览",
+                    "POST仅用于用户明确触发的单股只读研究预览",
                 )
             )
             return
@@ -1293,6 +1297,29 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 package_sha256=package_sha,
                 sessions=sessions,
             )
+            if post_path == "/api/preview/stock-timeline":
+                result = research_entry.research_stock_pg_history_timeline(
+                    symbol=symbol,
+                    target_session=target.isoformat(),
+                    package_sha256=package_sha,
+                    session_dates=sessions,
+                    history_rows=history["history_rows"],
+                    missing_history_sessions=tuple(
+                        date.fromisoformat(item)
+                        for item in history["missing_history_sessions"]
+                    ),
+                    namespace_id=history["namespace_id"],
+                    profile_contract=self.preview_server.state.profile_contract,
+                )
+                result["selection"] = {
+                    "source_symbol": symbol,
+                    "target_session": target.isoformat(),
+                    "package_sha256": package_sha,
+                    "session_count": session_count,
+                    "calendar_revision": calendar_revision,
+                }
+                self._send_json(200, result)
+                return
             source_context = _preview_source_context(
                 self.preview_server.state.config,
                 target_session=target,

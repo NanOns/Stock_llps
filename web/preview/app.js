@@ -21,6 +21,10 @@ const state = {
   changeRequest: 0,
   changeSnapshots: [],
   loading: false,
+  timeline: null,
+  timelineContext: null,
+  timelineRequest: 0,
+  timelineNavigation: false,
 };
 const labels = {
   TARGET_PRESENT: "有Bar",
@@ -54,6 +58,22 @@ const labels = {
   COMPLETE: "完整闭合",
   PARTIAL: "部分覆盖",
   UNFINISHED: "周期未闭合",
+  ABOVE: "高于MA20",
+  BELOW: "低于MA20",
+  EQUAL: "等于MA20",
+  COMPARABLE: "可比较",
+  FIRST_EVALUABLE: "首次可评价",
+  NOT_COMPARABLE: "不可比较",
+  CROSS_ABOVE: "下方跨至上方",
+  CROSS_BELOW: "上方跨至下方",
+  HOLD_ABOVE: "保持高于",
+  HOLD_BELOW: "保持低于",
+  HOLD_EQUAL: "保持相等",
+  ENTER_EQUAL_FROM_ABOVE: "由上方进入相等",
+  ENTER_EQUAL_FROM_BELOW: "由下方进入相等",
+  LEAVE_EQUAL_TO_ABOVE: "由相等转为上方",
+  LEAVE_EQUAL_TO_BELOW: "由相等转为下方",
+  HISTORY_ROW_NOT_STORED: "PG未保存Raw行",
 };
 const profileLabels = {
   "profile.trend": "趋势",
@@ -1013,6 +1033,14 @@ $("lastPage").addEventListener("click", () => {
 });
 async function queryStock(event) {
   event.preventDefault();
+  const keepTimeline = state.timelineNavigation;
+  state.timelineNavigation = false;
+  if (!keepTimeline) {
+    state.timeline = null;
+    state.timelineContext = null;
+    state.timelineRequest++;
+    renderTimeline(null);
+  }
   const v = selectedVersion();
   if (!v) {
     setMessage("请先从真实PG目录选择目标日期和来源包版本。");
@@ -1105,10 +1133,12 @@ async function queryStock(event) {
       if (requestId !== state.stockRequest) return;
       renderRawPeriods(null, error.message);
     }
+    if (state.timeline) renderTimeline(state.timeline);
   } catch (error) {
     if (requestId !== state.stockRequest) return;
-    $("stockResult").hidden = true;
+    $("stockResult").hidden = Boolean(!keepTimeline || !state.timeline);
     setMessage(error.message);
+    if (keepTimeline && state.timeline) renderTimeline(state.timeline);
   } finally {
     if (requestId === state.stockRequest) $("queryStock").disabled = false;
   }
@@ -1120,6 +1150,180 @@ function selectedProfileSnapshot() {
       `${item.target_session}|${item.source_set_id}|${item.profile_revision}` ===
       key,
   );
+}
+function timelineField(field) {
+  if (!field) return "—";
+  if (field.quality !== "OBSERVED")
+    return `UNKNOWN · ${text(field.reason || field.quality)}`;
+  return text(field.value);
+}
+function priorHighRelationLabel(relation) {
+  const labels = {
+    ABOVE: "高于前20会话最高价",
+    BELOW: "低于前20会话最高价",
+    EQUAL: "等于前20会话最高价",
+  };
+  return labels[relation] || "UNKNOWN";
+}
+function openTimelineSession(sessionDate) {
+  const context = state.timelineContext;
+  if (!context || !state.timeline) return;
+  const value = `${sessionDate}|${context.package_sha256}`;
+  const select = $("versionSelect");
+  let option = Array.from(select.options).find((item) => item.value === value);
+  if (!option) {
+    option = new Option(`${sessionDate} · ${context.package_sha256}`, value);
+    select.add(option);
+  }
+  state.timelineNavigation = true;
+  $("symbolInput").value = context.symbol;
+  $("windowInput").value = String(context.session_count);
+  select.value = value;
+  $("stockForm").requestSubmit();
+}
+function returnToTimelineCutoff() {
+  const context = state.timelineContext;
+  if (!context) return;
+  const value = `${context.target_session}|${context.package_sha256}`;
+  state.timelineNavigation = true;
+  $("symbolInput").value = context.symbol;
+  $("windowInput").value = String(context.session_count);
+  $("versionSelect").value = value;
+  $("stockForm").requestSubmit();
+}
+function renderTimeline(data, errorMessage = "") {
+  const panel = $("timelinePanel");
+  const rows = $("timelineRows");
+  const status = $("timelineStatus");
+  const returnRoot = $("timelineReturn");
+  rows.replaceChildren();
+  returnRoot.replaceChildren();
+  if (!data) {
+    panel.hidden = true;
+    if (errorMessage) {
+      panel.hidden = false;
+      status.textContent = `历史轨迹未返回：${errorMessage}`;
+    }
+    return;
+  }
+  panel.hidden = false;
+  const counts = Object.entries(data.event_counts || {})
+    .map(([event, count]) => `${text(event)} ${count}`)
+    .join(" · ");
+  status.textContent =
+    `${data.symbol} · 截止 ${data.target_session} · ${data.total_session_count} 个官方会话 · ` +
+    `Raw行 ${data.raw_row_count} · 有效价格Bar ${data.valid_price_bar_count} · ` +
+    `MA20关系可评价 ${data.known_count}/${data.total_session_count} · ` +
+    `未知 ${data.unknown_count} · 可比较跨日 ${data.comparable_transition_count} · ` +
+    `不可比较 ${data.not_comparable_count} · 首次可评价 ${data.first_evaluable_count}次 ` +
+    `（${data.first_evaluable_session || "尚无"}）。` +
+    `事件：${counts || "无"}。${data.price_coordinate} / ${data.research_mode}；` +
+    `${data.producer || "stock_a.research.core:calculate_core"} · ${data.semantic_version || "CORE_PRIMITIVES_FIELDSET_R2"}。`;
+  const selected = selectedVersion();
+  if (
+    state.timelineContext &&
+    selected &&
+    selected.target_session !== state.timelineContext.target_session
+  ) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = `返回轨迹截止日 ${state.timelineContext.target_session}`;
+    button.addEventListener("click", returnToTimelineCutoff);
+    returnRoot.append(button);
+  }
+  for (const point of data.points || []) {
+    const tr = document.createElement("tr");
+    cell(tr, point.session_date);
+    cell(
+      tr,
+      `${text(point.raw_status)} · ${text(point.price_quality)}${point.price_reason ? ` · ${point.price_reason}` : ""}`,
+    );
+    cell(tr, timelineField(point.raw_close));
+    cell(tr, timelineField(point.core_ma20));
+    cell(
+      tr,
+      point.close_vs_ma20
+        ? text(point.close_vs_ma20)
+        : `UNKNOWN · ${text(point.relation_unknown_reason)}`,
+    );
+    cell(
+      tr,
+      `${text(point.comparison?.status)} · ${text(point.comparison?.previous_relation)} → ${text(point.comparison?.event)}${point.comparison?.reason ? ` · ${text(point.comparison.reason)}` : ""}`,
+    );
+    cell(
+      tr,
+      `${point.ma20_window.valid_bar_count}/${point.ma20_window.required_valid_bar_count} · ` +
+        `MA20 ${point.ma20_window.official_session_count}会话；` +
+        `prior_high20 ${point.prior_high20_window.valid_bar_count}/${point.prior_high20_window.required_valid_bar_count} · ` +
+        `${point.prior_high20_window.official_session_count}会话`,
+    );
+    cell(
+      tr,
+      `${timelineField(point.core_prior_high20)} · ` +
+        (point.close_vs_prior_high20
+          ? priorHighRelationLabel(point.close_vs_prior_high20)
+          : `UNKNOWN · ${text(point.prior_high20_relation_unknown_reason)}`),
+    );
+    const actionCell = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = "查看当日Core / 周月";
+    button.addEventListener("click", () =>
+      openTimelineSession(point.session_date),
+    );
+    actionCell.append(button);
+    tr.append(actionCell);
+    rows.append(tr);
+  }
+  if (!data.points?.length)
+    tableRow(rows, ["无官方会话轨迹", "", "", "", "", "", "", "", ""]);
+}
+async function queryTimeline() {
+  const version = selectedVersion();
+  const symbol = $("symbolInput").value.trim();
+  const sessionCount = Number($("windowInput").value);
+  if (!version || !symbol || !Number.isInteger(sessionCount)) {
+    renderTimeline(
+      null,
+      "请先选择目标日和完整来源包版本，并填写来源代码及会话数。",
+    );
+    return;
+  }
+  const requestId = ++state.timelineRequest;
+  state.timeline = null;
+  state.timelineContext = {
+    ...version,
+    symbol,
+    session_count: sessionCount,
+  };
+  $("queryTimeline").disabled = true;
+  $("timelinePanel").hidden = false;
+  $("timelineStatus").textContent =
+    "正在按所选来源代码和截止日进行一次有界PG只读历史读取，并逐日复用现役Core…";
+  $("timelineRows").replaceChildren();
+  try {
+    const data = await api("/api/preview/stock-timeline", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        symbol,
+        target_session: version.target_session,
+        package_sha256: version.package_sha256,
+        session_count: sessionCount,
+      }),
+    });
+    if (requestId !== state.timelineRequest) return;
+    state.timeline = data;
+    renderTimeline(data);
+  } catch (error) {
+    if (requestId !== state.timelineRequest) return;
+    renderTimeline(null, error.message);
+  } finally {
+    if (requestId === state.timelineRequest)
+      $("queryTimeline").disabled = false;
+  }
 }
 function clearProfileDetail() {
   $("profileDetail").hidden = true;
@@ -1607,6 +1811,12 @@ $("reloadCatalog").addEventListener("click", loadCatalog);
 $("versionSelect").addEventListener("change", () => {
   state.offset = 0;
   state.stockRequest++;
+  if (!state.timelineNavigation) {
+    state.timeline = null;
+    state.timelineContext = null;
+    state.timelineRequest++;
+    renderTimeline(null);
+  }
   $("queryStock").disabled = false;
   clearResult();
   loadPage();
@@ -1631,6 +1841,7 @@ $("nextPage").addEventListener("click", () => {
   }
 });
 $("stockForm").addEventListener("submit", queryStock);
+$("queryTimeline").addEventListener("click", queryTimeline);
 $("searchProfiles").addEventListener("click", () => {
   state.profileOffset = 0;
   loadProfilePage();

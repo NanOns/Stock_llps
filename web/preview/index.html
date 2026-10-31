@@ -392,6 +392,46 @@
                 <tbody id="profileRows"></tbody>
               </table>
             </div>
+            <section class="timeline-research" aria-labelledby="timelineTitle">
+              <div class="panel-head">
+                <div>
+                  <h3 id="timelineTitle">历史价格结构轨迹</h3>
+                  <p class="muted">
+                    按所选截止日、来源包SHA、来源代码和会话数查询；逐日复用现役Core，RAW_UNADJUSTED
+                    / NON_PIT_DIAGNOSTIC。
+                  </p>
+                </div>
+                <button id="queryTimeline" class="quiet" type="button">
+                  查询历史轨迹
+                </button>
+              </div>
+              <div id="timelinePanel" hidden>
+                <div id="timelineStatus" class="population" role="status"></div>
+                <div id="timelineReturn"></div>
+                <div class="table-wrap">
+                  <table class="timeline-table">
+                    <thead>
+                      <tr>
+                        <th>官方会话</th>
+                        <th>Raw行 / Bar / 价格质量</th>
+                        <th>RAW收盘</th>
+                        <th>Core MA20</th>
+                        <th>收盘相对MA20</th>
+                        <th>紧邻前态 / 变化</th>
+                        <th>MA20窗口有效Bar</th>
+                        <th>Core prior_high20 / 收盘位置</th>
+                        <th>历史窗口</th>
+                      </tr>
+                    </thead>
+                    <tbody id="timelineRows">
+                      <tr>
+                        <td colspan="9" class="muted">等待历史轨迹查询。</td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </section>
             <section
               class="raw-period-research"
               aria-labelledby="rawPeriodTitle"
