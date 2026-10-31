@@ -444,6 +444,45 @@
               <div id="timelinePanel" hidden>
                 <div id="timelineStatus" class="population" role="status"></div>
                 <div id="timelineReturn"></div>
+                <section
+                  class="candlestick-research"
+                  aria-label="RAW K线图研究"
+                >
+                  <div class="chart-controls" role="group" aria-label="K线周期">
+                    <button
+                      id="chartModeDay"
+                      class="quiet"
+                      type="button"
+                      aria-pressed="true"
+                    >
+                      日K
+                    </button>
+                    <button
+                      id="chartModeWeek"
+                      class="quiet"
+                      type="button"
+                      aria-pressed="false"
+                    >
+                      周K
+                    </button>
+                    <button
+                      id="chartModeMonth"
+                      class="quiet"
+                      type="button"
+                      aria-pressed="false"
+                    >
+                      月K
+                    </button>
+                  </div>
+                  <p id="chartIdentity" class="muted"></p>
+                  <div id="chartNotice" class="population" role="status"></div>
+                  <div id="candlestickChart" class="candlestick-chart"></div>
+                  <div
+                    id="chartDetail"
+                    class="chart-detail"
+                    aria-live="polite"
+                  ></div>
+                </section>
                 <div class="table-wrap">
                   <table class="timeline-table">
                     <thead>

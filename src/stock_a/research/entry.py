@@ -4505,6 +4505,52 @@ def _timeline_relation(
     return "EQUAL", None
 
 
+def _timeline_raw_ohlc(row: Mapping[str, Any] | None) -> dict[str, Any]:
+    """把同一条PG Raw行的四个价格字段投影到轨迹，不推导或修补价格。"""
+    field_names = {
+        "open": "raw_open",
+        "high": "raw_high",
+        "low": "raw_low",
+        "close": "raw_close",
+    }
+    if row is None:
+        quality = "UNKNOWN"
+        reason = "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+    elif row.get("bar_status") != "TARGET_PRESENT":
+        quality = "UNKNOWN"
+        reason = row.get("bar_reason") or row.get("bar_status") or "RAW_BAR_UNKNOWN"
+    elif row.get("price_quality") != "OBSERVED":
+        quality = str(row.get("price_quality") or "UNKNOWN")
+        reason = row.get("price_reason") or "RAW_PRICE_QUALITY_UNKNOWN"
+    else:
+        try:
+            values = {
+                name: exact_number(row.get(column))
+                for name, column in field_names.items()
+            }
+        except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+            values = {}
+        if len(values) != len(field_names) or any(
+            value <= 0 for value in values.values()
+        ):
+            quality = "BAD_VALUE"
+            reason = row.get("price_reason") or "RAW_OHLC_INVALID_OR_INCOMPLETE"
+        elif values["high"] < max(
+            values["open"], values["low"], values["close"]
+        ) or values["low"] > min(values["open"], values["high"], values["close"]):
+            quality = "BAD_VALUE"
+            reason = row.get("price_reason") or "RAW_OHLC_ENVELOPE_INVALID"
+        else:
+            return {
+                name: _render_field(FieldValue(row[column]))
+                for name, column in field_names.items()
+            } | {"quality": "OBSERVED", "reason": None}
+    return {
+        name: {"value": None, "quality": quality, "reason": reason}
+        for name in field_names
+    } | {"quality": quality, "reason": reason}
+
+
 def _timeline_transition(
     previous: Mapping[str, Any] | None,
     current: Mapping[str, Any],
@@ -4736,6 +4782,7 @@ def research_stock_pg_history_timeline(
             "price_reason": row.get("price_reason")
             if row
             else "UNKNOWN_HISTORY_SESSION_NOT_STORED",
+            "raw_ohlc": _timeline_raw_ohlc(row),
             "raw_close": raw_close_field,
             "core_ma20": ma20_field,
             "core_prior_high20": prior_high_field,

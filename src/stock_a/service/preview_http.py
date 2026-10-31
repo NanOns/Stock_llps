@@ -1001,14 +1001,55 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/source-symbol/raw-periods":
                 values = _query(
-                    self.path, {"target_session", "package_sha256", "symbol"}
+                    self.path,
+                    {
+                        "target_session",
+                        "package_sha256",
+                        "symbol",
+                        "namespace_id",
+                        "source_set_id",
+                    },
                 )
                 required = {"target_session", "package_sha256", "symbol"}
                 if set(values) != required:
+                    if not required.issubset(values):
+                        raise PreviewHttpError(
+                            400,
+                            "RAW_PERIOD_QUERY_REQUIRED",
+                            "RAW周期查询必须显式提供日期、完整SHA和来源代码",
+                        )
+                expected_namespace_id = None
+                expected_source_set_id = None
+                expected_source_set_bound = "source_set_id" in values
+                identity_fields = set(values) & {"namespace_id", "source_set_id"}
+                if identity_fields and identity_fields != {
+                    "namespace_id",
+                    "source_set_id",
+                }:
                     raise PreviewHttpError(
                         400,
-                        "RAW_PERIOD_QUERY_REQUIRED",
-                        "RAW周期查询必须显式提供日期、完整SHA和来源代码",
+                        "PREVIEW_SOURCE_IDENTITY_INVALID",
+                        "周期查询的namespace_id与source_set_id必须同时提供",
+                    )
+                if "namespace_id" in values:
+                    try:
+                        expected_namespace_id = str(UUID(values["namespace_id"]))
+                        if (
+                            expected_source_set_bound
+                            and values["source_set_id"] != "NONE"
+                        ):
+                            expected_source_set_id = str(UUID(values["source_set_id"]))
+                    except (ValueError, TypeError, AttributeError) as error:
+                        raise PreviewHttpError(
+                            400,
+                            "PREVIEW_SOURCE_IDENTITY_INVALID",
+                            "周期来源身份须使用有效的namespace_id和source_set_id",
+                        ) from error
+                elif "source_set_id" in values:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_SOURCE_IDENTITY_INVALID",
+                        "周期source_set_id必须与namespace_id一并提供",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
@@ -1032,6 +1073,29 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     package_sha256=package_sha,
                     sessions=sessions,
                 )
+                source_context = _preview_source_context(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    package_sha256=package_sha,
+                    namespace_id=history["namespace_id"],
+                    target_raw_rows=history["history_rows"],
+                )
+                if expected_namespace_id is not None and (
+                    expected_namespace_id != history["namespace_id"]
+                    or (
+                        expected_source_set_bound
+                        and expected_source_set_id != source_context["source_set_id"]
+                    )
+                    or (
+                        expected_source_set_id is not None
+                        and source_context["status"] != "AVAILABLE"
+                    )
+                ):
+                    raise PreviewHttpError(
+                        409,
+                        "PREVIEW_SOURCE_IDENTITY_MISMATCH",
+                        "周期返回的namespace或SEALED source_set与所选来源上下文不一致",
+                    )
                 calendar_payload, _metadata, _year_revision, calendar_sessions = (
                     research_entry._load_calendar(target)
                 )
@@ -1085,6 +1149,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "RAW_HISTORY_SUMMARY_MISMATCH",
                         "Raw历史缺失会话汇总与PG读取结果不一致",
                     )
+                identity = self.preview_server.state.snapshot_identity(
+                    namespace_id=history["namespace_id"],
+                    target_session=target.isoformat(),
+                    package_sha256=package_sha,
+                    session_count=len(sessions),
+                    session_start=sessions[0].isoformat(),
+                    calendar_revision=calendar_revision,
+                    source_set_id=source_context["source_set_id"],
+                )
                 self._send_json(
                     200,
                     {
@@ -1101,7 +1174,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "corporate_action_status": "UNKNOWN_NOT_BOUND",
                         "target_session": target.isoformat(),
                         "source_symbol": symbol,
+                        "symbol": symbol,
                         "package_sha256": package_sha,
+                        "namespace_id": history["namespace_id"],
+                        "snapshot_identity": identity,
+                        "formal_source_set": source_context,
+                        "selection": {
+                            "source_symbol": symbol,
+                            "target_session": target.isoformat(),
+                            "package_sha256": package_sha,
+                            "namespace_id": history["namespace_id"],
+                            "source_set_id": source_context["source_set_id"],
+                        },
                         "calendar_revision": calendar_revision,
                         "history_window": {
                             "start_session": sessions[0].isoformat(),
