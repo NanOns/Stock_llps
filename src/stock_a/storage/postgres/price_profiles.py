@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from decimal import Decimal
 from hashlib import sha256
 import json
 import re
@@ -488,7 +489,53 @@ def _snapshot_for_session(
     namespace_id: str,
     target_session: date,
     max_target_session: date,
+    source_set_id: str | None = None,
+    package_sha256: str | None = None,
+    profile_revision: str | None = None,
 ) -> dict[str, Any]:
+    exact_identity = (source_set_id, package_sha256, profile_revision)
+    if any(value is not None for value in exact_identity):
+        if not all(isinstance(value, str) and value for value in exact_identity):
+            raise PriceProfilePgError(
+                "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
+                "精确快照必须同时提供source_set_id、package_sha256和profile_revision",
+            )
+        try:
+            source_set_id = str(UUID(source_set_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise PriceProfilePgError(
+                "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID", "source_set_id不是UUID"
+            ) from error
+        if len(package_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in package_sha256
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
+                "package_sha256不是小写SHA-256",
+            )
+        if len(profile_revision) != 64 or any(
+            character not in "0123456789abcdef" for character in profile_revision
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
+                "profile_revision不是小写SHA-256",
+            )
+
+    predicates = [
+        "p.namespace_id=%s::uuid",
+        "p.target_session=%s",
+        "p.target_session<=%s",
+    ]
+    parameters: list[Any] = [namespace_id, target_session, max_target_session]
+    if source_set_id is not None:
+        predicates.extend(
+            (
+                "p.source_set_id=%s::uuid",
+                "p.package_sha256=%s",
+                "p.profile_revision=%s",
+            )
+        )
+        parameters.extend((source_set_id, package_sha256, profile_revision))
     cursor.execute(
         """SELECT p.target_session, p.source_set_id::text, p.package_sha256,
        p.profile_revision, p.history_calendar_id, p.history_calendar_revision,
@@ -499,12 +546,14 @@ FROM stock.source_symbol_price_profiles p
 JOIN stock.source_sets s ON s.namespace_id=p.namespace_id
   AND s.source_set_id=p.source_set_id AND s.target_session=p.target_session
   AND s.package_sha256=p.package_sha256 AND s.seal_status='SEALED'
-WHERE p.namespace_id=%s::uuid AND p.target_session=%s AND p.target_session<=%s
+WHERE """
+        + " AND ".join(predicates)
+        + """
 GROUP BY p.target_session, p.source_set_id, p.package_sha256, p.profile_revision,
          p.history_calendar_id, p.history_calendar_revision,
          p.history_window_start, p.history_window_end, p.history_requested_session_count
 ORDER BY p.source_set_id, p.profile_revision""",
-        (namespace_id, target_session, max_target_session),
+        parameters,
     )
     rows = cursor.fetchall()
     if not rows:
@@ -542,7 +591,12 @@ ORDER BY p.source_set_id, p.profile_revision""",
 
 _PROFILE_CHANGE_CTES = """
 WITH old_rows AS (
-    SELECT p.*, r.raw_close AS joined_raw_close,
+    SELECT p.*,
+           r.source_symbol IS NOT NULL AS joined_raw_present,
+           r.raw_open AS joined_raw_open,
+           r.raw_high AS joined_raw_high,
+           r.raw_low AS joined_raw_low,
+           r.raw_close AS joined_raw_close,
            r.price_quality AS joined_raw_price_quality,
            r.price_reason AS joined_raw_price_reason
     FROM stock.source_symbol_price_profiles p
@@ -553,7 +607,12 @@ WITH old_rows AS (
       AND p.source_set_id=%s::uuid AND p.package_sha256=%s
       AND p.profile_revision=%s
 ), new_rows AS (
-    SELECT p.*, r.raw_close AS joined_raw_close,
+    SELECT p.*,
+           r.source_symbol IS NOT NULL AS joined_raw_present,
+           r.raw_open AS joined_raw_open,
+           r.raw_high AS joined_raw_high,
+           r.raw_low AS joined_raw_low,
+           r.raw_close AS joined_raw_close,
            r.price_quality AS joined_raw_price_quality,
            r.price_reason AS joined_raw_price_reason
     FROM stock.source_symbol_price_profiles p
@@ -569,8 +628,20 @@ WITH old_rows AS (
            n.source_symbol IS NOT NULL AS after_present,
            o.source_set_id::text AS before_source_set_id,
            n.source_set_id::text AS after_source_set_id,
+           o.source_set_revision AS before_source_set_revision,
+           n.source_set_revision AS after_source_set_revision,
+           o.source_capture_id::text AS before_source_capture_id,
+           n.source_capture_id::text AS after_source_capture_id,
            o.package_sha256::text AS before_package_sha256,
            n.package_sha256::text AS after_package_sha256,
+           o.calculation_scope AS before_calculation_scope,
+           n.calculation_scope AS after_calculation_scope,
+           o.producer_contract AS before_producer_contract,
+           n.producer_contract AS after_producer_contract,
+           o.producer_version AS before_producer_version,
+           n.producer_version AS after_producer_version,
+           o.producer_contract_sha256::text AS before_semantics_sha256,
+           n.producer_contract_sha256::text AS after_semantics_sha256,
            o.identity_status AS before_identity_status,
            n.identity_status AS after_identity_status,
            o.stable_security_id_status AS before_stable_security_id_status,
@@ -583,18 +654,46 @@ WITH old_rows AS (
            n.pit_status AS after_pit_status,
            o.target_bar_status AS before_bar_status,
            n.target_bar_status AS after_bar_status,
+           o.target_price_quality AS before_target_price_quality,
+           n.target_price_quality AS after_target_price_quality,
+           COALESCE(o.joined_raw_present, FALSE) AS before_raw_record_present,
+           COALESCE(n.joined_raw_present, FALSE) AS after_raw_record_present,
            o.price_window_status AS before_window_status,
            n.price_window_status AS after_window_status,
            o.price_window_reason AS before_window_reason,
            n.price_window_reason AS after_window_reason,
            o.joined_raw_close AS before_raw_close,
            n.joined_raw_close AS after_raw_close,
+           o.joined_raw_open AS before_raw_open,
+           n.joined_raw_open AS after_raw_open,
+           o.joined_raw_high AS before_raw_high,
+           n.joined_raw_high AS after_raw_high,
+           o.joined_raw_low AS before_raw_low,
+           n.joined_raw_low AS after_raw_low,
            o.joined_raw_price_quality AS before_raw_price_quality,
            n.joined_raw_price_quality AS after_raw_price_quality,
            o.joined_raw_price_reason AS before_raw_price_reason,
            n.joined_raw_price_reason AS after_raw_price_reason,
            o.ma20 AS before_ma20,
            n.ma20 AS after_ma20,
+           o.ma5 AS before_ma5,
+           n.ma5 AS after_ma5,
+           o.ma10 AS before_ma10,
+           n.ma10 AS after_ma10,
+           o.ma60 AS before_ma60,
+           n.ma60 AS after_ma60,
+           o.atr20 AS before_atr20,
+           n.atr20 AS after_atr20,
+           o.clv AS before_clv,
+           n.clv AS after_clv,
+           o.prior_high20 AS before_prior_high20,
+           n.prior_high20 AS after_prior_high20,
+           o.ret20 AS before_ret20,
+           n.ret20 AS after_ret20,
+           o.pos60 AS before_pos60,
+           n.pos60 AS after_pos60,
+           o.bias20_atr AS before_bias20_atr,
+           n.bias20_atr AS after_bias20_atr,
            o.ma20_quality AS before_ma20_quality,
            n.ma20_quality AS after_ma20_quality,
            o.price_coordinate AS before_price_coordinate,
@@ -619,10 +718,10 @@ WITH old_rows AS (
            n.profile_qualities AS after_profile_qualities,
            o.profile_reasons AS before_profile_reasons,
            n.profile_reasons AS after_profile_reasons,
-           o.producer_contract AS before_producer_contract,
-           n.producer_contract AS after_producer_contract,
-           o.producer_contract_sha256 AS before_semantics_sha256,
-           n.producer_contract_sha256 AS after_semantics_sha256,
+           o.amount_unit_status AS before_amount_unit_status,
+           n.amount_unit_status AS after_amount_unit_status,
+           o.volume_unit_status AS before_volume_unit_status,
+           n.volume_unit_status AS after_volume_unit_status,
            COALESCE(
                o.source_symbol IS NOT NULL AND n.source_symbol IS NOT NULL
                AND o.producer_contract=n.producer_contract
@@ -813,6 +912,12 @@ def read_profile_change_page(
     limit: int,
     source_symbol: str | None = None,
     change_type: str = "ALL",
+    before_source_set_id: str | None = None,
+    before_package_sha256: str | None = None,
+    before_profile_revision: str | None = None,
+    after_source_set_id: str | None = None,
+    after_package_sha256: str | None = None,
+    after_profile_revision: str | None = None,
 ) -> dict[str, Any]:
     """只比较两组精确PG画像；使用稳定SQL分页，不重算Core。"""
     change_types = {
@@ -856,6 +961,30 @@ def read_profile_change_page(
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SYMBOL_INVALID", "来源代码搜索只接受字母、数字和点号"
         )
+    before_identity = (
+        before_source_set_id,
+        before_package_sha256,
+        before_profile_revision,
+    )
+    after_identity = (
+        after_source_set_id,
+        after_package_sha256,
+        after_profile_revision,
+    )
+    if any(value is not None for value in before_identity) and not all(
+        value is not None for value in before_identity
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
+            "起始快照必须同时提供source_set_id、package_sha256和profile_revision",
+        )
+    if any(value is not None for value in after_identity) and not all(
+        value is not None for value in after_identity
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
+            "结束快照必须同时提供source_set_id、package_sha256和profile_revision",
+        )
     symbol_search = source_symbol.upper() if source_symbol else None
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
         before = _snapshot_for_session(
@@ -863,12 +992,18 @@ def read_profile_change_page(
             namespace_id=namespace_id,
             target_session=before_session,
             max_target_session=max_target_session,
+            source_set_id=before_source_set_id,
+            package_sha256=before_package_sha256,
+            profile_revision=before_profile_revision,
         )
         after = _snapshot_for_session(
             cursor,
             namespace_id=namespace_id,
             target_session=after_session,
             max_target_session=max_target_session,
+            source_set_id=after_source_set_id,
+            package_sha256=after_package_sha256,
+            profile_revision=after_profile_revision,
         )
         base_parameters = (
             *_profile_change_snapshot_parameters(namespace_id, before),
@@ -1105,6 +1240,263 @@ LIMIT %s OFFSET %s""",
             else None,
         },
         "rows": rows,
+        "database_write": False,
+        "core_recalculated": False,
+    }
+
+
+def classify_source_profile_pair_status(
+    *,
+    before_present: bool,
+    after_present: bool,
+    core_compatible: bool,
+    profile_compatible: bool,
+    change_types: Sequence[str],
+) -> dict[str, str]:
+    """把成员存在状态与变化分类状态分开，避免把不可比当作无变化。"""
+    if not before_present and not after_present:
+        return {
+            "pair_status": "NO_SAVED_SOURCE_CODE_MATCH",
+            "state_change_status": "NOT_APPLICABLE",
+        }
+    if before_present and not after_present:
+        return {"pair_status": "BEFORE_ONLY", "state_change_status": "NOT_APPLICABLE"}
+    if after_present and not before_present:
+        return {"pair_status": "AFTER_ONLY", "state_change_status": "NOT_APPLICABLE"}
+    if not core_compatible or not profile_compatible:
+        state_change_status = "NOT_COMPARABLE"
+    elif change_types:
+        state_change_status = "RECORDED_CHANGE"
+    else:
+        state_change_status = "NO_RECORDED_STATE_CHANGE"
+    return {"pair_status": "BOTH_PRESENT", "state_change_status": state_change_status}
+
+
+def _field_pair_status(
+    *,
+    before_value: Any,
+    after_value: Any,
+    before_quality: str | None,
+    after_quality: str | None,
+    compatible: bool,
+) -> str:
+    if not compatible:
+        return "NOT_COMPARABLE"
+    if (
+        before_quality != "OBSERVED"
+        or after_quality != "OBSERVED"
+        or before_value is None
+        or after_value is None
+    ):
+        return "UNKNOWN"
+    return (
+        "SAME_VALUE"
+        if Decimal(before_value) == Decimal(after_value)
+        else "DIFFERENT_VALUES"
+    )
+
+
+def read_profile_pair(
+    config: Mapping[str, Any],
+    *,
+    before_session: date,
+    after_session: date,
+    max_target_session: date,
+    source_symbol: str,
+    before_source_set_id: str,
+    before_package_sha256: str,
+    before_profile_revision: str,
+    after_source_set_id: str,
+    after_package_sha256: str,
+    after_profile_revision: str,
+) -> dict[str, Any]:
+    """按两端精确封口快照，从现役配对SQL读取单个来源代码。"""
+    if (
+        type(before_session) is not date
+        or type(after_session) is not date
+        or type(max_target_session) is not date
+        or before_session >= after_session
+        or after_session > max_target_session
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_DATE_INVALID",
+            "对照日期必须递增，且不晚于显式研究截止日",
+        )
+    if (
+        not isinstance(source_symbol, str)
+        or len(source_symbol) != 9
+        or source_symbol[:2] not in {"SH", "SZ"}
+        or source_symbol[2] != "."
+        or not source_symbol[3:].isdecimal()
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_SYMBOL_INVALID", "来源代码必须符合SH./SZ.六位数字格式"
+        )
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        before = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=before_session,
+            max_target_session=max_target_session,
+            source_set_id=before_source_set_id,
+            package_sha256=before_package_sha256,
+            profile_revision=before_profile_revision,
+        )
+        after = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=after_session,
+            max_target_session=max_target_session,
+            source_set_id=after_source_set_id,
+            package_sha256=after_package_sha256,
+            profile_revision=after_profile_revision,
+        )
+        parameters = (
+            *_profile_change_snapshot_parameters(namespace_id, before),
+            *_profile_change_snapshot_parameters(namespace_id, after),
+        )
+        cursor.execute(
+            _PROFILE_CHANGE_CTES + "SELECT * FROM classified WHERE source_symbol=%s",
+            (*parameters, source_symbol),
+        )
+        names = [column.name for column in cursor.description]
+        result = cursor.fetchone()
+        row = dict(zip(names, result, strict=True)) if result else None
+
+    if row is None:
+        return {
+            "status": "NO_SAVED_SOURCE_CODE_MATCH",
+            "namespace_id": namespace_id,
+            "source_symbol": source_symbol,
+            "before_snapshot": before,
+            "after_snapshot": after,
+            "item": None,
+            "database_write": False,
+            "core_recalculated": False,
+        }
+
+    row["change_types"] = list(row["change_types"] or [])
+    row["core_quality_changed_fields"] = list(row["core_quality_changed_fields"] or [])
+    row.update(
+        classify_source_profile_pair_status(
+            before_present=bool(row["before_present"]),
+            after_present=bool(row["after_present"]),
+            core_compatible=bool(row["core_compatible"]),
+            profile_compatible=bool(row["profile_compatible"]),
+            change_types=row["change_types"],
+        )
+    )
+    both_present = row["pair_status"] == "BOTH_PRESENT"
+    same_coordinate = row["before_price_coordinate"] == row["after_price_coordinate"]
+    price_compatible = both_present and same_coordinate
+    row["raw_ohlc_comparison_status"] = (
+        "NOT_APPLICABLE"
+        if not both_present
+        else "NOT_COMPARABLE"
+        if not same_coordinate
+        else "COMPARABLE"
+        if row["before_raw_price_quality"]
+        == row["after_raw_price_quality"]
+        == "OBSERVED"
+        and row["before_raw_record_present"]
+        and row["after_raw_record_present"]
+        else "UNKNOWN"
+    )
+    row["raw_close_comparison_status"] = (
+        "NOT_APPLICABLE"
+        if not both_present
+        else _field_pair_status(
+            before_value=row["before_raw_close"],
+            after_value=row["after_raw_close"],
+            before_quality=row["before_raw_price_quality"],
+            after_quality=row["after_raw_price_quality"],
+            compatible=price_compatible,
+        )
+    )
+    row["close_ma20_comparison_status"] = (
+        "NOT_APPLICABLE"
+        if not both_present
+        else "NOT_COMPARABLE"
+        if not row["core_compatible"]
+        else "UNKNOWN"
+        if row["before_raw_price_quality"] != "OBSERVED"
+        or row["after_raw_price_quality"] != "OBSERVED"
+        or row["before_ma20_quality"] != "OBSERVED"
+        or row["after_ma20_quality"] != "OBSERVED"
+        else "COMPARABLE"
+    )
+    core_statuses = [
+        _field_pair_status(
+            before_value=row.get(f"before_{field}"),
+            after_value=row.get(f"after_{field}"),
+            before_quality=row.get(f"before_{field}_quality"),
+            after_quality=row.get(f"after_{field}_quality"),
+            compatible=bool(row["core_compatible"]),
+        )
+        for field in _CORE_COLUMN_NAMES
+    ]
+    row["core_comparison_status"] = (
+        "NOT_APPLICABLE"
+        if not both_present
+        else "NOT_COMPARABLE"
+        if not row["core_compatible"]
+        else "COMPARABLE"
+        if all(status != "UNKNOWN" for status in core_statuses)
+        else "PARTIALLY_COMPARABLE"
+        if any(status != "UNKNOWN" for status in core_statuses)
+        else "UNKNOWN"
+    )
+    before_profile_qualities = row["before_profile_qualities"] or []
+    after_profile_qualities = row["after_profile_qualities"] or []
+    profile_lists_compatible = len(before_profile_qualities) == len(
+        after_profile_qualities
+    )
+    profile_observed = (
+        sum(
+            before == "OBSERVED" and after == "OBSERVED"
+            for before, after in zip(
+                before_profile_qualities, after_profile_qualities, strict=True
+            )
+        )
+        if both_present and profile_lists_compatible
+        else 0
+    )
+    row["profile_comparison_status"] = (
+        "NOT_APPLICABLE"
+        if not both_present
+        else "NOT_COMPARABLE"
+        if not row["profile_compatible"] or not profile_lists_compatible
+        else "COMPARABLE"
+        if profile_observed == len(before_profile_qualities)
+        else "PARTIALLY_COMPARABLE"
+        if profile_observed
+        else "UNKNOWN"
+    )
+    row["core_quality_changes"] = [
+        {
+            "field_id": field_id,
+            "before_quality": row.get(
+                "before_" + field_id.removeprefix("core.") + "_quality"
+            ),
+            "after_quality": row.get(
+                "after_" + field_id.removeprefix("core.") + "_quality"
+            ),
+            "before_reason": row.get(
+                "before_" + field_id.removeprefix("core.") + "_reason"
+            ),
+            "after_reason": row.get(
+                "after_" + field_id.removeprefix("core.") + "_reason"
+            ),
+        }
+        for field_id in row["core_quality_changed_fields"]
+    ]
+    return {
+        "status": "AVAILABLE",
+        "namespace_id": namespace_id,
+        "source_symbol": source_symbol,
+        "before_snapshot": before,
+        "after_snapshot": after,
+        "item": row,
         "database_write": False,
         "core_recalculated": False,
     }

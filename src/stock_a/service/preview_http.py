@@ -32,6 +32,7 @@ from stock_a.application.pg_research import (
 )
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
+    query_source_symbol_price_profile_pair,
     query_source_symbol_price_profiles,
     query_source_symbol_price_profile_changes,
     source_symbol_price_profile_snapshots,
@@ -604,8 +605,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             elif error.code in {
                 "PROFILE_SOURCE_SET_NOT_FOUND",
                 "PROFILE_SNAPSHOT_INCOMPLETE",
+                "PROFILE_CHANGE_SNAPSHOT_MISSING",
+                "PROFILE_CHANGE_SNAPSHOT_AMBIGUOUS",
+                "PROFILE_CHANGE_SNAPSHOT_INCOMPLETE",
             }:
-                status = 404
+                status = (
+                    409 if error.code.startswith("PROFILE_CHANGE_SNAPSHOT_") else 404
+                )
             else:
                 status = 503
             self._error(PreviewHttpError(status, error.code, str(error)))
@@ -768,6 +774,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
+                        "before_source_set_id",
+                        "before_package_sha256",
+                        "before_profile_revision",
+                        "after_source_set_id",
+                        "after_package_sha256",
+                        "after_profile_revision",
                         "offset",
                         "limit",
                         "symbol",
@@ -804,6 +816,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     ),
                     source_symbol=symbol,
                     change_type=values.get("change_type", "ALL"),
+                    before_source_set_id=values.get("before_source_set_id"),
+                    before_package_sha256=values.get("before_package_sha256"),
+                    before_profile_revision=values.get("before_profile_revision"),
+                    after_source_set_id=values.get("after_source_set_id"),
+                    after_package_sha256=values.get("after_package_sha256"),
+                    after_profile_revision=values.get("after_profile_revision"),
                 )
                 result.update(
                     {
@@ -811,6 +829,72 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "research_mode": "ACCEPTED_PG_PROFILE_CHANGE_OBSERVATION",
                         "database_write": False,
                         "ddl_executed": False,
+                    }
+                )
+                self._send_json(200, result)
+                return
+            if parsed.path == "/api/source-symbol-price-profile-pair":
+                values = _query(
+                    self.path,
+                    {
+                        "before_session",
+                        "after_session",
+                        "symbol",
+                        "before_source_set_id",
+                        "before_package_sha256",
+                        "before_profile_revision",
+                        "after_source_set_id",
+                        "after_package_sha256",
+                        "after_profile_revision",
+                    },
+                )
+                required = {
+                    "before_session",
+                    "after_session",
+                    "symbol",
+                    "before_source_set_id",
+                    "before_package_sha256",
+                    "before_profile_revision",
+                    "after_source_set_id",
+                    "after_package_sha256",
+                    "after_profile_revision",
+                }
+                if set(values) != required:
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_PAIR_QUERY_REQUIRED",
+                        "双日代码对照必须精确提供前后日期、source_set、包SHA、画像修订和来源代码",
+                    )
+                before_session = _iso_date(values["before_session"], "before_session")
+                after_session = _iso_date(values["after_session"], "after_session")
+                _require_research_cutoff(
+                    before_session, self.preview_server.state.research_cutoff
+                )
+                _require_research_cutoff(
+                    after_session, self.preview_server.state.research_cutoff
+                )
+                result = query_source_symbol_price_profile_pair(
+                    self.preview_server.state.config,
+                    before_session=before_session,
+                    after_session=after_session,
+                    max_target_session=self.preview_server.state.research_cutoff,
+                    source_symbol=_symbol(values["symbol"]),
+                    before_source_set_id=values["before_source_set_id"],
+                    before_package_sha256=_sha(values["before_package_sha256"]),
+                    before_profile_revision=_sha(values["before_profile_revision"]),
+                    after_source_set_id=values["after_source_set_id"],
+                    after_package_sha256=_sha(values["after_package_sha256"]),
+                    after_profile_revision=_sha(values["after_profile_revision"]),
+                )
+                result.update(
+                    {
+                        "ok": True,
+                        "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE_PAIR",
+                        "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
+                        "database_write": False,
+                        "ddl_executed": False,
+                        "source_zip_opened": False,
+                        "core_recalculated": False,
                     }
                 )
                 self._send_json(200, result)

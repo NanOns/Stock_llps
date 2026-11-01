@@ -26,6 +26,7 @@ from stock_a.storage.postgres.price_profiles import (
     persist_profile_records,
     read_profile_change_page,
     read_profile_page,
+    read_profile_pair,
 )
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
@@ -597,6 +598,94 @@ def query_source_symbol_price_profiles(
         ) from error
 
 
+def _profile_session_relation(
+    before: Mapping[str, Any], after: Mapping[str, Any]
+) -> dict[str, Any]:
+    before_session = before["target_session"]
+    after_session = after["target_session"]
+    before_date = (
+        before_session
+        if isinstance(before_session, date)
+        else date.fromisoformat(str(before_session))
+    )
+    after_date = (
+        after_session
+        if isinstance(after_session, date)
+        else date.fromisoformat(str(after_session))
+    )
+    relation = {
+        "status": "UNKNOWN",
+        "before_session": before_session.isoformat()
+        if isinstance(before_session, date)
+        else str(before_session),
+        "after_session": after_session.isoformat()
+        if isinstance(after_session, date)
+        else str(after_session),
+        "calendar_id": None,
+        "calendar_revision": None,
+        "reason": "OFFICIAL_SESSION_ADJACENCY_NOT_PROVEN",
+    }
+    if (
+        before["history_calendar_id"] != after["history_calendar_id"]
+        or before["history_calendar_revision"] != after["history_calendar_revision"]
+    ):
+        return relation
+    try:
+        payload, _metadata, revision, sessions = _load_calendar(after_date)
+    except ResearchEntryError:
+        return relation
+    relation.update(
+        {
+            "calendar_id": payload["calendar_id"],
+            "calendar_revision": revision,
+            "reason": None,
+        }
+    )
+    if revision != after["history_calendar_revision"]:
+        relation["reason"] = "PROFILE_CALENDAR_REVISION_MISMATCH"
+        return relation
+    before_index = next(
+        (
+            index
+            for index, day in enumerate(sessions)
+            if day == before_date or day.isoformat() == before_date.isoformat()
+        ),
+        None,
+    )
+    after_index = next(
+        (
+            index
+            for index, day in enumerate(sessions)
+            if day == after_date or day.isoformat() == after_date.isoformat()
+        ),
+        None,
+    )
+    if before_index is None or after_index is None:
+        relation["reason"] = "SESSION_NOT_IN_PROFILE_CALENDAR"
+    else:
+        relation["status"] = (
+            "CONSECUTIVE_OFFICIAL_SESSIONS"
+            if after_index == before_index + 1
+            else "NONCONSECUTIVE_OFFICIAL_SESSIONS"
+        )
+    return relation
+
+
+def query_source_symbol_price_profile_pair(
+    config: Mapping[str, Any], **kwargs: Any
+) -> dict[str, Any]:
+    try:
+        result = read_profile_pair(config, **kwargs)
+        result["session_relation"] = _profile_session_relation(
+            result["before_snapshot"], result["after_snapshot"]
+        )
+        return result
+    except (RawSourcePgError, PriceProfilePgError) as error:
+        raise PgPriceProfileError(
+            getattr(error, "code", "PROFILE_PAIR_READ_FAILED"), str(error)
+        ) from error
+
+
 def query_source_symbol_price_profile_changes(
     config: Mapping[str, Any], **kwargs: Any
 ) -> dict[str, Any]:
@@ -604,61 +693,7 @@ def query_source_symbol_price_profile_changes(
         result = read_profile_change_page(config, **kwargs)
         before = result["before_snapshot"]
         after = result["after_snapshot"]
-        session_relation = {
-            "status": "UNKNOWN",
-            "before_session": before["target_session"].isoformat(),
-            "after_session": after["target_session"].isoformat(),
-            "calendar_id": None,
-            "calendar_revision": None,
-            "reason": "OFFICIAL_SESSION_ADJACENCY_NOT_PROVEN",
-        }
-        if (
-            before["history_calendar_id"] == after["history_calendar_id"]
-            and before["history_calendar_revision"]
-            == after["history_calendar_revision"]
-        ):
-            try:
-                payload, _metadata, revision, sessions = _load_calendar(
-                    after["target_session"]
-                )
-            except ResearchEntryError:
-                pass
-            else:
-                session_relation.update(
-                    {
-                        "calendar_id": payload["calendar_id"],
-                        "calendar_revision": revision,
-                        "reason": None,
-                    }
-                )
-                if revision == after["history_calendar_revision"]:
-                    before_index = next(
-                        (
-                            index
-                            for index, day in enumerate(sessions)
-                            if day == before["target_session"]
-                        ),
-                        None,
-                    )
-                    after_index = next(
-                        (
-                            index
-                            for index, day in enumerate(sessions)
-                            if day == after["target_session"]
-                        ),
-                        None,
-                    )
-                    if before_index is not None and after_index is not None:
-                        session_relation["status"] = (
-                            "CONSECUTIVE_OFFICIAL_SESSIONS"
-                            if after_index == before_index + 1
-                            else "NONCONSECUTIVE_OFFICIAL_SESSIONS"
-                        )
-                    else:
-                        session_relation["reason"] = "SESSION_NOT_IN_PROFILE_CALENDAR"
-                else:
-                    session_relation["reason"] = "PROFILE_CALENDAR_REVISION_MISMATCH"
-        result["session_relation"] = session_relation
+        result["session_relation"] = _profile_session_relation(before, after)
         return result
     except (RawSourcePgError, PriceProfilePgError) as error:
         raise PgPriceProfileError(

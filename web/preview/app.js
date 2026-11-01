@@ -19,8 +19,10 @@ const state = {
   changeLimit: 30,
   changeTotal: 0,
   changeRequest: 0,
+  pairRequest: 0,
   changeSnapshots: [],
   changeBinding: null,
+  changeDetailItem: null,
   loading: false,
   timeline: null,
   timelineContext: null,
@@ -1366,11 +1368,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-      snapshot.target_session === point.session_date &&
-      snapshot.package_sha256 === point.package_sha256 &&
-      snapshot.namespace_id === point.namespace_id &&
-      snapshot.source_set_id === selectedSourceSet &&
-      snapshot.field_ids?.length,
+    snapshot.target_session === point.session_date &&
+    snapshot.package_sha256 === point.package_sha256 &&
+    snapshot.namespace_id === point.namespace_id &&
+    snapshot.source_set_id === selectedSourceSet &&
+    snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -1729,6 +1731,7 @@ function returnToTimelineCutoff() {
 function returnToChanges() {
   const context = state.timelineContext;
   const selection = context?.returnSelection;
+  const detailItem = state.changeDetailItem;
   if (!context || context.origin !== "change" || !selection) return;
   const value = `${selection.target_session}|${selection.package_sha256}`;
   if (
@@ -1748,6 +1751,7 @@ function returnToChanges() {
   clearRawPeriodState("返回变化详情；下一次轨迹查询会按精确身份读取周期数据。");
   renderTimeline(null);
   clearResult();
+  if (detailItem) showChangeDetail(detailItem);
   $("changeDetail").scrollIntoView({ block: "start" });
 }
 function renderTimelineReturnControls(context, selected) {
@@ -2726,6 +2730,33 @@ const changeTypeLabels = {
   PROFILE_STATE_CHANGED: "Profile状态/质量变化",
   CORE_QUALITY_CHANGED: "Core质量/原因变化",
 };
+const profilePairStatusLabels = {
+  BOTH_PRESENT: "两侧均有持久画像",
+  BEFORE_ONLY: "仅起始快照有画像",
+  AFTER_ONLY: "仅结束快照有画像",
+  NO_SAVED_SOURCE_CODE_MATCH: "两份已存来源集合都没有这个代码",
+  RECORDED_CHANGE: "当前分类记录到状态变化",
+  NO_RECORDED_STATE_CHANGE: "当前分类没有记录到状态变化",
+  NOT_COMPARABLE: "来源或语义不可比",
+  NOT_APPLICABLE: "不适用",
+  COMPARABLE: "可比较",
+  PARTIALLY_COMPARABLE: "部分可比较",
+  UNKNOWN: "未知",
+  SAME_VALUE: "数值相同",
+  DIFFERENT_VALUES: "数值不同",
+};
+const corePriceLabels = {
+  ma5: "MA5",
+  ma10: "MA10",
+  ma20: "MA20",
+  ma60: "MA60",
+  atr20: "ATR20",
+  clv: "CLV",
+  prior_high20: "排除当前日的前高20",
+  ret20: "20会话收益",
+  pos60: "60会话位置",
+  bias20_atr: "MA20偏离ATR",
+};
 const highlightCategoryLabels = {
   CLOSE_MA20_BELOW_TO_ABOVE: "收盘由MA20下方转到上方",
   CLOSE_MA20_ABOVE_TO_BELOW: "收盘由MA20上方转到下方",
@@ -2886,6 +2917,7 @@ function renderChangeHighlights(data, relation) {
     tableRow(root, ["已查询，没有符合展示规则的对象。", "", "", "", "", ""]);
 }
 function resetChangeDetail() {
+  state.changeDetailItem = null;
   $("changeDetail").hidden = true;
   $("changeDetail").replaceChildren();
 }
@@ -3011,22 +3043,81 @@ function appendChangeTimelineLinks(root, item) {
   );
 }
 function showChangeDetail(item) {
+  state.changeDetailItem = item;
   const root = $("changeDetail");
   root.replaceChildren();
   root.hidden = false;
   appendText(
     root,
     "h3",
-    `${item.source_symbol} · ${item.before_profile_revision} → ${item.after_profile_revision}`,
+    `${item.source_symbol} · ${item.before_profile_revision || "无前侧记录"} → ${item.after_profile_revision || "无后侧记录"}`,
   );
+  if (item.pair_status) {
+    const explanation = document.createElement("p");
+    explanation.className = "population profile-pair-explanation";
+    if (item.state_change_status === "NO_RECORDED_STATE_CHANGE") {
+      explanation.textContent =
+        "两侧均有已保存画像；所比较字段没有记录到符合当前变化分类的差异。此结果不表示收盘价相同，也不表示正式选股未入选。";
+      if (item.raw_close_comparison_status === "DIFFERENT_VALUES")
+        explanation.textContent +=
+          " 可核RAW收盘数值不同，但未触发当前已记录状态变化。";
+      if (
+        item.close_ma20_comparison_status === "UNKNOWN" ||
+        item.core_comparison_status === "PARTIALLY_COMPARABLE" ||
+        item.profile_comparison_status === "PARTIALLY_COMPARABLE"
+      )
+        explanation.textContent +=
+          " 部分价格关系、Core或Profile字段的质量为UNKNOWN/仅部分可比；未记录到分类变化不表示这些数值相同。";
+    } else if (item.state_change_status === "RECORDED_CHANGE") {
+      explanation.textContent = `现役变化分类记录到：${(item.change_types || []).map((type) => changeTypeLabels[type] || type).join("、")}。这属于来源代码级NON_PIT观察，不代表正式选股结论。`;
+    } else if (item.state_change_status === "NOT_COMPARABLE") {
+      explanation.textContent =
+        "两侧都有画像，但Core或Profile语义不兼容；不可比较字段的空变化标签不能解释为无变化。仍可查看两侧有证据的Raw数值和逐字段质量。";
+    } else if (item.pair_status === "BEFORE_ONLY") {
+      explanation.textContent =
+        "该来源代码只在起始快照有画像记录；没有后侧记录，不能据此推断停牌、退市或正式未入选。";
+    } else if (item.pair_status === "AFTER_ONLY") {
+      explanation.textContent =
+        "该来源代码只在结束快照有画像记录；没有前侧记录，不能据此推断新上市或正式入选。";
+    }
+    root.append(explanation);
+  }
   const meta = document.createElement("dl");
   meta.className = "profile-detail-meta";
+  const pairMeta = item.pair_status
+    ? [
+        [
+          "两侧画像记录",
+          profilePairStatusLabels[item.pair_status] || item.pair_status,
+        ],
+        [
+          "当前状态变化分类",
+          profilePairStatusLabels[item.state_change_status] ||
+            item.state_change_status,
+        ],
+        [
+          "RAW OHLC可比性",
+          profilePairStatusLabels[item.raw_ohlc_comparison_status] ||
+            item.raw_ohlc_comparison_status,
+        ],
+        [
+          "收盘数值对照",
+          profilePairStatusLabels[item.raw_close_comparison_status] ||
+            item.raw_close_comparison_status,
+        ],
+        [
+          "Core / Profile数值质量",
+          `${profilePairStatusLabels[item.core_comparison_status] || item.core_comparison_status} / ${profilePairStatusLabels[item.profile_comparison_status] || item.profile_comparison_status}`,
+        ],
+      ]
+    : [];
   for (const [label, value] of [
+    ...pairMeta,
     [
       "实际变化类型",
       (item.change_types || [])
         .map((type) => changeTypeLabels[type] || type)
-        .join("、"),
+        .join("、") || (item.pair_status ? "无（当前分类未记录）" : ""),
     ],
     [
       "Core/Profile语义可比",
@@ -3052,9 +3143,10 @@ function showChangeDetail(item) {
   ])
     readinessDetail(meta, label, text(value));
   root.append(meta);
+  if (item.pair_status) appendProfilePairValues(root, item);
   appendChangeTimelineLinks(root, item);
   appendText(root, "h3", "Profile11状态、质量与UNKNOWN原因");
-  if (!item.profile_compatible) {
+  if (!item.profile_compatible && !item.pair_status) {
     appendText(
       root,
       "p",
@@ -3066,9 +3158,15 @@ function showChangeDetail(item) {
     table.innerHTML =
       "<thead><tr><th>字段</th><th>前日状态 / 质量 / 原因</th><th>后日状态 / 质量 / 原因</th></tr></thead>";
     const body = document.createElement("tbody");
-    (item.before_profile_field_ids || []).forEach((field, index) =>
+    (
+      item.before_profile_field_ids ||
+      item.after_profile_field_ids ||
+      []
+    ).forEach((field, index) =>
       tableRow(body, [
-        field,
+        item.profile_compatible || !item.pair_status
+          ? field
+          : `${text(item.before_profile_field_ids?.[index])} → ${text(item.after_profile_field_ids?.[index])}`,
         `${text(item.before_profile_statuses?.[index])} / ${text(item.before_profile_qualities?.[index])} / ${text(item.before_profile_reasons?.[index])}`,
         `${text(item.after_profile_statuses?.[index])} / ${text(item.after_profile_qualities?.[index])} / ${text(item.after_profile_reasons?.[index])}`,
       ]),
@@ -3099,28 +3197,180 @@ function showChangeDetail(item) {
   } else appendText(root, "p", "此对象没有Core质量或原因变化。", "muted");
   root.scrollIntoView({ behavior: "smooth", block: "start" });
 }
+function appendProfilePairValues(root, item) {
+  appendText(root, "h3", "两端RAW OHLC（原生未复权价格）");
+  appendText(
+    root,
+    "p",
+    `前侧 ${text(state.changeBinding?.before_snapshot?.target_session)} · Raw行${item.before_raw_record_present ? "存在" : "缺失"} · ${text(item.before_raw_price_quality)} / ${text(item.before_raw_price_reason)}；后侧 ${text(state.changeBinding?.after_snapshot?.target_session)} · Raw行${item.after_raw_record_present ? "存在" : "缺失"} · ${text(item.after_raw_price_quality)} / ${text(item.after_raw_price_reason)}。量额单位未核实，不影响合法RAW OHLC价格展示。`,
+    "muted",
+  );
+  const rawTable = document.createElement("table");
+  rawTable.innerHTML =
+    "<thead><tr><th>字段</th><th>起始快照</th><th>结束快照</th></tr></thead>";
+  const rawBody = document.createElement("tbody");
+  for (const [field, label] of [
+    ["open", "开盘"],
+    ["high", "最高"],
+    ["low", "最低"],
+    ["close", "收盘"],
+  ])
+    tableRow(rawBody, [
+      label,
+      `${text(item[`before_raw_${field}`])} / ${text(item.before_raw_price_quality)} / ${text(item.before_raw_price_reason)}`,
+      `${text(item[`after_raw_${field}`])} / ${text(item.after_raw_price_quality)} / ${text(item.after_raw_price_reason)}`,
+    ]);
+  rawTable.append(rawBody);
+  const rawWrap = document.createElement("div");
+  rawWrap.className = "table-wrap";
+  rawWrap.append(rawTable);
+  root.append(rawWrap);
+  appendText(root, "h3", "Core两日数值、质量与原因");
+  const coreTable = document.createElement("table");
+  coreTable.innerHTML =
+    "<thead><tr><th>字段</th><th>起始快照：值 / 质量 / 原因</th><th>结束快照：值 / 质量 / 原因</th></tr></thead>";
+  const coreBody = document.createElement("tbody");
+  for (const [field, label] of Object.entries(corePriceLabels))
+    tableRow(coreBody, [
+      label,
+      `${text(item[`before_${field}`])} / ${text(item[`before_${field}_quality`])} / ${text(item[`before_${field}_reason`])}`,
+      `${text(item[`after_${field}`])} / ${text(item[`after_${field}_quality`])} / ${text(item[`after_${field}_reason`])}`,
+    ]);
+  coreTable.append(coreBody);
+  const coreWrap = document.createElement("div");
+  coreWrap.className = "table-wrap";
+  coreWrap.append(coreTable);
+  root.append(coreWrap);
+}
+async function compareSourceProfilePair() {
+  const symbol = $("changeSymbolInput").value.trim().toUpperCase();
+  const before = selectedChangeSnapshot("changeBeforeSelect");
+  const after = selectedChangeSnapshot("changeAfterSelect");
+  const root = $("changeDetail");
+  resetChangeDetail();
+  const requestId = ++state.pairRequest;
+  if (!before || !after || before.target_session >= after.target_session) {
+    root.hidden = false;
+    appendText(root, "p", "请先选择日期递增的两个精确PG画像快照。", "message");
+    return;
+  }
+  if (!/^(SH|SZ)\.[0-9]{6}$/.test(symbol)) {
+    root.hidden = false;
+    appendText(
+      root,
+      "p",
+      "请输入SH.或SZ.加六位数字的精确来源代码。",
+      "message",
+    );
+    return;
+  }
+  const params = new URLSearchParams({
+    before_session: before.target_session,
+    after_session: after.target_session,
+    symbol,
+    before_source_set_id: before.source_set_id,
+    before_package_sha256: before.package_sha256,
+    before_profile_revision: before.profile_revision,
+    after_source_set_id: after.source_set_id,
+    after_package_sha256: after.package_sha256,
+    after_profile_revision: after.profile_revision,
+  });
+  root.hidden = false;
+  appendText(
+    root,
+    "p",
+    "正在读取这两份精确画像快照中的单个来源代码…",
+    "population",
+  );
+  $("compareProfilePair").disabled = true;
+  try {
+    const data = await api(`/api/source-symbol-price-profile-pair?${params}`);
+    if (requestId !== state.pairRequest) return;
+    if (data.status === "NO_SAVED_SOURCE_CODE_MATCH") {
+      root.replaceChildren();
+      root.hidden = false;
+      appendText(root, "h3", `${symbol} · 本两份已存来源集合没有这个代码`);
+      appendText(
+        root,
+        "p",
+        "两份精确PG画像快照中都没有该来源代码的持久画像记录。此结果不判断退市、停牌、官方上市总体或正式选股资格。",
+        "population",
+      );
+      appendText(
+        root,
+        "p",
+        `${before.target_session} · source_set ${before.source_set_id} · SHA ${before.package_sha256} · revision ${before.profile_revision} → ${after.target_session} · source_set ${after.source_set_id} · SHA ${after.package_sha256} · revision ${after.profile_revision}`,
+        "muted",
+      );
+      return;
+    }
+    state.changeBinding = {
+      namespace_id: data.namespace_id,
+      before_snapshot: data.before_snapshot,
+      after_snapshot: data.after_snapshot,
+      session_relation: data.session_relation,
+      offset: 0,
+      limit: 1,
+      change_type: "ALL",
+      symbol,
+    };
+    showChangeDetail(data.item);
+  } catch (error) {
+    if (requestId !== state.pairRequest) return;
+    root.replaceChildren();
+    root.hidden = false;
+    appendText(root, "p", `双日画像对照未完成：${error.message}`, "message");
+  } finally {
+    if (requestId === state.pairRequest)
+      $("compareProfilePair").disabled = false;
+  }
+}
 function populateChangeSnapshots(snapshots) {
   const complete = snapshots
     .filter((item) => item.complete)
     .slice()
-    .sort((a, b) => a.target_session.localeCompare(b.target_session));
+    .sort(
+      (a, b) =>
+        a.target_session.localeCompare(b.target_session) ||
+        a.source_set_id.localeCompare(b.source_set_id) ||
+        a.profile_revision.localeCompare(b.profile_revision),
+    );
+  state.changeSnapshots = complete;
   for (const id of ["changeBeforeSelect", "changeAfterSelect"]) {
     const select = $(id);
     select.replaceChildren(new Option("— 选择完整PG画像快照 —", ""));
-    for (const item of complete)
-      select.append(
-        new Option(
-          `${item.target_session} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · rev ${item.profile_revision.slice(0, 10)}`,
-          item.target_session,
-        ),
+    for (const item of complete) {
+      const option = new Option(
+        `${item.target_session} · ${item.source_set_id.slice(0, 8)} · SHA ${item.package_sha256.slice(0, 8)} · rev ${item.profile_revision.slice(0, 12)} · ${item.source_symbol_count}/${item.expected_source_symbol_count}`,
+        profileSnapshotKey(item),
       );
+      option.title = `${item.target_session} · source_set ${item.source_set_id} · package SHA ${item.package_sha256} · profile revision ${item.profile_revision}`;
+      select.append(option);
+    }
     select.disabled = complete.length < 2;
   }
-  if (complete.length >= 2) {
-    $("changeBeforeSelect").value = complete.at(-2).target_session;
-    $("changeAfterSelect").value = complete.at(-1).target_session;
+  const dates = [...new Set(complete.map((item) => item.target_session))];
+  if (dates.length >= 2) {
+    const beforeVersions = complete.filter(
+      (item) => item.target_session === dates.at(-2),
+    );
+    const afterVersions = complete.filter(
+      (item) => item.target_session === dates.at(-1),
+    );
     $("searchChanges").disabled = false;
-    loadChanges();
+    if (beforeVersions.length === 1 && afterVersions.length === 1) {
+      $("changeBeforeSelect").value = profileSnapshotKey(beforeVersions[0]);
+      $("changeAfterSelect").value = profileSnapshotKey(afterVersions[0]);
+      loadChanges();
+    } else {
+      $("changeBeforeSelect").value = "";
+      $("changeAfterSelect").value = "";
+      $("changeSummary").textContent =
+        "至少一个日期有多个精确来源版本；请在两个快照选择器中明确选择具体revision。";
+      $("changeHighlightsCount").textContent = "等待精确快照";
+      $("changeHighlightsSummary").textContent =
+        "请选择日期递增的两个精确PG画像快照；不会自动猜测或回退latest。";
+    }
   } else {
     $("searchChanges").disabled = true;
     $("changeSummary").textContent =
@@ -3139,11 +3389,28 @@ function populateChangeSnapshots(snapshots) {
     ]);
   }
 }
+function profileSnapshotKey(snapshot) {
+  return [
+    snapshot.target_session,
+    snapshot.source_set_id,
+    snapshot.package_sha256,
+    snapshot.profile_revision,
+  ].join("|");
+}
+function selectedChangeSnapshot(id) {
+  const key = $(id).value;
+  return state.changeSnapshots.find(
+    (snapshot) => profileSnapshotKey(snapshot) === key,
+  );
+}
 async function loadChanges() {
   if (state.timelineContext?.origin === "change") invalidateTimeline();
   state.changeBinding = null;
-  const before = $("changeBeforeSelect").value;
-  const after = $("changeAfterSelect").value;
+  state.pairRequest++;
+  const beforeSnapshot = selectedChangeSnapshot("changeBeforeSelect");
+  const afterSnapshot = selectedChangeSnapshot("changeAfterSelect");
+  const before = beforeSnapshot?.target_session;
+  const after = afterSnapshot?.target_session;
   const requestId = ++state.changeRequest;
   resetChangeDetail();
   $("changeRows").replaceChildren();
@@ -3151,7 +3418,13 @@ async function loadChanges() {
   $("changeHighlightsCount").textContent = "查询中";
   $("changeHighlightsSummary").textContent =
     "正在读取所选两日的完整PG变化全集…";
-  if (!before || !after || before >= after) {
+  if (
+    !beforeSnapshot ||
+    !afterSnapshot ||
+    !before ||
+    !after ||
+    before >= after
+  ) {
     $("changeSummary").textContent = "请选择递增的起始与结束画像日期。";
     $("changeHighlightsCount").textContent = "等待精确快照";
     $("changeHighlightsSummary").textContent =
@@ -3178,6 +3451,14 @@ async function loadChanges() {
     limit: String(state.changeLimit),
     change_type: $("changeTypeSelect").value,
   });
+  for (const [prefix, snapshot] of [
+    ["before", beforeSnapshot],
+    ["after", afterSnapshot],
+  ]) {
+    params.set(`${prefix}_source_set_id`, snapshot.source_set_id);
+    params.set(`${prefix}_package_sha256`, snapshot.package_sha256);
+    params.set(`${prefix}_profile_revision`, snapshot.profile_revision);
+  }
   const symbol = $("changeSymbolInput").value.trim();
   if (symbol) params.set("symbol", symbol);
   $("changeSummary").textContent = "正在比较精确的PG画像来源版本…";
@@ -3499,6 +3780,13 @@ $("profileLast").addEventListener("click", () => {
 $("searchChanges").addEventListener("click", () => {
   state.changeOffset = 0;
   loadChanges();
+});
+$("compareProfilePair").addEventListener("click", compareSourceProfilePair);
+$("changeSymbolInput").addEventListener("input", () => {
+  state.pairRequest++;
+  if (state.timelineContext?.origin === "change") invalidateTimeline();
+  state.changeBinding = null;
+  resetChangeDetail();
 });
 $("changeSymbolInput").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
