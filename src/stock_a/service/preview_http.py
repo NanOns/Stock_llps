@@ -1181,6 +1181,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "position_1_status",
                         "position_2_field",
                         "position_2_status",
+                        "bias20_atr_band",
                     },
                 )
                 required = {
@@ -1230,13 +1231,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     position_1_status=values.get("position_1_status"),
                     position_2_field=values.get("position_2_field"),
                     position_2_status=values.get("position_2_status"),
+                    bias20_atr_band=values.get("bias20_atr_band", "ALL"),
                 )
-                if result["status"] == "NO_MATCH" and result["page"]["total"] > 0:
-                    raise PreviewHttpError(
-                        404,
-                        "PROFILE_NO_MATCH",
-                        "PG中没有满足这组精确来源版本与筛选条件的画像记录",
-                    )
                 result.update(
                     {
                         "ok": True,

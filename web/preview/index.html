@@ -606,6 +606,16 @@
               <option value="GEM">创业板</option>
             </select></label
           ><label
+            >MA20 / ATR20距离<select id="profileBias20AtrBandSelect">
+              <option value="ALL">全部距离状态</option>
+              <option value="NEAR_BOTH_HALF">距MA20不超过±0.5 ATR</option>
+              <option value="NEAR_BELOW_ONE">MA20下方0至1 ATR</option>
+              <option value="NEAR_ABOVE_ONE">MA20上方0至1 ATR</option>
+              <option value="FAR_BELOW_ONE">MA20下方超过1 ATR</option>
+              <option value="FAR_ABOVE_ONE">MA20上方超过1 ATR</option>
+              <option value="UNKNOWN">距离未知</option>
+            </select></label
+          ><label
             >目标日Bar<select id="profileBarStatusSelect">
               <option value="ALL">全部状态</option>
               <option value="TDX_TARGET_BAR_PRESENT">有Bar</option>
@@ -697,6 +707,10 @@
             </select></label
           ><button id="searchProfiles" type="button">查询画像</button>
         </div>
+        <p id="profileBias20AtrHelp" class="muted">
+          距离按 (当前RAW收盘−MA20)/ATR20
+          计算；0表示恰等于MA20，正负表示收盘在均线两侧。这是来源价格描述，不是量能、确认回踩或买入信号。
+        </p>
         <div id="profileMessage" class="population" role="status">
           正在读取真实PG已保存画像版本。
         </div>
@@ -710,6 +724,7 @@
                 <th>PG窗口覆盖</th>
                 <th>MA20</th>
                 <th>ATR20</th>
+                <th>MA20 / ATR20距离</th>
                 <th>CLV</th>
                 <th id="profileCoreValueHeader">
                   所选Core字段 / 值 / 质量 / 原因
@@ -722,12 +737,15 @@
             </thead>
             <tbody id="profileRows">
               <tr>
-                <td colspan="12" class="muted">请选择已保存的PG画像版本。</td>
+                <td colspan="13" class="muted">请选择已保存的PG画像版本。</td>
               </tr>
             </tbody>
           </table>
         </div>
         <div class="pager">
+          <button id="profileReturnFirst" class="quiet" type="button" hidden>
+            返回第一页
+          </button>
           <button id="profilePrev" class="quiet" disabled>上一页</button>
           <span id="profilePageStatus">—</span>
           <div class="pager-actions">

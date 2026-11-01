@@ -156,6 +156,90 @@ _PROFILE_MA20_DIRECTIONS = frozenset(
     {"ALL", "INCREASED", "UNCHANGED", "DECREASED", "UNKNOWN"}
 )
 
+_BIAS20_ATR_BAND_DEFINITIONS = {
+    "ALL": {
+        "label": "全部距离状态",
+        "predicate": None,
+        "definition": "不按bias20_atr距离或质量过滤。",
+    },
+    "NEAR_BOTH_HALF": {
+        "label": "距MA20不超过±0.5 ATR",
+        "predicate": """(
+            p.bias20_atr_exact_numerator::numeric * 2
+        ) BETWEEN -p.bias20_atr_exact_denominator::numeric
+          AND p.bias20_atr_exact_denominator::numeric""",
+        "definition": "精确 -1/2 ≤ (RAW收盘−MA20)/ATR20 ≤ +1/2。",
+    },
+    "NEAR_BELOW_ONE": {
+        "label": "MA20下方0至1 ATR",
+        "predicate": """p.bias20_atr_exact_numerator::numeric
+            >= -p.bias20_atr_exact_denominator::numeric
+            AND p.bias20_atr_exact_numerator::numeric < 0""",
+        "definition": "精确 -1 ≤ (RAW收盘−MA20)/ATR20 ＜ 0。",
+    },
+    "NEAR_ABOVE_ONE": {
+        "label": "MA20上方0至1 ATR",
+        "predicate": """p.bias20_atr_exact_numerator::numeric > 0
+            AND p.bias20_atr_exact_numerator::numeric
+              <= p.bias20_atr_exact_denominator::numeric""",
+        "definition": "精确 0 ＜ (RAW收盘−MA20)/ATR20 ≤ +1。",
+    },
+    "FAR_BELOW_ONE": {
+        "label": "MA20下方超过1 ATR",
+        "predicate": """p.bias20_atr_exact_numerator::numeric
+            < -p.bias20_atr_exact_denominator::numeric""",
+        "definition": "精确 (RAW收盘−MA20)/ATR20 ＜ -1。",
+    },
+    "FAR_ABOVE_ONE": {
+        "label": "MA20上方超过1 ATR",
+        "predicate": """p.bias20_atr_exact_numerator::numeric
+            > p.bias20_atr_exact_denominator::numeric""",
+        "definition": "精确 (RAW收盘−MA20)/ATR20 ＞ +1。",
+    },
+    "UNKNOWN": {
+        "label": "距离未知",
+        "predicate": "BIAS20_ATR_UNKNOWN",
+        "definition": "Core质量、精确分数、RAW价格坐标或相关价格质量不可用。",
+    },
+}
+_BIAS20_ATR_UNKNOWN_SQL = """(
+    p.bias20_atr_quality IS DISTINCT FROM 'OBSERVED'
+    OR p.bias20_atr_exact_numerator IS NULL
+    OR p.bias20_atr_exact_denominator IS NULL
+    OR p.bias20_atr_exact_denominator <= 0
+    OR p.price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+    OR p.ma20_quality IS DISTINCT FROM 'OBSERVED'
+    OR p.ma20 IS NULL
+    OR p.atr20_quality IS DISTINCT FROM 'OBSERVED'
+    OR p.atr20 IS NULL
+    OR p.atr20 <= 0
+    OR r.price_quality IS DISTINCT FROM 'OBSERVED'
+    OR r.raw_close IS NULL
+)"""
+_BIAS20_ATR_UNKNOWN_REASON_SQL = """CASE
+    WHEN p.bias20_atr_quality IS DISTINCT FROM 'OBSERVED'
+      THEN COALESCE(p.bias20_atr_reason,
+                    'BIAS20_ATR_QUALITY=' ||
+                    COALESCE(p.bias20_atr_quality, 'UNKNOWN'))
+    WHEN p.bias20_atr_exact_numerator IS NULL
+      OR p.bias20_atr_exact_denominator IS NULL
+      OR p.bias20_atr_exact_denominator <= 0
+      THEN 'BIAS20_ATR_EXACT_VALUE_UNAVAILABLE'
+    WHEN p.price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+      THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'
+    WHEN p.ma20_quality IS DISTINCT FROM 'OBSERVED' OR p.ma20 IS NULL
+      THEN COALESCE(p.ma20_reason, 'MA20_QUALITY_OR_VALUE_UNAVAILABLE')
+    WHEN p.atr20_quality IS DISTINCT FROM 'OBSERVED'
+      OR p.atr20 IS NULL
+      OR p.atr20 <= 0
+      THEN COALESCE(p.atr20_reason, 'ATR20_NOT_POSITIVE_OR_UNAVAILABLE')
+    WHEN r.price_quality IS DISTINCT FROM 'OBSERVED'
+      THEN COALESCE(r.price_reason, 'RAW_PRICE_QUALITY=' ||
+                    COALESCE(r.price_quality, 'UNKNOWN'))
+    WHEN r.raw_close IS NULL THEN 'RAW_CLOSE_UNAVAILABLE'
+    ELSE NULL
+END"""
+
 
 def _profile_ma20_direction(row: Mapping[str, Any]) -> tuple[str, str | None]:
     """证据有效时直接比较双日已存MA20数值，不隐式归零。"""
@@ -3157,6 +3241,7 @@ def read_profile_page(
     position_1_status: str | None = None,
     position_2_field: str | None = None,
     position_2_status: str | None = None,
+    bias20_atr_band: str = "ALL",
 ) -> dict[str, Any]:
     if type(max_target_session) is not date:
         raise PriceProfilePgError(
@@ -3186,6 +3271,10 @@ def read_profile_page(
         )
     if market not in {"ALL", "SH", "SZ"} or board not in {"ALL", "MAIN_BOARD", "GEM"}:
         raise PriceProfilePgError("PROFILE_FILTER_INVALID", "市场或板别筛选值无效")
+    if bias20_atr_band not in _BIAS20_ATR_BAND_DEFINITIONS:
+        raise PriceProfilePgError(
+            "PROFILE_FILTER_INVALID", "MA20-ATR距离档位筛选值无效"
+        )
     if target_bar_status not in {
         "ALL",
         "TDX_TARGET_BAR_PRESENT",
@@ -3314,6 +3403,13 @@ def read_profile_page(
     for field, status in position_filters:
         conditions.append(f"({_price_position_status_sql(field)})=%s")
         parameters.append(status)
+    if bias20_atr_band == "UNKNOWN":
+        conditions.append(_BIAS20_ATR_UNKNOWN_SQL)
+    elif bias20_atr_band != "ALL":
+        conditions.append(f"NOT {_BIAS20_ATR_UNKNOWN_SQL}")
+        conditions.append(
+            str(_BIAS20_ATR_BAND_DEFINITIONS[bias20_atr_band]["predicate"])
+        )
     where_sql = " AND ".join(conditions)
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
         parameters[0] = namespace_id
@@ -3500,6 +3596,7 @@ WHERE {where_sql}""",
             WHEN r.price_quality IS DISTINCT FROM 'OBSERVED'
               THEN COALESCE(r.price_reason, 'RAW_PRICE_REASON_MISSING')
             ELSE r.price_reason END AS target_raw_price_reason,
+       {_BIAS20_ATR_UNKNOWN_REASON_SQL} AS bias20_atr_unknown_reason,
        {position_projection},
        {selected_profile_projection}
 FROM stock.source_symbol_price_profiles p
@@ -3512,6 +3609,11 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         )
         names = [item.name for item in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+        if not rows and total > 0 and offset < total:
+            raise PriceProfilePgError(
+                "PROFILE_PAGE_COUNT_MISMATCH",
+                "同一只读快照中的筛选总数与分页行数不一致",
+            )
         for row in rows:
             for column in ("namespace_id", "source_set_id", "source_capture_id"):
                 if isinstance(row.get(column), UUID):
@@ -3561,13 +3663,20 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
                     "reason": row.pop("selected_profile_reason"),
                 }
     return {
-        "status": "AVAILABLE" if rows else "NO_MATCH",
+        "status": "AVAILABLE"
+        if rows
+        else "EMPTY_PAGE_OUT_OF_RANGE"
+        if total > 0
+        else "NO_MATCH",
         "namespace_id": namespace_id,
         "target_session": target_session.isoformat(),
         "source_set_id": source_set_id,
         "package_sha256": package_sha256,
         "profile_revision": profile_revision,
         "source_set_revision": int(source_set[1]),
+        "source_pool_total": snapshot_total,
+        "bias20_atr_band": bias20_atr_band,
+        "bias20_atr_band_definition": _BIAS20_ATR_BAND_DEFINITIONS[bias20_atr_band],
         "history_window": {
             "start": rows[0]["history_window_start"].isoformat() if rows else None,
             "end": rows[0]["history_window_end"].isoformat() if rows else None,
@@ -3596,6 +3705,8 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         "execution": {
             "sql_pagination": True,
             "price_position_filter": "POSTGRES_NUMERIC",
+            "bias20_atr_filter": "POSTGRES_EXACT_NUMERIC_CROSS_MULTIPLICATION",
+            "bias20_atr_filter_scope": "COMPLETE_SEALED_SOURCE_PROFILE_SET",
             "profile_field_filter": "POSTGRES_ARRAY_FIELD_ID_INDEX",
             "profile_field_summary": "POSTGRES_FULL_SOURCE_SET",
             "all_candidates_recomputed": False,

@@ -3274,11 +3274,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-      snapshot.target_session === point.session_date &&
-      snapshot.package_sha256 === point.package_sha256 &&
-      snapshot.namespace_id === point.namespace_id &&
-      snapshot.source_set_id === selectedSourceSet &&
-      snapshot.field_ids?.length,
+    snapshot.target_session === point.session_date &&
+    snapshot.package_sha256 === point.package_sha256 &&
+    snapshot.namespace_id === point.namespace_id &&
+    snapshot.source_set_id === selectedSourceSet &&
+    snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -4971,6 +4971,7 @@ async function openProfileTimeline(item) {
   $("timelinePanel").scrollIntoView({ behavior: "smooth", block: "start" });
 }
 function returnToProfileSearch() {
+  clearProfileDetail();
   $("profileBrowserTitle").scrollIntoView({
     behavior: "smooth",
     block: "start",
@@ -7520,6 +7521,37 @@ function profilePositionConditionText(condition) {
   const definition = pricePositionDefinitions[condition.field];
   return `${definition.label} ${pricePositionStatusLabels[condition.status]} ${condition.status}`;
 }
+function profileBias20AtrRowText(item) {
+  const quality = item.bias20_atr_quality || "UNKNOWN";
+  const numerator = String(item.bias20_atr_exact_numerator ?? "");
+  const denominator = String(item.bias20_atr_exact_denominator ?? "");
+  if (
+    quality !== "OBSERVED" ||
+    item.price_coordinate !== "RAW_UNADJUSTED" ||
+    !/^-?\d+$/.test(numerator) ||
+    !/^\d+$/.test(denominator) ||
+    !/[1-9]/.test(denominator) ||
+    item.ma20_quality !== "OBSERVED" ||
+    item.ma20 == null ||
+    item.atr20_quality !== "OBSERVED" ||
+    item.atr20 == null ||
+    item.target_raw_price_quality !== "OBSERVED" ||
+    item.target_raw_close == null
+  ) {
+    const reason =
+      item.bias20_atr_unknown_reason ||
+      item.bias20_atr_reason ||
+      "未知原因未提供";
+    return (
+      `UNKNOWN · ${text(reason)} · Core ${text(quality)} · ` +
+      `RAW价格 ${text(item.target_raw_price_quality)}`
+    );
+  }
+  return (
+    `${text(item.bias20_atr)} ATR · 精确 ${text(numerator)}/${text(denominator)} · ` +
+    `OBSERVED · ${text(item.price_coordinate)}`
+  );
+}
 function profilePositionRowText(item, conditions) {
   if (!conditions.length) return "未启用价格位置条件";
   return conditions
@@ -7569,6 +7601,7 @@ async function loadProfilePage() {
   const requestId = ++state.profileRequest;
   const coreField = $("profileCoreFieldSelect").value;
   const coreQuality = $("profileCoreQualitySelect").value;
+  const bias20AtrBand = $("profileBias20AtrBandSelect").value;
   const profileFieldId = $("profileFieldSelect").value || null;
   const profileCondition = $("profileConditionSelect").value;
   const profileQuality = profileCondition.startsWith("quality:")
@@ -7596,6 +7629,7 @@ async function loadProfilePage() {
   $("profilePrev").disabled = true;
   $("profileNext").disabled = true;
   $("profileLast").disabled = true;
+  $("profileReturnFirst").hidden = true;
   if (hasCoreField !== hasCoreQuality) {
     $("profileMessage").textContent =
       "Core字段与质量状态需要成对选择；旧结果已清除，当前筛选尚未执行。";
@@ -7644,6 +7678,7 @@ async function loadProfilePage() {
     board: $("profileBoardSelect").value,
     target_bar_status: $("profileBarStatusSelect").value,
     price_window_status: $("profileWindowStatusSelect").value,
+    bias20_atr_band: bias20AtrBand,
   });
   if (hasCoreField) {
     params.set("core_field", coreField);
@@ -7666,7 +7701,17 @@ async function loadProfilePage() {
     if (requestId !== state.profileRequest) return;
     const page = data.page;
     const profileFilter = data.profile_field_filter;
+    const expectedPageStatus =
+      page.count > 0
+        ? "AVAILABLE"
+        : page.total === 0
+          ? "NO_MATCH"
+          : page.offset >= page.total
+            ? "EMPTY_PAGE_OUT_OF_RANGE"
+            : null;
     if (
+      !expectedPageStatus ||
+      data.status !== expectedPageStatus ||
       !profileFilter ||
       profileFilter.field_id !== profileFieldId ||
       profileFilter.quality !== profileQuality ||
@@ -7687,6 +7732,9 @@ async function loadProfilePage() {
       data.source_set_id !== snapshot.source_set_id ||
       data.package_sha256 !== snapshot.package_sha256 ||
       data.profile_revision !== snapshot.profile_revision ||
+      data.bias20_atr_band !== bias20AtrBand ||
+      !data.bias20_atr_band_definition ||
+      data.source_pool_total !== snapshot.source_symbol_count ||
       page.offset !== state.profileOffset ||
       page.limit !== state.profileLimit ||
       !Array.isArray(data.price_position_filters) ||
@@ -7733,8 +7781,10 @@ async function loadProfilePage() {
       `source_set_id ${data.source_set_id} · 包SHA ${data.package_sha256} · ` +
       `profile_revision ${data.profile_revision}`;
     state.profileTotal = page.total;
-    $("profileCount").textContent = `${page.count}条 / 筛选分母${page.total}`;
+    $("profileCount").textContent =
+      `${page.count}条 / 筛选命中${page.total} / 完整来源池${data.source_pool_total}`;
     const filterDescription = [
+      data.bias20_atr_band_definition.label,
       hasCoreField
         ? `${selectedCore.label} / ${coreQuality}`
         : "Core质量未过滤",
@@ -7750,10 +7800,29 @@ async function loadProfilePage() {
     const windowDescription = data.history_window?.start
       ? ` · 窗口 ${data.history_window.start} 至 ${data.history_window.end}（${data.history_window.requested_session_count}会话）`
       : "";
-    $("profileMessage").textContent =
-      `${page.total === 0 ? "当前来源版本没有符合此条件的记录。" : ""}${binding} · ${filterDescription}${windowDescription} · ${profileFieldSummaryText(state.profileFieldSummary)} · 筛选后命中 ${page.total} · NON_PIT来源代码研究，不是正式上市Universe或选股结论。`;
+    const pageNotice =
+      data.status === "NO_MATCH"
+        ? "当前来源版本没有符合此条件的记录。"
+        : data.status === "EMPTY_PAGE_OUT_OF_RANGE"
+          ? "筛选结果仍有成员，但当前偏移已超过末页；可返回第一页。"
+          : "";
+    $("profileMessage").textContent = [
+      pageNotice,
+      binding,
+      `距离定义：${data.bias20_atr_band_definition.definition}`,
+      filterDescription,
+      windowDescription,
+      `完整来源池 ${data.source_pool_total}`,
+      `筛选后命中 ${page.total}`,
+      profileFieldSummaryText(state.profileFieldSummary),
+      "NON_PIT来源代码研究，不是正式上市Universe或选股结论。",
+    ]
+      .filter(Boolean)
+      .join(" · ");
     $("profilePageStatus").textContent =
-      `偏移 ${page.offset} · 本页 ${page.count}/${page.limit} · 总计 ${page.total}`;
+      `偏移 ${page.offset} · 本页 ${page.count}/${page.limit} · 筛选命中 ${page.total} · 来源池 ${data.source_pool_total}`;
+    const pageOutOfRange = data.status === "EMPTY_PAGE_OUT_OF_RANGE";
+    $("profileReturnFirst").hidden = !pageOutOfRange;
     $("profilePrev").disabled = page.offset === 0;
     $("profileNext").disabled = page.next_offset === null;
     $("profileLast").disabled =
@@ -7762,7 +7831,10 @@ async function loadProfilePage() {
       tableRow($("profileRows"), [
         page.total === 0
           ? "当前来源版本没有符合此条件的记录。"
-          : "当前偏移没有成员。",
+          : pageOutOfRange
+            ? "当前偏移超过末页；筛选全集仍有成员。"
+            : "当前偏移没有成员。",
+        "",
         "",
         "",
         "",
@@ -7790,6 +7862,7 @@ async function loadProfilePage() {
       );
       cell(tr, `${text(item.ma20)} · ${text(item.ma20_quality)}`);
       cell(tr, `${text(item.atr20)} · ${text(item.atr20_quality)}`);
+      cell(tr, profileBias20AtrRowText(item));
       cell(tr, `${text(item.clv)} · ${text(item.clv_quality)}`);
       const selectedCoreValue = selectedCore
         ? `${selectedCore.label} · ${text(item[selectedCore.key])} · ${text(item[`${selectedCore.key}_quality`])} · 原因 ${text(item[`${selectedCore.key}_reason`])}`
@@ -7847,6 +7920,7 @@ async function loadProfilePage() {
       "",
       "",
       "",
+      "",
     ]);
     $("profileMessage").textContent = `画像查询未返回记录：${error.message}`;
     $("profileCount").textContent = "画像查询失败";
@@ -7854,6 +7928,7 @@ async function loadProfilePage() {
     $("profilePrev").disabled = true;
     $("profileNext").disabled = true;
     $("profileLast").disabled = true;
+    $("profileReturnFirst").hidden = true;
   }
 }
 function clearProfilePageResults(message, count = "待查询") {
@@ -7866,6 +7941,7 @@ function clearProfilePageResults(message, count = "待查询") {
   $("profilePrev").disabled = true;
   $("profileNext").disabled = true;
   $("profileLast").disabled = true;
+  $("profileReturnFirst").hidden = true;
   $("profileMessage").textContent = message;
 }
 function submitProfileSearch() {
@@ -7968,6 +8044,7 @@ $("profileSnapshotSelect").addEventListener("change", () => {
 for (const id of [
   "profileMarketSelect",
   "profileBoardSelect",
+  "profileBias20AtrBandSelect",
   "profileBarStatusSelect",
   "profileWindowStatusSelect",
   "profileCoreFieldSelect",
@@ -8004,6 +8081,10 @@ $("profileLast").addEventListener("click", () => {
       state.profileLimit;
     loadProfilePage();
   }
+});
+$("profileReturnFirst").addEventListener("click", () => {
+  state.profileOffset = 0;
+  loadProfilePage();
 });
 $("searchChanges").addEventListener("click", () => {
   state.changeOffset = 0;
