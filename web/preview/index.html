@@ -106,6 +106,143 @@
         <div id="changeSummary" class="population" role="status">
           请选择前后两个完整PG画像版本。
         </div>
+        <section
+          class="source-breadth"
+          aria-labelledby="priceRelationScreenTitle"
+        >
+          <div class="highlights-head">
+            <div>
+              <h3 id="priceRelationScreenTitle">
+                RAW结构关系变化与结束日联合筛选
+              </h3>
+              <p>
+                三类关系直接比较两端已封存RAW画像。联合筛选在完整来源并集上计算，不依赖旧变化成员或当前页；结束日最多添加两个价格位置AND条件。
+              </p>
+            </div>
+            <span id="priceRelationScreenCount" class="count"
+              >等待精确快照</span
+            >
+          </div>
+          <div class="change-controls relation-controls">
+            <label>
+              两日关系字段
+              <select id="priceRelationFieldSelect">
+                <option value="c_vs_ma20">收盘与MA20</option>
+                <option value="c_vs_prior_high20">
+                  收盘与严格排除当日的前20高点
+                </option>
+                <option value="ma5_vs_ma20">MA5与MA20</option>
+              </select>
+            </label>
+            <label>
+              两端转移类别
+              <select id="priceTransitionTypeSelect">
+                <option value="ALL">全部关系</option>
+                <option value="STRICT_CROSS_UP">严格上穿</option>
+                <option value="STRICT_CROSS_DOWN">严格下破</option>
+                <option value="EQUAL_BOUNDARY">等值边界变化</option>
+                <option value="SAME_RELATION">关系未变化</option>
+                <option value="NOT_COMPARABLE">不可比较</option>
+                <option value="ONLY_BEFORE">仅起始日有来源</option>
+                <option value="ONLY_AFTER">仅结束日有来源</option>
+              </select>
+            </label>
+            <label>
+              结束日条件1字段
+              <select id="endPosition1Field">
+                <option value="">不筛选</option>
+                <option value="c_vs_ma20">收盘与MA20</option>
+                <option value="c_vs_prior_high20">收盘与前20高点</option>
+                <option value="ma5_vs_ma20">MA5与MA20</option>
+              </select>
+            </label>
+            <label>
+              结束日条件1关系
+              <select id="endPosition1Status" disabled>
+                <option value="">选择关系</option>
+                <option value="ABOVE">高于</option>
+                <option value="EQUAL">等于</option>
+                <option value="BELOW">低于</option>
+                <option value="UNKNOWN">不可评价</option>
+              </select>
+            </label>
+            <label>
+              结束日条件2字段
+              <select id="endPosition2Field">
+                <option value="">不筛选</option>
+                <option value="c_vs_ma20">收盘与MA20</option>
+                <option value="c_vs_prior_high20">收盘与前20高点</option>
+                <option value="ma5_vs_ma20">MA5与MA20</option>
+              </select>
+            </label>
+            <label>
+              结束日条件2关系
+              <select id="endPosition2Status" disabled>
+                <option value="">选择关系</option>
+                <option value="ABOVE">高于</option>
+                <option value="EQUAL">等于</option>
+                <option value="BELOW">低于</option>
+                <option value="UNKNOWN">不可评价</option>
+              </select>
+            </label>
+            <label>
+              精确来源代码
+              <input
+                id="relationSymbolInput"
+                placeholder="可选，输入来源目录代码"
+                autocomplete="off"
+                maxlength="9"
+              />
+            </label>
+            <button id="searchPriceRelations" type="button">查询RAW关系</button>
+          </div>
+          <div id="priceRelationScreenSummary" class="population" role="status">
+            请选择两个完整PG画像快照。
+          </div>
+          <div class="table-wrap">
+            <table class="change-table">
+              <thead>
+                <tr>
+                  <th>来源代码 / 完整身份</th>
+                  <th>起始日关系与数值质量</th>
+                  <th>结束日关系与数值质量</th>
+                  <th>两日转移 / 原因</th>
+                  <th>结束日位置条件</th>
+                  <th>详情</th>
+                </tr>
+              </thead>
+              <tbody id="priceRelationScreenRows">
+                <tr>
+                  <td colspan="6" class="muted">等待精确的两日画像版本。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button id="priceRelationPrev" class="quiet" type="button" disabled>
+              上一页
+            </button>
+            <span id="priceRelationScreenPage">—</span>
+            <div class="pager-actions">
+              <button
+                id="priceRelationNext"
+                class="quiet"
+                type="button"
+                disabled
+              >
+                下一页
+              </button>
+              <button
+                id="priceRelationLast"
+                class="quiet"
+                type="button"
+                disabled
+              >
+                末页
+              </button>
+            </div>
+          </div>
+        </section>
         <section class="source-breadth" aria-labelledby="sourceBreadthTitle">
           <div class="highlights-head">
             <div>

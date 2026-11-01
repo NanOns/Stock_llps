@@ -29,6 +29,7 @@ from stock_a.storage.postgres.price_profiles import (
     read_profile_change_page,
     read_profile_page,
     read_profile_pair,
+    read_profile_relation_screen,
 )
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
@@ -730,4 +731,21 @@ def query_source_symbol_price_profile_changes(
     except (RawSourcePgError, PriceProfilePgError) as error:
         raise PgPriceProfileError(
             getattr(error, "code", "PROFILE_CHANGE_READ_FAILED"), str(error)
+        ) from error
+
+
+def query_source_symbol_price_profile_relation_screen(
+    config: Mapping[str, Any], **kwargs: Any
+) -> dict[str, Any]:
+    try:
+        result = read_profile_relation_screen(config, **kwargs)
+        result["session_relation"] = _profile_session_relation(
+            result["before_snapshot"], result["after_snapshot"]
+        )
+        result["research_mode"] = "SOURCE_SYMBOL_NON_PIT_RAW_PRICE_RELATION_SCREEN"
+        result["formal_listing_universe"] = "UNKNOWN_NOT_CONNECTED"
+        return result
+    except (RawSourcePgError, PriceProfilePgError) as error:
+        raise PgPriceProfileError(
+            getattr(error, "code", "PROFILE_RELATION_SCREEN_READ_FAILED"), str(error)
         ) from error

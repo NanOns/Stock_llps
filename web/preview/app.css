@@ -418,8 +418,14 @@ footer {
 .change-controls button {
   min-height: 42px;
 }
+.relation-controls {
+  grid-template-columns: repeat(4, minmax(160px, 1fr));
+}
 .change-table {
   min-width: 980px;
+}
+.relation-controls + .population {
+  margin-bottom: 10px;
 }
 .profile-controls button {
   min-height: 42px;

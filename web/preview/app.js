@@ -21,6 +21,15 @@ const state = {
   changeTotal: 0,
   changeRequest: 0,
   pairRequest: 0,
+  relationRequest: 0,
+  relationPageRequest: 0,
+  relationOffset: 0,
+  relationLimit: 30,
+  relationTotal: 0,
+  relationData: null,
+  relationQuery: null,
+  relationDetailRequest: 0,
+  relationDetailRow: null,
   profileBreadthRequest: 0,
   profileBreadthData: null,
   profileBreadthBinding: null,
@@ -1789,7 +1798,12 @@ function returnToChanges() {
   const context = state.timelineContext;
   const selection = context?.returnSelection;
   const detailItem = state.changeDetailItem;
-  if (!context || context.origin !== "change" || !selection) return;
+  if (
+    !context ||
+    !["change", "relation"].includes(context.origin) ||
+    !selection
+  )
+    return;
   const value = `${selection.target_session}|${selection.package_sha256}`;
   if (
     !Array.from($("versionSelect").options).some((item) => item.value === value)
@@ -1860,6 +1874,13 @@ function renderTimelineReturnControls(context, selected) {
     button.type = "button";
     button.className = "quiet";
     button.textContent = "返回画像变化详情";
+    button.addEventListener("click", returnToChanges);
+    returnRoot.append(button);
+  } else if (context?.origin === "relation") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = "返回RAW关系详情";
     button.addEventListener("click", returnToChanges);
     returnRoot.append(button);
   } else if (context?.origin === "profile") {
@@ -2908,6 +2929,27 @@ const changeTypeLabels = {
   PROFILE_STATE_CHANGED: "Profile状态/质量变化",
   CORE_QUALITY_CHANGED: "Core质量/原因变化",
 };
+const priceRelationFieldLabels = {
+  c_vs_ma20: "收盘与MA20",
+  c_vs_prior_high20: "收盘与排除当日的前20高点",
+  ma5_vs_ma20: "MA5与MA20",
+};
+const priceRelationTransitionLabels = {
+  ALL: "全部关系",
+  STRICT_CROSS_UP: "严格上穿",
+  STRICT_CROSS_DOWN: "严格下破",
+  EQUAL_BOUNDARY: "经过等值边界",
+  SAME_RELATION: "关系未变化",
+  NOT_COMPARABLE: "不可比较",
+  ONLY_BEFORE: "仅起始日有来源",
+  ONLY_AFTER: "仅结束日有来源",
+};
+const priceRelationStatusLabels = {
+  ABOVE: "高于",
+  EQUAL: "等于",
+  BELOW: "低于",
+  UNKNOWN: "不可评价",
+};
 const profilePairStatusLabels = {
   BOTH_PRESENT: "两侧均有持久画像",
   BEFORE_ONLY: "仅起始快照有画像",
@@ -3244,6 +3286,20 @@ function showChangeDetail(item) {
     back.addEventListener("click", returnToProfileBreadthMembers);
     root.append(back);
   }
+  if (state.changeBinding?.origin === "relation") {
+    appendText(
+      root,
+      "p",
+      `从RAW关系${priceRelationFieldLabels[state.relationQuery?.relation_field] || ""}筛选结果打开；返回会保留A类、B结束日条件、快照身份和偏移${state.relationOffset}。`,
+      "muted",
+    );
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "quiet";
+    back.textContent = "返回RAW关系筛选结果";
+    back.addEventListener("click", returnToRelationScreen);
+    root.append(back);
+  }
   if (item.pair_status) {
     const explanation = document.createElement("p");
     explanation.className = "population profile-pair-explanation";
@@ -3336,6 +3392,7 @@ function showChangeDetail(item) {
     readinessDetail(meta, label, text(value));
   root.append(meta);
   if (item.pair_status) appendProfilePairValues(root, item);
+  appendPriceRelationTransitions(root, item);
   appendChangeTimelineLinks(root, item);
   appendText(root, "h3", "Profile11状态、质量与UNKNOWN原因");
   if (!item.profile_compatible && !item.pair_status) {
@@ -3388,6 +3445,56 @@ function showChangeDetail(item) {
     root.append(wrap);
   } else appendText(root, "p", "此对象没有Core质量或原因变化。", "muted");
   root.scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function relationEndpointValue(item, side, field) {
+  const isClose = field === "raw_close";
+  return {
+    value: item[`${side}_${isClose ? "raw_close" : field}`],
+    quality:
+      item[`${side}_${isClose ? "raw_price_quality" : `${field}_quality`}`],
+    reason: item[`${side}_${isClose ? "raw_price_reason" : `${field}_reason`}`],
+  };
+}
+function appendPriceRelationTransitions(root, item) {
+  const transitions = item.price_relation_transitions;
+  if (!transitions) return;
+  appendText(root, "h3", "三类RAW价格关系的两端值与转移原因");
+  appendText(
+    root,
+    "p",
+    "收盘与排除当日的前20高点比较的是两个目标日各自的滚动阈值，不代表同一固定阻力位或突破确认。正式选股状态仍为NOT_EVALUATED。",
+    "muted",
+  );
+  const table = document.createElement("table");
+  table.innerHTML =
+    "<thead><tr><th>关系字段</th><th>起始日数值 / 质量</th><th>结束日数值 / 质量</th><th>两端关系</th><th>转移与具体原因</th></tr></thead>";
+  const body = document.createElement("tbody");
+  for (const [field, definition] of Object.entries(transitions)) {
+    const fields = {
+      c_vs_ma20: ["raw_close", "ma20"],
+      c_vs_prior_high20: ["raw_close", "prior_high20"],
+      ma5_vs_ma20: ["ma5", "ma20"],
+    }[field];
+    const endpoint = (side) =>
+      fields
+        .map((valueField) => {
+          const value = relationEndpointValue(item, side, valueField);
+          return `${valueField}=${text(value.value)} (${text(value.quality)}; ${text(value.reason)})`;
+        })
+        .join(" vs ");
+    tableRow(body, [
+      priceRelationFieldLabels[field] || field,
+      endpoint("before"),
+      endpoint("after"),
+      `${priceRelationStatusLabels[definition.before_relation] || definition.before_relation} → ${priceRelationStatusLabels[definition.after_relation] || definition.after_relation}`,
+      `${priceRelationTransitionLabels[definition.transition_type] || definition.transition_type}${definition.transition_reason ? `：${definition.transition_reason}` : ""}`,
+    ]);
+  }
+  table.append(body);
+  const wrap = document.createElement("div");
+  wrap.className = "table-wrap";
+  wrap.append(table);
+  root.append(wrap);
 }
 function appendProfilePairValues(root, item) {
   appendText(root, "h3", "两端RAW OHLC（原生未复权价格）");
@@ -3554,9 +3661,13 @@ function populateChangeSnapshots(snapshots) {
       $("changeBeforeSelect").value = profileSnapshotKey(beforeVersions[0]);
       $("changeAfterSelect").value = profileSnapshotKey(afterVersions[0]);
       loadChanges();
+      loadPriceRelations();
     } else {
       $("changeBeforeSelect").value = "";
       $("changeAfterSelect").value = "";
+      clearRelationScreen(
+        "至少一个日期有多个精确来源版本；请选择唯一前后快照后再查询RAW关系。",
+      );
       $("changeSummary").textContent =
         "至少一个日期有多个精确来源版本；请在两个快照选择器中明确选择具体revision。";
       $("changeHighlightsCount").textContent = "等待精确快照";
@@ -3565,6 +3676,9 @@ function populateChangeSnapshots(snapshots) {
     }
   } else {
     $("searchChanges").disabled = true;
+    clearRelationScreen(
+      "需要两个不同日期且分母闭合的已保存画像版本才能查询RAW关系。",
+    );
     $("changeSummary").textContent =
       "需要两个不同日期且分母闭合的已保存画像版本才能比较。";
     $("changeHighlightsCount").textContent = "等待精确快照";
@@ -3594,6 +3708,404 @@ function selectedChangeSnapshot(id) {
   return state.changeSnapshots.find(
     (snapshot) => profileSnapshotKey(snapshot) === key,
   );
+}
+function clearRelationScreen(message = "请选择两个完整PG画像快照。") {
+  state.relationRequest++;
+  state.relationPageRequest++;
+  state.relationData = null;
+  state.relationQuery = null;
+  state.relationTotal = 0;
+  state.relationOffset = 0;
+  $("priceRelationScreenCount").textContent = "等待精确快照";
+  $("priceRelationScreenPage").textContent = "—";
+  $("priceRelationScreenRows").replaceChildren();
+  tableRow($("priceRelationScreenRows"), [message, "", "", "", "", ""]);
+  $("priceRelationScreenSummary").textContent = message;
+  $("priceRelationPrev").disabled = true;
+  $("priceRelationNext").disabled = true;
+  $("priceRelationLast").disabled = true;
+}
+function relationSnapshotParams(params, prefix, snapshot) {
+  params.set(prefix + "_source_set_id", snapshot.source_set_id);
+  params.set(prefix + "_package_sha256", snapshot.package_sha256);
+  params.set(prefix + "_profile_revision", snapshot.profile_revision);
+}
+function relationValueText(item, field, side) {
+  const value = relationEndpointValue(item, side, field);
+  return (
+    field +
+    "=" +
+    text(value.value) +
+    " (" +
+    text(value.quality) +
+    "；" +
+    text(value.reason) +
+    ")"
+  );
+}
+function relationEndpointText(item, field, side) {
+  const definition = item.price_relation_transitions?.[field];
+  if (!definition) return "未计算";
+  const relation = definition[side + "_relation"];
+  const reason = definition[side + "_reason"];
+  return (
+    (priceRelationStatusLabels[relation] || relation) +
+    " · " +
+    relationValueText(item, definition.left_field, side) +
+    " vs " +
+    relationValueText(item, definition.right_field, side) +
+    (reason ? " · " + reason : "")
+  );
+}
+function relationEndFilterText(item, filters) {
+  if (!filters?.length) return "无结束日附加条件";
+  return filters
+    .map((filter) => {
+      const transition = item.price_relation_transitions?.[filter.field];
+      const actual = transition?.after_relation;
+      const reason = transition?.after_reason;
+      return (
+        priceRelationFieldLabels[filter.field] +
+        " " +
+        priceRelationStatusLabels[filter.status] +
+        "；实际" +
+        (priceRelationStatusLabels[actual] || actual || "未知") +
+        (reason ? "（" + reason + "）" : "")
+      );
+    })
+    .join(" AND ");
+}
+function renderRelationScreen(data, requestId) {
+  if (requestId !== state.relationRequest) return;
+  const field = data.relation_field;
+  const counts = data.summary.transition_counts;
+  const reasonText = data.summary.unknown_reason_counts
+    .map(
+      (item) =>
+        (item.side === "BEFORE" ? "前侧 " : "后侧 ") +
+        (item.reason || "未提供原因") +
+        "=" +
+        item.count,
+    )
+    .join("；");
+  const sourceCodeStatus = !state.relationQuery?.source_symbol
+    ? "未按来源代码筛选"
+    : data.source_code_presence?.status === "NO_PERSISTED_SOURCE_ROW"
+      ? "该代码在两份快照中都没有持久来源行"
+      : data.page.total === 0
+        ? "该代码有持久来源行，但未匹配本次关系或结束日条件"
+        : "该代码符合当前关系和结束日条件";
+  $("priceRelationScreenCount").textContent =
+    data.page.total + " 个当前组合命中";
+  $("priceRelationScreenSummary").textContent =
+    sessionRelationLabel(data.session_relation) +
+    " · 完整来源并集 U=" +
+    data.summary.source_symbol_union_count +
+    "，两端交集 I=" +
+    data.summary.intersection_count +
+    "，仅前=" +
+    data.summary.before_only_count +
+    "，仅后=" +
+    data.summary.after_only_count +
+    "。" +
+    priceRelationFieldLabels[field] +
+    "：可比较 " +
+    data.summary.comparable_count +
+    "（上穿 " +
+    counts.strict_cross_up +
+    "、下破 " +
+    counts.strict_cross_down +
+    "、等值边界 " +
+    counts.equal_boundary +
+    "、未变化 " +
+    counts.same_relation +
+    "），不可比较 " +
+    data.summary.not_comparable_count +
+    "（前侧UNKNOWN " +
+    data.summary.before_unknown_count +
+    "、后侧UNKNOWN " +
+    data.summary.after_unknown_count +
+    "）。当前关系类别 " +
+    priceRelationTransitionLabels[data.transition_type] +
+    "；结束日AND条件 " +
+    (data.end_position_filters
+      .map(
+        (item) =>
+          priceRelationFieldLabels[item.field] +
+          " " +
+          priceRelationStatusLabels[item.status],
+      )
+      .join(" AND ") || "无") +
+    "；精确来源筛选 " +
+    (state.relationQuery?.source_symbol || "无") +
+    "（" +
+    sourceCodeStatus +
+    "）" +
+    "；命中 " +
+    data.page.total +
+    "。未知原因：" +
+    (reasonText || "本字段无UNKNOWN端点") +
+    "。namespace " +
+    data.namespace_id +
+    "；起始 " +
+    data.before_snapshot.target_session +
+    " / source_set " +
+    data.before_snapshot.source_set_id +
+    " / SHA " +
+    data.before_snapshot.package_sha256 +
+    " / revision " +
+    data.before_snapshot.profile_revision +
+    "；结束 " +
+    data.after_snapshot.target_session +
+    " / source_set " +
+    data.after_snapshot.source_set_id +
+    " / SHA " +
+    data.after_snapshot.package_sha256 +
+    " / revision " +
+    data.after_snapshot.profile_revision +
+    "。SOURCE_SYMBOL_ONLY · RAW_UNADJUSTED · NON_PIT；正式选股未评价。";
+  const root = $("priceRelationScreenRows");
+  root.replaceChildren();
+  if (!data.rows.length) {
+    tableRow(root, [
+      data.page.total === 0
+        ? "当前组合没有符合来源；空结果不会回退到其它类别或旧变化列表。"
+        : "该偏移没有结果；可返回首页或末页。",
+      "",
+      "",
+      "",
+      "",
+      "",
+    ]);
+  }
+  for (const item of data.rows) {
+    const row = document.createElement("tr");
+    const identity =
+      item.source_symbol +
+      " · " +
+      item.before_source_set_id +
+      " / " +
+      item.before_package_sha256 +
+      " / " +
+      item.before_profile_revision +
+      " → " +
+      item.after_source_set_id +
+      " / " +
+      item.after_package_sha256 +
+      " / " +
+      item.after_profile_revision;
+    cell(row, identity);
+    cell(row, relationEndpointText(item, field, "before"));
+    cell(row, relationEndpointText(item, field, "after"));
+    const transition = item.price_relation_transitions[field];
+    cell(
+      row,
+      (priceRelationTransitionLabels[transition.transition_type] ||
+        transition.transition_type) +
+        (transition.transition_reason
+          ? " · " + transition.transition_reason
+          : ""),
+    );
+    cell(row, relationEndFilterText(item, data.end_position_filters));
+    const detail = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = "双日详情 / 75日轨迹";
+    button.addEventListener("click", () => openRelationDetail(item));
+    detail.append(button);
+    row.append(detail);
+    root.append(row);
+  }
+  $("priceRelationScreenPage").textContent =
+    "偏移 " +
+    data.page.offset +
+    " · 本页 " +
+    data.page.count +
+    "/" +
+    data.page.limit +
+    " · 当前组合总计 " +
+    data.page.total;
+  $("priceRelationPrev").disabled = data.page.offset === 0;
+  $("priceRelationNext").disabled = data.page.next_offset === null;
+  $("priceRelationLast").disabled =
+    data.page.last_offset === null || data.page.offset >= data.page.last_offset;
+}
+async function loadPriceRelations() {
+  if (state.timelineContext?.origin === "relation") invalidateTimeline();
+  const before = selectedChangeSnapshot("changeBeforeSelect");
+  const after = selectedChangeSnapshot("changeAfterSelect");
+  if (!before || !after || before.target_session >= after.target_session) {
+    clearRelationScreen("请选择日期递增的两个完整PG画像快照。");
+    return;
+  }
+  const positionFields = [
+    $("endPosition1Field").value,
+    $("endPosition2Field").value,
+  ];
+  const positionStatuses = [
+    $("endPosition1Status").value,
+    $("endPosition2Status").value,
+  ];
+  if (
+    positionFields.some((field, index) => field && !positionStatuses[index])
+  ) {
+    clearRelationScreen(
+      "结束日字段已选；请为该条件选择ABOVE、EQUAL、BELOW或UNKNOWN，或清空字段。",
+    );
+    return;
+  }
+  const activeFields = positionFields.filter(Boolean);
+  if (new Set(activeFields).size !== activeFields.length) {
+    clearRelationScreen("两个结束日AND条件必须使用不同价格关系字段。");
+    return;
+  }
+  const sourceSymbol = $("relationSymbolInput").value.trim().toUpperCase();
+  if (sourceSymbol && !/^(SH|SZ)\.[0-9]{6}$/.test(sourceSymbol)) {
+    clearRelationScreen(
+      "精确代码筛选请输入SH.或SZ.加六位数字；正式来源总体仍由完整PG快照计算。",
+    );
+    return;
+  }
+  const requestId = ++state.relationRequest;
+  const relationField = $("priceRelationFieldSelect").value;
+  const transitionType = $("priceTransitionTypeSelect").value;
+  const endPositionFilters = positionFields
+    .map((field, index) => ({ field, status: positionStatuses[index] }))
+    .filter((item) => item.field);
+  const query = {
+    before,
+    after,
+    relation_field: relationField,
+    transition_type: transitionType,
+    end_position_filters: endPositionFilters,
+    source_symbol: sourceSymbol,
+    offset: state.relationOffset,
+    limit: state.relationLimit,
+  };
+  state.relationQuery = query;
+  state.relationData = null;
+  $("priceRelationScreenCount").textContent = "完整来源池查询中";
+  $("priceRelationScreenSummary").textContent =
+    "在同一只读一致视图中计算三字段RAW关系、结束日条件、完整COUNT与分页。";
+  $("priceRelationScreenRows").replaceChildren();
+  tableRow($("priceRelationScreenRows"), [
+    "读取完整来源集合…",
+    "",
+    "",
+    "",
+    "",
+    "",
+  ]);
+  $("searchPriceRelations").disabled = true;
+  const params = new URLSearchParams({
+    before_session: before.target_session,
+    after_session: after.target_session,
+    relation_field: relationField,
+    transition_type: transitionType,
+    offset: String(query.offset),
+    limit: String(query.limit),
+  });
+  relationSnapshotParams(params, "before", before);
+  relationSnapshotParams(params, "after", after);
+  for (let index = 0; index < endPositionFilters.length; index++) {
+    const filter = endPositionFilters[index];
+    params.set("end_position_" + (index + 1) + "_field", filter.field);
+    params.set("end_position_" + (index + 1) + "_status", filter.status);
+  }
+  if (sourceSymbol) params.set("symbol", sourceSymbol);
+  try {
+    const data = await api(
+      "/api/source-symbol-price-profile-relation-screen?" + params,
+    );
+    if (requestId !== state.relationRequest) return;
+    state.relationData = data;
+    state.relationTotal = data.page.total;
+    renderRelationScreen(data, requestId);
+  } catch (error) {
+    if (requestId !== state.relationRequest) return;
+    $("priceRelationScreenCount").textContent = "关系筛选失败";
+    $("priceRelationScreenSummary").textContent =
+      "RAW关系查询未完成：" + error.message;
+    $("priceRelationScreenRows").replaceChildren();
+    tableRow($("priceRelationScreenRows"), [error.message, "", "", "", "", ""]);
+    $("priceRelationScreenPage").textContent = "查询失败";
+    $("priceRelationPrev").disabled = true;
+    $("priceRelationNext").disabled = true;
+    $("priceRelationLast").disabled = true;
+  } finally {
+    if (requestId === state.relationRequest)
+      $("searchPriceRelations").disabled = false;
+  }
+}
+async function openRelationDetail(relationRow) {
+  const query = state.relationQuery;
+  if (!query) return;
+  const requestId = ++state.relationDetailRequest;
+  state.relationDetailRow = relationRow;
+  const params = new URLSearchParams({
+    before_session: query.before.target_session,
+    after_session: query.after.target_session,
+    symbol: relationRow.source_symbol,
+  });
+  relationSnapshotParams(params, "before", query.before);
+  relationSnapshotParams(params, "after", query.after);
+  const root = $("changeDetail");
+  root.replaceChildren();
+  root.hidden = false;
+  appendText(
+    root,
+    "p",
+    "正在从精确两端画像读取详情；查询不依赖旧变化成员名单。",
+    "population",
+  );
+  state.changeBinding = {
+    origin: "relation",
+    namespace_id: state.relationData?.namespace_id,
+    before_snapshot: state.relationData?.before_snapshot,
+    after_snapshot: state.relationData?.after_snapshot,
+    session_relation: state.relationData?.session_relation,
+    offset: query.offset,
+    limit: query.limit,
+    relation_query: query,
+  };
+  try {
+    const data = await api("/api/source-symbol-price-profile-pair?" + params);
+    if (requestId !== state.relationDetailRequest) return;
+    if (data.status !== "AVAILABLE" || !data.item) {
+      root.replaceChildren();
+      appendText(
+        root,
+        "p",
+        "持久双日画像行当前不可用；原RAW关系结果仍保留，未推断上市/退市或选股状态。",
+        "message",
+      );
+      return;
+    }
+    state.changeBinding.session_relation = data.session_relation;
+    showChangeDetail({
+      ...data.item,
+      price_relation_transitions: relationRow.price_relation_transitions,
+    });
+  } catch (error) {
+    if (requestId !== state.relationDetailRequest) return;
+    root.replaceChildren();
+    root.hidden = false;
+    appendText(root, "p", "双日RAW详情读取失败：" + error.message, "message");
+  }
+}
+function returnToRelationScreen() {
+  if (state.timelineContext?.origin === "relation") {
+    returnToChanges();
+    return;
+  }
+  state.relationDetailRequest++;
+  state.pairRequest++;
+  resetChangeDetail();
+  $("priceRelationScreenTitle").scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
 }
 function clearProfileBreadth(message = "请选择两个完整PG画像快照。") {
   state.profileBreadthRequest++;
@@ -4723,6 +5235,10 @@ $("searchChanges").addEventListener("click", () => {
   state.changeOffset = 0;
   loadChanges();
 });
+$("searchPriceRelations").addEventListener("click", () => {
+  state.relationOffset = 0;
+  loadPriceRelations();
+});
 $("profileBreadthOpenFull").addEventListener("click", () => {
   const snapshot = state.profileBreadthData?.after_snapshot;
   if (!snapshot) return;
@@ -4800,16 +5316,77 @@ $("changeSymbolInput").addEventListener("keydown", (event) => {
     loadChanges();
   }
 });
-for (const id of [
-  "changeBeforeSelect",
-  "changeAfterSelect",
-  "changeTypeSelect",
-]) {
+for (const id of ["changeBeforeSelect", "changeAfterSelect"]) {
   $(id).addEventListener("change", () => {
     state.changeOffset = 0;
+    state.relationOffset = 0;
+    clearRelationScreen(
+      "两日快照已变化；旧RAW关系结果已清除，正在读取新绑定。",
+    );
     loadChanges();
+    loadPriceRelations();
   });
 }
+$("changeTypeSelect").addEventListener("change", () => {
+  state.changeOffset = 0;
+  loadChanges();
+});
+$("priceRelationFieldSelect").addEventListener("change", () => {
+  state.relationOffset = 0;
+  loadPriceRelations();
+});
+$("priceTransitionTypeSelect").addEventListener("change", () => {
+  state.relationOffset = 0;
+  loadPriceRelations();
+});
+for (const [fieldId, statusId] of [
+  ["endPosition1Field", "endPosition1Status"],
+  ["endPosition2Field", "endPosition2Status"],
+]) {
+  $(fieldId).addEventListener("change", () => {
+    const status = $(statusId);
+    status.disabled = !$(fieldId).value;
+    if (!$(fieldId).value) status.value = "";
+    state.relationOffset = 0;
+    loadPriceRelations();
+  });
+  $(statusId).addEventListener("change", () => {
+    state.relationOffset = 0;
+    loadPriceRelations();
+  });
+}
+$("relationSymbolInput").addEventListener("input", () => {
+  state.relationOffset = 0;
+  clearRelationScreen("精确来源代码筛选已变化；点击“查询RAW关系”读取新组合。");
+});
+$("relationSymbolInput").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    state.relationOffset = 0;
+    loadPriceRelations();
+  }
+});
+$("priceRelationPrev").addEventListener("click", () => {
+  state.relationOffset = Math.max(
+    0,
+    state.relationOffset - state.relationLimit,
+  );
+  loadPriceRelations();
+});
+$("priceRelationNext").addEventListener("click", () => {
+  if (state.relationOffset + state.relationLimit < state.relationTotal) {
+    state.relationOffset += state.relationLimit;
+    loadPriceRelations();
+  }
+});
+$("priceRelationLast").addEventListener("click", () => {
+  if (state.relationTotal) {
+    state.relationOffset =
+      Math.floor((state.relationTotal - 1) / state.relationLimit) *
+      state.relationLimit;
+    loadPriceRelations();
+  }
+});
 $("changePrev").addEventListener("click", () => {
   state.changeOffset = Math.max(0, state.changeOffset - state.changeLimit);
   loadChanges();

@@ -37,6 +37,7 @@ from stock_a.application.pg_price_profiles import (
     query_source_symbol_price_profile_pair,
     query_source_symbol_price_profiles,
     query_source_symbol_price_profile_changes,
+    query_source_symbol_price_profile_relation_screen,
     source_symbol_price_profile_snapshots,
 )
 from stock_a.application.source_ingress import (
@@ -832,6 +833,98 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "research_mode": "ACCEPTED_PG_PROFILE_CHANGE_OBSERVATION",
                         "database_write": False,
                         "ddl_executed": False,
+                    }
+                )
+                self._send_json(200, result)
+                return
+            if parsed.path == "/api/source-symbol-price-profile-relation-screen":
+                values = _query(
+                    self.path,
+                    {
+                        "before_session",
+                        "after_session",
+                        "before_source_set_id",
+                        "before_package_sha256",
+                        "before_profile_revision",
+                        "after_source_set_id",
+                        "after_package_sha256",
+                        "after_profile_revision",
+                        "relation_field",
+                        "transition_type",
+                        "end_position_1_field",
+                        "end_position_1_status",
+                        "end_position_2_field",
+                        "end_position_2_status",
+                        "offset",
+                        "limit",
+                        "symbol",
+                    },
+                )
+                required = {
+                    "before_session",
+                    "after_session",
+                    "before_source_set_id",
+                    "before_package_sha256",
+                    "before_profile_revision",
+                    "after_source_set_id",
+                    "after_package_sha256",
+                    "after_profile_revision",
+                    "relation_field",
+                    "transition_type",
+                    "offset",
+                    "limit",
+                }
+                if not required.issubset(values):
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_RELATION_QUERY_REQUIRED",
+                        "RAW关系查询必须绑定前后完整画像身份、关系字段、转移类别和分页参数",
+                    )
+                before_session = _iso_date(values["before_session"], "before_session")
+                after_session = _iso_date(values["after_session"], "after_session")
+                _require_research_cutoff(
+                    before_session, self.preview_server.state.research_cutoff
+                )
+                _require_research_cutoff(
+                    after_session, self.preview_server.state.research_cutoff
+                )
+                limit = _positive_int(
+                    _nonnegative_int(values["limit"], "limit", 100) or 0,
+                    "limit",
+                    100,
+                )
+                result = query_source_symbol_price_profile_relation_screen(
+                    self.preview_server.state.config,
+                    before_session=before_session,
+                    after_session=after_session,
+                    max_target_session=self.preview_server.state.research_cutoff,
+                    offset=_nonnegative_int(values["offset"], "offset"),
+                    limit=limit,
+                    relation_field=values["relation_field"],
+                    transition_type=values["transition_type"],
+                    end_position_1_field=values.get("end_position_1_field"),
+                    end_position_1_status=values.get("end_position_1_status"),
+                    end_position_2_field=values.get("end_position_2_field"),
+                    end_position_2_status=values.get("end_position_2_status"),
+                    source_symbol=(
+                        _symbol_search(values["symbol"])
+                        if values.get("symbol")
+                        else None
+                    ),
+                    before_source_set_id=values["before_source_set_id"],
+                    before_package_sha256=_sha(values["before_package_sha256"]),
+                    before_profile_revision=_sha(values["before_profile_revision"]),
+                    after_source_set_id=values["after_source_set_id"],
+                    after_package_sha256=_sha(values["after_package_sha256"]),
+                    after_profile_revision=_sha(values["after_profile_revision"]),
+                )
+                result.update(
+                    {
+                        "ok": True,
+                        "database_write": False,
+                        "ddl_executed": False,
+                        "source_zip_opened": False,
+                        "core_recalculated": False,
                     }
                 )
                 self._send_json(200, result)

@@ -125,14 +125,27 @@ _PRICE_POSITION_QUERY_FIELDS = {
     },
 }
 _PRICE_POSITION_STATUSES = frozenset({"ABOVE", "EQUAL", "BELOW", "UNKNOWN"})
+_PRICE_RELATION_TRANSITION_TYPES = frozenset(
+    {
+        "ALL",
+        "STRICT_CROSS_UP",
+        "STRICT_CROSS_DOWN",
+        "EQUAL_BOUNDARY",
+        "SAME_RELATION",
+        "NOT_COMPARABLE",
+        "ONLY_BEFORE",
+        "ONLY_AFTER",
+    }
+)
 
 
-def _price_position_status_sql(position: str) -> str:
-    fields = _PRICE_POSITION_QUERY_FIELDS[position]
+def _price_position_status_expression(
+    fields: Mapping[str, str], *, coordinate_sql: str
+) -> str:
     left = fields["left_value_sql"]
     right = fields["right_value_sql"]
     return f"""CASE
-WHEN p.price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+WHEN {coordinate_sql} IS DISTINCT FROM 'RAW_UNADJUSTED'
   OR {fields["left_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
   OR {left} IS NULL
   OR {fields["right_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
@@ -142,13 +155,14 @@ WHEN {left} < {right} THEN 'BELOW'
 ELSE 'EQUAL' END"""
 
 
-def _price_position_reason_sql(position: str) -> str:
-    fields = _PRICE_POSITION_QUERY_FIELDS[position]
+def _price_position_reason_expression(
+    fields: Mapping[str, str], *, coordinate_sql: str
+) -> str:
     return f"""CASE
-WHEN p.price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+WHEN {coordinate_sql} IS DISTINCT FROM 'RAW_UNADJUSTED'
   THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'
 WHEN {fields["left_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
-  THEN '{fields["left_field"]}_quality=' || {fields["left_quality_sql"]}
+  THEN '{fields["left_field"]}_quality=' || COALESCE({fields["left_quality_sql"]}, 'UNKNOWN')
     || '; reason=' || COALESCE({fields["left_reason_sql"]}, 'REASON_NOT_PROVIDED')
 WHEN {fields["left_value_sql"]} IS NULL THEN 'OBSERVED_LEFT_VALUE_MISSING'
 WHEN {fields["right_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
@@ -156,6 +170,54 @@ WHEN {fields["right_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
     || '; reason=' || COALESCE({fields["right_reason_sql"]}, 'REASON_NOT_PROVIDED')
 WHEN {fields["right_value_sql"]} IS NULL THEN 'OBSERVED_RIGHT_VALUE_MISSING'
 ELSE NULL END"""
+
+
+def _profile_pair_price_position_fields(position: str, *, side: str) -> dict[str, str]:
+    definition = _PRICE_POSITION_QUERY_FIELDS[position]
+
+    def field_expressions(field: str) -> tuple[str, str, str]:
+        if field == "raw_close":
+            return (
+                f"{side}_raw_close",
+                f"COALESCE({side}_raw_price_quality, 'UNKNOWN')",
+                f"""CASE
+WHEN NOT {side}_raw_record_present THEN 'SOURCE_RAW_ROW_MISSING'
+WHEN {side}_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+  THEN COALESCE({side}_raw_price_reason, 'RAW_PRICE_REASON_MISSING')
+ELSE {side}_raw_price_reason END""",
+            )
+        return (
+            f"{side}_{field}",
+            f"{side}_{field}_quality",
+            f"{side}_{field}_reason",
+        )
+
+    left_value, left_quality, left_reason = field_expressions(definition["left_field"])
+    right_value, right_quality, right_reason = field_expressions(
+        definition["right_field"]
+    )
+    return {
+        "left_field": definition["left_field"],
+        "left_value_sql": left_value,
+        "left_quality_sql": left_quality,
+        "left_reason_sql": left_reason,
+        "right_field": definition["right_field"],
+        "right_value_sql": right_value,
+        "right_quality_sql": right_quality,
+        "right_reason_sql": right_reason,
+    }
+
+
+def _price_position_status_sql(position: str) -> str:
+    return _price_position_status_expression(
+        _PRICE_POSITION_QUERY_FIELDS[position], coordinate_sql="p.price_coordinate"
+    )
+
+
+def _price_position_reason_sql(position: str) -> str:
+    return _price_position_reason_expression(
+        _PRICE_POSITION_QUERY_FIELDS[position], coordinate_sql="p.price_coordinate"
+    )
 
 
 class PriceProfilePgError(Exception):
@@ -997,6 +1059,78 @@ WITH old_rows AS (
 """
 
 
+def _profile_relation_endpoint_projection() -> str:
+    expressions: list[str] = []
+    for position in _PRICE_POSITION_QUERY_FIELDS:
+        for side in ("before", "after"):
+            fields = _profile_pair_price_position_fields(position, side=side)
+            expressions.extend(
+                (
+                    f"{_price_position_status_expression(fields, coordinate_sql=f'{side}_price_coordinate')} "
+                    f"AS {side}_{position}_relation",
+                    f"CASE WHEN NOT {side}_present THEN 'NO_{side.upper()}_PROFILE' "
+                    f"ELSE {_price_position_reason_expression(fields, coordinate_sql=f'{side}_price_coordinate')} END "
+                    f"AS {side}_{position}_relation_reason",
+                )
+            )
+    return ",\n           ".join(expressions)
+
+
+def _profile_relation_transition_projection() -> str:
+    expressions: list[str] = []
+    for position in _PRICE_POSITION_QUERY_FIELDS:
+        before = f"before_{position}_relation"
+        after = f"after_{position}_relation"
+        reason = f"""CASE
+WHEN NOT before_present THEN 'NO_BEFORE_PROFILE'
+WHEN NOT after_present THEN 'NO_AFTER_PROFILE'
+WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
+  THEN 'PRICE_COORDINATE_MISMATCH'
+WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+  OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+  THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'
+WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'
+WHEN {before}='UNKNOWN' OR {after}='UNKNOWN' THEN concat_ws('; ',
+  CASE WHEN {before}='UNKNOWN' THEN 'BEFORE:' || COALESCE(before_{position}_relation_reason, 'UNKNOWN_REASON_NOT_PROVIDED') END,
+  CASE WHEN {after}='UNKNOWN' THEN 'AFTER:' || COALESCE(after_{position}_relation_reason, 'UNKNOWN_REASON_NOT_PROVIDED') END)
+ELSE NULL END"""
+        transition = f"""CASE
+WHEN NOT before_present AND after_present THEN 'ONLY_AFTER'
+WHEN before_present AND NOT after_present THEN 'ONLY_BEFORE'
+WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
+  OR before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+  OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+  OR NOT core_compatible
+  OR {before}='UNKNOWN' OR {after}='UNKNOWN' THEN 'NOT_COMPARABLE'
+WHEN {before}={after} THEN 'SAME_RELATION'
+WHEN {before}='EQUAL' OR {after}='EQUAL' THEN 'EQUAL_BOUNDARY'
+WHEN {before}='BELOW' AND {after}='ABOVE' THEN 'STRICT_CROSS_UP'
+WHEN {before}='ABOVE' AND {after}='BELOW' THEN 'STRICT_CROSS_DOWN'
+ELSE 'NOT_COMPARABLE' END"""
+        expressions.extend(
+            (
+                f"{transition} AS {position}_transition_type",
+                f"{reason} AS {position}_transition_reason",
+            )
+        )
+    return ",\n           ".join(expressions)
+
+
+_PROFILE_RELATION_TRANSITION_CTES = (
+    _PROFILE_CHANGE_CTES
+    + f""", relation_endpoints AS (
+    SELECT *,
+           {_profile_relation_endpoint_projection()}
+    FROM classified
+), relation_transitions AS (
+    SELECT *,
+           {_profile_relation_transition_projection()}
+    FROM relation_endpoints
+)
+"""
+)
+
+
 _PROFILE_CHANGE_HIGHLIGHT_CTES = (
     _PROFILE_CHANGE_CTES
     + """
@@ -1398,6 +1532,353 @@ LIMIT %s OFFSET %s""",
             "total": filtered_total,
             "next_offset": offset + len(rows)
             if offset + len(rows) < filtered_total
+            else None,
+        },
+        "rows": rows,
+        "database_write": False,
+        "core_recalculated": False,
+    }
+
+
+def read_profile_relation_screen(
+    config: Mapping[str, Any],
+    *,
+    before_session: date,
+    after_session: date,
+    max_target_session: date,
+    offset: int,
+    limit: int,
+    relation_field: str,
+    transition_type: str = "ALL",
+    end_position_1_field: str | None = None,
+    end_position_1_status: str | None = None,
+    end_position_2_field: str | None = None,
+    end_position_2_status: str | None = None,
+    source_symbol: str | None = None,
+    before_source_set_id: str,
+    before_package_sha256: str,
+    before_profile_revision: str,
+    after_source_set_id: str,
+    after_package_sha256: str,
+    after_profile_revision: str,
+) -> dict[str, Any]:
+    """在完整两端来源并集上读取关系转移及结束日位置联合筛选。"""
+    if (
+        type(before_session) is not date
+        or type(after_session) is not date
+        or type(max_target_session) is not date
+        or before_session >= after_session
+        or after_session > max_target_session
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_RELATION_DATE_INVALID",
+            "RAW关系变化日期必须递增且不晚于显式研究截止日",
+        )
+    if (
+        type(offset) is not int
+        or not 0 <= offset <= 2**31 - 1
+        or type(limit) is not int
+        or not 1 <= limit <= 100
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_RELATION_PAGE_INVALID", "关系筛选offset须非负且limit须在1到100"
+        )
+    if relation_field not in _PRICE_POSITION_QUERY_FIELDS:
+        raise PriceProfilePgError(
+            "PROFILE_RELATION_FIELD_INVALID", "RAW关系字段不在允许的三类价格关系内"
+        )
+    if transition_type not in _PRICE_RELATION_TRANSITION_TYPES:
+        raise PriceProfilePgError(
+            "PROFILE_RELATION_TYPE_INVALID", "RAW关系转移分类无效"
+        )
+    if source_symbol is not None and (
+        not isinstance(source_symbol, str)
+        or source_symbol != source_symbol.strip()
+        or len(source_symbol) > 9
+        or re.fullmatch(r"[A-Za-z0-9.]+", source_symbol) is None
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_RELATION_SYMBOL_INVALID", "来源代码筛选只接受字母、数字和点号"
+        )
+    end_filters: list[tuple[str, str]] = []
+    for field, status in (
+        (end_position_1_field, end_position_1_status),
+        (end_position_2_field, end_position_2_status),
+    ):
+        if field is None and status is None:
+            continue
+        if (
+            field not in _PRICE_POSITION_QUERY_FIELDS
+            or status not in _PRICE_POSITION_STATUSES
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_RELATION_END_FILTER_INVALID",
+                "结束日位置条件必须同时指定允许字段和ABOVE/EQUAL/BELOW/UNKNOWN状态",
+            )
+        end_filters.append((field, status))
+    if len({field for field, _status in end_filters}) != len(end_filters):
+        raise PriceProfilePgError(
+            "PROFILE_RELATION_END_FILTER_INVALID", "两个结束日位置条件不能重复字段"
+        )
+    if any(
+        not isinstance(value, str) or not value
+        for value in (
+            before_source_set_id,
+            before_package_sha256,
+            before_profile_revision,
+            after_source_set_id,
+            after_package_sha256,
+            after_profile_revision,
+        )
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_RELATION_SNAPSHOT_IDENTITY_INVALID",
+            "前后快照必须完整提供source_set、package SHA和profile revision",
+        )
+
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        before = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=before_session,
+            max_target_session=max_target_session,
+            source_set_id=before_source_set_id,
+            package_sha256=before_package_sha256,
+            profile_revision=before_profile_revision,
+        )
+        after = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=after_session,
+            max_target_session=max_target_session,
+            source_set_id=after_source_set_id,
+            package_sha256=after_package_sha256,
+            profile_revision=after_profile_revision,
+        )
+        base_parameters = (
+            *_profile_change_snapshot_parameters(namespace_id, before),
+            *_profile_change_snapshot_parameters(namespace_id, after),
+        )
+        count_columns = [
+            "count(*)::bigint AS source_symbol_union_count",
+            "count(*) FILTER (WHERE before_present AND after_present)::bigint AS intersection_count",
+            "count(*) FILTER (WHERE before_present AND NOT after_present)::bigint AS before_only_count",
+            "count(*) FILTER (WHERE NOT before_present AND after_present)::bigint AS after_only_count",
+        ]
+        count_columns.extend(
+            (
+                f"count(*) FILTER (WHERE {relation_field}_transition_type='STRICT_CROSS_UP')::bigint AS strict_cross_up_count",
+                f"count(*) FILTER (WHERE {relation_field}_transition_type='STRICT_CROSS_DOWN')::bigint AS strict_cross_down_count",
+                f"count(*) FILTER (WHERE {relation_field}_transition_type='EQUAL_BOUNDARY')::bigint AS equal_boundary_count",
+                f"count(*) FILTER (WHERE {relation_field}_transition_type='SAME_RELATION')::bigint AS same_relation_count",
+                f"count(*) FILTER (WHERE {relation_field}_transition_type='NOT_COMPARABLE')::bigint AS not_comparable_count",
+                f"count(*) FILTER (WHERE {relation_field}_transition_type='ONLY_BEFORE')::bigint AS only_before_count",
+                f"count(*) FILTER (WHERE {relation_field}_transition_type='ONLY_AFTER')::bigint AS only_after_count",
+                f"count(*) FILTER (WHERE {relation_field}_transition_type IN ('STRICT_CROSS_UP','STRICT_CROSS_DOWN','EQUAL_BOUNDARY','SAME_RELATION'))::bigint AS comparable_count",
+                f"count(*) FILTER (WHERE before_present AND before_{relation_field}_relation='UNKNOWN')::bigint AS before_unknown_count",
+                f"count(*) FILTER (WHERE after_present AND after_{relation_field}_relation='UNKNOWN')::bigint AS after_unknown_count",
+            )
+        )
+        filters = []
+        filter_parameters: list[Any] = []
+        if transition_type != "ALL":
+            filters.append(f"{relation_field}_transition_type=%s")
+            filter_parameters.append(transition_type)
+        for field, status in end_filters:
+            filters.append(f"after_{field}_relation=%s")
+            filter_parameters.append(status)
+        symbol_search = source_symbol.upper() if source_symbol else None
+        if symbol_search is not None:
+            filters.append("source_symbol=%s")
+            filter_parameters.append(symbol_search)
+        filter_sql = " AND ".join(filters) if filters else "TRUE"
+        unknown_reason_sql = f"""SELECT COALESCE(
+    jsonb_agg(
+        jsonb_build_object('side', side, 'reason', reason, 'count', row_count)
+        ORDER BY side, reason NULLS FIRST
+    ),
+    '[]'::jsonb
+) AS unknown_reason_counts
+FROM (
+    SELECT side, reason, count(*)::bigint AS row_count
+    FROM (
+    SELECT 'BEFORE'::text AS side,
+           before_{relation_field}_relation_reason AS reason
+    FROM relation_transitions
+    WHERE before_present AND before_{relation_field}_relation='UNKNOWN'
+    UNION ALL
+    SELECT 'AFTER'::text AS side,
+           after_{relation_field}_relation_reason AS reason
+    FROM relation_transitions
+    WHERE after_present AND after_{relation_field}_relation='UNKNOWN'
+) AS unknowns
+    GROUP BY side, reason
+) AS grouped_unknowns"""
+        count_names = [
+            "source_symbol_union_count",
+            "intersection_count",
+            "before_only_count",
+            "after_only_count",
+            "strict_cross_up_count",
+            "strict_cross_down_count",
+            "equal_boundary_count",
+            "same_relation_count",
+            "not_comparable_count",
+            "only_before_count",
+            "only_after_count",
+            "comparable_count",
+            "before_unknown_count",
+            "after_unknown_count",
+        ]
+        cursor.execute(
+            _PROFILE_RELATION_TRANSITION_CTES
+            + ", summary AS (SELECT "
+            + ",\n       ".join(count_columns)
+            + f"""\nFROM relation_transitions
+), unknown_reason_counts AS (
+    {unknown_reason_sql}
+), source_code_presence AS (
+    SELECT count(*) FILTER (WHERE before_present)::bigint AS before_count,
+           count(*) FILTER (WHERE after_present)::bigint AS after_count
+    FROM relation_transitions
+    WHERE %s::text IS NOT NULL AND source_symbol=%s
+), filtered AS (
+    SELECT * FROM relation_transitions WHERE {filter_sql}
+), filtered_total AS (
+    SELECT count(*)::bigint AS filtered_count FROM filtered
+), page_rows AS (
+    SELECT * FROM filtered
+    ORDER BY source_symbol COLLATE "C"
+    LIMIT %s OFFSET %s
+)
+SELECT summary.*,
+       unknown_reason_counts.unknown_reason_counts,
+       source_code_presence.before_count AS source_code_before_count,
+       source_code_presence.after_count AS source_code_after_count,
+       filtered_total.filtered_count,
+       page_rows.*
+FROM summary
+CROSS JOIN unknown_reason_counts
+CROSS JOIN source_code_presence
+CROSS JOIN filtered_total
+LEFT JOIN page_rows ON TRUE
+ORDER BY page_rows.source_symbol COLLATE "C" """,
+            (
+                *base_parameters,
+                symbol_search,
+                symbol_search,
+                *filter_parameters,
+                limit,
+                offset,
+            ),
+        )
+        names = [item.name for item in cursor.description]
+        result_rows = cursor.fetchall()
+        first = dict(zip(names, result_rows[0], strict=True))
+        summary = {name: first[name] for name in count_names}
+        unknown_reason_counts = first["unknown_reason_counts"]
+        filtered_total = int(first["filtered_count"])
+        source_code_before_count = int(first["source_code_before_count"])
+        source_code_after_count = int(first["source_code_after_count"])
+        metadata_names = set(count_names) | {
+            "unknown_reason_counts",
+            "filtered_count",
+            "source_code_before_count",
+            "source_code_after_count",
+        }
+        rows = []
+        for result_row in result_rows:
+            row = dict(zip(names, result_row, strict=True))
+            if row.get("source_symbol") is None:
+                continue
+            for name in metadata_names:
+                row.pop(name, None)
+            rows.append(row)
+
+    field_definition = _PRICE_POSITION_QUERY_FIELDS
+    for row in rows:
+        transitions: dict[str, Any] = {}
+        for field, definition in field_definition.items():
+            transition = {
+                "before_relation": row.pop(f"before_{field}_relation"),
+                "before_reason": row.pop(f"before_{field}_relation_reason"),
+                "after_relation": row.pop(f"after_{field}_relation"),
+                "after_reason": row.pop(f"after_{field}_relation_reason"),
+                "transition_type": row.pop(f"{field}_transition_type"),
+                "transition_reason": row.pop(f"{field}_transition_reason"),
+                "left_field": definition["left_field"],
+                "right_field": definition["right_field"],
+            }
+            transitions[field] = transition
+        row["price_relation_transitions"] = transitions
+        row["change_types"] = list(row["change_types"] or [])
+        for key, value in tuple(row.items()):
+            if isinstance(value, (date, UUID)):
+                row[key] = value.isoformat() if isinstance(value, date) else str(value)
+
+    transition_counts = {
+        key.removesuffix("_count"): int(summary[key] or 0)
+        for key in (
+            "strict_cross_up_count",
+            "strict_cross_down_count",
+            "equal_boundary_count",
+            "same_relation_count",
+            "not_comparable_count",
+            "only_before_count",
+            "only_after_count",
+            "comparable_count",
+        )
+    }
+    source_code_presence = None
+    if source_symbol is not None:
+        if source_code_before_count and source_code_after_count:
+            presence_status = "BOTH_PRESENT"
+        elif source_code_before_count:
+            presence_status = "BEFORE_ONLY"
+        elif source_code_after_count:
+            presence_status = "AFTER_ONLY"
+        else:
+            presence_status = "NO_PERSISTED_SOURCE_ROW"
+        source_code_presence = {
+            "source_symbol": source_symbol.upper(),
+            "status": presence_status,
+            "before_present": bool(source_code_before_count),
+            "after_present": bool(source_code_after_count),
+        }
+    return {
+        "status": "AVAILABLE" if filtered_total else "NO_MATCH",
+        "namespace_id": namespace_id,
+        "before_snapshot": before,
+        "after_snapshot": after,
+        "relation_field": relation_field,
+        "transition_type": transition_type,
+        "source_code_presence": source_code_presence,
+        "end_position_filters": [
+            {"field": field, "status": status} for field, status in end_filters
+        ],
+        "summary": {
+            "source_symbol_union_count": int(summary["source_symbol_union_count"]),
+            "intersection_count": int(summary["intersection_count"]),
+            "before_only_count": int(summary["before_only_count"]),
+            "after_only_count": int(summary["after_only_count"]),
+            "comparable_count": transition_counts["comparable"],
+            "not_comparable_count": transition_counts["not_comparable"],
+            "before_unknown_count": int(summary["before_unknown_count"]),
+            "after_unknown_count": int(summary["after_unknown_count"]),
+            "transition_counts": transition_counts,
+            "unknown_reason_counts": unknown_reason_counts,
+            "filtered_count": filtered_total,
+        },
+        "page": {
+            "offset": offset,
+            "limit": limit,
+            "count": len(rows),
+            "total": filtered_total,
+            "next_offset": offset + len(rows)
+            if offset + len(rows) < filtered_total
+            else None,
+            "last_offset": ((filtered_total - 1) // limit) * limit
+            if filtered_total
             else None,
         },
         "rows": rows,
