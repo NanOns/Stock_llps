@@ -90,6 +90,89 @@ main {
   margin: 0;
   font-size: 13px;
 }
+.comparison-browser {
+  border-color: #b8d6e2;
+  background: #fbfdfe;
+}
+.comparison-basket,
+.comparison-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+.comparison-controls {
+  margin-top: 12px;
+}
+.comparison-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 8px;
+  border: 1px solid #cddbe2;
+  border-radius: 8px;
+  background: white;
+}
+.comparison-item button,
+.comparison-source-actions button {
+  padding: 6px 9px;
+  font-size: 12px;
+}
+.comparison-cards {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 12px 0;
+}
+.comparison-card {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #d8e3e9;
+  border-radius: 9px;
+  background: white;
+  overflow-wrap: anywhere;
+}
+.comparison-card h3 {
+  margin: 0 0 8px;
+}
+.comparison-card p {
+  margin: 4px 0;
+  font-size: 12px;
+}
+.comparison-source-actions {
+  margin-top: 9px;
+}
+.comparison-table {
+  min-width: 100%;
+}
+.comparison-table th:first-child,
+.comparison-table td:first-child {
+  min-width: 112px;
+  white-space: nowrap;
+}
+.comparison-table th:not(:first-child),
+.comparison-table td:not(:first-child) {
+  width: 33%;
+  min-width: 300px;
+}
+.comparison-symbol-facts {
+  display: grid;
+  gap: 3px;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.comparison-index {
+  color: #176c8a;
+  font-weight: 700;
+}
+.comparison-table tr[data-target-session="true"] {
+  background: #eef7fa;
+}
+@media (max-width: 980px) {
+  .comparison-cards {
+    grid-template-columns: 1fr;
+  }
+}
 .controls {
   display: grid;
   grid-template-columns: minmax(260px, 2fr) minmax(170px, 1fr) minmax(

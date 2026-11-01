@@ -30,6 +30,12 @@ const state = {
   relationQuery: null,
   relationDetailRequest: 0,
   relationDetailRow: null,
+  comparisonBasket: [],
+  comparisonMessage: null,
+  comparisonRequest: 0,
+  comparisonTimelines: [],
+  comparisonBaseSession: null,
+  comparisonReturnForm: null,
   profileBreadthRequest: 0,
   profileBreadthData: null,
   profileBreadthBinding: null,
@@ -1375,6 +1381,657 @@ function priorHighRelationLabel(relation) {
   };
   return labels[relation] || "UNKNOWN";
 }
+function comparisonIdentityOf(item) {
+  return {
+    target_session: item.target_session,
+    namespace_id: item.namespace_id,
+    source_set_id: item.source_set_id,
+    package_sha256: item.package_sha256,
+    profile_revision: item.profile_revision,
+  };
+}
+function sameComparisonIdentity(left, right) {
+  if (!left || !right) return false;
+  return [
+    "target_session",
+    "namespace_id",
+    "source_set_id",
+    "package_sha256",
+    "profile_revision",
+  ].every((key) => left[key] === right[key]);
+}
+function relationComparisonCandidate(item) {
+  const data = state.relationData;
+  const snapshot = data?.after_snapshot;
+  if (!snapshot || !data.namespace_id) return null;
+  return {
+    source_symbol: item.source_symbol,
+    target_session: snapshot.target_session,
+    namespace_id: data.namespace_id,
+    source_set_id: item.after_source_set_id,
+    package_sha256: item.after_package_sha256,
+    profile_revision: item.after_profile_revision,
+    origin_label: "两日RAW结构结果",
+  };
+}
+function addComparisonCandidate(candidate) {
+  if (
+    !candidate?.source_symbol ||
+    !candidate.target_session ||
+    !candidate.namespace_id ||
+    !candidate.source_set_id ||
+    !/^[0-9a-f]{64}$/.test(candidate.package_sha256 || "") ||
+    !/^[0-9a-f]{64}$/.test(candidate.profile_revision || "") ||
+    !/^(SH|SZ)\.[0-9]{6}$/.test(candidate.source_symbol)
+  ) {
+    state.comparisonMessage =
+      "来源行缺少完整SEALED身份或不是SH./SZ.来源代码，未加入。";
+    renderComparisonBasket();
+    return;
+  }
+  const identity = comparisonIdentityOf(candidate);
+  const currentIdentity = state.comparisonBasket[0]
+    ? comparisonIdentityOf(state.comparisonBasket[0])
+    : null;
+  if (currentIdentity && !sameComparisonIdentity(identity, currentIdentity)) {
+    state.comparisonMessage =
+      "该来源属于不同目标日、namespace、source_set、包SHA或画像修订；请先清空对照篮再选。";
+    renderComparisonBasket();
+    return;
+  }
+  if (
+    state.comparisonBasket.some(
+      (item) => item.source_symbol === candidate.source_symbol,
+    )
+  ) {
+    state.comparisonMessage = `${candidate.source_symbol} 已在临时对照篮中。`;
+    renderComparisonBasket();
+    return;
+  }
+  if (state.comparisonBasket.length >= 3) {
+    state.comparisonMessage = "临时对照最多选择3个不同来源代码；请先移除一只。";
+    renderComparisonBasket();
+    return;
+  }
+  state.comparisonBasket.push({ ...candidate });
+  state.comparisonMessage =
+    `已加入 ${candidate.source_symbol}（${candidate.origin_label}）；选择身份固定为 ` +
+    `${candidate.target_session} / ${candidate.source_set_id} / ${candidate.profile_revision}。`;
+  invalidateComparisonResults(
+    "选择已变化；请重新读取同一快照下的75个官方会话。",
+  );
+  renderComparisonBasket();
+}
+function makeComparisonAddButton(candidate) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "quiet";
+  button.textContent = "加入对照";
+  button.disabled = !candidate;
+  if (!candidate) button.title = "此行没有完整SEALED画像身份。";
+  button.addEventListener("click", () => addComparisonCandidate(candidate));
+  return button;
+}
+function invalidateComparisonResults(message) {
+  state.comparisonRequest++;
+  state.comparisonTimelines = [];
+  state.comparisonBaseSession = null;
+  $("comparisonResults").hidden = true;
+  $("comparisonIdentity").replaceChildren();
+  $("comparisonCards").replaceChildren();
+  $("comparisonHead").replaceChildren();
+  $("comparisonRows").replaceChildren();
+  $("comparisonStatus").textContent = message;
+}
+function renderComparisonBasket() {
+  const root = $("comparisonBasket");
+  root.replaceChildren();
+  const basket = state.comparisonBasket;
+  $("comparisonCount").textContent = `${basket.length}/3`;
+  $("compareSymbols").disabled = basket.length < 2 || basket.length > 3;
+  $("clearComparison").disabled =
+    basket.length === 0 && state.comparisonTimelines.length === 0;
+  $("comparisonNotice").textContent =
+    state.comparisonMessage ||
+    (basket.length
+      ? `同一快照 ${basket[0].target_session} · namespace ${basket[0].namespace_id} · source_set ${basket[0].source_set_id} · SHA ${basket[0].package_sha256} · profile_revision ${basket[0].profile_revision}。`
+      : "从两日RAW关系结果或完整PG画像页加入同一来源快照的代码。");
+  if (!basket.length) {
+    appendText(root, "span", "尚未选择来源代码。", "muted");
+    return;
+  }
+  for (const item of basket) {
+    const chip = document.createElement("div");
+    chip.className = "comparison-item";
+    appendText(chip, "strong", item.source_symbol);
+    appendText(chip, "span", item.origin_label, "muted");
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "quiet";
+    remove.textContent = "移除";
+    remove.addEventListener("click", () =>
+      removeComparisonCandidate(item.source_symbol),
+    );
+    chip.append(remove);
+    root.append(chip);
+  }
+}
+function removeComparisonCandidate(sourceSymbol) {
+  state.comparisonBasket = state.comparisonBasket.filter(
+    (item) => item.source_symbol !== sourceSymbol,
+  );
+  state.comparisonMessage = `已移除 ${sourceSymbol}；原筛选条件和分页保持不变。`;
+  invalidateComparisonResults(
+    "选择已变化；请重新读取同一快照下的75个官方会话。",
+  );
+  renderComparisonBasket();
+}
+function clearComparisonBasket(
+  message = "临时对照已清空；筛选结果和分页保持不变。",
+) {
+  if (state.timelineContext?.origin === "comparison") returnFromComparison();
+  state.comparisonBasket = [];
+  state.comparisonMessage = message;
+  invalidateComparisonResults(message);
+  renderComparisonBasket();
+}
+function invalidateComparisonForSnapshot(snapshot, sourceLabel) {
+  if (!state.comparisonBasket.length) return;
+  if (
+    snapshot &&
+    sameComparisonIdentity(
+      snapshot,
+      comparisonIdentityOf(state.comparisonBasket[0]),
+    )
+  )
+    return;
+  clearComparisonBasket(
+    `${sourceLabel}已切换；旧对照身份已失效并清空。若需比较新快照，请从新结果重新选择。`,
+  );
+}
+function exactFraction(raw) {
+  if (raw === null || raw === undefined) return null;
+  const source = String(raw).trim();
+  const ratio = source.match(/^([+-]?\d+)\s*\/\s*([+-]?\d+)$/);
+  if (ratio) {
+    const denominator = BigInt(ratio[2]);
+    if (denominator === 0n) return null;
+    const sign = denominator < 0n ? -1n : 1n;
+    return {
+      numerator: BigInt(ratio[1]) * sign,
+      denominator: denominator * sign,
+    };
+  }
+  const decimal = source.match(/^([+-]?)(\d+)(?:\.(\d*))?(?:e([+-]?\d+))?$/i);
+  if (!decimal) return null;
+  const digits = `${decimal[2]}${decimal[3] || ""}`;
+  let numerator = BigInt(digits || "0");
+  if (decimal[1] === "-") numerator = -numerator;
+  let scale = (decimal[3] || "").length - Number(decimal[4] || 0);
+  if (!Number.isSafeInteger(scale) || Math.abs(scale) > 100) return null;
+  if (scale < 0) {
+    numerator *= 10n ** BigInt(-scale);
+    scale = 0;
+  }
+  return { numerator, denominator: 10n ** BigInt(scale) };
+}
+function rawCloseFraction(field) {
+  if (!field || field.quality !== "OBSERVED") return null;
+  const value = field.value;
+  const exact =
+    value && typeof value === "object" ? (value.exact ?? value.decimal) : value;
+  const fraction = exactFraction(exact);
+  return fraction?.numerator > 0n ? fraction : null;
+}
+function normalizedIndexFraction(close, base) {
+  if (!close || !base || base.numerator <= 0n) return null;
+  return {
+    numerator: 100n * close.numerator * base.denominator,
+    denominator: close.denominator * base.numerator,
+  };
+}
+function formatIndexFraction(fraction) {
+  if (!fraction || fraction.numerator < 0n || fraction.denominator <= 0n)
+    return "UNKNOWN";
+  const doubledCents = fraction.numerator * 200n;
+  const cents =
+    (doubledCents + fraction.denominator) / (2n * fraction.denominator);
+  const whole = cents / 100n;
+  const decimal = String(cents % 100n).padStart(2, "0");
+  return `${whole}.${decimal}`;
+}
+function comparisonFieldText(field) {
+  if (!field || field.quality !== "OBSERVED") {
+    return `UNKNOWN · ${text(field?.reason || field?.quality || "字段未提供")}`;
+  }
+  const value = field.value;
+  const displayed =
+    value && typeof value === "object"
+      ? (value.decimal ?? value.exact ?? "—")
+      : (value ?? "—");
+  return `${text(displayed)} · OBSERVED`;
+}
+function comparisonRelationText(relation, reason) {
+  return relation
+    ? `${priceRelationLabels[relation] || text(relation)}`
+    : `UNKNOWN · ${text(reason || "关系字段未提供")}`;
+}
+function comparisonAxis(entries, selectionCount) {
+  const valid = entries.filter((entry) => entry.data);
+  const sessionDates = Array.from(
+    new Set(
+      valid.flatMap((entry) =>
+        entry.data.points.map((point) => point.session_date),
+      ),
+    ),
+  ).sort();
+  const maps = new Map(
+    valid.map((entry) => [
+      entry.selection.source_symbol,
+      new Map(entry.data.points.map((point) => [point.session_date, point])),
+    ]),
+  );
+  let baseSession = null;
+  if (valid.length === selectionCount && valid.length >= 2) {
+    baseSession =
+      sessionDates.find((session) =>
+        valid.every((entry) =>
+          rawCloseFraction(
+            maps.get(entry.selection.source_symbol)?.get(session)?.raw_close,
+          ),
+        ),
+      ) || null;
+  }
+  const bases = new Map();
+  if (baseSession) {
+    for (const entry of valid) {
+      bases.set(
+        entry.selection.source_symbol,
+        rawCloseFraction(
+          maps.get(entry.selection.source_symbol).get(baseSession)?.raw_close,
+        ),
+      );
+    }
+  }
+  return { valid, sessionDates, maps, baseSession, bases };
+}
+function renderComparisonSummary(entry) {
+  const card = document.createElement("article");
+  card.className = "comparison-card";
+  appendText(
+    card,
+    "h3",
+    `${entry.selection.source_symbol} · ${entry.selection.target_session}`,
+  );
+  if (!entry.data) {
+    appendText(card, "p", `75会话未返回：${entry.error}`, "message");
+    return card;
+  }
+  const data = entry.data;
+  const target = data.points.find(
+    (point) => point.session_date === entry.selection.target_session,
+  );
+  appendText(
+    card,
+    "p",
+    `RAW收盘 ${comparisonFieldText(target?.raw_close)} · Bar ${text(target?.raw_status)} · ${text(target?.price_reason || "无价格原因")}`,
+  );
+  appendText(
+    card,
+    "p",
+    `MA20 ${comparisonFieldText(target?.core_ma20)} · C/MA20 ${comparisonRelationText(target?.close_vs_ma20, target?.relation_unknown_reason)}`,
+  );
+  appendText(
+    card,
+    "p",
+    `严格前20高点 ${comparisonFieldText(target?.core_prior_high20)} · C/前高20 ${comparisonRelationText(target?.close_vs_prior_high20, target?.prior_high20_relation_unknown_reason)}`,
+  );
+  appendText(
+    card,
+    "p",
+    `MA5/10/20/60排列 ${formatMovingAverageOrder(target?.moving_average_order)} · 有效Bar ${data.valid_price_bar_count}/${data.total_session_count}`,
+  );
+  appendText(
+    card,
+    "p",
+    `namespace ${data.namespace_id} · source_set ${data.snapshot_identity.source_set_id} · package SHA ${data.package_sha256} · profile_revision ${entry.selection.profile_revision}`,
+  );
+  appendText(
+    card,
+    "p",
+    `${data.price_coordinate} · ${data.identity_status} · ${data.pit_status} · 历史行 ${data.raw_row_count}/${data.total_session_count}`,
+    "muted",
+  );
+  return card;
+}
+function renderComparisonResults() {
+  const entries = state.comparisonTimelines;
+  const basket = state.comparisonBasket;
+  const successful = entries.filter((entry) => entry.data);
+  const failed = entries.filter((entry) => !entry.data);
+  const axis = comparisonAxis(entries, basket.length);
+  state.comparisonBaseSession = axis.baseSession;
+  $("comparisonResults").hidden = entries.length === 0;
+  $("comparisonCards").replaceChildren();
+  for (const entry of entries)
+    $("comparisonCards").append(renderComparisonSummary(entry));
+  const identity = basket[0];
+  if (identity) {
+    $("comparisonIdentity").textContent =
+      `统一目标 ${identity.target_session} · namespace ${identity.namespace_id} · source_set ${identity.source_set_id} · 完整 package SHA ${identity.package_sha256} · profile_revision ${identity.profile_revision} · ` +
+      `官方会话窗 ${successful[0]?.data?.calendar_id || "—"}/${successful[0]?.data?.calendar_revision || "—"} · RAW_UNADJUSTED / NON_PIT。` +
+      (axis.baseSession
+        ? `共同有效收盘基准 ${axis.baseSession}；只按精确有理数计算、显示时四舍五入2位。`
+        : `共同有效收盘基准 UNKNOWN${failed.length ? "（至少一只历史未返回，不能用子集建立基准）" : ""}。`);
+  }
+  $("comparisonStatus").textContent =
+    `${entries.length}只请求 · ${successful.length}只轨迹有效 · ${failed.length}只未返回 · ` +
+    `${axis.sessionDates.length}个官方会话日期${axis.baseSession ? ` · t0=${axis.baseSession}` : " · 指数基准UNKNOWN"}。`;
+  const head = $("comparisonHead");
+  head.replaceChildren();
+  const headerRow = document.createElement("tr");
+  const dateHeader = document.createElement("th");
+  dateHeader.textContent = "官方会话日期";
+  headerRow.append(dateHeader);
+  for (const entry of entries) {
+    const th = document.createElement("th");
+    appendText(th, "strong", entry.selection.source_symbol);
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "quiet";
+    open.textContent = "查看单股日K/周月K与Core";
+    open.disabled = !entry.data;
+    open.addEventListener("click", () =>
+      openComparisonTimeline(entry.selection.source_symbol),
+    );
+    const actions = document.createElement("div");
+    actions.className = "comparison-source-actions";
+    actions.append(open);
+    th.append(actions);
+    headerRow.append(th);
+  }
+  head.append(headerRow);
+  const body = $("comparisonRows");
+  body.replaceChildren();
+  if (!axis.sessionDates.length) {
+    tableRow(body, [
+      "没有可显示的官方会话轨迹。",
+      ...entries.map((entry) => entry.error || ""),
+    ]);
+    return;
+  }
+  for (const session of axis.sessionDates) {
+    const row = document.createElement("tr");
+    row.dataset.targetSession = String(session === identity?.target_session);
+    cell(row, session);
+    for (const entry of entries) {
+      const td = document.createElement("td");
+      const facts = document.createElement("div");
+      facts.className = "comparison-symbol-facts";
+      const point = axis.maps.get(entry.selection.source_symbol)?.get(session);
+      if (!entry.data || !point) {
+        appendText(
+          facts,
+          "span",
+          `RAW收盘 UNKNOWN · ${entry.error || "该官方会话未返回轨迹点"}`,
+        );
+        appendText(facts, "span", "MA20 UNKNOWN · 该日无对应Core点");
+        appendText(facts, "span", "前高20 UNKNOWN · 该日无对应Core点");
+        appendText(
+          facts,
+          "span",
+          `RAW指数 UNKNOWN · ${axis.baseSession ? "该代码或日期数据未返回" : "无共同基准"}`,
+          "comparison-index",
+        );
+        td.append(facts);
+        row.append(td);
+        continue;
+      }
+      const close = point.raw_close;
+      const ma20 = point.core_ma20;
+      const priorHigh = point.core_prior_high20;
+      const closeReason =
+        close?.quality === "OBSERVED"
+          ? point.price_reason || close.reason || "无"
+          : close?.reason ||
+            point.price_reason ||
+            close?.quality ||
+            "未提供原因";
+      appendText(
+        facts,
+        "span",
+        `RAW收盘 ${comparisonFieldText(close)} · ${text(point.raw_status)} · 原因 ${text(closeReason)}`,
+      );
+      appendText(
+        facts,
+        "span",
+        `MA20 ${comparisonFieldText(ma20)} · C/MA20 ${comparisonRelationText(point.close_vs_ma20, point.relation_unknown_reason)}`,
+      );
+      appendText(
+        facts,
+        "span",
+        `严格前高20 ${comparisonFieldText(priorHigh)} · C/前高20 ${comparisonRelationText(point.close_vs_prior_high20, point.prior_high20_relation_unknown_reason)}`,
+      );
+      appendText(
+        facts,
+        "span",
+        `MA5/10/20/60 ${formatMovingAverageOrder(point.moving_average_order)}`,
+      );
+      let indexText;
+      if (!axis.baseSession) {
+        indexText = "UNKNOWN · 无共同有效收盘基准";
+      } else if (session < axis.baseSession) {
+        indexText = `共同基准 ${axis.baseSession} 以前无指数`;
+      } else {
+        const closeFraction = rawCloseFraction(close);
+        const indexFraction = normalizedIndexFraction(
+          closeFraction,
+          axis.bases.get(entry.selection.source_symbol),
+        );
+        indexText = indexFraction
+          ? formatIndexFraction(indexFraction)
+          : `UNKNOWN · ${text(close?.reason || point.price_reason || close?.quality || "RAW收盘不可观察")}`;
+      }
+      appendText(
+        facts,
+        "strong",
+        `相对已存RAW价格指数 ${indexText}`,
+        "comparison-index",
+      );
+      td.append(facts);
+      row.append(td);
+    }
+    body.append(row);
+  }
+}
+function validateComparisonTimeline(data, selection) {
+  if (
+    data.price_coordinate !== "RAW_UNADJUSTED" ||
+    data.symbol !== selection.source_symbol ||
+    data.target_session !== selection.target_session ||
+    data.package_sha256 !== selection.package_sha256 ||
+    data.namespace_id !== selection.namespace_id ||
+    data.selection?.source_symbol !== selection.source_symbol ||
+    data.selection?.target_session !== selection.target_session ||
+    data.selection?.package_sha256 !== selection.package_sha256 ||
+    data.selection?.session_count !== 75 ||
+    data.selection?.namespace_id !== selection.namespace_id ||
+    data.selection?.source_set_id !== selection.source_set_id ||
+    data.snapshot_identity?.namespace_id !== selection.namespace_id ||
+    data.snapshot_identity?.target_session !== selection.target_session ||
+    data.snapshot_identity?.package_sha256 !== selection.package_sha256 ||
+    data.snapshot_identity?.source_set_id !== selection.source_set_id ||
+    data.formal_source_set?.status !== "AVAILABLE" ||
+    data.formal_source_set?.source_set_id !== selection.source_set_id ||
+    data.total_session_count > 75 ||
+    !Array.isArray(data.points) ||
+    data.points.length !== data.total_session_count
+  )
+    throw new Error(
+      "75会话响应的代码、RAW坐标或完整SEALED身份不匹配，已拒绝加入对照。",
+    );
+  const dates = data.points.map((point) => point.session_date);
+  if (
+    dates.some((value, index) => index > 0 && dates[index - 1] >= value) ||
+    data.points.some(
+      (point) =>
+        point.source_symbol !== selection.source_symbol ||
+        point.package_sha256 !== selection.package_sha256 ||
+        point.namespace_id !== selection.namespace_id,
+    )
+  )
+    throw new Error("轨迹日期或逐日来源身份不完整，已拒绝同日合并。");
+  return data;
+}
+async function compareSelectedSymbols() {
+  const basket = state.comparisonBasket.map((item) => ({ ...item }));
+  if (basket.length < 2 || basket.length > 3) {
+    state.comparisonMessage = "请选择2至3个同一精确SEALED快照的不同来源代码。";
+    renderComparisonBasket();
+    return;
+  }
+  const identity = comparisonIdentityOf(basket[0]);
+  if (
+    basket.some(
+      (item) => !sameComparisonIdentity(comparisonIdentityOf(item), identity),
+    )
+  ) {
+    state.comparisonMessage = "选择篮包含不同来源版本；请清空后重新选择。";
+    renderComparisonBasket();
+    return;
+  }
+  const requestId = ++state.comparisonRequest;
+  state.comparisonTimelines = [];
+  state.comparisonBaseSession = null;
+  $("comparisonResults").hidden = true;
+  $("comparisonStatus").textContent =
+    `正在并行读取${basket.length}只股票各75个官方会话…`;
+  $("compareSymbols").disabled = true;
+  const entries = await Promise.all(
+    basket.map(async (selection) => {
+      try {
+        const data = await api("/api/preview/stock-timeline", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            symbol: selection.source_symbol,
+            target_session: selection.target_session,
+            package_sha256: selection.package_sha256,
+            session_count: 75,
+            source_set_id: selection.source_set_id,
+            namespace_id: selection.namespace_id,
+          }),
+        });
+        return {
+          selection,
+          data: validateComparisonTimeline(data, selection),
+          error: null,
+        };
+      } catch (error) {
+        return { selection, data: null, error: error.message };
+      }
+    }),
+  );
+  const currentKey = state.comparisonBasket
+    .map(
+      (item) =>
+        `${item.source_symbol}|${item.target_session}|${item.namespace_id}|${item.source_set_id}|${item.package_sha256}|${item.profile_revision}`,
+    )
+    .join(";");
+  const requestKey = basket
+    .map(
+      (item) =>
+        `${item.source_symbol}|${item.target_session}|${item.namespace_id}|${item.source_set_id}|${item.package_sha256}|${item.profile_revision}`,
+    )
+    .join(";");
+  if (requestId !== state.comparisonRequest || currentKey !== requestKey)
+    return;
+  const reference = entries.find((entry) => entry.data)?.data;
+  if (reference) {
+    for (const entry of entries) {
+      if (
+        entry.data &&
+        (entry.data.calendar_id !== reference.calendar_id ||
+          entry.data.calendar_revision !== reference.calendar_revision ||
+          entry.data.session_start !== reference.session_start ||
+          entry.data.total_session_count !== reference.total_session_count)
+      ) {
+        entry.data = null;
+        entry.error =
+          "官方会话日历版本或窗口与其它代码不一致，已拒绝跨轴对齐。";
+      }
+    }
+  }
+  state.comparisonTimelines = entries;
+  $("comparisonResults").hidden = false;
+  renderComparisonResults();
+  $("comparisonResults").scrollIntoView({ behavior: "smooth", block: "start" });
+  renderComparisonBasket();
+}
+function openComparisonTimeline(sourceSymbol) {
+  const entry = state.comparisonTimelines.find(
+    (item) => item.selection.source_symbol === sourceSymbol,
+  );
+  if (!entry?.data) return;
+  if (!state.comparisonReturnForm) {
+    state.comparisonReturnForm = {
+      version: $("versionSelect").value,
+      symbol: $("symbolInput").value,
+      window: $("windowInput").value,
+    };
+  }
+  state.timelineRequest++;
+  state.timeline = entry.data;
+  state.timelineContext = {
+    target_session: entry.selection.target_session,
+    package_sha256: entry.selection.package_sha256,
+    symbol: entry.selection.source_symbol,
+    session_count: 75,
+    namespace_id: entry.selection.namespace_id,
+    source_set_id: entry.selection.source_set_id,
+    origin: "comparison",
+  };
+  state.chartPeriodContext = chartContextForTimeline(entry.data);
+  state.chartMode = "day";
+  state.chartSelection = null;
+  clearRawPeriodState(
+    "已复用多股对照已读取的75会话；闭周/月视图按需读现役PG Raw周期接口。",
+  );
+  clearResult();
+  $("stockResult").classList.add("timeline-only");
+  $("stockResult").hidden = false;
+  $("resultTitle").textContent =
+    `${sourceSymbol} · ${entry.selection.target_session}`;
+  $("resultMode").textContent =
+    "复用多股对照的现役75会话轨迹 · SOURCE_SYMBOL_ONLY · RAW_UNADJUSTED · NON_PIT";
+  $("snapshotId").textContent = entry.selection.package_sha256;
+  $("windowText").textContent = "75个官方会话";
+  $("versionSelect").value =
+    `${entry.selection.target_session}|${entry.selection.package_sha256}`;
+  $("symbolInput").value = sourceSymbol;
+  $("windowInput").value = "75";
+  renderTimeline(entry.data);
+  $("timelinePanel").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function returnFromComparison() {
+  const returnForm = state.comparisonReturnForm;
+  state.timelineRequest++;
+  state.timeline = null;
+  state.timelineContext = null;
+  state.chartPeriodContext = null;
+  state.chartSelection = null;
+  state.chartMode = "day";
+  clearRawPeriodState("返回多股对照；原临时选择、t0和筛选分页仍保留。");
+  renderTimeline(null);
+  clearResult();
+  if (returnForm) {
+    $("versionSelect").value = returnForm.version;
+    $("symbolInput").value = returnForm.symbol;
+    $("windowInput").value = returnForm.window;
+  }
+  state.comparisonReturnForm = null;
+  $("comparisonTitle").scrollIntoView({ behavior: "smooth", block: "start" });
+}
 const priceProfileFieldIds = new Set([
   "profile.trend",
   "profile.position",
@@ -1434,11 +2091,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-    snapshot.target_session === point.session_date &&
-    snapshot.package_sha256 === point.package_sha256 &&
-    snapshot.namespace_id === point.namespace_id &&
-    snapshot.source_set_id === selectedSourceSet &&
-    snapshot.field_ids?.length,
+      snapshot.target_session === point.session_date &&
+      snapshot.package_sha256 === point.package_sha256 &&
+      snapshot.namespace_id === point.namespace_id &&
+      snapshot.source_set_id === selectedSourceSet &&
+      snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -1862,7 +2519,14 @@ function returnToProfileBreadthMembers() {
 }
 function renderTimelineReturnControls(context, selected) {
   const returnRoot = $("timelineReturn");
-  if (context?.origin === "breadth") {
+  if (context?.origin === "comparison") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = "返回多股对照";
+    button.addEventListener("click", returnFromComparison);
+    returnRoot.append(button);
+  } else if (context?.origin === "breadth") {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "quiet";
@@ -3913,7 +4577,10 @@ function renderRelationScreen(data, requestId) {
     button.className = "quiet";
     button.textContent = "双日详情 / 75日轨迹";
     button.addEventListener("click", () => openRelationDetail(item));
-    detail.append(button);
+    detail.append(
+      button,
+      makeComparisonAddButton(relationComparisonCandidate(item)),
+    );
     row.append(detail);
     root.append(row);
   }
@@ -5083,7 +5750,18 @@ async function loadProfilePage() {
       detailButton.className = "quiet";
       detailButton.textContent = "详情";
       detailButton.addEventListener("click", () => showProfileDetail(item));
-      detailCell.append(detailButton);
+      detailCell.append(
+        detailButton,
+        makeComparisonAddButton({
+          source_symbol: item.source_symbol,
+          target_session: item.target_session,
+          namespace_id: item.namespace_id,
+          source_set_id: item.source_set_id,
+          package_sha256: item.package_sha256,
+          profile_revision: item.profile_revision,
+          origin_label: "完整PG价格画像",
+        }),
+      );
       tr.append(detailCell);
       $("profileRows").append(tr);
     }
@@ -5197,6 +5875,10 @@ $("profileSymbolInput").addEventListener("keydown", (event) => {
   }
 });
 $("profileSnapshotSelect").addEventListener("change", () => {
+  invalidateComparisonForSnapshot(
+    selectedProfileSnapshot(),
+    "完整PG价格画像快照",
+  );
   submitProfileSearch();
 });
 for (const id of [
@@ -5318,6 +6000,11 @@ $("changeSymbolInput").addEventListener("keydown", (event) => {
 });
 for (const id of ["changeBeforeSelect", "changeAfterSelect"]) {
   $(id).addEventListener("change", () => {
+    if (id === "changeAfterSelect")
+      invalidateComparisonForSnapshot(
+        selectedChangeSnapshot(id),
+        "两日结束快照",
+      );
     state.changeOffset = 0;
     state.relationOffset = 0;
     clearRelationScreen(
@@ -5327,6 +6014,21 @@ for (const id of ["changeBeforeSelect", "changeAfterSelect"]) {
     loadPriceRelations();
   });
 }
+$("versionSelect").addEventListener("change", () => {
+  const selected = selectedVersion();
+  const binding = state.comparisonBasket[0];
+  if (
+    binding &&
+    (!selected ||
+      selected.target_session !== binding.target_session ||
+      selected.package_sha256 !== binding.package_sha256)
+  )
+    clearComparisonBasket(
+      "预览来源日期或包SHA已切换；旧临时对照已失效并清空。",
+    );
+});
+$("compareSymbols").addEventListener("click", compareSelectedSymbols);
+$("clearComparison").addEventListener("click", () => clearComparisonBasket());
 $("changeTypeSelect").addEventListener("change", () => {
   state.changeOffset = 0;
   loadChanges();
@@ -5414,6 +6116,7 @@ $("priceRelationKindFilter").addEventListener("change", () =>
 $("showPriceRelationUnknown").addEventListener("change", () =>
   renderPriceRelationHistory(state.timeline?.price_relation_history || null),
 );
+renderComparisonBasket();
 void (async () => {
   await loadCatalog();
   await loadProfileSnapshots();

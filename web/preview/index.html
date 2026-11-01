@@ -26,6 +26,39 @@
         >
       </section>
       <section
+        class="panel comparison-browser"
+        aria-labelledby="comparisonTitle"
+      >
+        <div class="panel-head">
+          <div>
+            <h2 id="comparisonTitle">临时多股对照</h2>
+            <p>
+              只在当前网页内存中保留最多3只来源代码；须来自同一精确SEALED快照。RAW指数从全部所选代码首个共同有效收盘设为100，不是复权收益、RPS或交易信号。
+            </p>
+          </div>
+          <span id="comparisonCount" class="count">0/3</span>
+        </div>
+        <div id="comparisonNotice" class="population" role="status">
+          从两日RAW关系结果或完整PG画像页加入同一来源快照的代码。
+        </div>
+        <div id="comparisonBasket" class="comparison-basket"></div>
+        <div class="comparison-controls">
+          <button id="compareSymbols" type="button" disabled>对照75会话</button>
+          <button id="clearComparison" class="quiet" type="button">清空</button>
+          <span id="comparisonStatus" class="muted">尚未读取历史。</span>
+        </div>
+        <div id="comparisonResults" hidden>
+          <div id="comparisonIdentity" class="population"></div>
+          <div id="comparisonCards" class="comparison-cards"></div>
+          <div class="table-wrap">
+            <table class="comparison-table">
+              <thead id="comparisonHead"></thead>
+              <tbody id="comparisonRows"></tbody>
+            </table>
+          </div>
+        </div>
+      </section>
+      <section
         class="panel change-browser"
         aria-labelledby="changeBrowserTitle"
       >
