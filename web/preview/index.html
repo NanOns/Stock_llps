@@ -56,6 +56,109 @@
               <tbody id="comparisonRows"></tbody>
             </table>
           </div>
+          <section
+            id="comparisonEventHistory"
+            class="comparison-event-history"
+            aria-labelledby="comparisonEventTitle"
+            hidden
+          >
+            <div class="panel-head">
+              <div>
+                <h3 id="comparisonEventTitle">
+                  同日价格关系事件与近期会话回看
+                </h3>
+                <p>
+                  按完整 observations
+                  对齐官方会话与字段。关系未变化只表示前后关系相同；不可比和未记录均单独保留。
+                  这是 SOURCE_SYMBOL_ONLY / RAW_UNADJUSTED / NON_PIT
+                  的后验事实，不是信号或全市场排名。
+                </p>
+              </div>
+              <span id="comparisonEventCount" class="count">等待轨迹</span>
+            </div>
+            <div class="comparison-event-controls">
+              <label>
+                近期官方会话窗口
+                <select id="comparisonEventWindow">
+                  <option value="5" selected>最近5个官方会话</option>
+                  <option value="10">最近10个官方会话</option>
+                </select>
+              </label>
+              <label>
+                价格关系字段
+                <select id="comparisonEventField">
+                  <option value="ALL">全部实际字段</option>
+                </select>
+              </label>
+              <label>
+                状态 / 真实事件类型
+                <select id="comparisonEventKind">
+                  <option value="ALL">全部状态与事件</option>
+                </select>
+              </label>
+            </div>
+            <div
+              id="comparisonEventSummaryStatus"
+              class="population"
+              role="status"
+            ></div>
+            <section class="comparison-event-subsection">
+              <h4>最近窗口逐代码、逐字段计数</h4>
+              <div class="table-wrap comparison-event-summary-wrap">
+                <table class="comparison-event-summary-table">
+                  <thead>
+                    <tr>
+                      <th>来源代码</th>
+                      <th>价格关系字段</th>
+                      <th>窗口会话数</th>
+                      <th>可比较</th>
+                      <th>已变化</th>
+                      <th>未变化</th>
+                      <th>不可比</th>
+                      <th>未记录</th>
+                      <th>轨迹状态</th>
+                    </tr>
+                  </thead>
+                  <tbody id="comparisonEventSummaryRows"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="comparison-event-subsection">
+              <h4>窗口内实际变化事件</h4>
+              <p class="muted">
+                事件条目与下方矩阵中的来源代码、日期、字段和 event_kind
+                对应；点击可复用本次已读轨迹定位日K与Core。
+              </p>
+              <div class="table-wrap comparison-event-list-wrap">
+                <table class="comparison-event-list-table">
+                  <thead>
+                    <tr>
+                      <th>官方会话日期</th>
+                      <th>字段</th>
+                      <th>同日关系</th>
+                      <th>来源代码与真实事件类型</th>
+                    </tr>
+                  </thead>
+                  <tbody id="comparisonEventListRows"></tbody>
+                </table>
+              </div>
+            </section>
+            <section class="comparison-event-subsection">
+              <h4>75会话同日、同字段关系矩阵</h4>
+              <p class="muted">
+                未返回该日期与字段的观察记录显示 UNKNOWN /
+                NOT_RECORDED，不由变化子集推导“未变化”。
+                只有全部选中代码均真实变化且 event_kind
+                一致时，才标为同日同字段同类型。
+              </p>
+              <div class="table-wrap comparison-event-matrix-wrap">
+                <table class="comparison-event-matrix-table">
+                  <thead id="comparisonEventMatrixHead"></thead>
+                  <tbody id="comparisonEventMatrixRows"></tbody>
+                </table>
+              </div>
+            </section>
+          </section>
         </div>
       </section>
       <section

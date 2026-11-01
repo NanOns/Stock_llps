@@ -36,6 +36,9 @@ const state = {
   comparisonTimelines: [],
   comparisonBaseSession: null,
   comparisonReturnForm: null,
+  comparisonEventWindow: 5,
+  comparisonEventField: "ALL",
+  comparisonEventKind: "ALL",
   profileBreadthRequest: 0,
   profileBreadthData: null,
   profileBreadthBinding: null,
@@ -1477,10 +1480,15 @@ function invalidateComparisonResults(message) {
   state.comparisonTimelines = [];
   state.comparisonBaseSession = null;
   $("comparisonResults").hidden = true;
+  $("comparisonEventHistory").hidden = true;
   $("comparisonIdentity").replaceChildren();
   $("comparisonCards").replaceChildren();
   $("comparisonHead").replaceChildren();
   $("comparisonRows").replaceChildren();
+  $("comparisonEventSummaryRows").replaceChildren();
+  $("comparisonEventListRows").replaceChildren();
+  $("comparisonEventMatrixHead").replaceChildren();
+  $("comparisonEventMatrixRows").replaceChildren();
   $("comparisonStatus").textContent = message;
 }
 function renderComparisonBasket() {
@@ -1704,6 +1712,499 @@ function renderComparisonSummary(entry) {
   );
   return card;
 }
+function comparisonEventFieldIds(entries) {
+  const fieldIds = new Set();
+  for (const entry of entries) {
+    const history = entry.data?.price_relation_history;
+    Object.keys(history?.field_statistics || {}).forEach((fieldId) =>
+      fieldIds.add(fieldId),
+    );
+    (history?.observations || []).forEach((observation) => {
+      if (observation.field_id) fieldIds.add(observation.field_id);
+    });
+  }
+  const knownOrder = new Map(
+    Object.keys(timelinePriceFieldLabels).map((fieldId, index) => [
+      fieldId,
+      index,
+    ]),
+  );
+  return Array.from(fieldIds).sort((left, right) => {
+    const leftRank = knownOrder.get(left) ?? Number.MAX_SAFE_INTEGER;
+    const rightRank = knownOrder.get(right) ?? Number.MAX_SAFE_INTEGER;
+    return leftRank - rightRank || left.localeCompare(right);
+  });
+}
+function comparisonEventFieldLabel(fieldId) {
+  const label = timelinePriceFieldLabels[fieldId] || fieldId;
+  return label + "（" + fieldId + "）";
+}
+function comparisonEventIndexes(entries) {
+  return entries.map((entry) => {
+    const observations = new Map();
+    for (const observation of entry.data?.price_relation_history
+      ?.observations || []) {
+      observations.set(
+        observation.session_date + "|" + observation.field_id,
+        observation,
+      );
+    }
+    return { entry, observations };
+  });
+}
+function comparisonEventFilterOptions(entries) {
+  const eventKinds = new Set();
+  for (const entry of entries) {
+    for (const observation of entry.data?.price_relation_history
+      ?.observations || []) {
+      if (
+        observation.comparison_status === "RELATION_CHANGED" &&
+        observation.event_kind
+      )
+        eventKinds.add(observation.event_kind);
+    }
+  }
+  const options = [
+    { value: "ALL", label: "全部状态与事件" },
+    { value: "RELATION_CHANGED", label: "所有关系变化" },
+    { value: "NO_RELATION_CHANGE", label: "关系未变化" },
+    { value: "NOT_COMPARABLE", label: "不可比 / UNKNOWN" },
+    { value: "NOT_RECORDED", label: "未知 / 未记录" },
+  ];
+  for (const eventKind of Array.from(eventKinds).sort()) {
+    options.push({
+      value: "EVENT:" + eventKind,
+      label:
+        (priceRelationKindLabels[eventKind] || eventKind) +
+        "（" +
+        eventKind +
+        "）",
+    });
+  }
+  return options;
+}
+function setComparisonEventSelect(select, options, selectedValue) {
+  select.replaceChildren();
+  for (const item of options) {
+    const option = document.createElement("option");
+    option.value = item.value;
+    option.textContent = item.label;
+    select.append(option);
+  }
+  select.value = options.some((item) => item.value === selectedValue)
+    ? selectedValue
+    : "ALL";
+}
+function comparisonEventFilterMatches(filter, observation) {
+  if (filter === "ALL") return true;
+  if (!observation) return filter === "NOT_RECORDED";
+  if (filter.startsWith("EVENT:"))
+    return (
+      observation.comparison_status === "RELATION_CHANGED" &&
+      observation.event_kind === filter.slice("EVENT:".length)
+    );
+  if (filter === "RELATION_CHANGED")
+    return observation.comparison_status === "RELATION_CHANGED";
+  return observation.comparison_status === filter;
+}
+function comparisonEventStatusLabel(status) {
+  const labels = {
+    RELATION_CHANGED: "真实关系变化",
+    NO_RELATION_CHANGE: "关系未变化",
+    NOT_COMPARABLE: "不可比较 / UNKNOWN",
+    NOT_RECORDED: "UNKNOWN / NOT_RECORDED",
+    NOT_RETURNED: "轨迹未返回",
+  };
+  return labels[status] || status;
+}
+function comparisonEventEvidence(observation) {
+  const before = observation.before_relation || "UNKNOWN";
+  const after = observation.after_relation || "UNKNOWN";
+  const kind =
+    observation.event_kind &&
+    (priceRelationKindLabels[observation.event_kind] || observation.event_kind);
+  const quality =
+    "前态 " +
+    priceRelationSideText(observation, "before") +
+    "；当日 " +
+    priceRelationSideText(observation, "after");
+  const reason =
+    observation.reason_summary || (observation.reason_codes || []).join("、");
+  return {
+    relation:
+      (priceRelationLabels[before] || before) +
+      " → " +
+      (priceRelationLabels[after] || after),
+    kind,
+    quality,
+    reason,
+  };
+}
+function renderComparisonEventHistory(axis) {
+  const panel = $("comparisonEventHistory");
+  const entries = state.comparisonTimelines;
+  const basket = state.comparisonBasket;
+  const summaryRows = $("comparisonEventSummaryRows");
+  const eventListRows = $("comparisonEventListRows");
+  const matrixHead = $("comparisonEventMatrixHead");
+  const matrixRows = $("comparisonEventMatrixRows");
+  if (!panel) return;
+  summaryRows.replaceChildren();
+  eventListRows.replaceChildren();
+  matrixHead.replaceChildren();
+  matrixRows.replaceChildren();
+  if (!entries.length) {
+    panel.hidden = true;
+    return;
+  }
+  panel.hidden = false;
+
+  const fieldIds = comparisonEventFieldIds(entries);
+  const fieldOptions = [
+    { value: "ALL", label: "全部实际字段" },
+    ...fieldIds.map((fieldId) => ({
+      value: fieldId,
+      label: comparisonEventFieldLabel(fieldId),
+    })),
+  ];
+  setComparisonEventSelect(
+    $("comparisonEventField"),
+    fieldOptions,
+    state.comparisonEventField,
+  );
+  state.comparisonEventField = $("comparisonEventField").value;
+  const eventOptions = comparisonEventFilterOptions(entries);
+  setComparisonEventSelect(
+    $("comparisonEventKind"),
+    eventOptions,
+    state.comparisonEventKind,
+  );
+  state.comparisonEventKind = $("comparisonEventKind").value;
+
+  const windowCount = Number(state.comparisonEventWindow);
+  const windowDates = axis.sessionDates.slice(-windowCount);
+  const windowDateSet = new Set(windowDates);
+  const indexes = comparisonEventIndexes(entries);
+  const selectedFieldIds =
+    state.comparisonEventField === "ALL"
+      ? fieldIds
+      : fieldIds.filter((fieldId) => fieldId === state.comparisonEventField);
+  const summaryWindow =
+    windowDates.length > 0
+      ? windowDates[0] + " 至 " + windowDates[windowDates.length - 1]
+      : "没有共同官方会话日期";
+  const failed = entries.filter((entry) => !entry.data);
+  const summaryParts = [
+    "窗口取 comparisonAxis 的最近 " +
+      windowCount +
+      " 个官方会话：" +
+      summaryWindow +
+      "（实际 " +
+      windowDates.length +
+      "/" +
+      windowCount +
+      " 个）",
+    "当前临时篮 " + basket.length + " 只",
+    "筛选字段：" +
+      (state.comparisonEventField === "ALL"
+        ? "全部实际字段"
+        : comparisonEventFieldLabel(state.comparisonEventField)),
+    "事件筛选：" +
+      ($("comparisonEventKind").selectedOptions[0]?.textContent ||
+        "全部状态与事件"),
+  ];
+  if (failed.length)
+    summaryParts.push(
+      "未返回轨迹：" +
+        failed
+          .map(
+            (entry) =>
+              entry.selection.source_symbol + "（" + entry.error + "）",
+          )
+          .join("；"),
+    );
+
+  for (const { entry, observations } of indexes) {
+    for (const fieldId of selectedFieldIds) {
+      const counts = {
+        changed: 0,
+        unchanged: 0,
+        notComparable: 0,
+        notRecorded: 0,
+      };
+      if (entry.data) {
+        for (const sessionDate of windowDates) {
+          const observation = observations.get(sessionDate + "|" + fieldId);
+          if (!observation) {
+            counts.notRecorded += 1;
+          } else if (observation.comparison_status === "RELATION_CHANGED") {
+            counts.changed += 1;
+          } else if (observation.comparison_status === "NO_RELATION_CHANGE") {
+            counts.unchanged += 1;
+          } else if (observation.comparison_status === "NOT_COMPARABLE") {
+            counts.notComparable += 1;
+          } else {
+            counts.notRecorded += 1;
+          }
+        }
+      }
+      const row = document.createElement("tr");
+      cell(row, entry.selection.source_symbol);
+      cell(row, comparisonEventFieldLabel(fieldId));
+      cell(row, entry.data ? windowDates.length : "—");
+      cell(row, entry.data ? counts.changed + counts.unchanged : "—");
+      cell(row, entry.data ? counts.changed : "—");
+      cell(row, entry.data ? counts.unchanged : "—");
+      cell(row, entry.data ? counts.notComparable : "—");
+      cell(row, entry.data ? counts.notRecorded : "—");
+      cell(row, entry.data ? "75会话轨迹有效" : "轨迹未返回：" + entry.error);
+      summaryRows.append(row);
+    }
+  }
+
+  const eventGroups = new Map();
+  for (const { entry } of indexes) {
+    for (const observation of entry.data?.price_relation_history
+      ?.observations || []) {
+      if (
+        !windowDateSet.has(observation.session_date) ||
+        observation.comparison_status !== "RELATION_CHANGED" ||
+        (state.comparisonEventField !== "ALL" &&
+          observation.field_id !== state.comparisonEventField) ||
+        !comparisonEventFilterMatches(state.comparisonEventKind, observation)
+      )
+        continue;
+      const groupKey = observation.session_date + "|" + observation.field_id;
+      if (!eventGroups.has(groupKey))
+        eventGroups.set(groupKey, {
+          sessionDate: observation.session_date,
+          fieldId: observation.field_id,
+          members: [],
+        });
+      eventGroups.get(groupKey).members.push({
+        sourceSymbol: entry.selection.source_symbol,
+        observation,
+      });
+    }
+  }
+  const orderedGroups = Array.from(eventGroups.values()).sort(
+    (left, right) =>
+      right.sessionDate.localeCompare(left.sessionDate) ||
+      fieldIds.indexOf(left.fieldId) - fieldIds.indexOf(right.fieldId),
+  );
+  let commonEventGroupCount = 0;
+  for (const group of orderedGroups) {
+    const allSelected = indexes.map(({ entry, observations }) => ({
+      sourceSymbol: entry.selection.source_symbol,
+      observation: observations.get(group.sessionDate + "|" + group.fieldId),
+    }));
+    const eventKinds = new Set(
+      allSelected.map(({ observation }) => observation?.event_kind),
+    );
+    const commonEvent =
+      allSelected.length === basket.length &&
+      allSelected.length >= 2 &&
+      allSelected.every(
+        ({ observation }) =>
+          observation?.comparison_status === "RELATION_CHANGED" &&
+          Boolean(observation.event_kind),
+      ) &&
+      eventKinds.size === 1;
+    if (commonEvent) commonEventGroupCount += 1;
+
+    const row = document.createElement("tr");
+    cell(row, group.sessionDate);
+    cell(row, comparisonEventFieldLabel(group.fieldId));
+    cell(
+      row,
+      commonEvent
+        ? "同日同字段同类型 · " + Array.from(eventKinds)[0]
+        : "各代码实际变化分别列出",
+    );
+    const membersCell = document.createElement("td");
+    const memberList = document.createElement("div");
+    memberList.className = "comparison-event-members";
+    for (const member of group.members) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "quiet";
+      button.dataset.eventKey = [
+        member.sourceSymbol,
+        member.observation.session_date,
+        member.observation.field_id,
+        member.observation.event_kind,
+      ].join("|");
+      button.textContent =
+        member.sourceSymbol +
+        " · " +
+        (priceRelationKindLabels[member.observation.event_kind] ||
+          member.observation.event_kind) +
+        " · 定位日K/Core";
+      button.title =
+        member.observation.reason_summary ||
+        member.observation.before_relation +
+          " → " +
+          member.observation.after_relation;
+      button.addEventListener("click", () =>
+        openComparisonTimeline(
+          member.sourceSymbol,
+          member.observation.session_date,
+        ),
+      );
+      memberList.append(button);
+    }
+    membersCell.append(memberList);
+    row.append(membersCell);
+    eventListRows.append(row);
+  }
+  if (!orderedGroups.length) {
+    const row = document.createElement("tr");
+    const message = document.createElement("td");
+    message.colSpan = 4;
+    message.className = "muted";
+    message.textContent = "当前窗口与字段 / 事件筛选下没有真实变化事件。";
+    row.append(message);
+    eventListRows.append(row);
+  }
+
+  const selectedSymbols = entries.map((entry) => entry.selection.source_symbol);
+  const headerRow = document.createElement("tr");
+  cell(headerRow, "官方会话日期");
+  cell(headerRow, "价格关系字段");
+  for (const sourceSymbol of selectedSymbols) cell(headerRow, sourceSymbol);
+  cell(headerRow, "同日同字段判定");
+  matrixHead.append(headerRow);
+
+  let visibleMatrixRows = 0;
+  for (const sessionDate of [...axis.sessionDates].reverse()) {
+    for (const fieldId of fieldIds) {
+      if (
+        state.comparisonEventField !== "ALL" &&
+        fieldId !== state.comparisonEventField
+      )
+        continue;
+      const cells = indexes.map(({ entry, observations }) => ({
+        entry,
+        observation: observations.get(sessionDate + "|" + fieldId) || null,
+      }));
+      if (
+        !cells.some(({ observation }) =>
+          comparisonEventFilterMatches(state.comparisonEventKind, observation),
+        )
+      )
+        continue;
+      const eventKinds = new Set(
+        cells.map(({ observation }) => observation?.event_kind),
+      );
+      const commonEvent =
+        cells.length === basket.length &&
+        cells.length >= 2 &&
+        cells.every(
+          ({ observation }) =>
+            observation?.comparison_status === "RELATION_CHANGED" &&
+            Boolean(observation.event_kind),
+        ) &&
+        eventKinds.size === 1;
+      const row = document.createElement("tr");
+      row.dataset.sessionDate = sessionDate;
+      row.dataset.fieldId = fieldId;
+      row.dataset.targetSession = String(
+        sessionDate === basket[0]?.target_session,
+      );
+      cell(row, sessionDate);
+      cell(row, comparisonEventFieldLabel(fieldId));
+      for (const item of cells) {
+        const tableCell = document.createElement("td");
+        const content = document.createElement("div");
+        const observation = item.observation;
+        let status = "NOT_RECORDED";
+        if (!item.entry.data) status = "NOT_RETURNED";
+        else if (observation) status = observation.comparison_status;
+        content.className = "comparison-event-cell";
+        content.dataset.status = status;
+        appendText(content, "strong", comparisonEventStatusLabel(status));
+        if (observation) {
+          const evidence = comparisonEventEvidence(observation);
+          appendText(
+            content,
+            "span",
+            "关系 " +
+              evidence.relation +
+              (evidence.kind
+                ? " · " + evidence.kind + "（" + observation.event_kind + "）"
+                : ""),
+          );
+          appendText(content, "span", evidence.quality);
+          if (evidence.reason)
+            appendText(content, "span", "原因 " + evidence.reason);
+          if (observation.comparison_status === "NO_RELATION_CHANGE")
+            appendText(
+              content,
+              "span",
+              "仅表示前后关系相同，不表示收盘价没有变动。",
+              "muted",
+            );
+          if (observation.comparison_status === "RELATION_CHANGED") {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "quiet";
+            button.dataset.eventKey = [
+              item.entry.selection.source_symbol,
+              observation.session_date,
+              observation.field_id,
+              observation.event_kind,
+            ].join("|");
+            button.textContent = "定位当日K线 / Core";
+            button.addEventListener("click", () =>
+              openComparisonTimeline(
+                item.entry.selection.source_symbol,
+                observation.session_date,
+              ),
+            );
+            content.append(button);
+          }
+        } else {
+          const startSession = item.entry.data?.points?.[0]?.session_date;
+          const reason = !item.entry.data
+            ? item.entry.error || "该代码的轨迹没有返回"
+            : sessionDate === startSession
+              ? "这是轨迹首个官方会话，没有前态可比较"
+              : "该来源代码没有返回此日期与字段的观察记录";
+          appendText(content, "span", reason, "muted");
+        }
+        tableCell.append(content);
+        row.append(tableCell);
+      }
+      cell(
+        row,
+        commonEvent
+          ? "同日同字段同类型 · " + Array.from(eventKinds)[0]
+          : "没有满足全体同类变化条件",
+      );
+      matrixRows.append(row);
+      visibleMatrixRows += 1;
+    }
+  }
+  if (!visibleMatrixRows) {
+    const row = document.createElement("tr");
+    const message = document.createElement("td");
+    message.colSpan = entries.length + 3;
+    message.className = "muted";
+    message.textContent = "当前字段 / 事件筛选下没有匹配的日期×字段行。";
+    row.append(message);
+    matrixRows.append(row);
+  }
+  $("comparisonEventCount").textContent =
+    axis.sessionDates.length + "个官方会话 · " + fieldIds.length + "个实际字段";
+  summaryParts.push(
+    "矩阵 " + visibleMatrixRows + " 行",
+    "窗口内实际变化 " +
+      orderedGroups.reduce((total, group) => total + group.members.length, 0) +
+      " 条",
+    "满足全体同日同字段同类型 " + commonEventGroupCount + " 组",
+  );
+  $("comparisonEventSummaryStatus").textContent = summaryParts.join(" · ");
+}
 function renderComparisonResults() {
   const entries = state.comparisonTimelines;
   const basket = state.comparisonBasket;
@@ -1758,6 +2259,7 @@ function renderComparisonResults() {
       "没有可显示的官方会话轨迹。",
       ...entries.map((entry) => entry.error || ""),
     ]);
+    renderComparisonEventHistory(axis);
     return;
   }
   for (const session of axis.sessionDates) {
@@ -1843,6 +2345,7 @@ function renderComparisonResults() {
     }
     body.append(row);
   }
+  renderComparisonEventHistory(axis);
 }
 function validateComparisonTimeline(data, selection) {
   if (
@@ -1881,6 +2384,62 @@ function validateComparisonTimeline(data, selection) {
     )
   )
     throw new Error("轨迹日期或逐日来源身份不完整，已拒绝同日合并。");
+  const history = data.price_relation_history;
+  const fieldIds = Object.keys(history?.field_statistics || {});
+  const observations = history?.observations;
+  if (
+    !history ||
+    history.identity_ref !== data.snapshot_identity.identity_sha256 ||
+    fieldIds.length !== 5 ||
+    history.comparison_count !==
+      Math.max(0, data.total_session_count - 1) * 5 ||
+    !Array.isArray(observations) ||
+    observations.length !== history.comparison_count
+  )
+    throw new Error(
+      "价格关系 observations 未绑定完整轨迹或官方会话×字段分母，已拒绝多股对齐。",
+    );
+  const dateIndex = new Map(dates.map((value, index) => [value, index]));
+  const observationKeys = new Set();
+  for (const observation of observations) {
+    const index = dateIndex.get(observation.session_date);
+    const key = observation.session_date + "|" + observation.field_id;
+    if (
+      index === undefined ||
+      index < 1 ||
+      dates[index - 1] !== observation.previous_official_session ||
+      !fieldIds.includes(observation.field_id) ||
+      observation.identity_ref !== history.identity_ref ||
+      observationKeys.has(key)
+    )
+      throw new Error(
+        "价格关系 observations 存在非紧邻日期、重复字段或不同响应身份，已拒绝多股对齐。",
+      );
+    observationKeys.add(key);
+  }
+  if (observationKeys.size !== history.comparison_count)
+    throw new Error("价格关系 observation 键数与完整分母不一致。");
+  const eventKeys = new Set(
+    (history.events || []).map((event) => event.event_key),
+  );
+  if (
+    eventKeys.size !== history.event_count ||
+    [...eventKeys].some(
+      (eventKey) =>
+        !observations.some(
+          (observation) =>
+            observation.session_date +
+              "|" +
+              observation.field_id +
+              "|" +
+              observation.event_kind ===
+              eventKey && observation.comparison_status === "RELATION_CHANGED",
+        ),
+    )
+  )
+    throw new Error(
+      "价格关系 events 不是完整 observations 中的变化子集，已拒绝多股对齐。",
+    );
   return data;
 }
 async function compareSelectedSymbols() {
@@ -1968,7 +2527,7 @@ async function compareSelectedSymbols() {
   $("comparisonResults").scrollIntoView({ behavior: "smooth", block: "start" });
   renderComparisonBasket();
 }
-function openComparisonTimeline(sourceSymbol) {
+function openComparisonTimeline(sourceSymbol, sessionDate = null) {
   const entry = state.comparisonTimelines.find(
     (item) => item.selection.source_symbol === sourceSymbol,
   );
@@ -1993,7 +2552,13 @@ function openComparisonTimeline(sourceSymbol) {
   };
   state.chartPeriodContext = chartContextForTimeline(entry.data);
   state.chartMode = "day";
-  state.chartSelection = null;
+  const pointIndex = sessionDate
+    ? entry.data.points.findIndex((point) => point.session_date === sessionDate)
+    : entry.data.points.findIndex(
+        (point) => point.session_date === entry.selection.target_session,
+      );
+  state.chartSelection =
+    pointIndex >= 0 ? { mode: "day", index: pointIndex } : null;
   clearRawPeriodState(
     "已复用多股对照已读取的75会话；闭周/月视图按需读现役PG Raw周期接口。",
   );
@@ -2030,7 +2595,10 @@ function returnFromComparison() {
     $("windowInput").value = returnForm.window;
   }
   state.comparisonReturnForm = null;
-  $("comparisonTitle").scrollIntoView({ behavior: "smooth", block: "start" });
+  $("comparisonEventHistory").scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
 }
 const priceProfileFieldIds = new Set([
   "profile.trend",
@@ -6029,6 +6597,24 @@ $("versionSelect").addEventListener("change", () => {
 });
 $("compareSymbols").addEventListener("click", compareSelectedSymbols);
 $("clearComparison").addEventListener("click", () => clearComparisonBasket());
+function refreshComparisonEventHistory() {
+  if (!state.comparisonTimelines.length) return;
+  renderComparisonEventHistory(
+    comparisonAxis(state.comparisonTimelines, state.comparisonBasket.length),
+  );
+}
+$("comparisonEventWindow").addEventListener("change", () => {
+  state.comparisonEventWindow = Number($("comparisonEventWindow").value);
+  refreshComparisonEventHistory();
+});
+$("comparisonEventField").addEventListener("change", () => {
+  state.comparisonEventField = $("comparisonEventField").value;
+  refreshComparisonEventHistory();
+});
+$("comparisonEventKind").addEventListener("change", () => {
+  state.comparisonEventKind = $("comparisonEventKind").value;
+  refreshComparisonEventHistory();
+});
 $("changeTypeSelect").addEventListener("change", () => {
   state.changeOffset = 0;
   loadChanges();
