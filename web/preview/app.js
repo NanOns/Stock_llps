@@ -1543,7 +1543,7 @@ function clearComparisonBasket(
   invalidateComparisonResults(message);
   renderComparisonBasket();
 }
-function invalidateComparisonForSnapshot(snapshot, sourceLabel) {
+function preserveComparisonOnSnapshotChange(snapshot, sourceLabel) {
   if (!state.comparisonBasket.length) return;
   if (
     snapshot &&
@@ -1553,9 +1553,8 @@ function invalidateComparisonForSnapshot(snapshot, sourceLabel) {
     )
   )
     return;
-  clearComparisonBasket(
-    `${sourceLabel}已切换；旧对照身份已失效并清空。若需比较新快照，请从新结果重新选择。`,
-  );
+  state.comparisonMessage = `${sourceLabel}已切换；临时对照仍绑定原完整快照身份。不同身份的来源代码会被拒绝，原篮和结果保持不变。`;
+  renderComparisonBasket();
 }
 function exactFraction(raw) {
   if (raw === null || raw === undefined) return null;
@@ -2659,11 +2658,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-      snapshot.target_session === point.session_date &&
-      snapshot.package_sha256 === point.package_sha256 &&
-      snapshot.namespace_id === point.namespace_id &&
-      snapshot.source_set_id === selectedSourceSet &&
-      snapshot.field_ids?.length,
+    snapshot.target_session === point.session_date &&
+    snapshot.package_sha256 === point.package_sha256 &&
+    snapshot.namespace_id === point.namespace_id &&
+    snapshot.source_set_id === selectedSourceSet &&
+    snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -4320,7 +4319,7 @@ function renderChangeHighlights(data, relation) {
     highlights.eligible_count === 0
       ? "已查询、没有符合展示规则的变化。此结果与未计算、来源不可用分开；30只展示上限不是市场分母。"
       : `同版本变化全集按规则命中 ${highlights.eligible_count} 只；显示 ${highlights.display_count}/30，命中但未显示 ${highlights.undisplayed_count} 只。此列表不是全市场分母，原全集仍可搜索和分页。`;
-  for (const item of highlights.rows) {
+  highlights.rows.forEach((item, index) => {
     const row = document.createElement("tr");
     cell(row, item.source_symbol);
     const reasonCell = document.createElement("td");
@@ -4360,11 +4359,27 @@ function renderChangeHighlights(data, relation) {
     button.type = "button";
     button.className = "quiet highlight-detail-action";
     button.textContent = "查看变化详情";
-    button.addEventListener("click", () => showChangeDetail(item));
+    button.addEventListener("click", () =>
+      showChangeDetail({
+        ...item,
+        highlight_lookup: {
+          status: "DISPLAYED",
+          reason: "SAME_PRODUCER_CANDIDATE",
+          candidate: true,
+          position: index + 1,
+          category: item.highlight_category,
+          priority: item.highlight_priority,
+          eligible_count: highlights.eligible_count,
+          display_count: highlights.display_count,
+          undisplayed_count: highlights.undisplayed_count,
+          display_limit: 30,
+        },
+      }),
+    );
     detail.append(button);
     row.append(detail);
     root.append(row);
-  }
+  });
   if (!highlights.rows.length)
     tableRow(root, ["已查询，没有符合展示规则的对象。", "", "", "", "", ""]);
 }
@@ -4372,6 +4387,61 @@ function resetChangeDetail() {
   state.changeDetailItem = null;
   $("changeDetail").hidden = true;
   $("changeDetail").replaceChildren();
+}
+function appendHighlightLookup(root, item, lookup = item?.highlight_lookup) {
+  if (!lookup) return;
+  appendText(root, "h3", "首页重点变化榜核验（最多30条）");
+  const messages = {
+    DISPLAYED: `同一服务端生产者确认该代码符合重点候选规则，序位第${lookup.position}，已包含在本次榜单展示中。`,
+    ELIGIBLE_NOT_DISPLAYED: `同一服务端生产者确认该代码符合重点候选规则，序位第${lookup.position}；超过首页最多${lookup.display_limit}条的展示上限，所以没有出现在首页榜单。`,
+    OTHER_CHANGE_NOT_ELIGIBLE: `双日画像记录了${(item?.change_types || []).map((type) => changeTypeLabels[type] || type).join("、") || "实际变化"}；同一服务端重点候选生产者没有将它列为候选。`,
+    NOT_TRIGGERED:
+      "两端相关质量可比；当前比较语义没有记录会触发重点变化候选的差异。数值可能不同但仍未触发状态变化；这不等于正式选股未入选。",
+    NO_SAVED_SOURCE_ROWS:
+      "两端已存来源集合都没有这个代码的画像行，因此没有可进入本次重点变化候选的双日来源记录；不据此推断上市、退市、停牌或正式选股资格。",
+    UNKNOWN_NOT_VERIFIED:
+      "目前无法核实该代码的重点榜资格。存在单侧记录、字段质量UNKNOWN或语义不可比时，不从前30列表缺项推断排名或未计算。",
+  };
+  const message = messages[lookup?.status] || messages.UNKNOWN_NOT_VERIFIED;
+  appendText(root, "p", message, "population highlight-lookup-message");
+  if (lookup && Number.isInteger(lookup.eligible_count)) {
+    appendText(
+      root,
+      "p",
+      `同一双日版本候选 ${lookup.eligible_count} 只 · 展示 ${lookup.display_count}/${lookup.display_limit} · 符合候选但未展示 ${lookup.undisplayed_count} 只。该数值不是市场股票分母。`,
+      "muted",
+    );
+  }
+  if (lookup?.category) {
+    appendText(
+      root,
+      "p",
+      `服务端类别：${highlightCategoryLabels[lookup.category] || lookup.category} · 类别优先级 ${lookup.priority}。`,
+      "muted",
+    );
+  }
+}
+function exactPairComparisonCandidate(item) {
+  const binding = state.changeBinding;
+  const snapshot = binding?.origin === "exact-symbol" && binding.after_snapshot;
+  if (
+    !snapshot?.complete ||
+    item.after_present !== true ||
+    item.source_symbol !== binding.symbol ||
+    item.after_source_set_id !== snapshot.source_set_id ||
+    item.after_package_sha256 !== snapshot.package_sha256 ||
+    item.after_profile_revision !== snapshot.profile_revision
+  )
+    return null;
+  return {
+    source_symbol: item.source_symbol,
+    target_session: snapshot.target_session,
+    namespace_id: binding.namespace_id,
+    source_set_id: snapshot.source_set_id,
+    package_sha256: snapshot.package_sha256,
+    profile_revision: snapshot.profile_revision,
+    origin_label: "精确双日画像核对",
+  };
 }
 function resolveChangeTimelineSide(item, side, binding, versions) {
   const snapshot = binding?.[`${side}_snapshot`];
@@ -4562,6 +4632,7 @@ function showChangeDetail(item) {
     }
     root.append(explanation);
   }
+  appendHighlightLookup(root, item);
   const meta = document.createElement("dl");
   meta.className = "profile-detail-meta";
   const pairMeta = item.pair_status
@@ -4626,6 +4697,28 @@ function showChangeDetail(item) {
   if (item.pair_status) appendProfilePairValues(root, item);
   appendPriceRelationTransitions(root, item);
   appendChangeTimelineLinks(root, item);
+  if (state.changeBinding?.origin === "exact-symbol") {
+    appendText(root, "h3", "加入结束日来源版多股临时对照");
+    const candidate = exactPairComparisonCandidate(item);
+    const add = makeComparisonAddButton(candidate);
+    if (!candidate) {
+      add.title =
+        "结束快照没有该代码的完整SEALED画像身份，无法加入来源版对照。";
+      appendText(
+        root,
+        "p",
+        "该代码不在结束快照或缺少完整SEALED身份；原有临时对照篮与筛选保持不变。",
+        "muted",
+      );
+    }
+    root.append(add);
+    appendText(
+      root,
+      "p",
+      "需在同一结束日、namespace、source_set、完整包SHA和profile_revision下选2–3只；这是临时来源版对照，不代表正式Focus或选股名单。",
+      "muted",
+    );
+  }
   appendText(root, "h3", "Profile11状态、质量与UNKNOWN原因");
   if (!item.profile_compatible && !item.pair_status) {
     appendText(
@@ -4818,6 +4911,17 @@ async function compareSourceProfilePair() {
     const data = await api(`/api/source-symbol-price-profile-pair?${params}`);
     if (requestId !== state.pairRequest) return;
     if (data.status === "NO_SAVED_SOURCE_CODE_MATCH") {
+      state.changeBinding = {
+        namespace_id: data.namespace_id,
+        before_snapshot: data.before_snapshot,
+        after_snapshot: data.after_snapshot,
+        session_relation: data.session_relation,
+        offset: 0,
+        limit: 1,
+        change_type: "ALL",
+        symbol,
+        origin: "exact-symbol",
+      };
       root.replaceChildren();
       root.hidden = false;
       appendText(root, "h3", `${symbol} · 本两份已存来源集合没有这个代码`);
@@ -4827,6 +4931,7 @@ async function compareSourceProfilePair() {
         "两份精确PG画像快照中都没有该来源代码的持久画像记录。此结果不判断退市、停牌、官方上市总体或正式选股资格。",
         "population",
       );
+      appendHighlightLookup(root, null, data.highlight_lookup);
       appendText(
         root,
         "p",
@@ -4844,8 +4949,12 @@ async function compareSourceProfilePair() {
       limit: 1,
       change_type: "ALL",
       symbol,
+      origin: "exact-symbol",
     };
-    showChangeDetail(data.item);
+    showChangeDetail({
+      ...data.item,
+      highlight_lookup: data.highlight_lookup,
+    });
   } catch (error) {
     if (requestId !== state.pairRequest) return;
     root.replaceChildren();
@@ -6443,7 +6552,7 @@ $("profileSymbolInput").addEventListener("keydown", (event) => {
   }
 });
 $("profileSnapshotSelect").addEventListener("change", () => {
-  invalidateComparisonForSnapshot(
+  preserveComparisonOnSnapshotChange(
     selectedProfileSnapshot(),
     "完整PG价格画像快照",
   );
@@ -6524,7 +6633,7 @@ $("profileBreadthOpenPair").addEventListener("click", () => {
     behavior: "smooth",
     block: "center",
   });
-  $("changeSymbolInput").placeholder = "输入来源代码后点击“对照双日画像”";
+  $("changeSymbolInput").placeholder = "SH.或SZ.加六位数字";
 });
 $("profileBreadthMembersPrev").addEventListener("click", () => {
   const previous = Math.max(
@@ -6562,14 +6671,13 @@ $("changeSymbolInput").addEventListener("input", () => {
 $("changeSymbolInput").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
-    state.changeOffset = 0;
-    loadChanges();
+    compareSourceProfilePair();
   }
 });
 for (const id of ["changeBeforeSelect", "changeAfterSelect"]) {
   $(id).addEventListener("change", () => {
     if (id === "changeAfterSelect")
-      invalidateComparisonForSnapshot(
+      preserveComparisonOnSnapshotChange(
         selectedChangeSnapshot(id),
         "两日结束快照",
       );

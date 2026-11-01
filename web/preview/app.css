@@ -634,6 +634,12 @@ footer {
   border-radius: 9px;
   background: #f8fafb;
 }
+.highlight-lookup-message {
+  border-left: 3px solid #467a9a;
+  padding: 9px 12px;
+  background: #f2f8fb;
+  color: #29475b;
+}
 .profile-detail-actions {
   display: flex;
   flex-wrap: wrap;

@@ -2514,6 +2514,70 @@ def classify_source_profile_pair_status(
     return {"pair_status": "BOTH_PRESENT", "state_change_status": state_change_status}
 
 
+def classify_source_profile_highlight_status(
+    *,
+    source_present: bool,
+    pair_status: str | None,
+    state_change_status: str | None,
+    qualities_complete: bool,
+    position: int | None,
+    highlight_category: str | None,
+    highlight_priority: int | None,
+    eligible_count: int,
+    display_limit: int = MAX_PROFILE_CHANGE_HIGHLIGHTS,
+) -> dict[str, Any]:
+    """把同一重点候选生产者的精确查找结果转成可审计状态。"""
+    if (
+        type(eligible_count) is not int
+        or eligible_count < 0
+        or type(display_limit) is not int
+        or display_limit < 1
+    ):
+        raise ValueError("重点变化计数或展示上限无效")
+
+    display_count = min(eligible_count, display_limit)
+    undisplayed_count = eligible_count - display_count
+    candidate = position is not None
+    if candidate and (
+        type(position) is not int or position < 1 or position > eligible_count
+    ):
+        candidate = False
+        position = None
+
+    if candidate:
+        status = "DISPLAYED" if position <= display_limit else "ELIGIBLE_NOT_DISPLAYED"
+        reason = "SAME_PRODUCER_CANDIDATE"
+    elif not source_present:
+        status = "NO_SAVED_SOURCE_ROWS"
+        reason = "NO_PERSISTED_PAIR_MEMBER"
+    elif pair_status == "BOTH_PRESENT" and state_change_status == "RECORDED_CHANGE":
+        status = "OTHER_CHANGE_NOT_ELIGIBLE"
+        reason = "SAME_PRODUCER_DID_NOT_SELECT_RECORDED_CHANGE"
+    elif (
+        pair_status == "BOTH_PRESENT"
+        and state_change_status == "NO_RECORDED_STATE_CHANGE"
+        and qualities_complete
+    ):
+        status = "NOT_TRIGGERED"
+        reason = "COMPARABLE_PAIR_WITHOUT_CLASSIFIED_CHANGE"
+    else:
+        status = "UNKNOWN_NOT_VERIFIED"
+        reason = "PAIR_OR_REQUIRED_QUALITY_INCOMPLETE"
+
+    return {
+        "status": status,
+        "reason": reason,
+        "candidate": candidate,
+        "position": position,
+        "category": highlight_category if candidate else None,
+        "priority": highlight_priority if candidate else None,
+        "eligible_count": eligible_count,
+        "display_count": display_count,
+        "undisplayed_count": undisplayed_count,
+        "display_limit": display_limit,
+    }
+
+
 def _field_pair_status(
     *,
     before_value: Any,
@@ -2604,8 +2668,39 @@ def read_profile_pair(
         names = [column.name for column in cursor.description]
         result = cursor.fetchone()
         row = dict(zip(names, result, strict=True)) if result else None
+        cursor.execute(
+            _PROFILE_CHANGE_HIGHLIGHT_CTES
+            + """, ranked_candidates AS (
+    SELECT source_symbol, highlight_category, highlight_priority,
+           row_number() OVER (
+               ORDER BY highlight_priority, source_symbol COLLATE "C"
+           )::bigint AS highlight_position
+    FROM highlight_candidates
+)
+SELECT (SELECT count(*)::bigint FROM highlight_candidates) AS eligible_count,
+       candidate.source_symbol,
+       candidate.highlight_category,
+       candidate.highlight_priority,
+       candidate.highlight_position
+FROM (VALUES (TRUE)) AS requested(singleton)
+LEFT JOIN ranked_candidates candidate ON candidate.source_symbol=%s""",
+            (*parameters, source_symbol),
+        )
+        highlight_columns = [column.name for column in cursor.description]
+        highlight_result = cursor.fetchone()
+        highlight_record = dict(zip(highlight_columns, highlight_result, strict=True))
 
     if row is None:
+        highlight_lookup = classify_source_profile_highlight_status(
+            source_present=False,
+            pair_status=None,
+            state_change_status=None,
+            qualities_complete=False,
+            position=None,
+            highlight_category=None,
+            highlight_priority=None,
+            eligible_count=int(highlight_record["eligible_count"]),
+        )
         return {
             "status": "NO_SAVED_SOURCE_CODE_MATCH",
             "namespace_id": namespace_id,
@@ -2613,6 +2708,7 @@ def read_profile_pair(
             "before_snapshot": before,
             "after_snapshot": after,
             "item": None,
+            "highlight_lookup": highlight_lookup,
             "database_write": False,
             "core_recalculated": False,
         }
@@ -2714,6 +2810,21 @@ def read_profile_pair(
         if profile_observed
         else "UNKNOWN"
     )
+    highlight_lookup = classify_source_profile_highlight_status(
+        source_present=True,
+        pair_status=row["pair_status"],
+        state_change_status=row["state_change_status"],
+        qualities_complete=(
+            row["raw_ohlc_comparison_status"] == "COMPARABLE"
+            and row["close_ma20_comparison_status"] == "COMPARABLE"
+            and row["core_comparison_status"] == "COMPARABLE"
+            and row["profile_comparison_status"] == "COMPARABLE"
+        ),
+        position=highlight_record["highlight_position"],
+        highlight_category=highlight_record["highlight_category"],
+        highlight_priority=highlight_record["highlight_priority"],
+        eligible_count=int(highlight_record["eligible_count"]),
+    )
     row["core_quality_changes"] = [
         {
             "field_id": field_id,
@@ -2739,6 +2850,7 @@ def read_profile_pair(
         "before_snapshot": before,
         "after_snapshot": after,
         "item": row,
+        "highlight_lookup": highlight_lookup,
         "database_write": False,
         "core_recalculated": False,
     }

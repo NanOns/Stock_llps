@@ -194,15 +194,18 @@
             </select></label
           >
           <label
-            >来源代码搜索 / 双日对照<input
+            >精确来源代码 / 变化筛选<input
               id="changeSymbolInput"
-              placeholder="输入来源代码"
+              placeholder="SH.或SZ.加六位数字"
               autocomplete="off"
               maxlength="9"
           /></label>
           <button id="searchChanges" type="button">查询变化</button>
-          <button id="compareProfilePair" type="button">对照双日画像</button>
+          <button id="compareProfilePair" type="button">核对未展示原因</button>
         </div>
+        <p class="muted">
+          输入精确来源代码后点击“核对未展示原因”或按回车，可查看双日画像状态、同一服务端重点榜资格与序位；修改代码或快照会清除旧结论。
+        </p>
         <section
           class="change-highlights"
           aria-labelledby="changeHighlightsTitle"
