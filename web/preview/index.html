@@ -121,6 +121,59 @@
           <div id="profileBreadthSummary" class="population" role="status">
             请选择两个完整PG画像快照。
           </div>
+          <section id="profileBreadthMembers" class="breadth-members" hidden>
+            <h4 id="profileBreadthMembersTitle">来源分类成员</h4>
+            <p
+              id="profileBreadthMembersStatus"
+              class="population"
+              role="status"
+            >
+              点击任一广度分类计数读取其精确来源成员。
+            </p>
+            <div class="table-wrap">
+              <table class="breadth-members-table">
+                <thead>
+                  <tr>
+                    <th>来源代码 / 双日画像</th>
+                    <th>起始日 RAW收盘 / MA20</th>
+                    <th>结束日 RAW收盘 / MA20</th>
+                    <th>UNKNOWN / 不可比原因</th>
+                    <th>来源身份与坐标</th>
+                  </tr>
+                </thead>
+                <tbody id="profileBreadthMembersRows"></tbody>
+              </table>
+            </div>
+            <div class="pager">
+              <button
+                id="profileBreadthMembersPrev"
+                class="quiet"
+                type="button"
+                disabled
+              >
+                上一页
+              </button>
+              <span id="profileBreadthMembersPage">—</span>
+              <div class="pager-actions">
+                <button
+                  id="profileBreadthMembersNext"
+                  class="quiet"
+                  type="button"
+                  disabled
+                >
+                  下一页
+                </button>
+                <button
+                  id="profileBreadthMembersLast"
+                  class="quiet"
+                  type="button"
+                  disabled
+                >
+                  末页
+                </button>
+              </div>
+            </div>
+          </section>
           <div class="breadth-actions">
             <button id="profileBreadthOpenFull" type="button" disabled>
               查看结束日完整画像

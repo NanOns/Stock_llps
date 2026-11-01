@@ -25,6 +25,7 @@ from stock_a.storage.postgres.price_profiles import (
     list_profile_snapshots,
     persist_profile_records,
     read_profile_breadth,
+    read_profile_breadth_members,
     read_profile_change_page,
     read_profile_page,
     read_profile_pair,
@@ -699,6 +700,21 @@ def query_source_symbol_price_profile_breadth(
     except (RawSourcePgError, PriceProfilePgError) as error:
         raise PgPriceProfileError(
             getattr(error, "code", "PROFILE_BREADTH_READ_FAILED"), str(error)
+        ) from error
+
+
+def query_source_symbol_price_profile_breadth_members(
+    config: Mapping[str, Any], **kwargs: Any
+) -> dict[str, Any]:
+    try:
+        result = read_profile_breadth_members(config, **kwargs)
+        result["session_relation"] = _profile_session_relation(
+            result["before_snapshot"], result["after_snapshot"]
+        )
+        return result
+    except (RawSourcePgError, PriceProfilePgError) as error:
+        raise PgPriceProfileError(
+            getattr(error, "code", "PROFILE_BREADTH_MEMBERS_READ_FAILED"), str(error)
         ) from error
 
 

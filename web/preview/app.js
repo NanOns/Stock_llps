@@ -23,6 +23,12 @@ const state = {
   profileBreadthRequest: 0,
   profileBreadthData: null,
   profileBreadthBinding: null,
+  profileBreadthMemberRequest: 0,
+  profileBreadthMemberData: null,
+  profileBreadthMemberQuery: null,
+  profileBreadthMemberOffset: 0,
+  profileBreadthMemberLimit: 30,
+  profileBreadthMemberReturn: null,
   changeSnapshots: [],
   changeBinding: null,
   changeDetailItem: null,
@@ -1381,11 +1387,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-    snapshot.target_session === point.session_date &&
-    snapshot.package_sha256 === point.package_sha256 &&
-    snapshot.namespace_id === point.namespace_id &&
-    snapshot.source_set_id === selectedSourceSet &&
-    snapshot.field_ids?.length,
+      snapshot.target_session === point.session_date &&
+      snapshot.package_sha256 === point.package_sha256 &&
+      snapshot.namespace_id === point.namespace_id &&
+      snapshot.source_set_id === selectedSourceSet &&
+      snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -1767,9 +1773,51 @@ function returnToChanges() {
   if (detailItem) showChangeDetail(detailItem);
   $("changeDetail").scrollIntoView({ block: "start" });
 }
+function returnToProfileBreadthMembers() {
+  const returnState = state.profileBreadthMemberReturn;
+  if (
+    !returnState ||
+    returnState.binding !== state.profileBreadthBinding ||
+    !state.profileBreadthMemberData
+  )
+    return;
+  if (state.timelineContext?.origin === "breadth") {
+    const selection = returnState.selectedVersion;
+    if (selection) {
+      const value = `${selection.target_session}|${selection.package_sha256}`;
+      if (
+        Array.from($("versionSelect").options).some(
+          (option) => option.value === value,
+        )
+      )
+        $("versionSelect").value = value;
+    }
+    state.stockRequest++;
+    state.timelineRequest++;
+    state.timeline = null;
+    state.timelineContext = null;
+    state.timelineNavigation = false;
+    state.chartPeriodContext = null;
+    state.chartSelection = null;
+    clearRawPeriodState("已返回来源池分类成员；历史轨迹状态已清除。");
+    renderTimeline(null);
+    clearResult();
+  }
+  state.pairRequest++;
+  resetChangeDetail();
+  loadProfileBreadthMembers(returnState.query, returnState.offset);
+  $("profileBreadthMembers").scrollIntoView({ block: "start" });
+}
 function renderTimelineReturnControls(context, selected) {
   const returnRoot = $("timelineReturn");
-  if (context?.origin === "change") {
+  if (context?.origin === "breadth") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = "返回广度分类成员";
+    button.addEventListener("click", returnToProfileBreadthMembers);
+    returnRoot.append(button);
+  } else if (context?.origin === "change") {
     const button = document.createElement("button");
     button.type = "button";
     button.className = "quiet";
@@ -2993,7 +3041,7 @@ function openChangeTimeline(item, side) {
     "此视图只读取该快照绑定的官方会话轨迹；每日Core/周月详情须从存在Raw行的轨迹点进入。";
   state.timeline = null;
   queryTimeline({
-    origin: "change",
+    origin: state.changeBinding?.origin || "change",
     source_set_id: snapshot.source_set_id,
     namespace_id: state.changeBinding.namespace_id,
     persistedProfileSnapshot: {
@@ -3065,6 +3113,20 @@ function showChangeDetail(item) {
     "h3",
     `${item.source_symbol} · ${item.before_profile_revision || "无前侧记录"} → ${item.after_profile_revision || "无后侧记录"}`,
   );
+  if (state.changeBinding?.origin === "breadth") {
+    appendText(
+      root,
+      "p",
+      `从来源池广度分类“${breadthMemberQueryLabel(state.changeBinding.breadth_query)}”打开。返回时保留原始分类、精确快照和分页位置。`,
+      "muted",
+    );
+    const back = document.createElement("button");
+    back.type = "button";
+    back.className = "quiet";
+    back.textContent = "返回广度分类成员";
+    back.addEventListener("click", returnToProfileBreadthMembers);
+    root.append(back);
+  }
   if (item.pair_status) {
     const explanation = document.createElement("p");
     explanation.className = "population profile-pair-explanation";
@@ -3418,9 +3480,16 @@ function selectedChangeSnapshot(id) {
 }
 function clearProfileBreadth(message = "请选择两个完整PG画像快照。") {
   state.profileBreadthRequest++;
+  state.profileBreadthMemberRequest++;
   state.profileBreadthData = null;
   state.profileBreadthBinding = null;
+  state.profileBreadthMemberData = null;
+  state.profileBreadthMemberQuery = null;
+  state.profileBreadthMemberReturn = null;
   $("profileBreadthCount").textContent = "等待精确快照";
+  $("profileBreadthMembers").hidden = true;
+  $("profileBreadthMembersRows").replaceChildren();
+  $("profileBreadthMembersPage").textContent = "—";
   const root = $("profileBreadthSummary");
   root.replaceChildren();
   appendText(root, "p", message, "muted");
@@ -3438,6 +3507,29 @@ function breadthReason(reason) {
   const [code, detail] = String(reason || "UNKNOWN").split(/:(.*)/s);
   const primary = labels[code] || code;
   return detail ? `${primary}：${text(detail)}` : primary;
+}
+function breadthMemberCountButton(parent, title, count, query) {
+  const dt = document.createElement("dt");
+  dt.textContent = title;
+  const dd = document.createElement("dd");
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "breadth-count-action";
+  button.textContent = String(count);
+  button.setAttribute(
+    "aria-label",
+    `${title}，${count}个来源代码，查看分类成员`,
+  );
+  button.addEventListener("click", () => loadProfileBreadthMembers(query, 0));
+  dd.append(button);
+  parent.append(dt, dd);
+}
+function breadthRelationDetail(relation) {
+  return {
+    mode: "ENDPOINT",
+    side: relation.side,
+    relation: relation.relation,
+  };
 }
 function renderProfileBreadth(data) {
   const root = $("profileBreadthSummary");
@@ -3469,10 +3561,14 @@ function renderProfileBreadth(data) {
     const positionList = document.createElement("dl");
     positionList.className = "breadth-position-list";
     for (const relation of relationNames)
-      readinessDetail(
+      breadthMemberCountButton(
         positionList,
         text(relation),
-        String(side.positions[relation]),
+        side.positions[relation],
+        breadthRelationDetail({
+          side: key === "before" ? "BEFORE" : "AFTER",
+          relation,
+        }),
       );
     card.append(positionList);
     const unknown = document.createElement("div");
@@ -3524,8 +3620,17 @@ function renderProfileBreadth(data) {
   appendText(
     pairSection,
     "h4",
-    `两端共同且兼容来源集合 C=${paired.compatible_count} · 交集 ${membership.intersection_count} · 不可比 ${paired.incomparable_count}`,
+    `两端共同且兼容来源集合 C=${paired.compatible_count} · 交集 ${membership.intersection_count}`,
   );
+  const incomparableButton = document.createElement("button");
+  incomparableButton.type = "button";
+  incomparableButton.className =
+    "breadth-count-action breadth-incomparable-action";
+  incomparableButton.textContent = `不可比 ${paired.incomparable_count} · 查看来源代码`;
+  incomparableButton.addEventListener("click", () =>
+    loadProfileBreadthMembers({ mode: "INCOMPARABLE" }, 0),
+  );
+  pairSection.append(incomparableButton);
   appendText(
     pairSection,
     "p",
@@ -3546,8 +3651,26 @@ function renderProfileBreadth(data) {
   for (const from of ["BELOW", "EQUAL", "ABOVE"]) {
     const row = document.createElement("tr");
     cell(row, text(from));
-    for (const to of ["BELOW", "EQUAL", "ABOVE"])
-      cell(row, String(paired.transition_matrix[`${from}_TO_${to}`]));
+    for (const to of ["BELOW", "EQUAL", "ABOVE"]) {
+      const td = document.createElement("td");
+      const count = paired.transition_matrix[`${from}_TO_${to}`];
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "breadth-count-action";
+      button.textContent = String(count);
+      button.setAttribute(
+        "aria-label",
+        `${text(from)}转为${text(to)}，${count}个来源代码，查看分类成员`,
+      );
+      button.addEventListener("click", () =>
+        loadProfileBreadthMembers(
+          { mode: "TRANSITION", from_relation: from, to_relation: to },
+          0,
+        ),
+      );
+      td.append(button);
+      row.append(td);
+    }
     matrixBody.append(row);
   }
   matrix.append(matrixBody);
@@ -3601,9 +3724,16 @@ function renderProfileBreadth(data) {
 }
 async function loadProfileBreadth(before, after, ownerRequest) {
   const requestId = ++state.profileBreadthRequest;
+  state.profileBreadthMemberRequest++;
   const key = `${profileSnapshotKey(before)}→${profileSnapshotKey(after)}`;
   state.profileBreadthBinding = key;
   state.profileBreadthData = null;
+  state.profileBreadthMemberData = null;
+  state.profileBreadthMemberQuery = null;
+  state.profileBreadthMemberReturn = null;
+  $("profileBreadthMembers").hidden = true;
+  $("profileBreadthMembersRows").replaceChildren();
+  $("profileBreadthMembersPage").textContent = "—";
   $("profileBreadthCount").textContent = "完整来源池统计中";
   const root = $("profileBreadthSummary");
   root.replaceChildren();
@@ -3645,6 +3775,239 @@ async function loadProfileBreadth(before, after, ownerRequest) {
     $("profileBreadthCount").textContent = "来源池统计失败";
     root.replaceChildren();
     appendText(root, "p", `没有可用广度结果：${error.message}`, "message");
+  }
+}
+function breadthMemberQueryLabel(query) {
+  if (query.mode === "ENDPOINT")
+    return `${query.side === "BEFORE" ? "起始日" : "结束日"} · ${text(query.relation)}`;
+  if (query.mode === "TRANSITION")
+    return `${text(query.from_relation)} → ${text(query.to_relation)}`;
+  return "两端存在但价格/Core或来源标签不可比";
+}
+function breadthMemberRawText(item, side) {
+  const prefix = side === "BEFORE" ? "before" : "after";
+  if (!item[`${prefix}_present`]) return "该日来源集合中没有此代码";
+  const relation = item[`${prefix}_source_pool_close_ma20_relation`];
+  const unknown = item[`${prefix}_source_pool_unknown_reason`];
+  const reason = unknown ? ` · ${breadthReason(unknown)}` : "";
+  const rawQuality = `${text(item[`${prefix}_raw_price_quality`])}${
+    item[`${prefix}_raw_price_reason`]
+      ? `：${text(item[`${prefix}_raw_price_reason`])}`
+      : ""
+  }`;
+  const ma20Quality = `${text(item[`${prefix}_ma20_quality`])}${
+    item[`${prefix}_ma20_reason`]
+      ? `：${text(item[`${prefix}_ma20_reason`])}`
+      : ""
+  }`;
+  return (
+    `收盘 ${text(item[`${prefix}_raw_close`])} ` +
+    `(${rawQuality}) / ` +
+    `MA20 ${text(item[`${prefix}_ma20`])} ` +
+    `(${ma20Quality}) · ` +
+    `${text(relation)}${reason}`
+  );
+}
+function renderProfileBreadthMembers(data, query) {
+  const panel = $("profileBreadthMembers");
+  const page = data.page;
+  panel.hidden = false;
+  $("profileBreadthMembersTitle").textContent =
+    `来源分类成员 · ${breadthMemberQueryLabel(query)}`;
+  $("profileBreadthMembersStatus").textContent =
+    `共${page.total}个精确来源代码 · 当前${page.offset + 1}–${page.offset + page.count} · ` +
+    `第${page.total ? Math.floor(page.offset / page.limit) + 1 : 0}/` +
+    `${page.total ? Math.ceil(page.total / page.limit) : 0}页 · ` +
+    `每页${page.limit} · ${sessionRelationLabel(data.session_relation)} · ` +
+    `SOURCE_SYMBOL_ONLY / RAW_UNADJUSTED / NON_PIT；选股未评价。`;
+  const rows = $("profileBreadthMembersRows");
+  rows.replaceChildren();
+  if (!data.rows.length) {
+    tableRow(rows, ["该分类没有来源代码。", "", "", "", ""]);
+  }
+  for (const item of data.rows) {
+    const row = document.createElement("tr");
+    const codeCell = document.createElement("td");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet breadth-member-open";
+    button.textContent = `${item.source_symbol} · 双日画像`;
+    button.title =
+      "打开两份精确来源画像；可继续查看75会话Raw/Core并返回本分类页。";
+    button.addEventListener("click", () => openBreadthMemberPair(item));
+    codeCell.append(button);
+    row.append(codeCell);
+    cell(row, breadthMemberRawText(item, "BEFORE"));
+    cell(row, breadthMemberRawText(item, "AFTER"));
+    cell(
+      row,
+      [
+        item.before_source_pool_unknown_reason
+          ? `起始：${breadthReason(item.before_source_pool_unknown_reason)}`
+          : "",
+        item.after_source_pool_unknown_reason
+          ? `结束：${breadthReason(item.after_source_pool_unknown_reason)}`
+          : "",
+        !item.source_pool_pair_compatible &&
+        !item.before_source_pool_unknown_reason &&
+        !item.after_source_pool_unknown_reason
+          ? "Core语义、价格坐标或来源market/board标签不兼容"
+          : "",
+      ]
+        .filter(Boolean)
+        .join("；") || "—",
+    );
+    cell(
+      row,
+      `${text(item.before_market)} / ${text(item.before_board)} → ` +
+        `${text(item.after_market)} / ${text(item.after_board)} · ` +
+        `${text(item.before_identity_status)} / ${text(item.after_identity_status)} · ` +
+        `${text(item.before_price_coordinate)} / ${text(item.after_price_coordinate)}`,
+    );
+    rows.append(row);
+  }
+  $("profileBreadthMembersPage").textContent =
+    `偏移 ${page.offset} · 本页 ${page.count}/${page.limit} · 分类总数 ${page.total}`;
+  $("profileBreadthMembersPrev").disabled = page.offset === 0;
+  $("profileBreadthMembersNext").disabled = page.next_offset === null;
+  $("profileBreadthMembersLast").disabled =
+    page.last_offset === null || page.offset >= page.last_offset;
+  state.profileBreadthMemberData = data;
+}
+async function loadProfileBreadthMembers(query, offset) {
+  const breadth = state.profileBreadthData;
+  const binding = state.profileBreadthBinding;
+  if (
+    !breadth ||
+    !binding ||
+    binding !==
+      `${profileSnapshotKey(breadth.before_snapshot)}→${profileSnapshotKey(breadth.after_snapshot)}`
+  )
+    return;
+  const requestId = ++state.profileBreadthMemberRequest;
+  state.profileBreadthMemberQuery = { ...query };
+  state.profileBreadthMemberOffset = offset;
+  state.profileBreadthMemberData = null;
+  const panel = $("profileBreadthMembers");
+  panel.hidden = false;
+  $("profileBreadthMembersTitle").textContent =
+    `来源分类成员 · ${breadthMemberQueryLabel(query)}`;
+  $("profileBreadthMembersStatus").textContent = "正在读取精确来源成员…";
+  $("profileBreadthMembersRows").replaceChildren();
+  $("profileBreadthMembersPage").textContent = "查询中";
+  $("profileBreadthMembersPrev").disabled = true;
+  $("profileBreadthMembersNext").disabled = true;
+  $("profileBreadthMembersLast").disabled = true;
+  const params = new URLSearchParams({
+    before_session: breadth.before_snapshot.target_session,
+    after_session: breadth.after_snapshot.target_session,
+    before_source_set_id: breadth.before_snapshot.source_set_id,
+    before_package_sha256: breadth.before_snapshot.package_sha256,
+    before_profile_revision: breadth.before_snapshot.profile_revision,
+    after_source_set_id: breadth.after_snapshot.source_set_id,
+    after_package_sha256: breadth.after_snapshot.package_sha256,
+    after_profile_revision: breadth.after_snapshot.profile_revision,
+    mode: query.mode,
+    offset: String(offset),
+    limit: String(state.profileBreadthMemberLimit),
+  });
+  if (query.mode === "ENDPOINT") {
+    params.set("side", query.side);
+    params.set("relation", query.relation);
+  } else if (query.mode === "TRANSITION") {
+    params.set("from", query.from_relation);
+    params.set("to", query.to_relation);
+  }
+  try {
+    const data = await api(
+      `/api/source-symbol-price-profile-breadth-members?${params}`,
+    );
+    if (
+      requestId !== state.profileBreadthMemberRequest ||
+      binding !== state.profileBreadthBinding ||
+      data.before_snapshot.source_set_id !==
+        breadth.before_snapshot.source_set_id ||
+      data.before_snapshot.package_sha256 !==
+        breadth.before_snapshot.package_sha256 ||
+      data.before_snapshot.profile_revision !==
+        breadth.before_snapshot.profile_revision ||
+      data.after_snapshot.source_set_id !==
+        breadth.after_snapshot.source_set_id ||
+      data.after_snapshot.package_sha256 !==
+        breadth.after_snapshot.package_sha256 ||
+      data.after_snapshot.profile_revision !==
+        breadth.after_snapshot.profile_revision
+    )
+      return;
+    renderProfileBreadthMembers(data, query);
+  } catch (error) {
+    if (requestId !== state.profileBreadthMemberRequest) return;
+    panel.hidden = false;
+    $("profileBreadthMembersStatus").textContent =
+      `来源成员读取失败：${error.message}`;
+    $("profileBreadthMembersRows").replaceChildren();
+    tableRow($("profileBreadthMembersRows"), [error.message, "", "", "", ""]);
+    $("profileBreadthMembersPage").textContent = "读取失败";
+  }
+}
+async function openBreadthMemberPair(item) {
+  const breadth = state.profileBreadthData;
+  const query = state.profileBreadthMemberQuery;
+  if (!breadth || !query || !state.profileBreadthMemberData) return;
+  const requestId = ++state.pairRequest;
+  const memberBinding = state.profileBreadthBinding;
+  state.profileBreadthMemberReturn = {
+    query: { ...query },
+    offset: state.profileBreadthMemberOffset,
+    limit: state.profileBreadthMemberLimit,
+    binding: memberBinding,
+    selectedVersion: selectedVersion(),
+  };
+  const params = new URLSearchParams({
+    before_session: breadth.before_snapshot.target_session,
+    after_session: breadth.after_snapshot.target_session,
+    symbol: item.source_symbol,
+    before_source_set_id: breadth.before_snapshot.source_set_id,
+    before_package_sha256: breadth.before_snapshot.package_sha256,
+    before_profile_revision: breadth.before_snapshot.profile_revision,
+    after_source_set_id: breadth.after_snapshot.source_set_id,
+    after_package_sha256: breadth.after_snapshot.package_sha256,
+    after_profile_revision: breadth.after_snapshot.profile_revision,
+  });
+  resetChangeDetail();
+  const root = $("changeDetail");
+  root.hidden = false;
+  appendText(root, "p", "正在读取该成员对应的精确双日画像…", "population");
+  root.scrollIntoView({ behavior: "smooth", block: "start" });
+  try {
+    const data = await api(`/api/source-symbol-price-profile-pair?${params}`);
+    if (
+      requestId !== state.pairRequest ||
+      memberBinding !== state.profileBreadthBinding ||
+      data.source_symbol !== item.source_symbol ||
+      data.before_snapshot.source_set_id !==
+        breadth.before_snapshot.source_set_id ||
+      data.after_snapshot.source_set_id !== breadth.after_snapshot.source_set_id
+    )
+      return;
+    state.changeBinding = {
+      namespace_id: data.namespace_id,
+      before_snapshot: data.before_snapshot,
+      after_snapshot: data.after_snapshot,
+      session_relation: data.session_relation,
+      offset: 0,
+      limit: 1,
+      change_type: "ALL",
+      symbol: item.source_symbol,
+      origin: "breadth",
+      breadth_query: { ...query },
+    };
+    showChangeDetail(data.item);
+  } catch (error) {
+    if (requestId !== state.pairRequest) return;
+    root.replaceChildren();
+    root.hidden = false;
+    appendText(root, "p", `双日画像读取失败：${error.message}`, "message");
   }
 }
 async function loadChanges() {
@@ -4065,6 +4428,25 @@ $("profileBreadthOpenPair").addEventListener("click", () => {
     block: "center",
   });
   $("changeSymbolInput").placeholder = "输入来源代码后点击“对照双日画像”";
+});
+$("profileBreadthMembersPrev").addEventListener("click", () => {
+  const previous = Math.max(
+    0,
+    state.profileBreadthMemberOffset - state.profileBreadthMemberLimit,
+  );
+  if (state.profileBreadthMemberQuery)
+    loadProfileBreadthMembers(state.profileBreadthMemberQuery, previous);
+});
+$("profileBreadthMembersNext").addEventListener("click", () => {
+  const next =
+    state.profileBreadthMemberOffset + state.profileBreadthMemberLimit;
+  if (state.profileBreadthMemberQuery)
+    loadProfileBreadthMembers(state.profileBreadthMemberQuery, next);
+});
+$("profileBreadthMembersLast").addEventListener("click", () => {
+  const last = state.profileBreadthMemberData?.page.last_offset;
+  if (last !== null && last !== undefined && state.profileBreadthMemberQuery)
+    loadProfileBreadthMembers(state.profileBreadthMemberQuery, last);
 });
 $("returnToSourceBreadth").addEventListener("click", () => {
   $("sourceBreadthTitle").scrollIntoView({

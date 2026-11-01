@@ -1174,6 +1174,48 @@ button {
   cursor: pointer;
   color: #1d5f81;
 }
+.breadth-count-action {
+  border: 1px solid transparent;
+  border-radius: 5px;
+  padding: 2px 5px;
+  background: transparent;
+  color: #145b80;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+.breadth-count-action:hover,
+.breadth-count-action:focus-visible {
+  border-color: #77a9c2;
+  background: #edf7fb;
+  text-decoration: underline;
+}
+.breadth-incomparable-action {
+  margin: 0 0 8px;
+}
+.breadth-members {
+  margin: 14px 0 4px;
+  padding: 12px;
+  border: 1px solid #cddfe9;
+  border-radius: 8px;
+  background: #fff;
+}
+.breadth-members h4 {
+  margin: 0 0 6px;
+}
+.breadth-members-table {
+  min-width: 1450px;
+}
+.breadth-members-table td,
+.breadth-members-table th {
+  vertical-align: top;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.breadth-member-open {
+  color: #145b80;
+  white-space: nowrap;
+}
 @media (max-width: 620px) {
   .change-browser {
     overflow-x: clip;

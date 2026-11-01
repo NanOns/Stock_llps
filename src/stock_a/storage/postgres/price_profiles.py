@@ -1682,6 +1682,266 @@ def read_profile_breadth(
     }
 
 
+def read_profile_breadth_members(
+    config: Mapping[str, Any],
+    *,
+    before_session: date,
+    after_session: date,
+    max_target_session: date,
+    before_source_set_id: str,
+    before_package_sha256: str,
+    before_profile_revision: str,
+    after_source_set_id: str,
+    after_package_sha256: str,
+    after_profile_revision: str,
+    mode: str,
+    offset: int,
+    limit: int,
+    side: str | None = None,
+    relation: str | None = None,
+    from_relation: str | None = None,
+    to_relation: str | None = None,
+) -> dict[str, Any]:
+    """按现役广度分类投影精确快照成员，并在单条只读查询中分页。"""
+    if (
+        type(before_session) is not date
+        or type(after_session) is not date
+        or type(max_target_session) is not date
+        or before_session >= after_session
+        or after_session > max_target_session
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_BREADTH_DATE_INVALID",
+            "广度明细日期必须递增，且不晚于显式研究截止日",
+        )
+    if (
+        type(offset) is not int
+        or not 0 <= offset <= 2**31 - 1
+        or type(limit) is not int
+        or not 1 <= limit <= 100
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_BREADTH_MEMBER_PAGE_INVALID",
+            "广度明细offset须非负且limit须在1到100",
+        )
+
+    relation_names = {"ABOVE", "BELOW", "EQUAL", "UNKNOWN"}
+    predicates: str
+    filter_parameters: tuple[Any, ...]
+    if mode == "ENDPOINT":
+        if (
+            side not in {"BEFORE", "AFTER"}
+            or relation not in relation_names
+            or from_relation is not None
+            or to_relation is not None
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_BREADTH_MEMBER_FILTER_INVALID",
+                "单端分类必须指定BEFORE/AFTER及有效关系",
+            )
+        prefix = "before" if side == "BEFORE" else "after"
+        if relation == "UNKNOWN":
+            predicates = (
+                f"{prefix}_present AND {prefix}_source_pool_close_ma20_relation IS NULL"
+            )
+            filter_parameters = ()
+        else:
+            predicates = (
+                f"{prefix}_present AND {prefix}_source_pool_close_ma20_relation=%s"
+            )
+            filter_parameters = (relation,)
+    elif mode == "TRANSITION":
+        if (
+            side is not None
+            or relation is not None
+            or from_relation not in {"BELOW", "EQUAL", "ABOVE"}
+            or to_relation not in {"BELOW", "EQUAL", "ABOVE"}
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_BREADTH_MEMBER_FILTER_INVALID",
+                "九格转移必须指定有效的起始和结束关系",
+            )
+        predicates = (
+            "source_pool_pair_compatible "
+            "AND before_source_pool_close_ma20_relation=%s "
+            "AND after_source_pool_close_ma20_relation=%s"
+        )
+        filter_parameters = (from_relation, to_relation)
+    elif mode == "INCOMPARABLE":
+        if any(
+            value is not None for value in (side, relation, from_relation, to_relation)
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_BREADTH_MEMBER_FILTER_INVALID",
+                "不可比查询不接受关系筛选参数",
+            )
+        predicates = (
+            "before_present AND after_present AND NOT source_pool_pair_compatible"
+        )
+        filter_parameters = ()
+    else:
+        raise PriceProfilePgError(
+            "PROFILE_BREADTH_MEMBER_MODE_INVALID", "广度明细模式无效"
+        )
+
+    identities = (
+        before_source_set_id,
+        before_package_sha256,
+        before_profile_revision,
+        after_source_set_id,
+        after_package_sha256,
+        after_profile_revision,
+    )
+    if any(not isinstance(value, str) or not value for value in identities):
+        raise PriceProfilePgError(
+            "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
+            "广度明细必须显式提供前后source_set、package SHA和profile revision",
+        )
+
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        before = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=before_session,
+            max_target_session=max_target_session,
+            source_set_id=before_source_set_id,
+            package_sha256=before_package_sha256,
+            profile_revision=before_profile_revision,
+        )
+        after = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=after_session,
+            max_target_session=max_target_session,
+            source_set_id=after_source_set_id,
+            package_sha256=after_package_sha256,
+            profile_revision=after_profile_revision,
+        )
+        snapshot_parameters = (
+            *_profile_change_snapshot_parameters(namespace_id, before),
+            *_profile_change_snapshot_parameters(namespace_id, after),
+        )
+        cursor.execute(
+            _PROFILE_CHANGE_CTES
+            + f"""
+, member_rows AS (
+    SELECT source_symbol, before_present, after_present,
+           before_market, after_market, before_board, after_board,
+           before_source_set_id, after_source_set_id,
+           before_source_set_revision, after_source_set_revision,
+           before_source_capture_id, after_source_capture_id,
+           before_package_sha256, after_package_sha256,
+           before_profile_revision, after_profile_revision,
+           before_identity_status, after_identity_status,
+           before_stable_security_id_status, after_stable_security_id_status,
+           before_listing_status, after_listing_status,
+           before_suspension_status, after_suspension_status,
+           before_pit_status, after_pit_status,
+           before_bar_status, after_bar_status,
+           before_window_status, after_window_status,
+           before_window_reason, after_window_reason,
+           before_raw_open, after_raw_open,
+           before_raw_high, after_raw_high,
+           before_raw_low, after_raw_low,
+           before_raw_close, after_raw_close,
+           before_raw_price_quality, after_raw_price_quality,
+           before_raw_price_reason, after_raw_price_reason,
+           before_ma20, after_ma20,
+           before_ma20_quality, after_ma20_quality,
+           before_ma20_reason, after_ma20_reason,
+           before_price_coordinate, after_price_coordinate,
+           before_source_pool_close_ma20_relation,
+           after_source_pool_close_ma20_relation,
+           before_source_pool_unknown_reason,
+           after_source_pool_unknown_reason,
+           core_compatible, profile_compatible,
+           source_pool_pair_compatible
+    FROM classified
+    WHERE {predicates}
+)
+SELECT totals.total,
+       page.source_symbol, page.before_present, page.after_present,
+       page.before_market, page.after_market, page.before_board, page.after_board,
+       page.before_source_set_id, page.after_source_set_id,
+       page.before_source_set_revision, page.after_source_set_revision,
+       page.before_source_capture_id, page.after_source_capture_id,
+       page.before_package_sha256, page.after_package_sha256,
+       page.before_profile_revision, page.after_profile_revision,
+       page.before_identity_status, page.after_identity_status,
+       page.before_stable_security_id_status, page.after_stable_security_id_status,
+       page.before_listing_status, page.after_listing_status,
+       page.before_suspension_status, page.after_suspension_status,
+       page.before_pit_status, page.after_pit_status,
+       page.before_bar_status, page.after_bar_status,
+       page.before_window_status, page.after_window_status,
+       page.before_window_reason, page.after_window_reason,
+       page.before_raw_open, page.after_raw_open,
+       page.before_raw_high, page.after_raw_high,
+       page.before_raw_low, page.after_raw_low,
+       page.before_raw_close, page.after_raw_close,
+       page.before_raw_price_quality, page.after_raw_price_quality,
+       page.before_raw_price_reason, page.after_raw_price_reason,
+       page.before_ma20, page.after_ma20,
+       page.before_ma20_quality, page.after_ma20_quality,
+       page.before_ma20_reason, page.after_ma20_reason,
+       page.before_price_coordinate, page.after_price_coordinate,
+       page.before_source_pool_close_ma20_relation,
+       page.after_source_pool_close_ma20_relation,
+       page.before_source_pool_unknown_reason,
+       page.after_source_pool_unknown_reason,
+       page.core_compatible, page.profile_compatible,
+       page.source_pool_pair_compatible
+FROM (SELECT count(*)::bigint AS total FROM member_rows) totals
+LEFT JOIN LATERAL (
+    SELECT * FROM member_rows
+    ORDER BY source_symbol COLLATE "C"
+    OFFSET %s LIMIT %s
+) page ON TRUE
+ORDER BY page.source_symbol COLLATE "C"
+""",
+            (*snapshot_parameters, *filter_parameters, offset, limit),
+        )
+        names = [column.name for column in cursor.description]
+        fetched = cursor.fetchall()
+        total = int(fetched[0][0]) if fetched else 0
+        rows = [
+            dict(zip(names[1:], row[1:], strict=True))
+            for row in fetched
+            if row[1] is not None
+        ]
+
+    next_offset = offset + len(rows) if offset + len(rows) < total else None
+    return {
+        "status": "AVAILABLE",
+        "namespace_id": namespace_id,
+        "before_snapshot": before,
+        "after_snapshot": after,
+        "query": {
+            "mode": mode,
+            "side": side,
+            "relation": relation,
+            "from_relation": from_relation,
+            "to_relation": to_relation,
+        },
+        "page": {
+            "offset": offset,
+            "limit": limit,
+            "count": len(rows),
+            "total": total,
+            "next_offset": next_offset,
+            "last_offset": ((total - 1) // limit * limit) if total else None,
+        },
+        "rows": rows,
+        "research_scope": "SOURCE_SYMBOL_ONLY",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
+        "database_write": False,
+        "ddl_executed": False,
+        "core_recalculated": False,
+    }
+
+
 def classify_source_profile_pair_status(
     *,
     before_present: bool,

@@ -33,6 +33,7 @@ from stock_a.application.pg_research import (
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
     query_source_symbol_price_profile_breadth,
+    query_source_symbol_price_profile_breadth_members,
     query_source_symbol_price_profile_pair,
     query_source_symbol_price_profiles,
     query_source_symbol_price_profile_changes,
@@ -888,6 +889,100 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "ok": True,
                         "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE_BREADTH",
+                        "database_write": False,
+                        "ddl_executed": False,
+                        "source_zip_opened": False,
+                        "core_recalculated": False,
+                    }
+                )
+                self._send_json(200, result)
+                return
+            if parsed.path == "/api/source-symbol-price-profile-breadth-members":
+                values = _query(
+                    self.path,
+                    {
+                        "before_session",
+                        "after_session",
+                        "before_source_set_id",
+                        "before_package_sha256",
+                        "before_profile_revision",
+                        "after_source_set_id",
+                        "after_package_sha256",
+                        "after_profile_revision",
+                        "mode",
+                        "side",
+                        "relation",
+                        "from",
+                        "to",
+                        "offset",
+                        "limit",
+                    },
+                )
+                base = {
+                    "before_session",
+                    "after_session",
+                    "before_source_set_id",
+                    "before_package_sha256",
+                    "before_profile_revision",
+                    "after_source_set_id",
+                    "after_package_sha256",
+                    "after_profile_revision",
+                    "mode",
+                }
+                mode = values.get("mode")
+                mode_parameters = {
+                    "ENDPOINT": {"side", "relation"},
+                    "TRANSITION": {"from", "to"},
+                    "INCOMPARABLE": set(),
+                }.get(mode)
+                optional_page_parameters = {"offset", "limit"}
+                if (
+                    mode_parameters is None
+                    or not base.issubset(values)
+                    or set(values)
+                    != base | mode_parameters | (set(values) & optional_page_parameters)
+                    or set(values) - base - mode_parameters - optional_page_parameters
+                ):
+                    raise PreviewHttpError(
+                        400,
+                        "PROFILE_BREADTH_MEMBER_QUERY_INVALID",
+                        "广度明细必须提供精确快照和与mode匹配的筛选参数",
+                    )
+                before_session = _iso_date(values["before_session"], "before_session")
+                after_session = _iso_date(values["after_session"], "after_session")
+                _require_research_cutoff(
+                    before_session, self.preview_server.state.research_cutoff
+                )
+                _require_research_cutoff(
+                    after_session, self.preview_server.state.research_cutoff
+                )
+                result = query_source_symbol_price_profile_breadth_members(
+                    self.preview_server.state.config,
+                    before_session=before_session,
+                    after_session=after_session,
+                    max_target_session=self.preview_server.state.research_cutoff,
+                    before_source_set_id=values["before_source_set_id"],
+                    before_package_sha256=_sha(values["before_package_sha256"]),
+                    before_profile_revision=_sha(values["before_profile_revision"]),
+                    after_source_set_id=values["after_source_set_id"],
+                    after_package_sha256=_sha(values["after_package_sha256"]),
+                    after_profile_revision=_sha(values["after_profile_revision"]),
+                    mode=mode,
+                    side=values.get("side"),
+                    relation=values.get("relation"),
+                    from_relation=values.get("from"),
+                    to_relation=values.get("to"),
+                    offset=_nonnegative_int(values.get("offset", "0"), "offset"),
+                    limit=_positive_int(
+                        _nonnegative_int(values.get("limit", "30"), "limit", 100) or 0,
+                        "limit",
+                        100,
+                    ),
+                )
+                result.update(
+                    {
+                        "ok": True,
+                        "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE_BREADTH_MEMBERS",
                         "database_write": False,
                         "ddl_executed": False,
                         "source_zip_opened": False,
