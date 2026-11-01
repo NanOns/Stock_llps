@@ -5017,6 +5017,149 @@ def _timeline_price_relation_history(
     }
 
 
+def _timeline_ma20_direction_value(
+    point: Mapping[str, Any],
+) -> tuple[Fraction | None, dict[str, Any]]:
+    field = point.get("core_ma20")
+    if not isinstance(field, Mapping):
+        return None, {
+            "value": None,
+            "quality": "UNKNOWN",
+            "reason": "CORE_MA20_FIELD_MISSING",
+            "window": point.get("ma20_window"),
+        }
+    evidence = {
+        "value": field.get("value"),
+        "quality": field.get("quality") or "UNKNOWN",
+        "reason": field.get("reason"),
+        "window": point.get("ma20_window"),
+    }
+    if evidence["quality"] != "OBSERVED":
+        evidence["reason"] = evidence["reason"] or "CORE_MA20_NOT_OBSERVED"
+        return None, evidence
+    raw_value = evidence["value"]
+    if isinstance(raw_value, Mapping):
+        raw_value = raw_value.get("exact", raw_value.get("value"))
+    try:
+        value = Fraction(str(raw_value))
+    except (TypeError, ValueError, ZeroDivisionError, OverflowError):
+        evidence["quality"] = "BAD_VALUE"
+        evidence["reason"] = "CORE_MA20_VALUE_INVALID"
+        return None, evidence
+    if value <= 0:
+        evidence["quality"] = "BAD_VALUE"
+        evidence["reason"] = "CORE_MA20_VALUE_NOT_POSITIVE"
+        return None, evidence
+    return value, evidence
+
+
+def _timeline_ma20_direction_history(
+    points: Sequence[Mapping[str, Any]],
+    *,
+    target_session: str,
+    source_symbol: str,
+    namespace_id: str,
+    package_sha256: str,
+    calendar_id: str,
+    calendar_revision: str,
+    coordinate_id: str,
+) -> dict[str, Any]:
+    """只消费同一轨迹已生成的Core MA20点，不重算Core或跨未知会话比较。"""
+    identity_fields = (
+        "source_symbol",
+        "namespace_id",
+        "package_sha256",
+        "coordinate_id",
+        "producer",
+        "semantic_version",
+    )
+    windows: dict[str, Any] = {}
+    for requested_count in (5, 10):
+        selected = tuple(points[-requested_count:])
+        counts = {"UP": 0, "SAME": 0, "DOWN": 0, "UNKNOWN": 0}
+        pairs: list[dict[str, Any]] = []
+        for previous, current in zip(selected, selected[1:], strict=False):
+            reasons: list[dict[str, str]] = []
+            for key in identity_fields:
+                if previous.get(key) != current.get(key):
+                    reasons.append(
+                        {"side": "PAIR", "code": "MA20_PAIR_IDENTITY_MISMATCH"}
+                    )
+                    break
+            previous_value, previous_evidence = _timeline_ma20_direction_value(previous)
+            current_value, current_evidence = _timeline_ma20_direction_value(current)
+            if previous_value is None:
+                reasons.append(
+                    {
+                        "side": "FROM",
+                        "code": str(previous_evidence.get("reason") or "MA20_UNKNOWN"),
+                    }
+                )
+            if current_value is None:
+                reasons.append(
+                    {
+                        "side": "TO",
+                        "code": str(current_evidence.get("reason") or "MA20_UNKNOWN"),
+                    }
+                )
+            if not reasons:
+                if current_value > previous_value:
+                    direction = "UP"
+                elif current_value < previous_value:
+                    direction = "DOWN"
+                else:
+                    direction = "SAME"
+            else:
+                direction = "UNKNOWN"
+            counts[direction] += 1
+            pairs.append(
+                {
+                    "from_session": previous.get("session_date"),
+                    "to_session": current.get("session_date"),
+                    "direction": direction,
+                    "from_ma20": previous_evidence,
+                    "to_ma20": current_evidence,
+                    "unknown_reasons": reasons,
+                }
+            )
+        session_count = len(selected)
+        windows[str(requested_count)] = {
+            "requested_session_count": requested_count,
+            "actual_session_count": session_count,
+            "start_session": selected[0].get("session_date") if selected else None,
+            "end_session": selected[-1].get("session_date") if selected else None,
+            "expected_pair_count": max(session_count - 1, 0),
+            "pair_count": len(pairs),
+            "counts": counts,
+            "pairs": pairs,
+        }
+    return {
+        "contract": "STOCK_A_PG_MA20_ADJACENT_SESSION_DIRECTION_R1",
+        "semantic_version": "MA20_ADJACENT_OFFICIAL_SESSION_NUMERIC_ORDER_R1",
+        "producer": "stock_a.research.entry:_timeline_ma20_direction_history",
+        "core_producer": "stock_a.research.core:calculate_core",
+        "core_semantic_version": "CORE_PRIMITIVES_FIELDSET_R2",
+        "identity_ref": None,
+        "binding": {
+            "target_session": target_session,
+            "source_symbol": source_symbol,
+            "namespace_id": namespace_id,
+            "package_sha256": package_sha256,
+            "source_set_id": None,
+            "source_set_revision": None,
+            "source_set_status": "NOT_ATTACHED",
+            "calendar_id": calendar_id,
+            "calendar_revision": calendar_revision,
+            "price_coordinate": "RAW_UNADJUSTED",
+            "coordinate_id": coordinate_id,
+        },
+        "windows": windows,
+        "future_session_rows_used": 0,
+        "database_write": False,
+        "ddl_executed": False,
+    }
+
+
 def research_stock_pg_history_timeline(
     *,
     symbol: str,
@@ -5334,6 +5477,16 @@ def research_stock_pg_history_timeline(
         event_counts[event] = event_counts.get(event, 0) + 1
 
     price_relation_history = _timeline_price_relation_history(points)
+    ma20_direction_history = _timeline_ma20_direction_history(
+        points,
+        target_session=target.isoformat(),
+        source_symbol=normalized,
+        namespace_id=namespace_id,
+        package_sha256=package_sha256,
+        calendar_id=calendar_payload["calendar_id"],
+        calendar_revision=calendar_revision,
+        coordinate_id=coordinate_id,
+    )
     known_count = sum(point["close_vs_ma20"] is not None for point in points)
     return {
         "ok": True,
@@ -5375,6 +5528,7 @@ def research_stock_pg_history_timeline(
         "semantic_version": "CORE_PRIMITIVES_FIELDSET_R2",
         "points": points,
         "price_relation_history": price_relation_history,
+        "ma20_direction_history": ma20_direction_history,
         "future_session_rows_used": 0,
         "database_write": False,
         "ddl_executed": False,

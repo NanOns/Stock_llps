@@ -973,6 +973,58 @@
                   ></div>
                 </section>
                 <section
+                  id="ma20DirectionHistory"
+                  class="price-relation-history ma20-direction-history"
+                  aria-labelledby="ma20DirectionHistoryTitle"
+                >
+                  <h4 id="ma20DirectionHistoryTitle">
+                    MA20逐相邻官方会话数值方向
+                  </h4>
+                  <p class="muted">
+                    从同一75会话Core轨迹读取已存MA20值；按相邻官方会话比较UP、SAME、DOWN或UNKNOWN。
+                    这不是回归斜率、正式趋势确认或交易信号；RAW
+                    OHLC可用时，MA20未知只影响对应相邻对。
+                  </p>
+                  <div class="price-relation-history-controls">
+                    <label for="ma20DirectionWindow">
+                      最近官方会话窗口
+                      <select id="ma20DirectionWindow">
+                        <option value="5" selected>近5个官方会话</option>
+                        <option value="10">近10个官方会话</option>
+                      </select>
+                    </label>
+                  </div>
+                  <p
+                    id="ma20DirectionIdentity"
+                    class="muted"
+                    aria-live="polite"
+                  ></p>
+                  <div
+                    id="ma20DirectionSummary"
+                    class="price-relation-history-summary"
+                    role="status"
+                  ></div>
+                  <div class="table-wrap price-relation-history-table-wrap">
+                    <table class="price-relation-history-table">
+                      <thead>
+                        <tr>
+                          <th>前一官方会话</th>
+                          <th>后一紧邻官方会话</th>
+                          <th>前态MA20 / 质量 / 原因</th>
+                          <th>后态MA20 / 质量 / 原因</th>
+                          <th>数值方向</th>
+                          <th>UNKNOWN原因</th>
+                        </tr>
+                      </thead>
+                      <tbody id="ma20DirectionRows">
+                        <tr>
+                          <td colspan="6" class="muted">等待历史轨迹查询。</td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                </section>
+                <section
                   id="priceRelationHistory"
                   class="price-relation-history"
                   aria-labelledby="priceRelationHistoryTitle"

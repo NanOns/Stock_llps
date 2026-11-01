@@ -1853,6 +1853,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         for item in relation_history.get(collection_name, ()):
                             if isinstance(item, dict):
                                 item["identity_ref"] = identity_ref
+                direction_history = result.get("ma20_direction_history")
+                if isinstance(direction_history, dict):
+                    direction_history["identity_ref"] = identity["identity_sha256"]
+                    binding = direction_history.get("binding")
+                    if isinstance(binding, dict):
+                        binding.update(
+                            {
+                                "source_set_id": source_context["source_set_id"],
+                                "source_set_revision": source_context["revision_id"],
+                                "source_set_status": source_context["status"],
+                            }
+                        )
                 self._send_json(200, result)
                 return
             source_context = _preview_source_context(

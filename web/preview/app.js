@@ -42,6 +42,7 @@ const state = {
   profileBreadthRequest: 0,
   profileBreadthData: null,
   profileBreadthBinding: null,
+  profileBreadthPendingKey: null,
   profileBreadthMemberRequest: 0,
   profileBreadthMemberData: null,
   profileBreadthMemberQuery: null,
@@ -64,6 +65,13 @@ const state = {
   chartSelection: null,
   chartPeriodContext: null,
 };
+const previewQueryDebounceMs = 160;
+let relationRefreshTimer = null;
+let relationRefreshPending = false;
+let relationRequestInFlight = false;
+let changeRefreshTimer = null;
+let changeRefreshPending = false;
+let changeRequestInFlight = false;
 const labels = {
   TARGET_PRESENT: "有Bar",
   TARGET_MISSING: "来源无Bar",
@@ -2347,6 +2355,72 @@ function renderComparisonResults() {
   }
   renderComparisonEventHistory(axis);
 }
+function validateMa20DirectionHistory(data) {
+  const history = data.ma20_direction_history;
+  const binding = history?.binding;
+  const identityRef = data.snapshot_identity?.identity_sha256;
+  if (
+    !history ||
+    !binding ||
+    history.identity_ref !== identityRef ||
+    binding.target_session !== data.target_session ||
+    binding.source_symbol !== data.symbol ||
+    binding.namespace_id !== data.namespace_id ||
+    binding.package_sha256 !== data.package_sha256 ||
+    binding.source_set_id !== (data.formal_source_set?.source_set_id ?? null) ||
+    binding.source_set_revision !==
+      (data.formal_source_set?.revision_id ?? null) ||
+    binding.source_set_status !==
+      (data.formal_source_set?.status ?? "UNKNOWN") ||
+    binding.calendar_id !== data.calendar_id ||
+    binding.calendar_revision !== data.calendar_revision ||
+    binding.price_coordinate !== data.price_coordinate ||
+    binding.coordinate_id !== data.points?.[0]?.coordinate_id
+  )
+    throw new Error("MA20方向记录没有绑定当前轨迹、来源集合、日历和价格坐标。");
+  for (const requestedCount of [5, 10]) {
+    const item = history.windows?.[String(requestedCount)];
+    const actualCount = Math.min(requestedCount, data.points.length);
+    const expectedPairCount = Math.max(actualCount - 1, 0);
+    const counts = item?.counts || {};
+    const pairs = item?.pairs;
+    if (
+      !item ||
+      item.requested_session_count !== requestedCount ||
+      item.actual_session_count !== actualCount ||
+      item.expected_pair_count !== expectedPairCount ||
+      item.pair_count !== expectedPairCount ||
+      !Array.isArray(pairs) ||
+      pairs.length !== expectedPairCount ||
+      ["UP", "SAME", "DOWN", "UNKNOWN"].reduce(
+        (total, direction) => total + Number(counts[direction] || 0),
+        0,
+      ) !== expectedPairCount
+    )
+      throw new Error("MA20方向窗口的实际官方会话分母或四态计数不完整。");
+    const firstPoint = data.points.length - actualCount;
+    const observedCounts = { UP: 0, SAME: 0, DOWN: 0, UNKNOWN: 0 };
+    for (let index = 0; index < pairs.length; index++) {
+      const pair = pairs[index];
+      const previous = data.points[firstPoint + index];
+      const current = data.points[firstPoint + index + 1];
+      if (
+        pair.from_session !== previous.session_date ||
+        pair.to_session !== current.session_date ||
+        !Object.hasOwn(observedCounts, pair.direction)
+      )
+        throw new Error("MA20方向记录跨越了缺失或非紧邻官方会话。");
+      observedCounts[pair.direction]++;
+    }
+    if (
+      ["UP", "SAME", "DOWN", "UNKNOWN"].some(
+        (direction) => counts[direction] !== observedCounts[direction],
+      )
+    )
+      throw new Error("MA20方向四态计数与相邻会话明细不一致。");
+  }
+  return history;
+}
 function validateComparisonTimeline(data, selection) {
   if (
     data.price_coordinate !== "RAW_UNADJUSTED" ||
@@ -2373,6 +2447,7 @@ function validateComparisonTimeline(data, selection) {
     throw new Error(
       "75会话响应的代码、RAW坐标或完整SEALED身份不匹配，已拒绝加入对照。",
     );
+  validateMa20DirectionHistory(data);
   const dates = data.points.map((point) => point.session_date);
   if (
     dates.some((value, index) => index > 0 && dates[index - 1] >= value) ||
@@ -2659,11 +2734,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-      snapshot.target_session === point.session_date &&
-      snapshot.package_sha256 === point.package_sha256 &&
-      snapshot.namespace_id === point.namespace_id &&
-      snapshot.source_set_id === selectedSourceSet &&
-      snapshot.field_ids?.length,
+    snapshot.target_session === point.session_date &&
+    snapshot.package_sha256 === point.package_sha256 &&
+    snapshot.namespace_id === point.namespace_id &&
+    snapshot.source_set_id === selectedSourceSet &&
+    snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -2932,6 +3007,92 @@ function renderPriceRelationHistory(history) {
     status.textContent +=
       "当前筛选下没有匹配事件；可恢复全部字段和变化类型查看完整集合。";
   }
+}
+
+function ma20DirectionLabel(direction) {
+  return (
+    {
+      UP: "UP · MA20上升",
+      SAME: "SAME · MA20持平",
+      DOWN: "DOWN · MA20下降",
+      UNKNOWN: "UNKNOWN · 证据不足",
+    }[direction] || text(direction || "UNKNOWN")
+  );
+}
+
+function renderMa20DirectionHistory(history) {
+  const identity = $("ma20DirectionIdentity");
+  const summary = $("ma20DirectionSummary");
+  const rows = $("ma20DirectionRows");
+  if (!identity || !summary || !rows) return;
+  identity.textContent = "";
+  summary.textContent = "";
+  rows.replaceChildren();
+  if (!history) {
+    tableRow(rows, ["等待历史轨迹查询。", "", "", "", "", ""]);
+    return;
+  }
+  const windowKey = $("ma20DirectionWindow").value;
+  const windowData = history.windows?.[windowKey];
+  const binding = history.binding || {};
+  if (!windowData) {
+    summary.textContent = "MA20逐会话方向响应缺少所选窗口。";
+    tableRow(rows, ["窗口不可用。", "", "", "", "", ""]);
+    return;
+  }
+  const counts = windowData.counts || {};
+  const pairSum = ["UP", "SAME", "DOWN", "UNKNOWN"].reduce(
+    (total, key) => total + Number(counts[key] || 0),
+    0,
+  );
+  summary.textContent =
+    `近${windowKey}个官方会话：实际${windowData.actual_session_count}个（` +
+    `${windowData.start_session || "—"} 至 ${windowData.end_session || "—"}），` +
+    `相邻对 ${windowData.pair_count}/${windowData.expected_pair_count}；` +
+    `UP ${counts.UP || 0} · SAME ${counts.SAME || 0} · ` +
+    `DOWN ${counts.DOWN || 0} · UNKNOWN ${counts.UNKNOWN || 0} · ` +
+    `四态合计 ${pairSum}。` +
+    (windowData.actual_session_count < Number(windowKey)
+      ? " 当前响应实际官方会话少于请求窗口，分母按实际相邻会话计算。"
+      : "");
+  identity.textContent =
+    `${binding.target_session || "—"} · ${binding.source_symbol || "—"} · ` +
+    `source_set ${binding.source_set_id || "未知"} / ${binding.source_set_status || "UNKNOWN"} ` +
+    `rev ${binding.source_set_revision || "未知"} · namespace ${binding.namespace_id || "UNKNOWN"} · ` +
+    `日历 ${binding.calendar_id || "UNKNOWN"}/${binding.calendar_revision || "UNKNOWN"} · ` +
+    `${binding.price_coordinate || "UNKNOWN"} / ${binding.coordinate_id || "UNKNOWN"} · ` +
+    `package SHA ${binding.package_sha256 || "UNKNOWN"} · ` +
+    `身份 ${history.identity_ref || "UNKNOWN"}。`;
+  for (const pair of windowData.pairs || []) {
+    const row = document.createElement("tr");
+    cell(row, pair.from_session || "—");
+    cell(row, pair.to_session || "—");
+    cell(
+      row,
+      `${timelineField(pair.from_ma20)} · ${text(pair.from_ma20?.quality || "UNKNOWN")}`,
+    );
+    cell(
+      row,
+      `${timelineField(pair.to_ma20)} · ${text(pair.to_ma20?.quality || "UNKNOWN")}`,
+    );
+    cell(row, ma20DirectionLabel(pair.direction));
+    cell(
+      row,
+      (pair.unknown_reasons || [])
+        .map((item) => `${text(item.side)}: ${text(item.code)}`)
+        .join("；") || "—",
+    );
+    rows.append(row);
+  }
+  if (!windowData.pairs?.length)
+    tableRow(rows, [
+      "实际不足两个官方会话，当前没有相邻会话对。",
+      "",
+      "",
+      "",
+      "",
+      "",
+    ]);
 }
 
 function invalidateTimeline(errorMessage = "") {
@@ -3832,6 +3993,7 @@ function renderTimeline(data, errorMessage = "") {
       renderTimelineReturnControls(state.timelineContext, selectedVersion());
     }
     renderCandlestickChart(null);
+    renderMa20DirectionHistory(null);
     renderPriceRelationHistory(null);
     return;
   }
@@ -3850,6 +4012,7 @@ function renderTimeline(data, errorMessage = "") {
     `${data.producer || "stock_a.research.core:calculate_core"} · ${data.semantic_version || "CORE_PRIMITIVES_FIELDSET_R2"}。` +
     "身份SOURCE_SYMBOL_ONLY/NON_PIT；选股NOT_EVALUATED/NOT_CONNECTED；严格PIT、复权与RPS资格UNKNOWN；Raw候选数不等于官方上市总体。";
   renderTimelineReturnControls(state.timelineContext, selectedVersion());
+  renderMa20DirectionHistory(data.ma20_direction_history);
   renderPriceRelationHistory(data.price_relation_history);
   for (const point of data.points || []) {
     const tr = document.createElement("tr");
@@ -4044,6 +4207,7 @@ async function queryTimeline(binding = null) {
       eventKeys.size !== relationHistory.event_count
     )
       throw new Error("价格变化事件与关系观察集合不一致，已拒绝展示。");
+    validateMa20DirectionHistory(data);
     state.timeline = data;
     state.chartPeriodContext = chartContextForTimeline(data);
     renderTimeline(data);
@@ -5464,12 +5628,57 @@ function renderRelationScreen(data, requestId) {
   $("priceRelationLast").disabled =
     data.page.last_offset === null || data.page.offset >= data.page.last_offset;
 }
-async function loadPriceRelations() {
+function scheduleRelationRefresh(delay) {
+  if (relationRefreshTimer !== null) window.clearTimeout(relationRefreshTimer);
+  relationRefreshTimer = window.setTimeout(() => {
+    relationRefreshTimer = null;
+    if (relationRequestInFlight) return;
+    void runPriceRelations(state.relationRequest);
+  }, delay);
+}
+function loadPriceRelations() {
   if (state.timelineContext?.origin === "relation") invalidateTimeline();
+  state.relationRequest++;
+  relationRefreshPending = true;
+  state.relationData = null;
+  state.relationQuery = null;
+  $("priceRelationScreenCount").textContent = "筛选更新中";
+  $("priceRelationScreenSummary").textContent =
+    "筛选已变化；连续操作合并后读取最新组合。";
+  $("priceRelationScreenRows").replaceChildren();
+  tableRow($("priceRelationScreenRows"), [
+    "等待筛选稳定…",
+    "",
+    "",
+    "",
+    "",
+    "",
+    "",
+  ]);
+  $("priceRelationScreenPage").textContent = "查询中";
+  $("priceRelationPrev").disabled = true;
+  $("priceRelationNext").disabled = true;
+  $("priceRelationLast").disabled = true;
+  $("searchPriceRelations").disabled = true;
+  if (relationRefreshTimer !== null) window.clearTimeout(relationRefreshTimer);
+  relationRefreshTimer = window.setTimeout(() => {
+    relationRefreshTimer = null;
+    if (!relationRequestInFlight) void runPriceRelations(state.relationRequest);
+  }, previewQueryDebounceMs);
+}
+async function runPriceRelations(requestId) {
+  if (
+    !relationRefreshPending ||
+    requestId !== state.relationRequest ||
+    relationRequestInFlight
+  )
+    return;
+  relationRefreshPending = false;
   const before = selectedChangeSnapshot("changeBeforeSelect");
   const after = selectedChangeSnapshot("changeAfterSelect");
   if (!before || !after || before.target_session >= after.target_session) {
     clearRelationScreen("请选择日期递增的两个完整PG画像快照。");
+    $("searchPriceRelations").disabled = false;
     return;
   }
   const positionFields = [
@@ -5486,11 +5695,13 @@ async function loadPriceRelations() {
     clearRelationScreen(
       "结束日字段已选；请为该条件选择ABOVE、EQUAL、BELOW或UNKNOWN，或清空字段。",
     );
+    $("searchPriceRelations").disabled = false;
     return;
   }
   const activeFields = positionFields.filter(Boolean);
   if (new Set(activeFields).size !== activeFields.length) {
     clearRelationScreen("两个结束日AND条件必须使用不同价格关系字段。");
+    $("searchPriceRelations").disabled = false;
     return;
   }
   const sourceSymbol = $("relationSymbolInput").value.trim().toUpperCase();
@@ -5498,9 +5709,9 @@ async function loadPriceRelations() {
     clearRelationScreen(
       "精确代码筛选请输入SH.或SZ.加六位数字；正式来源总体仍由完整PG快照计算。",
     );
+    $("searchPriceRelations").disabled = false;
     return;
   }
-  const requestId = ++state.relationRequest;
   const relationField = $("priceRelationFieldSelect").value;
   const transitionType = $("priceTransitionTypeSelect").value;
   const ma20Direction = $("ma20DirectionSelect").value;
@@ -5551,6 +5762,7 @@ async function loadPriceRelations() {
     params.set("end_position_" + (index + 1) + "_status", filter.status);
   }
   if (sourceSymbol) params.set("symbol", sourceSymbol);
+  relationRequestInFlight = true;
   try {
     const data = await api(
       "/api/source-symbol-price-profile-relation-screen?" + params,
@@ -5581,6 +5793,9 @@ async function loadPriceRelations() {
   } finally {
     if (requestId === state.relationRequest)
       $("searchPriceRelations").disabled = false;
+    relationRequestInFlight = false;
+    if (relationRefreshPending && relationRefreshTimer === null)
+      scheduleRelationRefresh(0);
   }
 }
 async function openRelationDetail(relationRow) {
@@ -5657,6 +5872,7 @@ function clearProfileBreadth(message = "请选择两个完整PG画像快照。")
   state.profileBreadthMemberRequest++;
   state.profileBreadthData = null;
   state.profileBreadthBinding = null;
+  state.profileBreadthPendingKey = null;
   state.profileBreadthMemberData = null;
   state.profileBreadthMemberQuery = null;
   state.profileBreadthMemberReturn = null;
@@ -5896,11 +6112,17 @@ function renderProfileBreadth(data) {
   $("profileBreadthOpenPair").disabled = false;
   state.profileBreadthData = data;
 }
-async function loadProfileBreadth(before, after, ownerRequest) {
+async function loadProfileBreadth(before, after) {
+  const key = `${profileSnapshotKey(before)}→${profileSnapshotKey(after)}`;
+  if (
+    state.profileBreadthBinding === key &&
+    (state.profileBreadthData || state.profileBreadthPendingKey === key)
+  )
+    return;
   const requestId = ++state.profileBreadthRequest;
   state.profileBreadthMemberRequest++;
-  const key = `${profileSnapshotKey(before)}→${profileSnapshotKey(after)}`;
   state.profileBreadthBinding = key;
+  state.profileBreadthPendingKey = key;
   state.profileBreadthData = null;
   state.profileBreadthMemberData = null;
   state.profileBreadthMemberQuery = null;
@@ -5935,20 +6157,23 @@ async function loadProfileBreadth(before, after, ownerRequest) {
     );
     if (
       requestId !== state.profileBreadthRequest ||
-      ownerRequest !== state.changeRequest
+      key !== state.profileBreadthBinding
     )
       return;
     renderProfileBreadth(data);
   } catch (error) {
     if (
       requestId !== state.profileBreadthRequest ||
-      ownerRequest !== state.changeRequest
+      key !== state.profileBreadthBinding
     )
       return;
     state.profileBreadthData = null;
     $("profileBreadthCount").textContent = "来源池统计失败";
     root.replaceChildren();
     appendText(root, "p", `没有可用广度结果：${error.message}`, "message");
+  } finally {
+    if (state.profileBreadthPendingKey === key)
+      state.profileBreadthPendingKey = null;
   }
 }
 function breadthMemberQueryLabel(query) {
@@ -6184,15 +6409,79 @@ async function openBreadthMemberPair(item) {
     appendText(root, "p", `双日画像读取失败：${error.message}`, "message");
   }
 }
-async function loadChanges() {
+function scheduleChangeRefresh(delay) {
+  if (changeRefreshTimer !== null) window.clearTimeout(changeRefreshTimer);
+  changeRefreshTimer = window.setTimeout(() => {
+    changeRefreshTimer = null;
+    if (changeRequestInFlight) return;
+    void runChanges(state.changeRequest);
+  }, delay);
+}
+function loadChanges() {
   if (state.timelineContext?.origin === "change") invalidateTimeline();
+  const requestId = ++state.changeRequest;
+  changeRefreshPending = true;
   state.changeBinding = null;
   state.pairRequest++;
+  resetChangeDetail();
+  const before = selectedChangeSnapshot("changeBeforeSelect");
+  const after = selectedChangeSnapshot("changeAfterSelect");
+  const nextBreadthBinding =
+    before && after
+      ? `${profileSnapshotKey(before)}→${profileSnapshotKey(after)}`
+      : null;
+  if (
+    state.profileBreadthBinding &&
+    state.profileBreadthBinding !== nextBreadthBinding
+  )
+    clearProfileBreadth("两日画像快照已变化；正在重新读取对应来源池。");
+  state.changeTotal = 0;
+  $("changeRows").replaceChildren();
+  tableRow($("changeRows"), [
+    "筛选已变化，正在合并连续操作…",
+    "",
+    "",
+    "",
+    "",
+    "",
+  ]);
+  $("changeHighlightsRows").replaceChildren();
+  tableRow($("changeHighlightsRows"), [
+    "正在读取最新筛选…",
+    "",
+    "",
+    "",
+    "",
+    "",
+  ]);
+  $("changeCount").textContent = "更新中";
+  $("changeSummary").textContent = "筛选已变化，正在合并连续操作…";
+  $("changePageStatus").textContent = "查询中";
+  $("changePrev").disabled = true;
+  $("changeNext").disabled = true;
+  $("changeLast").disabled = true;
+  $("changeHighlightsCount").textContent = "更新中";
+  $("changeHighlightsSummary").textContent =
+    "仅在筛选稳定后读取一次最新的完整PG变化全集。";
+  $("searchChanges").disabled = true;
+  if (changeRefreshTimer !== null) window.clearTimeout(changeRefreshTimer);
+  changeRefreshTimer = window.setTimeout(() => {
+    changeRefreshTimer = null;
+    if (!changeRequestInFlight) void runChanges(requestId);
+  }, previewQueryDebounceMs);
+}
+async function runChanges(requestId) {
+  if (
+    !changeRefreshPending ||
+    requestId !== state.changeRequest ||
+    changeRequestInFlight
+  )
+    return;
+  changeRefreshPending = false;
   const beforeSnapshot = selectedChangeSnapshot("changeBeforeSelect");
   const afterSnapshot = selectedChangeSnapshot("changeAfterSelect");
   const before = beforeSnapshot?.target_session;
   const after = afterSnapshot?.target_session;
-  const requestId = ++state.changeRequest;
   resetChangeDetail();
   $("changeRows").replaceChildren();
   $("changeHighlightsRows").replaceChildren();
@@ -6213,6 +6502,7 @@ async function loadChanges() {
     $("changeHighlightsCount").textContent = "等待精确快照";
     $("changeHighlightsSummary").textContent =
       "请选择两个递增且完整的PG画像快照。";
+    $("searchChanges").disabled = false;
     tableRow($("changeHighlightsRows"), [
       "等待精确的两日画像版本。",
       "",
@@ -6222,13 +6512,14 @@ async function loadChanges() {
       "",
     ]);
     $("changePageStatus").textContent = "—";
+    $("searchChanges").disabled = false;
     $("changePrev").disabled =
       $("changeNext").disabled =
       $("changeLast").disabled =
         true;
     return;
   }
-  void loadProfileBreadth(beforeSnapshot, afterSnapshot, requestId);
+  void loadProfileBreadth(beforeSnapshot, afterSnapshot);
   const params = new URLSearchParams({
     before_session: before,
     after_session: after,
@@ -6248,6 +6539,7 @@ async function loadChanges() {
   if (symbol) params.set("symbol", symbol);
   $("changeSummary").textContent = "正在比较精确的PG画像来源版本…";
   $("searchChanges").disabled = true;
+  changeRequestInFlight = true;
   try {
     const data = await api(
       `/api/source-symbol-price-profile-changes?${params}`,
@@ -6339,6 +6631,9 @@ async function loadChanges() {
         true;
   } finally {
     if (requestId === state.changeRequest) $("searchChanges").disabled = false;
+    changeRequestInFlight = false;
+    if (changeRefreshPending && changeRefreshTimer === null)
+      scheduleChangeRefresh(0);
   }
 }
 async function loadProfileSnapshots() {
@@ -7008,6 +7303,9 @@ $("changeLast").addEventListener("click", () => {
 });
 $("priceRelationFieldFilter").addEventListener("change", () =>
   renderPriceRelationHistory(state.timeline?.price_relation_history || null),
+);
+$("ma20DirectionWindow").addEventListener("change", () =>
+  renderMa20DirectionHistory(state.timeline?.ma20_direction_history || null),
 );
 $("priceRelationKindFilter").addEventListener("change", () =>
   renderPriceRelationHistory(state.timeline?.price_relation_history || null),
