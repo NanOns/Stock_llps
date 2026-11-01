@@ -106,6 +106,35 @@
         <div id="changeSummary" class="population" role="status">
           请选择前后两个完整PG画像版本。
         </div>
+        <section class="source-breadth" aria-labelledby="sourceBreadthTitle">
+          <div class="highlights-head">
+            <div>
+              <h3 id="sourceBreadthTitle">已存来源池 MA20 广度</h3>
+              <p>
+                使用两端完整来源代码集合；当前变化筛选、分页和最多30条重点观察都不改变统计分母。结果是
+                SOURCE_SYMBOL_ONLY / RAW_UNADJUSTED / NON_PIT
+                价格诊断，不代表正式上市总体或交易信号。
+              </p>
+            </div>
+            <span id="profileBreadthCount" class="count">等待精确快照</span>
+          </div>
+          <div id="profileBreadthSummary" class="population" role="status">
+            请选择两个完整PG画像快照。
+          </div>
+          <div class="breadth-actions">
+            <button id="profileBreadthOpenFull" type="button" disabled>
+              查看结束日完整画像
+            </button>
+            <button
+              id="profileBreadthOpenPair"
+              class="quiet"
+              type="button"
+              disabled
+            >
+              进入来源代码双日画像
+            </button>
+          </div>
+        </section>
         <div class="table-wrap">
           <table class="change-table">
             <thead>
@@ -152,7 +181,17 @@
               只查询精确P03来源版本和画像修订；不是正式上市Universe或P05结果。
             </p>
           </div>
-          <span id="profileCount" class="count">等待PG画像目录</span>
+          <div class="pager-actions">
+            <button
+              id="returnToSourceBreadth"
+              class="quiet"
+              type="button"
+              hidden
+            >
+              返回来源池 MA20 广度
+            </button>
+            <span id="profileCount" class="count">等待PG画像目录</span>
+          </div>
         </div>
         <div class="profile-controls">
           <label

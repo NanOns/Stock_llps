@@ -348,6 +348,59 @@ footer {
     font-size: 12px;
   }
 }
+.source-breadth {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid #d7e2e9;
+  border-radius: 10px;
+  background: #f7fafc;
+}
+.source-breadth .population {
+  margin: 12px 0;
+}
+.breadth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+.breadth-side-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.breadth-side,
+.breadth-paired {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #dfe7ec;
+  border-radius: 8px;
+  background: #fff;
+}
+.breadth-side h4,
+.breadth-paired h4 {
+  margin: 0 0 8px;
+}
+.breadth-identity,
+.breadth-semantics {
+  overflow-wrap: anywhere;
+  color: #526977;
+}
+.breadth-paired {
+  margin-top: 14px;
+}
+.breadth-table {
+  min-width: 760px;
+}
+.breadth-table td,
+.breadth-table th {
+  vertical-align: top;
+}
+@media (max-width: 980px) {
+  .breadth-side-grid {
+    grid-template-columns: 1fr;
+  }
+}
 .profile-controls {
   display: grid;
   grid-template-columns: repeat(4, minmax(145px, 1fr));
@@ -1046,6 +1099,81 @@ button {
 .highlight-detail-action {
   white-space: nowrap;
 }
+.source-breadth {
+  margin: 16px 0;
+  padding: 14px;
+  border: 1px solid #d7e4eb;
+  border-radius: 10px;
+  background: #f7fafc;
+}
+.source-breadth .population {
+  display: grid;
+  gap: 12px;
+}
+.breadth-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
+.breadth-side-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+.breadth-side,
+.breadth-paired {
+  min-width: 0;
+  padding: 12px;
+  border: 1px solid #dfe7ec;
+  border-radius: 8px;
+  background: #fff;
+}
+.breadth-side h4,
+.breadth-paired h4 {
+  margin: 0 0 8px;
+}
+.breadth-side h5 {
+  margin: 10px 0 4px;
+}
+.breadth-position-list {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 4px 12px;
+  margin: 8px 0;
+}
+.breadth-position-list dt {
+  color: #526977;
+}
+.breadth-position-list dd {
+  margin: 0;
+  font-weight: 650;
+}
+.breadth-table {
+  min-width: 700px;
+}
+.breadth-table td,
+.breadth-table th {
+  white-space: nowrap;
+}
+.breadth-paired {
+  margin-top: 14px;
+}
+.breadth-matrix {
+  min-width: 430px;
+  max-width: 620px;
+}
+.breadth-delta {
+  font-weight: 700;
+  color: #174f70;
+}
+.breadth-identity {
+  overflow-wrap: anywhere;
+}
+.breadth-identity summary {
+  cursor: pointer;
+  color: #1d5f81;
+}
 @media (max-width: 620px) {
   .change-browser {
     overflow-x: clip;
@@ -1063,5 +1191,11 @@ button {
   .highlights-head {
     display: grid;
     grid-template-columns: 1fr;
+  }
+  .breadth-side-grid {
+    grid-template-columns: 1fr;
+  }
+  .breadth-position-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 }

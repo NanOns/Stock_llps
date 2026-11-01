@@ -626,6 +626,10 @@ WITH old_rows AS (
     SELECT COALESCE(o.source_symbol, n.source_symbol) AS source_symbol,
            o.source_symbol IS NOT NULL AS before_present,
            n.source_symbol IS NOT NULL AS after_present,
+           o.market AS before_market,
+           n.market AS after_market,
+           o.board AS before_board,
+           n.board AS after_board,
            o.source_set_id::text AS before_source_set_id,
            n.source_set_id::text AS after_source_set_id,
            o.source_set_revision AS before_source_set_revision,
@@ -761,21 +765,114 @@ WITH old_rows AS (
            o.pos60_reason AS before_pos60_reason, n.pos60_reason AS after_pos60_reason,
            o.bias20_atr_reason AS before_bias20_atr_reason, n.bias20_atr_reason AS after_bias20_atr_reason
     FROM old_rows o FULL OUTER JOIN new_rows n USING (source_symbol)
+), endpoint_relations AS (
+    SELECT *,
+           CASE WHEN before_present
+                  AND before_raw_record_present
+                  AND before_raw_price_quality='OBSERVED'
+                  AND before_ma20_quality='OBSERVED'
+                  AND before_raw_close IS NOT NULL
+                  AND before_ma20 IS NOT NULL
+                  AND before_calculation_scope IS NOT NULL
+                  AND before_producer_contract IS NOT NULL
+                  AND before_producer_version IS NOT NULL
+                  AND before_semantics_sha256 IS NOT NULL
+                THEN CASE WHEN before_raw_close>before_ma20 THEN 'ABOVE'
+                          WHEN before_raw_close<before_ma20 THEN 'BELOW'
+                          ELSE 'EQUAL' END END AS before_close_ma20_relation_local,
+           CASE WHEN after_present
+                  AND after_raw_record_present
+                  AND after_raw_price_quality='OBSERVED'
+                  AND after_ma20_quality='OBSERVED'
+                  AND after_raw_close IS NOT NULL
+                  AND after_ma20 IS NOT NULL
+                  AND after_calculation_scope IS NOT NULL
+                  AND after_producer_contract IS NOT NULL
+                  AND after_producer_version IS NOT NULL
+                  AND after_semantics_sha256 IS NOT NULL
+                THEN CASE WHEN after_raw_close>after_ma20 THEN 'ABOVE'
+                          WHEN after_raw_close<after_ma20 THEN 'BELOW'
+                          ELSE 'EQUAL' END END AS after_close_ma20_relation_local
+    FROM paired
+), source_pool_relations AS (
+    SELECT *,
+           CASE WHEN before_price_coordinate='RAW_UNADJUSTED'
+                THEN before_close_ma20_relation_local END
+                AS before_source_pool_close_ma20_relation,
+           CASE WHEN after_price_coordinate='RAW_UNADJUSTED'
+                THEN after_close_ma20_relation_local END
+                AS after_source_pool_close_ma20_relation
+    FROM endpoint_relations
 ), relations AS (
     SELECT *,
            CASE WHEN core_compatible
-                  AND before_raw_price_quality='OBSERVED'
-                  AND before_ma20_quality='OBSERVED'
-                THEN CASE WHEN before_raw_close>before_ma20 THEN 'ABOVE'
-                          WHEN before_raw_close<before_ma20 THEN 'BELOW'
-                          ELSE 'EQUAL' END END AS before_close_ma20_relation,
+                THEN before_close_ma20_relation_local END
+                AS before_close_ma20_relation,
            CASE WHEN core_compatible
-                  AND after_raw_price_quality='OBSERVED'
-                  AND after_ma20_quality='OBSERVED'
-                THEN CASE WHEN after_raw_close>after_ma20 THEN 'ABOVE'
-                          WHEN after_raw_close<after_ma20 THEN 'BELOW'
-                          ELSE 'EQUAL' END END AS after_close_ma20_relation
-    FROM paired
+                THEN after_close_ma20_relation_local END
+                AS after_close_ma20_relation,
+           CASE WHEN before_present
+                     AND before_source_pool_close_ma20_relation IS NULL
+                THEN CASE
+                    WHEN NOT before_raw_record_present THEN 'RAW_ROW_MISSING'
+                    WHEN before_bar_status='TDX_TARGET_BAR_MISSING'
+                      THEN 'TARGET_BAR_MISSING:' ||
+                           COALESCE(before_raw_price_reason, before_window_reason, 'NO_REASON')
+                    WHEN before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+                      THEN 'RAW_PRICE_QUALITY_UNKNOWN:' ||
+                           COALESCE(before_raw_price_reason, 'NO_REASON')
+                    WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+                      THEN 'PRICE_COORDINATE_UNSUPPORTED:' ||
+                           COALESCE(before_price_coordinate, 'UNKNOWN')
+                    WHEN before_calculation_scope IS NULL
+                      OR before_producer_contract IS NULL
+                      OR before_producer_version IS NULL
+                      OR before_semantics_sha256 IS NULL
+                      THEN 'CORE_SEMANTICS_UNKNOWN'
+                    WHEN before_ma20_quality IS DISTINCT FROM 'OBSERVED'
+                      THEN 'MA20_QUALITY_UNKNOWN:' ||
+                           COALESCE(before_ma20_reason, 'NO_REASON')
+                    WHEN before_raw_close IS NULL OR before_ma20 IS NULL
+                      THEN 'PRICE_VALUE_MISSING:' ||
+                           COALESCE(before_ma20_reason, 'NO_REASON')
+                    ELSE 'RELATION_UNKNOWN'
+                END END AS before_source_pool_unknown_reason,
+           CASE WHEN after_present
+                     AND after_source_pool_close_ma20_relation IS NULL
+                THEN CASE
+                    WHEN NOT after_raw_record_present THEN 'RAW_ROW_MISSING'
+                    WHEN after_bar_status='TDX_TARGET_BAR_MISSING'
+                      THEN 'TARGET_BAR_MISSING:' ||
+                           COALESCE(after_raw_price_reason, after_window_reason, 'NO_REASON')
+                    WHEN after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+                      THEN 'RAW_PRICE_QUALITY_UNKNOWN:' ||
+                           COALESCE(after_raw_price_reason, 'NO_REASON')
+                    WHEN after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+                      THEN 'PRICE_COORDINATE_UNSUPPORTED:' ||
+                           COALESCE(after_price_coordinate, 'UNKNOWN')
+                    WHEN after_calculation_scope IS NULL
+                      OR after_producer_contract IS NULL
+                      OR after_producer_version IS NULL
+                      OR after_semantics_sha256 IS NULL
+                      THEN 'CORE_SEMANTICS_UNKNOWN'
+                    WHEN after_ma20_quality IS DISTINCT FROM 'OBSERVED'
+                      THEN 'MA20_QUALITY_UNKNOWN:' ||
+                           COALESCE(after_ma20_reason, 'NO_REASON')
+                    WHEN after_raw_close IS NULL OR after_ma20 IS NULL
+                      THEN 'PRICE_VALUE_MISSING:' ||
+                           COALESCE(after_ma20_reason, 'NO_REASON')
+                    ELSE 'RELATION_UNKNOWN'
+                END END AS after_source_pool_unknown_reason,
+           COALESCE((before_present AND after_present
+            AND before_source_pool_close_ma20_relation IS NOT NULL
+            AND after_source_pool_close_ma20_relation IS NOT NULL
+            AND before_price_coordinate='RAW_UNADJUSTED'
+            AND after_price_coordinate='RAW_UNADJUSTED'
+            AND core_compatible
+            AND before_market IS NOT DISTINCT FROM after_market
+            AND before_board IS NOT DISTINCT FROM after_board), FALSE)
+                AS source_pool_pair_compatible
+    FROM source_pool_relations
 ), classified AS (
     SELECT *,
            array_remove(ARRAY[
@@ -1241,6 +1338,346 @@ LIMIT %s OFFSET %s""",
         },
         "rows": rows,
         "database_write": False,
+        "core_recalculated": False,
+    }
+
+
+_PROFILE_BREADTH_SUMMARY_SQL = """
+SELECT count(*)::bigint AS union_count,
+       count(DISTINCT source_symbol)::bigint AS distinct_union_count,
+       count(*) FILTER (WHERE before_present)::bigint AS before_count,
+       count(*) FILTER (WHERE after_present)::bigint AS after_count,
+       count(*) FILTER (WHERE before_present AND after_present)::bigint AS intersection_count,
+       count(*) FILTER (WHERE before_present AND NOT after_present)::bigint AS before_only_count,
+       count(*) FILTER (WHERE NOT before_present AND after_present)::bigint AS after_only_count,
+       count(*) FILTER (WHERE before_present AND before_source_pool_close_ma20_relation='ABOVE')::bigint AS before_above,
+       count(*) FILTER (WHERE before_present AND before_source_pool_close_ma20_relation='BELOW')::bigint AS before_below,
+       count(*) FILTER (WHERE before_present AND before_source_pool_close_ma20_relation='EQUAL')::bigint AS before_equal,
+       count(*) FILTER (WHERE before_present AND before_source_pool_close_ma20_relation IS NULL)::bigint AS before_unknown,
+       count(*) FILTER (WHERE after_present AND after_source_pool_close_ma20_relation='ABOVE')::bigint AS after_above,
+       count(*) FILTER (WHERE after_present AND after_source_pool_close_ma20_relation='BELOW')::bigint AS after_below,
+       count(*) FILTER (WHERE after_present AND after_source_pool_close_ma20_relation='EQUAL')::bigint AS after_equal,
+       count(*) FILTER (WHERE after_present AND after_source_pool_close_ma20_relation IS NULL)::bigint AS after_unknown,
+       count(*) FILTER (WHERE source_pool_pair_compatible)::bigint AS compatible_count,
+       count(*) FILTER (WHERE before_present AND after_present AND NOT source_pool_pair_compatible)::bigint AS incomparable_count,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND before_source_pool_close_ma20_relation='BELOW' AND after_source_pool_close_ma20_relation='BELOW')::bigint AS below_to_below,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND before_source_pool_close_ma20_relation='BELOW' AND after_source_pool_close_ma20_relation='EQUAL')::bigint AS below_to_equal,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND before_source_pool_close_ma20_relation='BELOW' AND after_source_pool_close_ma20_relation='ABOVE')::bigint AS below_to_above,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND before_source_pool_close_ma20_relation='EQUAL' AND after_source_pool_close_ma20_relation='BELOW')::bigint AS equal_to_below,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND before_source_pool_close_ma20_relation='EQUAL' AND after_source_pool_close_ma20_relation='EQUAL')::bigint AS equal_to_equal,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND before_source_pool_close_ma20_relation='EQUAL' AND after_source_pool_close_ma20_relation='ABOVE')::bigint AS equal_to_above,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND before_source_pool_close_ma20_relation='ABOVE' AND after_source_pool_close_ma20_relation='BELOW')::bigint AS above_to_below,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND before_source_pool_close_ma20_relation='ABOVE' AND after_source_pool_close_ma20_relation='EQUAL')::bigint AS above_to_equal,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND before_source_pool_close_ma20_relation='ABOVE' AND after_source_pool_close_ma20_relation='ABOVE')::bigint AS above_to_above,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND before_source_pool_close_ma20_relation='ABOVE')::bigint AS paired_above_before,
+       count(*) FILTER (WHERE source_pool_pair_compatible AND after_source_pool_close_ma20_relation='ABOVE')::bigint AS paired_above_after
+FROM classified
+"""
+
+_PROFILE_BREADTH_BOARD_SQL = """
+SELECT endpoint.side, endpoint.market, endpoint.board, endpoint.relation,
+       count(*)::bigint AS row_count
+FROM classified
+CROSS JOIN LATERAL (
+    VALUES
+      ('before'::text, before_present, before_market, before_board,
+       COALESCE(before_source_pool_close_ma20_relation, 'UNKNOWN')::text),
+      ('after'::text, after_present, after_market, after_board,
+       COALESCE(after_source_pool_close_ma20_relation, 'UNKNOWN')::text)
+) AS endpoint(side, present, market, board, relation)
+WHERE endpoint.present
+GROUP BY endpoint.side, endpoint.market, endpoint.board, endpoint.relation
+ORDER BY endpoint.side, endpoint.market NULLS FIRST,
+         endpoint.board NULLS FIRST, endpoint.relation
+"""
+
+_PROFILE_BREADTH_UNKNOWN_SQL = """
+SELECT endpoint.side, endpoint.reason, count(*)::bigint AS row_count
+FROM classified
+CROSS JOIN LATERAL (
+    VALUES
+      ('before'::text, before_present, before_source_pool_unknown_reason),
+      ('after'::text, after_present, after_source_pool_unknown_reason)
+) AS endpoint(side, present, reason)
+WHERE endpoint.present AND endpoint.reason IS NOT NULL
+GROUP BY endpoint.side, endpoint.reason
+ORDER BY endpoint.side, endpoint.reason
+"""
+
+_PROFILE_BREADTH_INCOMPARABLE_SQL = """
+SELECT CASE
+    WHEN NOT before_raw_record_present OR NOT after_raw_record_present
+      THEN 'RAW_ROW_MISSING'
+    WHEN before_bar_status='TDX_TARGET_BAR_MISSING'
+      OR after_bar_status='TDX_TARGET_BAR_MISSING'
+      THEN 'TARGET_BAR_MISSING'
+    WHEN before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+      OR after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+      THEN 'RAW_CLOSE_QUALITY_UNKNOWN'
+    WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+      OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+      OR before_price_coordinate IS DISTINCT FROM after_price_coordinate
+      THEN 'PRICE_COORDINATE_INCOMPATIBLE'
+    WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'
+    WHEN before_market IS DISTINCT FROM after_market
+      OR before_board IS DISTINCT FROM after_board
+      THEN 'SOURCE_LABEL_CHANGED'
+    WHEN before_ma20_quality IS DISTINCT FROM 'OBSERVED'
+      OR after_ma20_quality IS DISTINCT FROM 'OBSERVED'
+      THEN 'MA20_QUALITY_UNKNOWN'
+    ELSE 'RELATION_UNKNOWN'
+END AS reason,
+count(*)::bigint AS row_count
+FROM classified
+WHERE before_present AND after_present
+  AND NOT source_pool_pair_compatible
+GROUP BY reason
+ORDER BY reason
+"""
+
+
+def read_profile_breadth(
+    config: Mapping[str, Any],
+    *,
+    before_session: date,
+    after_session: date,
+    max_target_session: date,
+    before_source_set_id: str,
+    before_package_sha256: str,
+    before_profile_revision: str,
+    after_source_set_id: str,
+    after_package_sha256: str,
+    after_profile_revision: str,
+) -> dict[str, Any]:
+    """按两份精确封口画像只读聚合来源池MA20关系。"""
+    if (
+        type(before_session) is not date
+        or type(after_session) is not date
+        or type(max_target_session) is not date
+        or before_session >= after_session
+        or after_session > max_target_session
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_BREADTH_DATE_INVALID",
+            "广度对照日期必须递增，且不晚于显式研究截止日",
+        )
+    identities = (
+        before_source_set_id,
+        before_package_sha256,
+        before_profile_revision,
+        after_source_set_id,
+        after_package_sha256,
+        after_profile_revision,
+    )
+    if any(not value for value in identities):
+        raise PriceProfilePgError(
+            "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
+            "广度对照必须显式提供前后source_set、package SHA和profile revision",
+        )
+
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        before = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=before_session,
+            max_target_session=max_target_session,
+            source_set_id=before_source_set_id,
+            package_sha256=before_package_sha256,
+            profile_revision=before_profile_revision,
+        )
+        after = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=after_session,
+            max_target_session=max_target_session,
+            source_set_id=after_source_set_id,
+            package_sha256=after_package_sha256,
+            profile_revision=after_profile_revision,
+        )
+        parameters = (
+            *_profile_change_snapshot_parameters(namespace_id, before),
+            *_profile_change_snapshot_parameters(namespace_id, after),
+        )
+        cursor.execute(_PROFILE_CHANGE_CTES + _PROFILE_BREADTH_SUMMARY_SQL, parameters)
+        names = [column.name for column in cursor.description]
+        row = cursor.fetchone()
+        if row is None:
+            raise PriceProfilePgError(
+                "PROFILE_BREADTH_EMPTY_RESULT", "广度查询没有返回汇总行"
+            )
+        summary = {name: int(value) for name, value in zip(names, row, strict=True)}
+        cursor.execute(_PROFILE_CHANGE_CTES + _PROFILE_BREADTH_BOARD_SQL, parameters)
+        board_rows = cursor.fetchall()
+        cursor.execute(_PROFILE_CHANGE_CTES + _PROFILE_BREADTH_UNKNOWN_SQL, parameters)
+        unknown_rows = cursor.fetchall()
+        cursor.execute(
+            _PROFILE_CHANGE_CTES + _PROFILE_BREADTH_INCOMPARABLE_SQL,
+            parameters,
+        )
+        incomparable_rows = cursor.fetchall()
+
+    before_count = summary["before_count"]
+    after_count = summary["after_count"]
+    intersection_count = summary["intersection_count"]
+    union_count = summary["union_count"]
+    if (
+        summary["distinct_union_count"] != union_count
+        or before_count != before["source_symbol_count"]
+        or after_count != after["source_symbol_count"]
+        or union_count
+        != intersection_count
+        + summary["before_only_count"]
+        + summary["after_only_count"]
+        or intersection_count
+        != summary["compatible_count"] + summary["incomparable_count"]
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_BREADTH_DENOMINATOR_INVARIANT_FAILED",
+            "广度并集、交集、快照分母或共同集合恒等式不成立",
+        )
+
+    relation_names = ("ABOVE", "BELOW", "EQUAL", "UNKNOWN")
+    side_summaries: dict[str, dict[str, Any]] = {}
+    for side in ("before", "after"):
+        positions = {
+            relation: summary[f"{side}_{relation.lower()}"]
+            for relation in relation_names
+        }
+        source_count = summary[f"{side}_count"]
+        eligible_count = sum(positions[relation] for relation in relation_names[:3])
+        if sum(positions.values()) != source_count:
+            raise PriceProfilePgError(
+                "PROFILE_BREADTH_POSITION_INVARIANT_FAILED",
+                f"{side}端MA20关系分类未覆盖完整来源分母",
+            )
+        unknown_reasons = {
+            str(reason): int(count)
+            for result_side, reason, count in unknown_rows
+            if result_side == side
+        }
+        if sum(unknown_reasons.values()) != positions["UNKNOWN"]:
+            raise PriceProfilePgError(
+                "PROFILE_BREADTH_UNKNOWN_REASON_INVARIANT_FAILED",
+                f"{side}端UNKNOWN主原因没有互斥覆盖全部未知项",
+            )
+        groups: dict[tuple[str, str], dict[str, int]] = {}
+        for result_side, market, board, relation, count in board_rows:
+            if result_side != side:
+                continue
+            key = (str(market or "UNKNOWN"), str(board or "UNKNOWN"))
+            groups.setdefault(key, dict.fromkeys(relation_names, 0))[str(relation)] += (
+                int(count)
+            )
+        board_distribution = [
+            {
+                "market": market,
+                "board": board,
+                "positions": groups[(market, board)],
+                "source_count": sum(groups[(market, board)].values()),
+                "research_board_label": market in {"SH", "SZ"}
+                and board in {"MAIN_BOARD", "GEM"},
+            }
+            for market, board in sorted(groups)
+        ]
+        if sum(item["source_count"] for item in board_distribution) != source_count:
+            raise PriceProfilePgError(
+                "PROFILE_BREADTH_BOARD_INVARIANT_FAILED",
+                f"{side}端来源market/board分组未覆盖完整分母",
+            )
+        side_summaries[side] = {
+            "source_symbol_count": source_count,
+            "positions": positions,
+            "eligible_count": eligible_count,
+            "eligible_coverage_fraction": {
+                "numerator": eligible_count,
+                "denominator": source_count,
+            },
+            "above_eligible_fraction": {
+                "numerator": positions["ABOVE"],
+                "denominator": eligible_count,
+            },
+            "unknown_reasons": [
+                {"reason": reason, "count": count}
+                for reason, count in sorted(unknown_reasons.items())
+            ],
+            "board_distribution": board_distribution,
+        }
+
+    transition_matrix = {
+        "BELOW_TO_BELOW": summary["below_to_below"],
+        "BELOW_TO_EQUAL": summary["below_to_equal"],
+        "BELOW_TO_ABOVE": summary["below_to_above"],
+        "EQUAL_TO_BELOW": summary["equal_to_below"],
+        "EQUAL_TO_EQUAL": summary["equal_to_equal"],
+        "EQUAL_TO_ABOVE": summary["equal_to_above"],
+        "ABOVE_TO_BELOW": summary["above_to_below"],
+        "ABOVE_TO_EQUAL": summary["above_to_equal"],
+        "ABOVE_TO_ABOVE": summary["above_to_above"],
+    }
+    compatible_count = summary["compatible_count"]
+    if sum(transition_matrix.values()) != compatible_count:
+        raise PriceProfilePgError(
+            "PROFILE_BREADTH_TRANSITION_INVARIANT_FAILED",
+            "九格关系转移矩阵之和不等于共同可比集合",
+        )
+    incomparable_reasons = [
+        {"reason": str(reason), "count": int(count)}
+        for reason, count in incomparable_rows
+    ]
+    if (
+        sum(item["count"] for item in incomparable_reasons)
+        != summary["incomparable_count"]
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_BREADTH_INCOMPARABLE_REASON_INVARIANT_FAILED",
+            "共同集合不可比主原因没有互斥覆盖全部不可比项",
+        )
+    paired_above_before = summary["paired_above_before"]
+    paired_above_after = summary["paired_above_after"]
+    return {
+        "status": "AVAILABLE",
+        "namespace_id": namespace_id,
+        "before_snapshot": before,
+        "after_snapshot": after,
+        "membership": {
+            "source_symbol_union_count": union_count,
+            "intersection_count": intersection_count,
+            "before_only_count": summary["before_only_count"],
+            "after_only_count": summary["after_only_count"],
+        },
+        "before": side_summaries["before"],
+        "after": side_summaries["after"],
+        "paired": {
+            "compatible_count": compatible_count,
+            "incomparable_count": summary["incomparable_count"],
+            "incomparable_reasons": incomparable_reasons,
+            "transition_matrix": transition_matrix,
+            "strict_cross_up_count": transition_matrix["BELOW_TO_ABOVE"],
+            "strict_cross_down_count": transition_matrix["ABOVE_TO_BELOW"],
+            "equal_transition_count": (
+                transition_matrix["BELOW_TO_EQUAL"]
+                + transition_matrix["EQUAL_TO_BELOW"]
+                + transition_matrix["EQUAL_TO_EQUAL"]
+                + transition_matrix["EQUAL_TO_ABOVE"]
+                + transition_matrix["ABOVE_TO_EQUAL"]
+            ),
+            "paired_above_before_count": paired_above_before,
+            "paired_above_after_count": paired_above_after,
+            "delta_above_percentage_points": (
+                {
+                    "numerator": 100 * (paired_above_after - paired_above_before),
+                    "denominator": compatible_count,
+                }
+                if compatible_count
+                else None
+            ),
+        },
+        "research_scope": "SOURCE_SYMBOL_ONLY",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
+        "database_write": False,
+        "ddl_executed": False,
         "core_recalculated": False,
     }
 

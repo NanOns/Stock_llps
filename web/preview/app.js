@@ -20,6 +20,9 @@ const state = {
   changeTotal: 0,
   changeRequest: 0,
   pairRequest: 0,
+  profileBreadthRequest: 0,
+  profileBreadthData: null,
+  profileBreadthBinding: null,
   changeSnapshots: [],
   changeBinding: null,
   changeDetailItem: null,
@@ -92,6 +95,18 @@ const labels = {
   LEAVE_EQUAL_TO_ABOVE: "由相等转为上方",
   LEAVE_EQUAL_TO_BELOW: "由相等转为下方",
   HISTORY_ROW_NOT_STORED: "PG未保存Raw行",
+  RAW_ROW_MISSING: "PG未保存目标日Raw行",
+  TARGET_BAR_MISSING: "目标会话缺少Bar",
+  RAW_PRICE_QUALITY_UNKNOWN: "Raw收盘质量未知",
+  PRICE_COORDINATE_UNSUPPORTED: "价格坐标不支持",
+  PRICE_COORDINATE_INCOMPATIBLE: "两端价格坐标不兼容",
+  CORE_SEMANTICS_UNKNOWN: "Core语义缺失",
+  CORE_SEMANTICS_INCOMPATIBLE: "Core语义不兼容",
+  MA20_QUALITY_UNKNOWN: "MA20质量未知",
+  PRICE_VALUE_MISSING: "价格值缺失",
+  RELATION_UNKNOWN: "关系未知",
+  RAW_CLOSE_QUALITY_UNKNOWN: "Raw收盘质量未知",
+  SOURCE_LABEL_CHANGED: "来源市场或板别标签变化",
 };
 const profileLabels = {
   "profile.trend": "趋势",
@@ -1287,9 +1302,7 @@ async function queryStock(event) {
 function selectedProfileSnapshot() {
   const key = $("profileSnapshotSelect").value;
   return state.profileSnapshots.find(
-    (item) =>
-      `${item.target_session}|${item.source_set_id}|${item.profile_revision}` ===
-      key,
+    (item) => profileSnapshotKey(item) === key,
   );
 }
 function timelineField(field) {
@@ -3403,6 +3416,237 @@ function selectedChangeSnapshot(id) {
     (snapshot) => profileSnapshotKey(snapshot) === key,
   );
 }
+function clearProfileBreadth(message = "请选择两个完整PG画像快照。") {
+  state.profileBreadthRequest++;
+  state.profileBreadthData = null;
+  state.profileBreadthBinding = null;
+  $("profileBreadthCount").textContent = "等待精确快照";
+  const root = $("profileBreadthSummary");
+  root.replaceChildren();
+  appendText(root, "p", message, "muted");
+  $("profileBreadthOpenFull").disabled = true;
+  $("profileBreadthOpenPair").disabled = true;
+}
+function breadthFraction(fraction, digits = 2) {
+  if (!fraction || !fraction.denominator) return "未知（分母为0）";
+  const numerator = Number(fraction.numerator);
+  const denominator = Number(fraction.denominator);
+  const percent = (100 * numerator) / denominator;
+  return `${fraction.numerator}/${fraction.denominator} · ${percent.toFixed(digits)}%`;
+}
+function breadthReason(reason) {
+  const [code, detail] = String(reason || "UNKNOWN").split(/:(.*)/s);
+  const primary = labels[code] || code;
+  return detail ? `${primary}：${text(detail)}` : primary;
+}
+function renderProfileBreadth(data) {
+  const root = $("profileBreadthSummary");
+  root.replaceChildren();
+  const before = data.before;
+  const after = data.after;
+  const paired = data.paired;
+  const membership = data.membership;
+  const relationNames = ["ABOVE", "BELOW", "EQUAL", "UNKNOWN"];
+  const sides = [
+    ["before", "起始日", before],
+    ["after", "结束日", after],
+  ];
+  const sideGrid = appendText(root, "div", "", "breadth-side-grid");
+  for (const [key, title, side] of sides) {
+    const card = document.createElement("section");
+    card.className = "breadth-side";
+    appendText(
+      card,
+      "h4",
+      `${title} · ${data[`${key}_snapshot`].target_session}`,
+    );
+    appendText(
+      card,
+      "p",
+      `全来源分母 ${side.source_symbol_count}；可评价 ${side.eligible_count}（${breadthFraction(side.eligible_coverage_fraction)}）；可评价项中高于MA20 ${breadthFraction(side.above_eligible_fraction)}`,
+      "muted",
+    );
+    const positionList = document.createElement("dl");
+    positionList.className = "breadth-position-list";
+    for (const relation of relationNames)
+      readinessDetail(
+        positionList,
+        text(relation),
+        String(side.positions[relation]),
+      );
+    card.append(positionList);
+    const unknown = document.createElement("div");
+    appendText(unknown, "h5", "UNKNOWN互斥主原因");
+    if (side.unknown_reasons.length) {
+      const list = document.createElement("ul");
+      for (const item of side.unknown_reasons)
+        appendText(list, "li", `${breadthReason(item.reason)} · ${item.count}`);
+      unknown.append(list);
+    } else appendText(unknown, "p", "无UNKNOWN项", "muted");
+    card.append(unknown);
+    const boardWrap = document.createElement("div");
+    boardWrap.className = "table-wrap";
+    const boardTable = document.createElement("table");
+    boardTable.className = "breadth-table";
+    const boardHead = document.createElement("thead");
+    const boardHeadRow = document.createElement("tr");
+    for (const heading of [
+      "来源标签（非上市总体）",
+      "ABOVE",
+      "BELOW",
+      "EQUAL",
+      "UNKNOWN",
+      "来源数",
+    ])
+      appendText(boardHeadRow, "th", heading);
+    boardHead.append(boardHeadRow);
+    boardTable.append(boardHead);
+    const boardBody = document.createElement("tbody");
+    for (const group of side.board_distribution) {
+      const row = document.createElement("tr");
+      cell(
+        row,
+        `${text(group.market)} / ${text(group.board)}${group.research_board_label ? " · 来源标注" : " · 标签未核"}`,
+      );
+      for (const relation of relationNames)
+        cell(row, String(group.positions[relation]));
+      cell(row, String(group.source_count));
+      boardBody.append(row);
+    }
+    boardTable.append(boardBody);
+    boardWrap.append(boardTable);
+    card.append(boardWrap);
+    sideGrid.append(card);
+  }
+
+  const pairSection = document.createElement("section");
+  pairSection.className = "breadth-paired";
+  appendText(
+    pairSection,
+    "h4",
+    `两端共同且兼容来源集合 C=${paired.compatible_count} · 交集 ${membership.intersection_count} · 不可比 ${paired.incomparable_count}`,
+  );
+  appendText(
+    pairSection,
+    "p",
+    `来源代码并集 ${membership.source_symbol_union_count}；仅起始 ${membership.before_only_count}；仅结束 ${membership.after_only_count}。本端日内广度按各自完整快照分母；两日变化只按C计算。`,
+    "muted",
+  );
+  const matrixWrap = document.createElement("div");
+  matrixWrap.className = "table-wrap";
+  const matrix = document.createElement("table");
+  matrix.className = "breadth-table breadth-matrix";
+  const matrixHead = document.createElement("thead");
+  const matrixHeadRow = document.createElement("tr");
+  for (const heading of ["起始 ↓ / 结束 →", "BELOW", "EQUAL", "ABOVE"])
+    appendText(matrixHeadRow, "th", heading);
+  matrixHead.append(matrixHeadRow);
+  matrix.append(matrixHead);
+  const matrixBody = document.createElement("tbody");
+  for (const from of ["BELOW", "EQUAL", "ABOVE"]) {
+    const row = document.createElement("tr");
+    cell(row, text(from));
+    for (const to of ["BELOW", "EQUAL", "ABOVE"])
+      cell(row, String(paired.transition_matrix[`${from}_TO_${to}`]));
+    matrixBody.append(row);
+  }
+  matrix.append(matrixBody);
+  matrixWrap.append(matrix);
+  pairSection.append(matrixWrap);
+  const delta = paired.delta_above_percentage_points;
+  const deltaView =
+    delta && delta.denominator
+      ? `${delta.numerator}/${delta.denominator}个百分点 · ${(Number(delta.numerator) / Number(delta.denominator)).toFixed(2)}个百分点`
+      : "未知（共同可比集合为空）";
+  appendText(
+    pairSection,
+    "p",
+    `C内ABOVE ${paired.paired_above_before_count} → ${paired.paired_above_after_count}；同口径变化 ${deltaView}。严格下方跨上方 ${paired.strict_cross_up_count} · 上方跨下方 ${paired.strict_cross_down_count} · 涉及EQUAL的转移 ${paired.equal_transition_count}。`,
+    "breadth-delta",
+  );
+  if (paired.incomparable_reasons.length) {
+    const reasons = document.createElement("ul");
+    for (const item of paired.incomparable_reasons)
+      appendText(
+        reasons,
+        "li",
+        `${breadthReason(item.reason)} · ${item.count}`,
+      );
+    pairSection.append(reasons);
+  }
+  root.append(pairSection);
+
+  const identity = document.createElement("details");
+  identity.className = "breadth-identity";
+  appendText(identity, "summary", "展开完整来源版本与研究身份");
+  for (const [key, title] of sides) {
+    const snapshot = data[`${key}_snapshot`];
+    appendText(
+      identity,
+      "p",
+      `${title} ${snapshot.target_session} · source_set ${snapshot.source_set_id} · package SHA ${snapshot.package_sha256} · profile revision ${snapshot.profile_revision} · 日历 ${snapshot.history_calendar_id}/${snapshot.history_calendar_revision} · 窗口 ${snapshot.window_start} 至 ${snapshot.window_end} · ${snapshot.history_session_count}个官方会话`,
+    );
+  }
+  appendText(
+    identity,
+    "p",
+    `namespace ${data.namespace_id} · ${data.research_scope} · ${data.price_coordinate} · ${data.pit_status} · 正式上市总体 ${text(data.formal_listing_universe)}。本查询只读PG，不打开来源包、不重算Core。`,
+  );
+  root.append(identity);
+  $("profileBreadthCount").textContent =
+    `全来源 ${before.source_symbol_count} / ${after.source_symbol_count} · C ${paired.compatible_count}`;
+  $("profileBreadthOpenFull").disabled = false;
+  $("profileBreadthOpenPair").disabled = false;
+  state.profileBreadthData = data;
+}
+async function loadProfileBreadth(before, after, ownerRequest) {
+  const requestId = ++state.profileBreadthRequest;
+  const key = `${profileSnapshotKey(before)}→${profileSnapshotKey(after)}`;
+  state.profileBreadthBinding = key;
+  state.profileBreadthData = null;
+  $("profileBreadthCount").textContent = "完整来源池统计中";
+  const root = $("profileBreadthSummary");
+  root.replaceChildren();
+  appendText(
+    root,
+    "p",
+    "正在读取两份精确封口画像的全来源代码池与已存MA20…",
+    "muted",
+  );
+  $("profileBreadthOpenFull").disabled = true;
+  $("profileBreadthOpenPair").disabled = true;
+  const params = new URLSearchParams({
+    before_session: before.target_session,
+    after_session: after.target_session,
+    before_source_set_id: before.source_set_id,
+    before_package_sha256: before.package_sha256,
+    before_profile_revision: before.profile_revision,
+    after_source_set_id: after.source_set_id,
+    after_package_sha256: after.package_sha256,
+    after_profile_revision: after.profile_revision,
+  });
+  try {
+    const data = await api(
+      `/api/source-symbol-price-profile-breadth?${params}`,
+    );
+    if (
+      requestId !== state.profileBreadthRequest ||
+      ownerRequest !== state.changeRequest
+    )
+      return;
+    renderProfileBreadth(data);
+  } catch (error) {
+    if (
+      requestId !== state.profileBreadthRequest ||
+      ownerRequest !== state.changeRequest
+    )
+      return;
+    state.profileBreadthData = null;
+    $("profileBreadthCount").textContent = "来源池统计失败";
+    root.replaceChildren();
+    appendText(root, "p", `没有可用广度结果：${error.message}`, "message");
+  }
+}
 async function loadChanges() {
   if (state.timelineContext?.origin === "change") invalidateTimeline();
   state.changeBinding = null;
@@ -3425,6 +3669,9 @@ async function loadChanges() {
     !after ||
     before >= after
   ) {
+    clearProfileBreadth(
+      "请选择两个递增且完整的PG画像快照；广度不会保留前一组数据。",
+    );
     $("changeSummary").textContent = "请选择递增的起始与结束画像日期。";
     $("changeHighlightsCount").textContent = "等待精确快照";
     $("changeHighlightsSummary").textContent =
@@ -3444,6 +3691,7 @@ async function loadChanges() {
         true;
     return;
   }
+  void loadProfileBreadth(beforeSnapshot, afterSnapshot, requestId);
   const params = new URLSearchParams({
     before_session: before,
     after_session: after,
@@ -3572,7 +3820,7 @@ async function loadProfileSnapshots() {
       new Option("— 请选择精确画像日期 / source_set / revision —", ""),
     );
     for (const item of state.profileSnapshots) {
-      const key = `${item.target_session}|${item.source_set_id}|${item.profile_revision}`;
+      const key = profileSnapshotKey(item);
       const option = new Option(
         `${item.target_session} · ${item.source_set_id.slice(0, 8)} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话 · rev ${item.profile_revision.slice(0, 10)}`,
         key,
@@ -3780,6 +4028,50 @@ $("profileLast").addEventListener("click", () => {
 $("searchChanges").addEventListener("click", () => {
   state.changeOffset = 0;
   loadChanges();
+});
+$("profileBreadthOpenFull").addEventListener("click", () => {
+  const snapshot = state.profileBreadthData?.after_snapshot;
+  if (!snapshot) return;
+  const exact = state.profileSnapshots.find(
+    (item) =>
+      item.target_session === snapshot.target_session &&
+      item.source_set_id === snapshot.source_set_id &&
+      item.package_sha256 === snapshot.package_sha256 &&
+      item.profile_revision === snapshot.profile_revision,
+  );
+  if (!exact) {
+    $("profileMessage").textContent =
+      "该精确结束快照不在当前PG目录中；已停止跳转，没有回退其它版本。";
+    return;
+  }
+  $("profileSnapshotSelect").value = profileSnapshotKey(exact);
+  $("profileSymbolInput").value = "";
+  $("profileMarketSelect").value = "ALL";
+  $("profileBoardSelect").value = "ALL";
+  $("profileBarStatusSelect").value = "ALL";
+  $("profileWindowStatusSelect").value = "ALL";
+  state.profileOffset = 0;
+  $("returnToSourceBreadth").hidden = false;
+  $("profileBrowserTitle").scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
+  loadProfilePage();
+});
+$("profileBreadthOpenPair").addEventListener("click", () => {
+  $("changeSymbolInput").focus();
+  $("changeSymbolInput").scrollIntoView({
+    behavior: "smooth",
+    block: "center",
+  });
+  $("changeSymbolInput").placeholder = "输入来源代码后点击“对照双日画像”";
+});
+$("returnToSourceBreadth").addEventListener("click", () => {
+  $("sourceBreadthTitle").scrollIntoView({
+    behavior: "smooth",
+    block: "center",
+  });
+  $("returnToSourceBreadth").hidden = true;
 });
 $("compareProfilePair").addEventListener("click", compareSourceProfilePair);
 $("changeSymbolInput").addEventListener("input", () => {
