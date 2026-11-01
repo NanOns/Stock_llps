@@ -89,6 +89,21 @@ _PROFILE_COLUMNS = (
     "profile_reasons",
 )
 _CORE_QUALITY_FIELDS = frozenset(_CORE_COLUMN_NAMES)
+_PROFILE_QUERY_FIELD_IDS = frozenset(
+    {
+        "profile.closed_month_trend",
+        "profile.closed_week_trend",
+        "profile.compression",
+        "profile.drawdown60",
+        "profile.extension",
+        "profile.ma_structure",
+        "profile.near_high20",
+        "profile.participation",
+        "profile.position",
+        "profile.relative",
+        "profile.trend",
+    }
+)
 _CORE_FIELD_QUERY_COLUMNS = {
     f"core.{field}": f"{field}_quality" for field in _CORE_COLUMN_NAMES
 }
@@ -3023,6 +3038,9 @@ def read_profile_page(
     source_symbol: str | None = None,
     core_field: str | None = None,
     core_quality: str | None = None,
+    profile_field_id: str | None = None,
+    profile_quality: str | None = None,
+    profile_status: str | None = None,
     position_1_field: str | None = None,
     position_1_status: str | None = None,
     position_2_field: str | None = None,
@@ -3076,6 +3094,27 @@ def read_profile_page(
     if (core_field is None) != (core_quality is None):
         raise PriceProfilePgError(
             "PROFILE_FILTER_INVALID", "Core质量筛选必须同时指定字段和质量"
+        )
+    if profile_field_id is None:
+        if profile_quality is not None or profile_status is not None:
+            raise PriceProfilePgError(
+                "PROFILE_FILTER_INVALID", "Profile11质量或状态筛选必须指定字段"
+            )
+    elif profile_field_id not in _PROFILE_QUERY_FIELD_IDS:
+        raise PriceProfilePgError(
+            "PROFILE_FILTER_INVALID", "Profile11字段不在已采用的11项合同白名单中"
+        )
+    if profile_quality is not None and profile_status is not None:
+        raise PriceProfilePgError(
+            "PROFILE_FILTER_INVALID", "Profile11质量与状态筛选一次只能选择一项"
+        )
+    if profile_quality is not None and not isinstance(profile_quality, str):
+        raise PriceProfilePgError(
+            "PROFILE_FILTER_INVALID", "Profile11质量筛选值格式无效"
+        )
+    if profile_status is not None and not isinstance(profile_status, str):
+        raise PriceProfilePgError(
+            "PROFILE_FILTER_INVALID", "Profile11状态筛选值格式无效"
         )
     core_quality_column = None
     if core_field is not None:
@@ -3150,6 +3189,16 @@ def read_profile_page(
     if core_quality_column is not None:
         conditions.append(f"p.{core_quality_column}=%s")
         parameters.append(core_quality)
+    if profile_quality is not None:
+        conditions.append(
+            "p.profile_qualities[array_position(p.profile_field_ids,%s)]=%s"
+        )
+        parameters.extend((profile_field_id, profile_quality))
+    if profile_status is not None:
+        conditions.append(
+            "p.profile_statuses[array_position(p.profile_field_ids,%s)]=%s"
+        )
+        parameters.extend((profile_field_id, profile_status))
     for field, status in position_filters:
         conditions.append(f"({_price_position_status_sql(field)})=%s")
         parameters.append(status)
@@ -3190,6 +3239,120 @@ WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid AND target_session=%s
             raise PriceProfilePgError(
                 "PROFILE_SNAPSHOT_INCOMPLETE", "该精确画像修订未覆盖完整来源代码分母"
             )
+        profile_field_summary = None
+        if profile_field_id is not None:
+            profile_ids = sorted(_PROFILE_QUERY_FIELD_IDS)
+            cursor.execute(
+                """SELECT count(*)::bigint
+FROM stock.source_symbol_price_profiles p
+WHERE p.namespace_id=%s::uuid AND p.source_set_id=%s::uuid
+  AND p.target_session=%s AND p.package_sha256=%s AND p.profile_revision=%s
+  AND (
+    COALESCE(array_ndims(p.profile_field_ids), 0) <> 1
+    OR COALESCE(array_length(p.profile_field_ids, 1), 0) <> 11
+    OR COALESCE(array_ndims(p.profile_statuses), 0) <> 1
+    OR COALESCE(array_length(p.profile_statuses, 1), 0) <> 11
+    OR COALESCE(array_ndims(p.profile_qualities), 0) <> 1
+    OR COALESCE(array_length(p.profile_qualities, 1), 0) <> 11
+    OR COALESCE(array_ndims(p.profile_reasons), 0) <> 1
+    OR COALESCE(array_length(p.profile_reasons, 1), 0) <> 11
+    OR array_lower(p.profile_field_ids, 1) IS DISTINCT FROM 1
+    OR array_lower(p.profile_statuses, 1) IS DISTINCT FROM array_lower(p.profile_field_ids, 1)
+    OR array_lower(p.profile_qualities, 1) IS DISTINCT FROM array_lower(p.profile_field_ids, 1)
+    OR array_lower(p.profile_reasons, 1) IS DISTINCT FROM array_lower(p.profile_field_ids, 1)
+    OR (SELECT count(DISTINCT field_id)::bigint
+        FROM unnest(p.profile_field_ids) AS fields(field_id)) <> 11
+    OR NOT (p.profile_field_ids @> %s::text[])
+    OR NOT (p.profile_field_ids <@ %s::text[])
+    OR array_position(p.profile_statuses, NULL) IS NOT NULL
+    OR array_position(p.profile_qualities, NULL) IS NOT NULL
+    OR array_position(p.profile_reasons, NULL) IS NOT NULL
+  )""",
+                (
+                    namespace_id,
+                    source_set_id,
+                    target_session,
+                    package_sha256,
+                    profile_revision,
+                    profile_ids,
+                    profile_ids,
+                ),
+            )
+            invalid_array_rows = int(cursor.fetchone()[0])
+            if invalid_array_rows:
+                raise PriceProfilePgError(
+                    "PROFILE_COMPONENTS_INVALID",
+                    "精确来源快照存在Profile11平行数组长度、字段集合或索引未对齐记录",
+                )
+            cursor.execute(
+                """SELECT p.profile_statuses[field_index.subscript],
+       p.profile_qualities[field_index.subscript],
+       p.profile_reasons[field_index.subscript], count(*)::bigint
+FROM stock.source_symbol_price_profiles p
+CROSS JOIN LATERAL generate_subscripts(p.profile_field_ids, 1)
+  AS field_index(subscript)
+WHERE p.namespace_id=%s::uuid AND p.source_set_id=%s::uuid
+  AND p.target_session=%s AND p.package_sha256=%s AND p.profile_revision=%s
+  AND p.profile_field_ids[field_index.subscript]=%s
+GROUP BY 1, 2, 3
+ORDER BY 1, 2, 3""",
+                (
+                    namespace_id,
+                    source_set_id,
+                    target_session,
+                    package_sha256,
+                    profile_revision,
+                    profile_field_id,
+                ),
+            )
+            profile_groups = cursor.fetchall()
+            quality_groups: dict[str, dict[str, Any]] = {}
+            status_groups: dict[str, dict[str, Any]] = {}
+            reason_groups: list[dict[str, Any]] = []
+            profile_denominator = 0
+            for status, quality, reason, raw_count in profile_groups:
+                count = int(raw_count)
+                profile_denominator += count
+                quality_item = quality_groups.setdefault(
+                    quality, {"quality": quality, "count": 0, "reason_counts": []}
+                )
+                quality_item["count"] += count
+                status_item = status_groups.setdefault(
+                    status, {"status": status, "count": 0}
+                )
+                status_item["count"] += count
+                reason_item = {
+                    "status": status,
+                    "quality": quality,
+                    "reason": reason,
+                    "count": count,
+                }
+                reason_groups.append(reason_item)
+                quality_item["reason_counts"].append(
+                    {"status": status, "reason": reason, "count": count}
+                )
+            if profile_denominator != expected_total:
+                raise PriceProfilePgError(
+                    "PROFILE_COMPONENTS_INCOMPLETE",
+                    "所选Profile11字段没有覆盖精确来源快照的完整分母",
+                )
+            profile_field_summary = {
+                "field_id": profile_field_id,
+                "source_denominator": profile_denominator,
+                "quality_counts": list(quality_groups.values()),
+                "status_counts": list(status_groups.values()),
+                "reason_counts": reason_groups,
+            }
+            if profile_quality is not None and profile_quality not in quality_groups:
+                raise PriceProfilePgError(
+                    "PROFILE_FILTER_INVALID",
+                    "Profile11质量值不在该精确快照的已存状态中",
+                )
+            if profile_status is not None and profile_status not in status_groups:
+                raise PriceProfilePgError(
+                    "PROFILE_FILTER_INVALID",
+                    "Profile11状态值不在该精确快照的已存状态中",
+                )
         cursor.execute(
             f"""SELECT count(*)::bigint FROM stock.source_symbol_price_profiles p
 LEFT JOIN stock.source_raw_daily r ON r.namespace_id=p.namespace_id
@@ -3204,6 +3367,18 @@ WHERE {where_sql}""",
             f"{_price_position_reason_sql(field)} AS {field}_reason"
             for field in _PRICE_POSITION_QUERY_FIELDS
         )
+        if profile_field_id is None:
+            selected_profile_projection = """NULL::text AS selected_profile_field_id,
+       NULL::text AS selected_profile_status,
+       NULL::text AS selected_profile_quality,
+       NULL::text AS selected_profile_reason"""
+            selected_profile_parameters: list[Any] = []
+        else:
+            selected_profile_projection = """p.profile_field_ids[array_position(p.profile_field_ids,%s)] AS selected_profile_field_id,
+       p.profile_statuses[array_position(p.profile_field_ids,%s)] AS selected_profile_status,
+       p.profile_qualities[array_position(p.profile_field_ids,%s)] AS selected_profile_quality,
+       p.profile_reasons[array_position(p.profile_field_ids,%s)] AS selected_profile_reason"""
+            selected_profile_parameters = [profile_field_id] * 4
         cursor.execute(
             f"""SELECT p.*, r.raw_open AS target_raw_open,
        r.raw_high AS target_raw_high, r.raw_low AS target_raw_low,
@@ -3213,14 +3388,15 @@ WHERE {where_sql}""",
             WHEN r.price_quality IS DISTINCT FROM 'OBSERVED'
               THEN COALESCE(r.price_reason, 'RAW_PRICE_REASON_MISSING')
             ELSE r.price_reason END AS target_raw_price_reason,
-       {position_projection}
+       {position_projection},
+       {selected_profile_projection}
 FROM stock.source_symbol_price_profiles p
 LEFT JOIN stock.source_raw_daily r ON r.namespace_id=p.namespace_id
   AND r.source_symbol=p.source_symbol AND r.session_date=p.target_session
   AND r.package_sha256=p.package_sha256
 WHERE {where_sql}
-ORDER BY p.source_symbol LIMIT %s OFFSET %s""",
-            [*parameters, limit, offset],
+ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
+            [*selected_profile_parameters, *parameters, limit, offset],
         )
         names = [item.name for item in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
@@ -3263,6 +3439,15 @@ ORDER BY p.source_symbol LIMIT %s OFFSET %s""",
                     },
                 }
             row["price_positions"] = positions
+            if profile_field_id is None:
+                row["selected_profile_field"] = None
+            else:
+                row["selected_profile_field"] = {
+                    "field_id": row.pop("selected_profile_field_id"),
+                    "status": row.pop("selected_profile_status"),
+                    "quality": row.pop("selected_profile_quality"),
+                    "reason": row.pop("selected_profile_reason"),
+                }
     return {
         "status": "AVAILABLE" if rows else "NO_MATCH",
         "namespace_id": namespace_id,
@@ -3288,10 +3473,19 @@ ORDER BY p.source_symbol LIMIT %s OFFSET %s""",
         "price_position_filters": [
             {"field": field, "status": status} for field, status in position_filters
         ],
+        "profile_field_options": sorted(_PROFILE_QUERY_FIELD_IDS),
+        "profile_field_filter": {
+            "field_id": profile_field_id,
+            "quality": profile_quality,
+            "status": profile_status,
+        },
+        "profile_field_summary": profile_field_summary,
         "rows": rows,
         "execution": {
             "sql_pagination": True,
             "price_position_filter": "POSTGRES_NUMERIC",
+            "profile_field_filter": "POSTGRES_ARRAY_FIELD_ID_INDEX",
+            "profile_field_summary": "POSTGRES_FULL_SOURCE_SET",
             "all_candidates_recomputed": False,
             "source_zip_opened": False,
             "database_write": False,

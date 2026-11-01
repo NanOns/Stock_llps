@@ -16,6 +16,7 @@ const state = {
   profileOffset: 0,
   profileLimit: 100,
   profileTotal: 0,
+  profileFieldSummary: null,
   changeOffset: 0,
   changeLimit: 30,
   changeTotal: 0,
@@ -30,6 +31,7 @@ const state = {
   relationQuery: null,
   relationDetailRequest: 0,
   relationDetailRow: null,
+  relationDetailBindingKey: null,
   comparisonBasket: [],
   comparisonMessage: null,
   comparisonRequest: 0,
@@ -69,6 +71,7 @@ const previewQueryDebounceMs = 160;
 let relationRefreshTimer = null;
 let relationRefreshPending = false;
 let relationRequestInFlight = false;
+let profileSearchTimer = null;
 let changeRefreshTimer = null;
 let changeRefreshPending = false;
 let changeRequestInFlight = false;
@@ -172,6 +175,19 @@ const profileCoreFields = [
   { value: "core.pos60", key: "pos60", label: "60会话价格位置" },
   { value: "core.bias20_atr", key: "bias20_atr", label: "相对MA20的ATR偏离" },
 ];
+const profileFieldLabels = {
+  "profile.closed_month_trend": "闭月趋势",
+  "profile.closed_week_trend": "闭周趋势",
+  "profile.compression": "压缩状态",
+  "profile.drawdown60": "60会话回撤",
+  "profile.extension": "延展状态",
+  "profile.ma_structure": "均线结构",
+  "profile.near_high20": "接近前高",
+  "profile.participation": "参与度",
+  "profile.position": "价格位置",
+  "profile.relative": "相对市场",
+  "profile.trend": "趋势状态",
+};
 const pricePositionDefinitions = {
   c_vs_ma20: { label: "收盘 vs MA20", left: "RAW收盘", right: "MA20" },
   c_vs_prior_high20: {
@@ -2734,11 +2750,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-    snapshot.target_session === point.session_date &&
-    snapshot.package_sha256 === point.package_sha256 &&
-    snapshot.namespace_id === point.namespace_id &&
-    snapshot.source_set_id === selectedSourceSet &&
-    snapshot.field_ids?.length,
+      snapshot.target_session === point.session_date &&
+      snapshot.package_sha256 === point.package_sha256 &&
+      snapshot.namespace_id === point.namespace_id &&
+      snapshot.source_set_id === selectedSourceSet &&
+      snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -5365,7 +5381,96 @@ function selectedChangeSnapshot(id) {
     (snapshot) => profileSnapshotKey(snapshot) === key,
   );
 }
+function relationDetailQueryKey(query, relationData, sourceSymbol) {
+  if (!query || !relationData || !sourceSymbol) return null;
+  const snapshotIdentity = (snapshot) => ({
+    target_session: snapshot?.target_session,
+    source_set_id: snapshot?.source_set_id,
+    package_sha256: snapshot?.package_sha256,
+    profile_revision: snapshot?.profile_revision,
+  });
+  const before = snapshotIdentity(query.before);
+  const after = snapshotIdentity(query.after);
+  if (
+    !before.target_session ||
+    !before.source_set_id ||
+    !before.package_sha256 ||
+    !before.profile_revision ||
+    !after.target_session ||
+    !after.source_set_id ||
+    !after.package_sha256 ||
+    !after.profile_revision ||
+    !relationData.namespace_id
+  )
+    return null;
+  return JSON.stringify({
+    relation_request: state.relationRequest,
+    namespace_id: relationData.namespace_id,
+    before,
+    after,
+    source_symbol: sourceSymbol,
+    relation_field: query.relation_field,
+    transition_type: query.transition_type,
+    ma20_direction: query.ma20_direction,
+    end_position_filters: (query.end_position_filters || []).map((item) => [
+      item.field,
+      item.status,
+    ]),
+    offset: query.offset,
+    limit: query.limit,
+  });
+}
+function relationDetailRequestIsCurrent(requestId, bindingKey, sourceSymbol) {
+  const binding = state.changeBinding;
+  return (
+    requestId === state.relationDetailRequest &&
+    bindingKey !== null &&
+    bindingKey ===
+      relationDetailQueryKey(
+        state.relationQuery,
+        state.relationData,
+        sourceSymbol,
+      ) &&
+    bindingKey === state.relationDetailBindingKey &&
+    binding?.origin === "relation" &&
+    binding.relation_query_key === bindingKey &&
+    binding.source_symbol === sourceSymbol
+  );
+}
+function relationDetailResponseMatches(
+  data,
+  query,
+  relationData,
+  sourceSymbol,
+) {
+  const sameSnapshot = (actual, expected) =>
+    actual?.target_session === expected?.target_session &&
+    actual?.source_set_id === expected?.source_set_id &&
+    actual?.package_sha256 === expected?.package_sha256 &&
+    actual?.profile_revision === expected?.profile_revision;
+  return (
+    data?.source_symbol === sourceSymbol &&
+    (data?.item?.source_symbol === undefined ||
+      data?.item?.source_symbol === sourceSymbol) &&
+    data?.namespace_id === relationData?.namespace_id &&
+    sameSnapshot(data?.before_snapshot, query?.before) &&
+    sameSnapshot(data?.after_snapshot, query?.after) &&
+    sameSnapshot(data?.before_snapshot, relationData?.before_snapshot) &&
+    sameSnapshot(data?.after_snapshot, relationData?.after_snapshot)
+  );
+}
+function invalidateRelationDetailRequest() {
+  state.relationDetailRequest++;
+  state.relationDetailRow = null;
+  state.relationDetailBindingKey = null;
+  if (state.changeBinding?.origin === "relation") {
+    state.changeBinding = null;
+    if (state.timelineContext?.origin === "relation") invalidateTimeline();
+    resetChangeDetail();
+  }
+}
 function clearRelationScreen(message = "请选择两个完整PG画像快照。") {
+  invalidateRelationDetailRequest();
   state.relationRequest++;
   state.relationPageRequest++;
   state.relationData = null;
@@ -5638,6 +5743,7 @@ function scheduleRelationRefresh(delay) {
 }
 function loadPriceRelations() {
   if (state.timelineContext?.origin === "relation") invalidateTimeline();
+  invalidateRelationDetailRequest();
   state.relationRequest++;
   relationRefreshPending = true;
   state.relationData = null;
@@ -5800,8 +5906,13 @@ async function runPriceRelations(requestId) {
 }
 async function openRelationDetail(relationRow) {
   const query = state.relationQuery;
-  if (!query) return;
+  const relationData = state.relationData;
+  if (!query || !relationData?.rows?.includes(relationRow)) return;
+  const sourceSymbol = relationRow.source_symbol;
+  const bindingKey = relationDetailQueryKey(query, relationData, sourceSymbol);
+  if (!bindingKey) return;
   const requestId = ++state.relationDetailRequest;
+  state.relationDetailBindingKey = bindingKey;
   state.relationDetailRow = relationRow;
   const params = new URLSearchParams({
     before_session: query.before.target_session,
@@ -5828,10 +5939,17 @@ async function openRelationDetail(relationRow) {
     offset: query.offset,
     limit: query.limit,
     relation_query: query,
+    relation_query_key: bindingKey,
+    relation_request: state.relationRequest,
+    source_symbol: sourceSymbol,
   };
   try {
     const data = await api("/api/source-symbol-price-profile-pair?" + params);
-    if (requestId !== state.relationDetailRequest) return;
+    if (
+      !relationDetailRequestIsCurrent(requestId, bindingKey, sourceSymbol) ||
+      !relationDetailResponseMatches(data, query, relationData, sourceSymbol)
+    )
+      return;
     if (data.status !== "AVAILABLE" || !data.item) {
       root.replaceChildren();
       appendText(
@@ -5848,18 +5966,37 @@ async function openRelationDetail(relationRow) {
       price_relation_transitions: relationRow.price_relation_transitions,
     });
   } catch (error) {
-    if (requestId !== state.relationDetailRequest) return;
+    if (!relationDetailRequestIsCurrent(requestId, bindingKey, sourceSymbol))
+      return;
     root.replaceChildren();
     root.hidden = false;
     appendText(root, "p", "双日RAW详情读取失败：" + error.message, "message");
   }
 }
 function returnToRelationScreen() {
+  const binding = state.changeBinding;
+  if (
+    binding?.origin === "relation" &&
+    (binding.relation_query_key !==
+      relationDetailQueryKey(
+        state.relationQuery,
+        state.relationData,
+        binding.source_symbol,
+      ) ||
+      binding.relation_request !== state.relationRequest)
+  ) {
+    invalidateRelationDetailRequest();
+    $("priceRelationScreenTitle").scrollIntoView({
+      behavior: "smooth",
+      block: "start",
+    });
+    return;
+  }
   if (state.timelineContext?.origin === "relation") {
     returnToChanges();
     return;
   }
-  state.relationDetailRequest++;
+  invalidateRelationDetailRequest();
   state.pairRequest++;
   resetChangeDetail();
   $("priceRelationScreenTitle").scrollIntoView({
@@ -6419,6 +6556,7 @@ function scheduleChangeRefresh(delay) {
 }
 function loadChanges() {
   if (state.timelineContext?.origin === "change") invalidateTimeline();
+  invalidateRelationDetailRequest();
   const requestId = ++state.changeRequest;
   changeRefreshPending = true;
   state.changeBinding = null;
@@ -6690,6 +6828,71 @@ function selectedProfilePosition(id) {
   const [field, status] = value.split(":");
   return { field, status };
 }
+function profileFieldLabel(field) {
+  const label = profileFieldLabels[field] || field;
+  return `${label} · ${field}`;
+}
+function populateProfileFieldOptions(options, selected = "") {
+  const select = $("profileFieldSelect");
+  select.replaceChildren(new Option("不按Profile11字段筛选", ""));
+  for (const field of options || []) {
+    select.append(new Option(profileFieldLabel(field), field));
+  }
+  select.value = (options || []).includes(selected) ? selected : "";
+}
+function populateProfileConditionOptions(summary, fieldId, selected = "ALL") {
+  const select = $("profileConditionSelect");
+  select.replaceChildren(new Option("仅查看质量分布，不筛质量/状态", "ALL"));
+  if (!fieldId || !summary || summary.field_id !== fieldId) {
+    select.disabled = true;
+    select.value = "ALL";
+    return;
+  }
+  for (const item of summary.quality_counts || []) {
+    select.append(
+      new Option(
+        `质量 · ${item.quality}（${item.count}）`,
+        `quality:${item.quality}`,
+      ),
+    );
+  }
+  for (const item of summary.status_counts || []) {
+    select.append(
+      new Option(
+        `状态 · ${item.status}（${item.count}）`,
+        `status:${item.status}`,
+      ),
+    );
+  }
+  select.disabled = false;
+  select.value = Array.from(select.options).some(
+    (option) => option.value === selected,
+  )
+    ? selected
+    : "ALL";
+}
+function profileFieldSummaryText(summary) {
+  if (!summary) return "Profile11质量/状态未过滤";
+  const qualities = (summary.quality_counts || [])
+    .map((item) => `${item.quality} ${item.count}`)
+    .join("、");
+  const statuses = (summary.status_counts || [])
+    .map((item) => `${item.status} ${item.count}`)
+    .join("、");
+  const reasons = (summary.reason_counts || [])
+    .filter((item) => item.quality !== "OBSERVED" || item.reason)
+    .map(
+      (item) =>
+        `${item.quality}/${item.status} 原因 ${item.reason || "未提供原因"} ${item.count}`,
+    )
+    .join("；");
+  return (
+    `Profile11 ${profileFieldLabel(summary.field_id)} · ` +
+    `完整来源字段分母 ${summary.source_denominator} · ` +
+    `质量 ${qualities || "无记录"} · 状态 ${statuses || "无记录"}` +
+    (reasons ? ` · 原因 ${reasons}` : "")
+  );
+}
 function profilePositionConditionText(condition) {
   const definition = pricePositionDefinitions[condition.field];
   return `${definition.label} ${pricePositionStatusLabels[condition.status]} ${condition.status}`;
@@ -6743,6 +6946,14 @@ async function loadProfilePage() {
   const requestId = ++state.profileRequest;
   const coreField = $("profileCoreFieldSelect").value;
   const coreQuality = $("profileCoreQualitySelect").value;
+  const profileFieldId = $("profileFieldSelect").value || null;
+  const profileCondition = $("profileConditionSelect").value;
+  const profileQuality = profileCondition.startsWith("quality:")
+    ? profileCondition.slice("quality:".length)
+    : null;
+  const profileStatus = profileCondition.startsWith("status:")
+    ? profileCondition.slice("status:".length)
+    : null;
   const hasCoreField = coreField !== "ALL";
   const hasCoreQuality = coreQuality !== "ALL";
   const selectedPositions = [
@@ -6770,6 +6981,13 @@ async function loadProfilePage() {
     $("profilePrev").disabled = true;
     $("profileNext").disabled = true;
     $("profileLast").disabled = true;
+    return;
+  }
+  if (profileCondition !== "ALL" && !profileFieldId) {
+    $("profileMessage").textContent =
+      "Profile11质量或状态筛选必须同时选择字段；旧结果已清除。";
+    $("profileCount").textContent = "筛选未执行";
+    $("profilePageStatus").textContent = "请完成配对选择";
     return;
   }
   if (
@@ -6808,6 +7026,9 @@ async function loadProfilePage() {
     params.set("core_field", coreField);
     params.set("core_quality", coreQuality);
   }
+  if (profileFieldId) params.set("profile_field_id", profileFieldId);
+  if (profileQuality) params.set("profile_quality", profileQuality);
+  if (profileStatus) params.set("profile_status", profileStatus);
   selectedPositions.forEach((condition, index) => {
     const number = index + 1;
     params.set(`position_${number}_field`, condition.field);
@@ -6821,6 +7042,22 @@ async function loadProfilePage() {
     const data = await api(`/api/source-symbol-price-profiles?${params}`);
     if (requestId !== state.profileRequest) return;
     const page = data.page;
+    const profileFilter = data.profile_field_filter;
+    if (
+      !profileFilter ||
+      profileFilter.field_id !== profileFieldId ||
+      profileFilter.quality !== profileQuality ||
+      profileFilter.status !== profileStatus ||
+      !Array.isArray(data.profile_field_options) ||
+      (profileFieldId &&
+        (!data.profile_field_summary ||
+          data.profile_field_summary.field_id !== profileFieldId ||
+          data.profile_field_summary.source_denominator !==
+            snapshot.source_symbol_count))
+    )
+      throw new Error(
+        "Profile11字段分布或筛选身份与精确快照不一致，已停止展示。",
+      );
     if (
       data.target_session !== snapshot.target_session ||
       data.namespace_id !== snapshot.namespace_id ||
@@ -6842,11 +7079,32 @@ async function loadProfilePage() {
             item.price_positions?.[condition.field]?.status !==
             condition.status,
         ),
+      ) ||
+      data.rows.some((item) =>
+        profileFieldId
+          ? item.selected_profile_field?.field_id !== profileFieldId ||
+            (profileQuality &&
+              item.selected_profile_field?.quality !== profileQuality) ||
+            (profileStatus &&
+              item.selected_profile_field?.status !== profileStatus)
+          : item.selected_profile_field !== null,
       )
     )
       throw new Error(
         "画像响应与选定的精确来源版本或分页上下文不一致，已停止展示。",
       );
+    populateProfileFieldOptions(
+      data.profile_field_options,
+      profileFieldId || "",
+    );
+    state.profileFieldSummary = profileFieldId
+      ? data.profile_field_summary
+      : null;
+    populateProfileConditionOptions(
+      state.profileFieldSummary,
+      profileFieldId,
+      profileCondition,
+    );
     const binding =
       `${snapshot.target_session} · namespace ${data.namespace_id || snapshot.namespace_id || "未提供"} · ` +
       `source_set_id ${data.source_set_id} · 包SHA ${data.package_sha256} · ` +
@@ -6860,12 +7118,17 @@ async function loadProfilePage() {
       selectedPositions.length
         ? selectedPositions.map(profilePositionConditionText).join(" AND ")
         : "价格位置未过滤",
+      profileQuality
+        ? `${profileFieldLabel(profileFieldId)} · 质量 ${profileQuality}`
+        : profileStatus
+          ? `${profileFieldLabel(profileFieldId)} · 状态 ${profileStatus}`
+          : "Profile11质量/状态未过滤",
     ].join(" · ");
     const windowDescription = data.history_window?.start
       ? ` · 窗口 ${data.history_window.start} 至 ${data.history_window.end}（${data.history_window.requested_session_count}会话）`
       : "";
     $("profileMessage").textContent =
-      `${page.total === 0 ? "当前来源版本没有符合此条件的记录。" : ""}${binding} · ${filterDescription}${windowDescription} · NON_PIT来源代码研究，不是正式上市Universe。`;
+      `${page.total === 0 ? "当前来源版本没有符合此条件的记录。" : ""}${binding} · ${filterDescription}${windowDescription} · ${profileFieldSummaryText(state.profileFieldSummary)} · 筛选后命中 ${page.total} · NON_PIT来源代码研究，不是正式上市Universe或选股结论。`;
     $("profilePageStatus").textContent =
       `偏移 ${page.offset} · 本页 ${page.count}/${page.limit} · 总计 ${page.total}`;
     $("profilePrev").disabled = page.offset === 0;
@@ -6877,6 +7140,7 @@ async function loadProfilePage() {
         page.total === 0
           ? "当前来源版本没有符合此条件的记录。"
           : "当前偏移没有成员。",
+        "",
         "",
         "",
         "",
@@ -6908,6 +7172,13 @@ async function loadProfilePage() {
         ? `${selectedCore.label} · ${text(item[selectedCore.key])} · ${text(item[`${selectedCore.key}_quality`])} · 原因 ${text(item[`${selectedCore.key}_reason`])}`
         : "筛选字段可在详情中查看值、质量与原因";
       cell(tr, selectedCoreValue);
+      const profileField = item.selected_profile_field;
+      cell(
+        tr,
+        profileField
+          ? `${profileFieldLabel(profileField.field_id)} · 状态 ${text(profileField.status)} · 质量 ${text(profileField.quality)} · 原因 ${text(profileField.reason)}`
+          : "未选择Profile11字段",
+      );
       const positionCell = cell(
         tr,
         profilePositionRowText(item, selectedPositions),
@@ -6952,6 +7223,7 @@ async function loadProfilePage() {
       "",
       "",
       "",
+      "",
     ]);
     $("profileMessage").textContent = `画像查询未返回记录：${error.message}`;
     $("profileCount").textContent = "画像查询失败";
@@ -6974,6 +7246,10 @@ function clearProfilePageResults(message, count = "待查询") {
   $("profileMessage").textContent = message;
 }
 function submitProfileSearch() {
+  if (profileSearchTimer !== null) {
+    window.clearTimeout(profileSearchTimer);
+    profileSearchTimer = null;
+  }
   state.profileOffset = 0;
   const hasCoreField = $("profileCoreFieldSelect").value !== "ALL";
   const hasCoreQuality = $("profileCoreQualitySelect").value !== "ALL";
@@ -6985,6 +7261,18 @@ function submitProfileSearch() {
     return;
   }
   void loadProfilePage();
+}
+function scheduleProfileSearch() {
+  if (profileSearchTimer !== null) window.clearTimeout(profileSearchTimer);
+  state.profileOffset = 0;
+  clearProfilePageResults(
+    "筛选条件已变化；连续操作合并后查询最新条件。",
+    "筛选更新中",
+  );
+  profileSearchTimer = window.setTimeout(() => {
+    profileSearchTimer = null;
+    submitProfileSearch();
+  }, previewQueryDebounceMs);
 }
 $("reloadCatalog").addEventListener("click", async () => {
   await loadCatalog();
@@ -7052,7 +7340,7 @@ $("profileSnapshotSelect").addEventListener("change", () => {
     selectedProfileSnapshot(),
     "完整PG价格画像快照",
   );
-  submitProfileSearch();
+  scheduleProfileSearch();
 });
 for (const id of [
   "profileMarketSelect",
@@ -7065,9 +7353,17 @@ for (const id of [
   "profilePosition2Select",
 ]) {
   $(id).addEventListener("change", () => {
-    submitProfileSearch();
+    scheduleProfileSearch();
   });
 }
+$("profileFieldSelect").addEventListener("change", () => {
+  state.profileOffset = 0;
+  $("profileConditionSelect").value = "ALL";
+  scheduleProfileSearch();
+});
+$("profileConditionSelect").addEventListener("change", () => {
+  scheduleProfileSearch();
+});
 $("profilePrev").addEventListener("click", () => {
   state.profileOffset = Math.max(0, state.profileOffset - state.profileLimit);
   loadProfilePage();

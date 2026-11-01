@@ -598,6 +598,14 @@
               <option value="NOT_APPLICABLE">NOT_APPLICABLE · 不适用</option>
             </select></label
           ><label
+            >Profile11字段<select id="profileFieldSelect">
+              <option value="">不按Profile11字段筛选</option>
+            </select></label
+          ><label
+            >Profile11质量 / 状态<select id="profileConditionSelect" disabled>
+              <option value="ALL">仅查看质量分布，不筛质量/状态</option>
+            </select></label
+          ><label
             >RAW位置条件1<select id="profilePosition1Select">
               <option value="">不启用</option>
               <optgroup label="收盘 vs MA20">
@@ -660,6 +668,7 @@
                 <th id="profileCoreValueHeader">
                   所选Core字段 / 值 / 质量 / 原因
                 </th>
+                <th>Profile11状态 / 质量 / 原因</th>
                 <th>所选RAW位置 / 数值 / 质量 / 原因</th>
                 <th>价格状态 / 原因</th>
                 <th>详情</th>
@@ -667,7 +676,7 @@
             </thead>
             <tbody id="profileRows">
               <tr>
-                <td colspan="11" class="muted">请选择已保存的PG画像版本。</td>
+                <td colspan="12" class="muted">请选择已保存的PG画像版本。</td>
               </tr>
             </tbody>
           </table>
