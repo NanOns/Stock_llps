@@ -1075,6 +1075,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "symbol",
                         "core_field",
                         "core_quality",
+                        "position_1_field",
+                        "position_1_status",
+                        "position_2_field",
+                        "position_2_status",
                     },
                 )
                 required = {
@@ -1117,6 +1121,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     source_symbol=symbol,
                     core_field=values.get("core_field"),
                     core_quality=values.get("core_quality"),
+                    position_1_field=values.get("position_1_field"),
+                    position_1_status=values.get("position_1_status"),
+                    position_2_field=values.get("position_2_field"),
+                    position_2_status=values.get("position_2_status"),
                 )
                 if result["status"] == "NO_MATCH" and result["page"]["total"] > 0:
                     raise PreviewHttpError(

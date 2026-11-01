@@ -425,7 +425,13 @@ footer {
   min-height: 42px;
 }
 .profile-table {
-  min-width: 1140px;
+  min-width: 1540px;
+}
+.profile-price-position {
+  min-width: 360px;
+  max-width: 480px;
+  line-height: 1.4;
+  white-space: normal;
 }
 .profile-detail {
   margin-top: 16px;

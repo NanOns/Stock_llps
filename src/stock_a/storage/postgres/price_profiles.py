@@ -92,6 +92,70 @@ _CORE_QUALITY_FIELDS = frozenset(_CORE_COLUMN_NAMES)
 _CORE_FIELD_QUERY_COLUMNS = {
     f"core.{field}": f"{field}_quality" for field in _CORE_COLUMN_NAMES
 }
+_PRICE_POSITION_QUERY_FIELDS = {
+    "c_vs_ma20": {
+        "left_field": "raw_close",
+        "left_value_sql": "r.raw_close",
+        "left_quality_sql": "COALESCE(r.price_quality, 'UNKNOWN')",
+        "left_reason_sql": "CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING' WHEN r.price_quality IS DISTINCT FROM 'OBSERVED' THEN COALESCE(r.price_reason, 'RAW_PRICE_REASON_MISSING') ELSE r.price_reason END",
+        "right_field": "ma20",
+        "right_value_sql": "p.ma20",
+        "right_quality_sql": "p.ma20_quality",
+        "right_reason_sql": "p.ma20_reason",
+    },
+    "c_vs_prior_high20": {
+        "left_field": "raw_close",
+        "left_value_sql": "r.raw_close",
+        "left_quality_sql": "COALESCE(r.price_quality, 'UNKNOWN')",
+        "left_reason_sql": "CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING' WHEN r.price_quality IS DISTINCT FROM 'OBSERVED' THEN COALESCE(r.price_reason, 'RAW_PRICE_REASON_MISSING') ELSE r.price_reason END",
+        "right_field": "prior_high20",
+        "right_value_sql": "p.prior_high20",
+        "right_quality_sql": "p.prior_high20_quality",
+        "right_reason_sql": "p.prior_high20_reason",
+    },
+    "ma5_vs_ma20": {
+        "left_field": "ma5",
+        "left_value_sql": "p.ma5",
+        "left_quality_sql": "p.ma5_quality",
+        "left_reason_sql": "p.ma5_reason",
+        "right_field": "ma20",
+        "right_value_sql": "p.ma20",
+        "right_quality_sql": "p.ma20_quality",
+        "right_reason_sql": "p.ma20_reason",
+    },
+}
+_PRICE_POSITION_STATUSES = frozenset({"ABOVE", "EQUAL", "BELOW", "UNKNOWN"})
+
+
+def _price_position_status_sql(position: str) -> str:
+    fields = _PRICE_POSITION_QUERY_FIELDS[position]
+    left = fields["left_value_sql"]
+    right = fields["right_value_sql"]
+    return f"""CASE
+WHEN p.price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+  OR {fields["left_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
+  OR {left} IS NULL
+  OR {fields["right_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
+  OR {right} IS NULL THEN 'UNKNOWN'
+WHEN {left} > {right} THEN 'ABOVE'
+WHEN {left} < {right} THEN 'BELOW'
+ELSE 'EQUAL' END"""
+
+
+def _price_position_reason_sql(position: str) -> str:
+    fields = _PRICE_POSITION_QUERY_FIELDS[position]
+    return f"""CASE
+WHEN p.price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+  THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'
+WHEN {fields["left_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
+  THEN '{fields["left_field"]}_quality=' || {fields["left_quality_sql"]}
+    || '; reason=' || COALESCE({fields["left_reason_sql"]}, 'REASON_NOT_PROVIDED')
+WHEN {fields["left_value_sql"]} IS NULL THEN 'OBSERVED_LEFT_VALUE_MISSING'
+WHEN {fields["right_quality_sql"]} IS DISTINCT FROM 'OBSERVED'
+  THEN '{fields["right_field"]}_quality=' || COALESCE({fields["right_quality_sql"]}, 'UNKNOWN')
+    || '; reason=' || COALESCE({fields["right_reason_sql"]}, 'REASON_NOT_PROVIDED')
+WHEN {fields["right_value_sql"]} IS NULL THEN 'OBSERVED_RIGHT_VALUE_MISSING'
+ELSE NULL END"""
 
 
 class PriceProfilePgError(Exception):
@@ -2216,6 +2280,10 @@ def read_profile_page(
     source_symbol: str | None = None,
     core_field: str | None = None,
     core_quality: str | None = None,
+    position_1_field: str | None = None,
+    position_1_status: str | None = None,
+    position_2_field: str | None = None,
+    position_2_status: str | None = None,
 ) -> dict[str, Any]:
     if type(max_target_session) is not date:
         raise PriceProfilePgError(
@@ -2287,6 +2355,25 @@ def read_profile_page(
         raise PriceProfilePgError(
             "PROFILE_SYMBOL_INVALID", "来源代码必须符合SH./SZ.六位数字格式"
         )
+    position_filters: list[tuple[str, str]] = []
+    for field, status in (
+        (position_1_field, position_1_status),
+        (position_2_field, position_2_status),
+    ):
+        if field is None and status is None:
+            continue
+        if (
+            field not in _PRICE_POSITION_QUERY_FIELDS
+            or status not in _PRICE_POSITION_STATUSES
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_FILTER_INVALID", "价格位置条件字段或关系状态无效"
+            )
+        position_filters.append((field, status))
+    if len({field for field, _status in position_filters}) != len(position_filters):
+        raise PriceProfilePgError(
+            "PROFILE_FILTER_INVALID", "两个价格位置条件不能重复使用同一比较字段"
+        )
 
     conditions = [
         "p.namespace_id=%s::uuid",
@@ -2320,6 +2407,9 @@ def read_profile_page(
     if core_quality_column is not None:
         conditions.append(f"p.{core_quality_column}=%s")
         parameters.append(core_quality)
+    for field, status in position_filters:
+        conditions.append(f"({_price_position_status_sql(field)})=%s")
+        parameters.append(status)
     where_sql = " AND ".join(conditions)
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
         parameters[0] = namespace_id
@@ -2358,17 +2448,31 @@ WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid AND target_session=%s
                 "PROFILE_SNAPSHOT_INCOMPLETE", "该精确画像修订未覆盖完整来源代码分母"
             )
         cursor.execute(
-            f"SELECT count(*)::bigint FROM stock.source_symbol_price_profiles p WHERE {where_sql}",
+            f"""SELECT count(*)::bigint FROM stock.source_symbol_price_profiles p
+LEFT JOIN stock.source_raw_daily r ON r.namespace_id=p.namespace_id
+  AND r.source_symbol=p.source_symbol AND r.session_date=p.target_session
+  AND r.package_sha256=p.package_sha256
+WHERE {where_sql}""",
             parameters,
         )
         total = int(cursor.fetchone()[0])
+        position_projection = ",\n       ".join(
+            f"{_price_position_status_sql(field)} AS {field}_status, "
+            f"{_price_position_reason_sql(field)} AS {field}_reason"
+            for field in _PRICE_POSITION_QUERY_FIELDS
+        )
         cursor.execute(
             f"""SELECT p.*, r.raw_open AS target_raw_open,
        r.raw_high AS target_raw_high, r.raw_low AS target_raw_low,
-       r.raw_close AS target_raw_close, r.price_quality AS target_raw_price_quality,
-       r.price_reason AS target_raw_price_reason
+       r.raw_close AS target_raw_close,
+       COALESCE(r.price_quality, 'UNKNOWN') AS target_raw_price_quality,
+       CASE WHEN r.source_symbol IS NULL THEN 'SOURCE_RAW_ROW_MISSING'
+            WHEN r.price_quality IS DISTINCT FROM 'OBSERVED'
+              THEN COALESCE(r.price_reason, 'RAW_PRICE_REASON_MISSING')
+            ELSE r.price_reason END AS target_raw_price_reason,
+       {position_projection}
 FROM stock.source_symbol_price_profiles p
-JOIN stock.source_raw_daily r ON r.namespace_id=p.namespace_id
+LEFT JOIN stock.source_raw_daily r ON r.namespace_id=p.namespace_id
   AND r.source_symbol=p.source_symbol AND r.session_date=p.target_session
   AND r.package_sha256=p.package_sha256
 WHERE {where_sql}
@@ -2381,6 +2485,41 @@ ORDER BY p.source_symbol LIMIT %s OFFSET %s""",
             for column in ("namespace_id", "source_set_id", "source_capture_id"):
                 if isinstance(row.get(column), UUID):
                     row[column] = str(row[column])
+            positions: dict[str, Any] = {}
+            for field, definition in _PRICE_POSITION_QUERY_FIELDS.items():
+                left_field = definition["left_field"]
+                right_field = definition["right_field"]
+                left_value_key = (
+                    "target_raw_close" if left_field == "raw_close" else left_field
+                )
+                left_quality_key = (
+                    "target_raw_price_quality"
+                    if left_field == "raw_close"
+                    else f"{left_field}_quality"
+                )
+                left_reason_key = (
+                    "target_raw_price_reason"
+                    if left_field == "raw_close"
+                    else f"{left_field}_reason"
+                )
+                positions[field] = {
+                    "status": row.pop(f"{field}_status"),
+                    "reason": row.pop(f"{field}_reason"),
+                    "price_coordinate": row["price_coordinate"],
+                    "left": {
+                        "field": left_field,
+                        "value": row.get(left_value_key),
+                        "quality": row.get(left_quality_key),
+                        "reason": row.get(left_reason_key),
+                    },
+                    "right": {
+                        "field": right_field,
+                        "value": row.get(right_field),
+                        "quality": row.get(f"{right_field}_quality"),
+                        "reason": row.get(f"{right_field}_reason"),
+                    },
+                }
+            row["price_positions"] = positions
     return {
         "status": "AVAILABLE" if rows else "NO_MATCH",
         "namespace_id": namespace_id,
@@ -2403,9 +2542,13 @@ ORDER BY p.source_symbol LIMIT %s OFFSET %s""",
             "total": total,
             "next_offset": offset + len(rows) if offset + len(rows) < total else None,
         },
+        "price_position_filters": [
+            {"field": field, "status": status} for field, status in position_filters
+        ],
         "rows": rows,
         "execution": {
             "sql_pagination": True,
+            "price_position_filter": "POSTGRES_NUMERIC",
             "all_candidates_recomputed": False,
             "source_zip_opened": False,
             "database_write": False,

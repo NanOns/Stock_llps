@@ -310,6 +310,50 @@
               <option value="UNKNOWN">UNKNOWN · 未知</option>
               <option value="NOT_APPLICABLE">NOT_APPLICABLE · 不适用</option>
             </select></label
+          ><label
+            >RAW位置条件1<select id="profilePosition1Select">
+              <option value="">不启用</option>
+              <optgroup label="收盘 vs MA20">
+                <option value="c_vs_ma20:ABOVE">高于 ABOVE</option>
+                <option value="c_vs_ma20:EQUAL">等于 EQUAL</option>
+                <option value="c_vs_ma20:BELOW">低于 BELOW</option>
+                <option value="c_vs_ma20:UNKNOWN">未知 UNKNOWN</option>
+              </optgroup>
+              <optgroup label="收盘 vs 严格前20会话高点">
+                <option value="c_vs_prior_high20:ABOVE">高于 ABOVE</option>
+                <option value="c_vs_prior_high20:EQUAL">等于 EQUAL</option>
+                <option value="c_vs_prior_high20:BELOW">低于 BELOW</option>
+                <option value="c_vs_prior_high20:UNKNOWN">未知 UNKNOWN</option>
+              </optgroup>
+              <optgroup label="MA5 vs MA20">
+                <option value="ma5_vs_ma20:ABOVE">高于 ABOVE</option>
+                <option value="ma5_vs_ma20:EQUAL">等于 EQUAL</option>
+                <option value="ma5_vs_ma20:BELOW">低于 BELOW</option>
+                <option value="ma5_vs_ma20:UNKNOWN">未知 UNKNOWN</option>
+              </optgroup>
+            </select></label
+          ><label
+            >RAW位置条件2<select id="profilePosition2Select">
+              <option value="">不启用</option>
+              <optgroup label="收盘 vs MA20">
+                <option value="c_vs_ma20:ABOVE">高于 ABOVE</option>
+                <option value="c_vs_ma20:EQUAL">等于 EQUAL</option>
+                <option value="c_vs_ma20:BELOW">低于 BELOW</option>
+                <option value="c_vs_ma20:UNKNOWN">未知 UNKNOWN</option>
+              </optgroup>
+              <optgroup label="收盘 vs 严格前20会话高点">
+                <option value="c_vs_prior_high20:ABOVE">高于 ABOVE</option>
+                <option value="c_vs_prior_high20:EQUAL">等于 EQUAL</option>
+                <option value="c_vs_prior_high20:BELOW">低于 BELOW</option>
+                <option value="c_vs_prior_high20:UNKNOWN">未知 UNKNOWN</option>
+              </optgroup>
+              <optgroup label="MA5 vs MA20">
+                <option value="ma5_vs_ma20:ABOVE">高于 ABOVE</option>
+                <option value="ma5_vs_ma20:EQUAL">等于 EQUAL</option>
+                <option value="ma5_vs_ma20:BELOW">低于 BELOW</option>
+                <option value="ma5_vs_ma20:UNKNOWN">未知 UNKNOWN</option>
+              </optgroup>
+            </select></label
           ><button id="searchProfiles" type="button">查询画像</button>
         </div>
         <div id="profileMessage" class="population" role="status">
@@ -329,13 +373,14 @@
                 <th id="profileCoreValueHeader">
                   所选Core字段 / 值 / 质量 / 原因
                 </th>
+                <th>所选RAW位置 / 数值 / 质量 / 原因</th>
                 <th>价格状态 / 原因</th>
                 <th>详情</th>
               </tr>
             </thead>
             <tbody id="profileRows">
               <tr>
-                <td colspan="10" class="muted">请选择已保存的PG画像版本。</td>
+                <td colspan="11" class="muted">请选择已保存的PG画像版本。</td>
               </tr>
             </tbody>
           </table>

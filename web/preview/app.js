@@ -146,6 +146,21 @@ const profileCoreFields = [
   { value: "core.pos60", key: "pos60", label: "60会话价格位置" },
   { value: "core.bias20_atr", key: "bias20_atr", label: "相对MA20的ATR偏离" },
 ];
+const pricePositionDefinitions = {
+  c_vs_ma20: { label: "收盘 vs MA20", left: "RAW收盘", right: "MA20" },
+  c_vs_prior_high20: {
+    label: "收盘 vs 严格前20会话高点",
+    left: "RAW收盘",
+    right: "严格前20会话高点",
+  },
+  ma5_vs_ma20: { label: "MA5 vs MA20", left: "MA5", right: "MA20" },
+};
+const pricePositionStatusLabels = {
+  ABOVE: "高于",
+  EQUAL: "等于",
+  BELOW: "低于",
+  UNKNOWN: "未知",
+};
 const text = (v) => {
   if (v === null || v === undefined) return "—";
   if (typeof v === "object") {
@@ -1410,11 +1425,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-      snapshot.target_session === point.session_date &&
-      snapshot.package_sha256 === point.package_sha256 &&
-      snapshot.namespace_id === point.namespace_id &&
-      snapshot.source_set_id === selectedSourceSet &&
-      snapshot.field_ids?.length,
+    snapshot.target_session === point.session_date &&
+    snapshot.package_sha256 === point.package_sha256 &&
+    snapshot.namespace_id === point.namespace_id &&
+    snapshot.source_set_id === selectedSourceSet &&
+    snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -2762,6 +2777,7 @@ function showProfileDetail(item) {
     rawGrid.append(card);
   }
   root.append(rawGrid);
+  renderPricePositionDetail(root, item);
   appendText(root, "h3", "Core价格字段 / 质量 / 原因");
   const coreTable = document.createElement("table");
   coreTable.innerHTML =
@@ -2821,6 +2837,12 @@ function showProfileDetail(item) {
     void openProfileTimeline(item);
   });
   actions.append(timelineButton);
+  const returnButton = document.createElement("button");
+  returnButton.type = "button";
+  returnButton.className = "quiet";
+  returnButton.textContent = "返回筛选结果";
+  returnButton.addEventListener("click", returnToProfileSearch);
+  actions.append(returnButton);
   root.append(actions);
 }
 async function openProfileTimeline(item) {
@@ -4310,6 +4332,59 @@ async function loadProfileSnapshots() {
     $("profileMessage").textContent = `画像目录读取失败：${error.message}`;
   }
 }
+function selectedProfilePosition(id) {
+  const value = $(id).value;
+  if (!value) return null;
+  const [field, status] = value.split(":");
+  return { field, status };
+}
+function profilePositionConditionText(condition) {
+  const definition = pricePositionDefinitions[condition.field];
+  return `${definition.label} ${pricePositionStatusLabels[condition.status]} ${condition.status}`;
+}
+function profilePositionRowText(item, conditions) {
+  if (!conditions.length) return "未启用价格位置条件";
+  return conditions
+    .map((condition) => {
+      const position = item.price_positions?.[condition.field];
+      if (!position)
+        return `${profilePositionConditionText(condition)} · 响应缺少比较结果`;
+      const operand = (value) =>
+        `${value.field} ${text(value.value)} · ${text(value.quality)} · 原因 ${text(value.reason)}`;
+      return `${pricePositionDefinitions[condition.field].label}：${operand(position.left)}；${operand(position.right)}；${pricePositionStatusLabels[position.status] || position.status}${position.reason ? ` · ${position.reason}` : ""}`;
+    })
+    .join(" AND ");
+}
+function renderPricePositionDetail(root, item) {
+  appendText(root, "h3", "RAW价格相对位置 / 数值 / 质量 / 原因");
+  appendText(
+    root,
+    "p",
+    "比较只使用RAW_UNADJUSTED坐标与PG NUMERIC值；UNKNOWN保留各输入质量原因。相对滚动前20会话高点的位置不代表固定前高突破或交易信号。",
+    "muted",
+  );
+  const table = document.createElement("table");
+  table.innerHTML =
+    "<thead><tr><th>比较</th><th>左侧NUMERIC / 质量 / 原因</th><th>右侧NUMERIC / 质量 / 原因</th><th>关系 / 原因</th></tr></thead>";
+  const body = document.createElement("tbody");
+  for (const [field, definition] of Object.entries(pricePositionDefinitions)) {
+    const position = item.price_positions?.[field];
+    if (!position) continue;
+    const format = (operand) =>
+      `${operand.field} · ${text(operand.value)} · ${text(operand.quality)} · 原因 ${text(operand.reason)}`;
+    tableRow(body, [
+      definition.label,
+      format(position.left),
+      format(position.right),
+      `${pricePositionStatusLabels[position.status] || position.status} · ${position.status}${position.reason ? ` · ${position.reason}` : ""}`,
+    ]);
+  }
+  table.append(body);
+  const wrap = document.createElement("div");
+  wrap.className = "table-wrap";
+  wrap.append(table);
+  root.append(wrap);
+}
 async function loadProfilePage() {
   if (state.timelineContext?.origin === "profile") invalidateTimeline();
   const snapshot = selectedProfileSnapshot();
@@ -4318,6 +4393,10 @@ async function loadProfilePage() {
   const coreQuality = $("profileCoreQualitySelect").value;
   const hasCoreField = coreField !== "ALL";
   const hasCoreQuality = coreQuality !== "ALL";
+  const selectedPositions = [
+    selectedProfilePosition("profilePosition1Select"),
+    selectedProfilePosition("profilePosition2Select"),
+  ].filter(Boolean);
   const selectedCore = profileCoreFields.find(
     (item) => item.value === coreField,
   );
@@ -4339,6 +4418,16 @@ async function loadProfilePage() {
     $("profilePrev").disabled = true;
     $("profileNext").disabled = true;
     $("profileLast").disabled = true;
+    return;
+  }
+  if (
+    new Set(selectedPositions.map((item) => item.field)).size !==
+    selectedPositions.length
+  ) {
+    $("profileMessage").textContent =
+      "两个RAW位置条件必须使用不同的比较字段；旧结果已清除。";
+    $("profileCount").textContent = "筛选未执行";
+    $("profilePageStatus").textContent = "请调整位置条件";
     return;
   }
   if (!snapshot) {
@@ -4367,6 +4456,11 @@ async function loadProfilePage() {
     params.set("core_field", coreField);
     params.set("core_quality", coreQuality);
   }
+  selectedPositions.forEach((condition, index) => {
+    const number = index + 1;
+    params.set(`position_${number}_field`, condition.field);
+    params.set(`position_${number}_status`, condition.status);
+  });
   const symbol = $("profileSymbolInput").value.trim();
   if (symbol) params.set("symbol", symbol);
   $("profileMessage").textContent =
@@ -4382,7 +4476,21 @@ async function loadProfilePage() {
       data.package_sha256 !== snapshot.package_sha256 ||
       data.profile_revision !== snapshot.profile_revision ||
       page.offset !== state.profileOffset ||
-      page.limit !== state.profileLimit
+      page.limit !== state.profileLimit ||
+      !Array.isArray(data.price_position_filters) ||
+      data.price_position_filters.length !== selectedPositions.length ||
+      data.price_position_filters.some(
+        (condition, index) =>
+          condition.field !== selectedPositions[index].field ||
+          condition.status !== selectedPositions[index].status,
+      ) ||
+      data.rows.some((item) =>
+        selectedPositions.some(
+          (condition) =>
+            item.price_positions?.[condition.field]?.status !==
+            condition.status,
+        ),
+      )
     )
       throw new Error(
         "画像响应与选定的精确来源版本或分页上下文不一致，已停止展示。",
@@ -4393,9 +4501,14 @@ async function loadProfilePage() {
       `profile_revision ${data.profile_revision}`;
     state.profileTotal = page.total;
     $("profileCount").textContent = `${page.count}条 / 筛选分母${page.total}`;
-    const filterDescription = hasCoreField
-      ? `${selectedCore.label} / ${coreQuality}`
-      : "Core质量未过滤";
+    const filterDescription = [
+      hasCoreField
+        ? `${selectedCore.label} / ${coreQuality}`
+        : "Core质量未过滤",
+      selectedPositions.length
+        ? selectedPositions.map(profilePositionConditionText).join(" AND ")
+        : "价格位置未过滤",
+    ].join(" · ");
     const windowDescription = data.history_window?.start
       ? ` · 窗口 ${data.history_window.start} 至 ${data.history_window.end}（${data.history_window.requested_session_count}会话）`
       : "";
@@ -4412,6 +4525,7 @@ async function loadProfilePage() {
         page.total === 0
           ? "当前来源版本没有符合此条件的记录。"
           : "当前偏移没有成员。",
+        "",
         "",
         "",
         "",
@@ -4439,9 +4553,14 @@ async function loadProfilePage() {
       cell(tr, `${text(item.atr20)} · ${text(item.atr20_quality)}`);
       cell(tr, `${text(item.clv)} · ${text(item.clv_quality)}`);
       const selectedCoreValue = selectedCore
-        ? `${selectedCore.label} · ${text(item[selectedCore.key])} · ${item[`${selectedCore.key}_quality`]}（${text(item[`${selectedCore.key}_quality`])}） · 原因 ${text(item[`${selectedCore.key}_reason`])}`
+        ? `${selectedCore.label} · ${text(item[selectedCore.key])} · ${text(item[`${selectedCore.key}_quality`])} · 原因 ${text(item[`${selectedCore.key}_reason`])}`
         : "筛选字段可在详情中查看值、质量与原因";
       cell(tr, selectedCoreValue);
+      const positionCell = cell(
+        tr,
+        profilePositionRowText(item, selectedPositions),
+      );
+      positionCell.className = "profile-price-position";
       cell(
         tr,
         `${text(item.price_window_status)}${item.price_window_reason ? ` · ${item.price_window_reason}` : ""}`,
@@ -4460,6 +4579,7 @@ async function loadProfilePage() {
     if (requestId !== state.profileRequest) return;
     tableRow($("profileRows"), [
       "画像查询失败",
+      "",
       "",
       "",
       "",
@@ -4574,6 +4694,8 @@ for (const id of [
   "profileWindowStatusSelect",
   "profileCoreFieldSelect",
   "profileCoreQualitySelect",
+  "profilePosition1Select",
+  "profilePosition2Select",
 ]) {
   $(id).addEventListener("change", () => {
     submitProfileSearch();
