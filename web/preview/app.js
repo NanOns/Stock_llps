@@ -37,6 +37,9 @@ const state = {
   comparisonRequest: 0,
   comparisonTimelines: [],
   comparisonBaseSession: null,
+  comparisonPeriodEntries: [],
+  comparisonPeriodKind: "WEEK",
+  comparisonPeriodBaseKey: null,
   comparisonReturnForm: null,
   comparisonEventWindow: 5,
   comparisonEventField: "ALL",
@@ -1504,12 +1507,18 @@ function invalidateComparisonResults(message) {
   state.comparisonRequest++;
   state.comparisonTimelines = [];
   state.comparisonBaseSession = null;
+  state.comparisonPeriodEntries = [];
+  state.comparisonPeriodBaseKey = null;
   $("comparisonResults").hidden = true;
   $("comparisonEventHistory").hidden = true;
   $("comparisonIdentity").replaceChildren();
   $("comparisonCards").replaceChildren();
   $("comparisonHead").replaceChildren();
   $("comparisonRows").replaceChildren();
+  $("comparisonPeriodHead").replaceChildren();
+  $("comparisonPeriodRows").replaceChildren();
+  $("comparisonPeriodCount").textContent = "等待周期";
+  $("comparisonPeriodStatus").textContent = message;
   $("comparisonEventSummaryRows").replaceChildren();
   $("comparisonEventListRows").replaceChildren();
   $("comparisonEventMatrixHead").replaceChildren();
@@ -1631,6 +1640,140 @@ function formatIndexFraction(fraction) {
   const whole = cents / 100n;
   const decimal = String(cents % 100n).padStart(2, "0");
   return `${whole}.${decimal}`;
+}
+function comparisonPeriodCloseFraction(period) {
+  if (
+    !period ||
+    period.calendar_closed !== true ||
+    period.coverage_status !== "COMPLETE" ||
+    period.reason_codes?.length ||
+    period.valid_price_bar_count !== period.calendar_expected_session_count ||
+    period.stored_raw_row_count !== period.calendar_expected_session_count ||
+    period.elapsed_expected_session_count !==
+      period.calendar_expected_session_count ||
+    period.window_truncated_session_count !== 0 ||
+    period.target_missing_count !== 0 ||
+    period.read_failed_count !== 0 ||
+    period.invalid_price_count !== 0 ||
+    period.missing_history_count !== 0
+  )
+    return null;
+  const close = period.ohlc?.close;
+  const fraction = exactFraction(close?.exact ?? close?.decimal);
+  return fraction?.numerator > 0n ? fraction : null;
+}
+function comparisonPeriodMetadataMatches(left, right) {
+  return (
+    left?.calendar_ordinal === right?.calendar_ordinal &&
+    left?.calendar_start_session === right?.calendar_start_session &&
+    left?.calendar_end_session === right?.calendar_end_session &&
+    left?.calendar_expected_session_count ===
+      right?.calendar_expected_session_count &&
+    left?.elapsed_expected_session_count ===
+      right?.elapsed_expected_session_count
+  );
+}
+function comparisonPeriodAxis(entries, selectionCount, periodKind) {
+  const periodName = periodKind === "WEEK" ? "week" : "month";
+  const periodsByEntry = entries.map((entry) => {
+    const periods = entry.data?.periods?.[periodName] || [];
+    return new Map(periods.map((period) => [period.period_key, period]));
+  });
+  const keys = new Set(
+    periodsByEntry.flatMap((periods) => [...periods.keys()]),
+  );
+  const rows = [...keys]
+    .map((key) => {
+      const periods = periodsByEntry.map((periods) => periods.get(key) || null);
+      const reference = periods.find(Boolean);
+      const aligned =
+        entries.length === selectionCount &&
+        periods.every(
+          (period) =>
+            period && comparisonPeriodMetadataMatches(period, reference),
+        );
+      return {
+        key,
+        periods,
+        metadata: reference,
+        aligned,
+      };
+    })
+    .sort((left, right) => {
+      const ordinalDifference =
+        left.metadata.calendar_ordinal - right.metadata.calendar_ordinal;
+      if (ordinalDifference) return ordinalDifference;
+      return left.key < right.key ? -1 : left.key > right.key ? 1 : 0;
+    });
+  const baseRow =
+    entries.length === selectionCount && entries.every((entry) => entry.data)
+      ? rows.find(
+          (row) =>
+            row.aligned &&
+            row.periods.every((period) =>
+              comparisonPeriodCloseFraction(period),
+            ),
+        ) || null
+      : null;
+  const bases = new Map();
+  if (baseRow) {
+    baseRow.periods.forEach((period, index) => {
+      bases.set(
+        entries[index].selection.source_symbol,
+        comparisonPeriodCloseFraction(period),
+      );
+    });
+  }
+  return {
+    rows: rows.map((row) => ({
+      ...row,
+      cells: entries.map((entry, index) => {
+        const period = row.periods[index];
+        const close = period?.calendar_closed
+          ? exactFraction(
+              period.ohlc?.close?.exact ?? period.ohlc?.close?.decimal,
+            )
+          : null;
+        const validClose = comparisonPeriodCloseFraction(period);
+        let reason = null;
+        let indexFraction = null;
+        if (!entry.data) {
+          reason = entry.pending
+            ? "正在读取该代码的周期数据"
+            : `周期不可用：${entry.error || "75会话轨迹未返回"}`;
+        } else if (!period) {
+          reason = "来源未返回该自然周期";
+        } else if (!row.aligned) {
+          reason = "官方周期范围与篮内来源不一致，拒绝横向比较";
+        } else if (!period.calendar_closed) {
+          reason = `自然周期未闭合：${period.reason_codes.join("、") || "官方日历期末晚于目标日"}`;
+        } else if (period.coverage_status !== "COMPLETE") {
+          reason = `周期覆盖${period.coverage_status}：${period.reason_codes.join("、") || "来源覆盖不完整"}`;
+        } else if (!validClose) {
+          reason = "完整闭合周期没有合法RAW收盘价";
+        } else if (!baseRow) {
+          reason = "没有所有篮内代码共同完整闭合的基准周期";
+        } else if (
+          row.metadata.calendar_ordinal < baseRow.metadata.calendar_ordinal
+        ) {
+          reason = `早于共同基准${baseRow.key}`;
+        } else {
+          indexFraction = normalizedIndexFraction(
+            validClose,
+            bases.get(entry.selection.source_symbol),
+          );
+          if (!indexFraction) reason = "RAW收盘或共同基准不是正数";
+        }
+        return { entry, period, close, indexFraction, reason };
+      }),
+    })),
+    baseRow,
+    bases,
+  };
+}
+function comparisonPeriodPriceText(value) {
+  if (!value) return "UNKNOWN";
+  return text(value.decimal ?? value.exact ?? "UNKNOWN");
 }
 function comparisonFieldText(field) {
   if (!field || field.quality !== "OBSERVED") {
@@ -2284,6 +2427,7 @@ function renderComparisonResults() {
       ...entries.map((entry) => entry.error || ""),
     ]);
     renderComparisonEventHistory(axis);
+    renderComparisonPeriodResults();
     return;
   }
   for (const session of axis.sessionDates) {
@@ -2370,6 +2514,181 @@ function renderComparisonResults() {
     body.append(row);
   }
   renderComparisonEventHistory(axis);
+  renderComparisonPeriodResults();
+}
+function comparisonPeriodAvailability(entry, periodKind) {
+  const symbol = entry.selection.source_symbol;
+  if (!entry.data) {
+    return `${symbol}：${entry.pending ? "周期请求仍在读取" : entry.error || "周期数据不可用"}`;
+  }
+  const periods = entry.data.periods[periodKind === "WEEK" ? "week" : "month"];
+  const completeKeys = periods
+    .filter((period) => comparisonPeriodCloseFraction(period))
+    .map((period) => period.period_key);
+  if (completeKeys.length)
+    return `${symbol}：COMPLETE闭合周期 ${completeKeys.join("、")}`;
+  const observedReasons = periods
+    .filter((period) => period.coverage_status !== "COMPLETE")
+    .map(
+      (period) =>
+        `${period.period_key} ${period.coverage_status} ${period.reason_codes.join("、") || "无原因码"}`,
+    );
+  observedReasons.push(
+    ...periods
+      .filter(
+        (period) =>
+          period.coverage_status === "COMPLETE" &&
+          !comparisonPeriodCloseFraction(period),
+      )
+      .map((period) => `${period.period_key} COMPLETE但RAW收盘无效`),
+  );
+  return `${symbol}：没有合法COMPLETE闭合收盘${observedReasons.length ? `（${observedReasons.join("；")}）` : ""}`;
+}
+function comparisonPeriodOhlcText(period) {
+  if (!period.calendar_closed) return "未闭合；不展示周期OHLC";
+  const ohlc = period.ohlc || {};
+  return `O ${comparisonPeriodPriceText(ohlc.open)} · H ${comparisonPeriodPriceText(ohlc.high)} · L ${comparisonPeriodPriceText(ohlc.low)} · C ${comparisonPeriodPriceText(ohlc.close)}`;
+}
+function renderComparisonPeriodResults() {
+  const entries = state.comparisonPeriodEntries;
+  const kind = state.comparisonPeriodKind;
+  const kindLabel = kind === "WEEK" ? "ISO自然周" : "自然月";
+  const axis = comparisonPeriodAxis(
+    entries,
+    state.comparisonBasket.length,
+    kind,
+  );
+  state.comparisonPeriodBaseKey = axis.baseRow?.key || null;
+  $("comparisonPeriodHead").replaceChildren();
+  const header = document.createElement("tr");
+  const periodHeader = document.createElement("th");
+  periodHeader.textContent = "自然周期与官方会话范围";
+  header.append(periodHeader);
+  for (const entry of entries) {
+    const th = document.createElement("th");
+    appendText(th, "strong", entry.selection.source_symbol);
+    if (!entry.data && !entry.pending)
+      appendText(th, "span", "周期数据不可用", "muted");
+    header.append(th);
+  }
+  $("comparisonPeriodHead").append(header);
+  const body = $("comparisonPeriodRows");
+  body.replaceChildren();
+  const successfulCount = entries.filter((entry) => entry.data).length;
+  $("comparisonPeriodCount").textContent =
+    `${axis.rows.length}个${kindLabel} · ${successfulCount}/${entries.length}只周期响应`;
+  const identity = state.comparisonBasket[0];
+  const targetText = identity
+    ? `目标 ${identity.target_session} · namespace ${identity.namespace_id} · SEALED source_set ${identity.source_set_id} · package SHA ${identity.package_sha256} · RAW_UNADJUSTED / NON_PIT_RETROSPECTIVE。`
+    : "等待同一SEALED来源快照的比较篮。";
+  if (axis.baseRow) {
+    $("comparisonPeriodStatus").textContent =
+      `${targetText} ${kindLabel}共同t0=${axis.baseRow.key}（${axis.baseRow.metadata.calendar_start_session}至${axis.baseRow.metadata.calendar_end_session}）；仅所有选中代码均为COMPLETE、合法RAW收盘且官方周期范围一致的行计算指数。`;
+  } else {
+    const details = entries.map((entry) =>
+      comparisonPeriodAvailability(entry, kind),
+    );
+    $("comparisonPeriodStatus").textContent =
+      `${targetText} ${kindLabel}共同t0=UNKNOWN；全篮没有可验证的共同完整闭合周期，所有同期指数均标为UNKNOWN。来源状态：${details.join("；")}。`;
+  }
+  if (!entries.length) {
+    tableRow(body, ["尚未读取来源周期。"]);
+    return;
+  }
+  if (!axis.rows.length) {
+    tableRow(body, [
+      "没有可对齐的自然周期。",
+      ...entries.map((entry) =>
+        entry.pending ? "周期读取中…" : entry.error || "周期接口没有返回周期行",
+      ),
+    ]);
+    return;
+  }
+  for (const rowData of axis.rows) {
+    const row = document.createElement("tr");
+    const periodCell = document.createElement("td");
+    const periodFacts = document.createElement("div");
+    periodFacts.className = "comparison-symbol-facts";
+    appendText(periodFacts, "strong", rowData.key);
+    appendText(
+      periodFacts,
+      "span",
+      `${rowData.metadata.calendar_start_session} → ${rowData.metadata.calendar_end_session} · ordinal ${rowData.metadata.calendar_ordinal}`,
+    );
+    appendText(
+      periodFacts,
+      "span",
+      `官方预期会话 ${rowData.metadata.calendar_expected_session_count} · 本窗经过会话 ${rowData.metadata.elapsed_expected_session_count}`,
+    );
+    if (!rowData.aligned)
+      appendText(
+        periodFacts,
+        "span",
+        "来源缺少该周期或周期日历元数据不一致；禁止横向计算",
+        "message",
+      );
+    periodCell.append(periodFacts);
+    row.append(periodCell);
+    for (const [index, item] of rowData.cells.entries()) {
+      const td = document.createElement("td");
+      const facts = document.createElement("div");
+      facts.className = "comparison-symbol-facts";
+      if (!item.period) {
+        appendText(
+          facts,
+          "span",
+          item.entry.pending
+            ? "周期读取中…"
+            : `UNKNOWN · ${item.entry.error || "来源未返回该自然周期"}`,
+          "message",
+        );
+      } else {
+        const period = item.period;
+        const closedText = period.calendar_closed ? "已闭合" : "未闭合";
+        appendText(
+          facts,
+          "span",
+          `${closedText} · ${period.coverage_status} · RAW行 ${period.stored_raw_row_count}/${period.elapsed_expected_session_count} · 有效价格Bar ${period.valid_price_bar_count}/${period.elapsed_expected_session_count}`,
+        );
+        appendText(
+          facts,
+          "span",
+          `缺目标 ${period.target_missing_count} · 读取失败 ${period.read_failed_count} · 坏价 ${period.invalid_price_count} · 历史未保存 ${period.missing_history_count} · 窗口截断 ${period.window_truncated_session_count}`,
+        );
+        appendText(facts, "span", comparisonPeriodOhlcText(period));
+        appendText(
+          facts,
+          "strong",
+          item.indexFraction
+            ? `周期RAW价格指数 ${formatIndexFraction(item.indexFraction)}（t0=${axis.baseRow.key}）`
+            : `周期RAW价格指数 UNKNOWN · ${item.reason || "未形成共同完整基准"}`,
+          "comparison-index",
+        );
+        appendText(
+          facts,
+          "span",
+          `原因码：${period.reason_codes.join("、") || "无"}`,
+          "muted",
+        );
+        if (item.entry.data && state.comparisonTimelines[index]?.data) {
+          const open = document.createElement("button");
+          open.type = "button";
+          open.className = "quiet";
+          open.textContent = "查看该代码日K/周月详情";
+          open.addEventListener("click", () =>
+            openComparisonTimeline(
+              item.entry.selection.source_symbol,
+              period.ohlc?.close_session || item.entry.selection.target_session,
+            ),
+          );
+          facts.append(open);
+        }
+      }
+      td.append(facts);
+      row.append(td);
+    }
+    body.append(row);
+  }
 }
 function validateMa20DirectionHistory(data) {
   const history = data.ma20_direction_history;
@@ -2533,6 +2852,163 @@ function validateComparisonTimeline(data, selection) {
     );
   return data;
 }
+function validateComparisonRawPeriods(data, selection, timeline) {
+  const identity = data?.snapshot_identity;
+  const formalSourceSet = data?.formal_source_set;
+  const responseSelection = data?.selection;
+  if (
+    data?.ok !== true ||
+    data.research_mode !== "NON_PIT_RAW_DIAGNOSTIC" ||
+    data.identity_status !== "SOURCE_SYMBOL_ONLY" ||
+    data.pit_status !== "NON_PIT_RETROSPECTIVE" ||
+    data.price_coordinate !== "RAW_UNADJUSTED" ||
+    data.target_session !== selection.target_session ||
+    data.source_symbol !== selection.source_symbol ||
+    data.symbol !== selection.source_symbol ||
+    data.package_sha256 !== selection.package_sha256 ||
+    data.namespace_id !== selection.namespace_id ||
+    data.calendar_id !== timeline.calendar_id ||
+    data.calendar_revision !== timeline.calendar_revision ||
+    data.history_window?.start_session !== timeline.session_start ||
+    data.history_window?.end_session !== selection.target_session ||
+    responseSelection?.source_symbol !== selection.source_symbol ||
+    responseSelection?.target_session !== selection.target_session ||
+    responseSelection?.package_sha256 !== selection.package_sha256 ||
+    responseSelection?.namespace_id !== selection.namespace_id ||
+    responseSelection?.source_set_id !== selection.source_set_id ||
+    identity?.identity_sha256 == null ||
+    identity.namespace_id !== selection.namespace_id ||
+    identity.target_session !== selection.target_session ||
+    identity.package_sha256 !== selection.package_sha256 ||
+    identity.source_set_id !== selection.source_set_id ||
+    identity.identity_type !== timeline.snapshot_identity.identity_type ||
+    identity.application_id !== timeline.snapshot_identity.application_id ||
+    identity.preview_mode !== timeline.snapshot_identity.preview_mode ||
+    identity.core_source_sha256 !==
+      timeline.snapshot_identity.core_source_sha256 ||
+    identity.research_entry_source_sha256 !==
+      timeline.snapshot_identity.research_entry_source_sha256 ||
+    identity.profile_contract_sha256 !==
+      timeline.snapshot_identity.profile_contract_sha256 ||
+    identity.price_coordinate !== "RAW_UNADJUSTED" ||
+    formalSourceSet?.status !== "AVAILABLE" ||
+    formalSourceSet?.source_set_id !== selection.source_set_id ||
+    formalSourceSet?.revision_id !== timeline.formal_source_set?.revision_id ||
+    !Array.isArray(data.periods?.week) ||
+    !Array.isArray(data.periods?.month)
+  )
+    throw new Error(
+      "闭周/月响应的来源、SEALED快照、日历、窗口或RAW坐标与75会话轨迹不一致。",
+    );
+  for (const [kind, periods] of Object.entries(data.periods)) {
+    const seen = new Set();
+    for (const period of periods) {
+      if (
+        period.kind !== kind.toUpperCase() ||
+        typeof period.period_key !== "string" ||
+        !Number.isSafeInteger(period.calendar_ordinal) ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(period.calendar_start_session || "") ||
+        !/^\d{4}-\d{2}-\d{2}$/.test(period.calendar_end_session || "") ||
+        !Number.isSafeInteger(period.calendar_expected_session_count) ||
+        !Number.isSafeInteger(period.elapsed_expected_session_count) ||
+        typeof period.calendar_closed !== "boolean" ||
+        !["COMPLETE", "PARTIAL", "UNFINISHED"].includes(
+          period.coverage_status,
+        ) ||
+        !Array.isArray(period.reason_codes) ||
+        seen.has(period.period_key) ||
+        !Array.isArray(period.source_package_sha256s) ||
+        period.source_package_sha256s.some(
+          (packageSha) => packageSha !== selection.package_sha256,
+        )
+      )
+        throw new Error("闭周/月响应含错序、重复或来源身份不完整的周期行。");
+      seen.add(period.period_key);
+      for (const field of [
+        "stored_raw_row_count",
+        "valid_price_bar_count",
+        "target_missing_count",
+        "read_failed_count",
+        "invalid_price_count",
+        "missing_history_count",
+        "window_truncated_session_count",
+      ]) {
+        if (!Number.isSafeInteger(period[field]) || period[field] < 0)
+          throw new Error("闭周/月响应含无效的来源覆盖计数。");
+      }
+    }
+  }
+  return data;
+}
+function comparisonBasketRequestKey(basket) {
+  return basket
+    .map(
+      (item) =>
+        `${item.source_symbol}|${item.target_session}|${item.namespace_id}|${item.source_set_id}|${item.package_sha256}|${item.profile_revision}`,
+    )
+    .join(";");
+}
+function comparisonRequestMatches(
+  requestId,
+  currentRequestId,
+  requestKey,
+  currentKey,
+) {
+  return requestId === currentRequestId && requestKey === currentKey;
+}
+function comparisonRequestIsCurrent(requestId, requestKey) {
+  return comparisonRequestMatches(
+    requestId,
+    state.comparisonRequest,
+    requestKey,
+    comparisonBasketRequestKey(state.comparisonBasket),
+  );
+}
+async function loadComparisonRawPeriods(entries, requestId, requestKey) {
+  const periodEntries = await Promise.all(
+    entries.map(async (entry) => {
+      if (!entry.data) {
+        return {
+          selection: entry.selection,
+          data: null,
+          error: entry.error,
+          pending: false,
+        };
+      }
+      try {
+        const query = new URLSearchParams({
+          target_session: entry.selection.target_session,
+          package_sha256: entry.selection.package_sha256,
+          symbol: entry.selection.source_symbol,
+          namespace_id: entry.selection.namespace_id,
+          source_set_id: entry.selection.source_set_id,
+        });
+        const response = await api(`/api/source-symbol/raw-periods?${query}`);
+        return {
+          selection: entry.selection,
+          data: validateComparisonRawPeriods(
+            response,
+            entry.selection,
+            entry.data,
+          ),
+          error: null,
+          pending: false,
+        };
+      } catch (error) {
+        return {
+          selection: entry.selection,
+          data: null,
+          error: error.message,
+          pending: false,
+        };
+      }
+    }),
+  );
+  if (!comparisonRequestIsCurrent(requestId, requestKey)) return false;
+  state.comparisonPeriodEntries = periodEntries;
+  renderComparisonPeriodResults();
+  return true;
+}
 async function compareSelectedSymbols() {
   const basket = state.comparisonBasket.map((item) => ({ ...item }));
   if (basket.length < 2 || basket.length > 3) {
@@ -2551,8 +3027,11 @@ async function compareSelectedSymbols() {
     return;
   }
   const requestId = ++state.comparisonRequest;
+  const requestKey = comparisonBasketRequestKey(basket);
   state.comparisonTimelines = [];
   state.comparisonBaseSession = null;
+  state.comparisonPeriodEntries = [];
+  state.comparisonPeriodBaseKey = null;
   $("comparisonResults").hidden = true;
   $("comparisonStatus").textContent =
     `正在并行读取${basket.length}只股票各75个官方会话…`;
@@ -2582,20 +3061,7 @@ async function compareSelectedSymbols() {
       }
     }),
   );
-  const currentKey = state.comparisonBasket
-    .map(
-      (item) =>
-        `${item.source_symbol}|${item.target_session}|${item.namespace_id}|${item.source_set_id}|${item.package_sha256}|${item.profile_revision}`,
-    )
-    .join(";");
-  const requestKey = basket
-    .map(
-      (item) =>
-        `${item.source_symbol}|${item.target_session}|${item.namespace_id}|${item.source_set_id}|${item.package_sha256}|${item.profile_revision}`,
-    )
-    .join(";");
-  if (requestId !== state.comparisonRequest || currentKey !== requestKey)
-    return;
+  if (!comparisonRequestIsCurrent(requestId, requestKey)) return;
   const reference = entries.find((entry) => entry.data)?.data;
   if (reference) {
     for (const entry of entries) {
@@ -2613,9 +3079,23 @@ async function compareSelectedSymbols() {
     }
   }
   state.comparisonTimelines = entries;
+  state.comparisonPeriodEntries = entries.map((entry) => ({
+    selection: entry.selection,
+    data: null,
+    error: entry.data ? null : entry.error,
+    pending: Boolean(entry.data),
+  }));
+  $("comparisonPeriodStatus").textContent =
+    "正在按同一目标、SEALED来源身份和官方日历读取现役PG周/月周期…";
   $("comparisonResults").hidden = false;
   renderComparisonResults();
   $("comparisonResults").scrollIntoView({ behavior: "smooth", block: "start" });
+  const periodsLoaded = await loadComparisonRawPeriods(
+    entries,
+    requestId,
+    requestKey,
+  );
+  if (!periodsLoaded) return;
   renderComparisonBasket();
 }
 function openComparisonTimeline(sourceSymbol, sessionDate = null) {
@@ -2628,6 +3108,36 @@ function openComparisonTimeline(sourceSymbol, sessionDate = null) {
       version: $("versionSelect").value,
       symbol: $("symbolInput").value,
       window: $("windowInput").value,
+      periodKind: state.comparisonPeriodKind,
+      periodBaseKey: state.comparisonPeriodBaseKey,
+      eventWindow: state.comparisonEventWindow,
+      eventField: state.comparisonEventField,
+      eventKind: state.comparisonEventKind,
+      formValues: Object.fromEntries(
+        Array.from(document.querySelectorAll("input, select"))
+          .filter((element) => element.id)
+          .map((element) => [element.id, element.value]),
+      ),
+      pgContext: {
+        offset: state.offset,
+        limit: state.limit,
+        total: state.total,
+        profileOffset: state.profileOffset,
+        profileLimit: state.profileLimit,
+        profileTotal: state.profileTotal,
+        changeOffset: state.changeOffset,
+        changeLimit: state.changeLimit,
+        changeTotal: state.changeTotal,
+        relationOffset: state.relationOffset,
+        relationLimit: state.relationLimit,
+        relationTotal: state.relationTotal,
+        relationQuery: state.relationQuery ? { ...state.relationQuery } : null,
+        profileBreadthMemberOffset: state.profileBreadthMemberOffset,
+        profileBreadthMemberLimit: state.profileBreadthMemberLimit,
+        profileBreadthMemberQuery: state.profileBreadthMemberQuery
+          ? { ...state.profileBreadthMemberQuery }
+          : null,
+      },
     };
   }
   state.timelineRequest++;
@@ -2684,9 +3194,23 @@ function returnFromComparison() {
     $("versionSelect").value = returnForm.version;
     $("symbolInput").value = returnForm.symbol;
     $("windowInput").value = returnForm.window;
+    state.comparisonPeriodKind = returnForm.periodKind;
+    $("comparisonPeriodKind").value = returnForm.periodKind;
+    state.comparisonEventWindow = returnForm.eventWindow;
+    state.comparisonEventField = returnForm.eventField;
+    state.comparisonEventKind = returnForm.eventKind;
+    $("comparisonEventWindow").value = String(returnForm.eventWindow);
+    $("comparisonEventField").value = returnForm.eventField;
+    $("comparisonEventKind").value = returnForm.eventKind;
+    for (const [id, value] of Object.entries(returnForm.formValues || {})) {
+      const control = $(id);
+      if (control) control.value = value;
+    }
+    Object.assign(state, returnForm.pgContext || {});
   }
   state.comparisonReturnForm = null;
-  $("comparisonEventHistory").scrollIntoView({
+  renderComparisonPeriodResults();
+  $("comparisonPeriodComparison").scrollIntoView({
     behavior: "smooth",
     block: "start",
   });
@@ -2750,11 +3274,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-    snapshot.target_session === point.session_date &&
-    snapshot.package_sha256 === point.package_sha256 &&
-    snapshot.namespace_id === point.namespace_id &&
-    snapshot.source_set_id === selectedSourceSet &&
-    snapshot.field_ids?.length,
+      snapshot.target_session === point.session_date &&
+      snapshot.package_sha256 === point.package_sha256 &&
+      snapshot.namespace_id === point.namespace_id &&
+      snapshot.source_set_id === selectedSourceSet &&
+      snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -7613,6 +8137,10 @@ $("comparisonEventField").addEventListener("change", () => {
 $("comparisonEventKind").addEventListener("change", () => {
   state.comparisonEventKind = $("comparisonEventKind").value;
   refreshComparisonEventHistory();
+});
+$("comparisonPeriodKind").addEventListener("change", () => {
+  state.comparisonPeriodKind = $("comparisonPeriodKind").value;
+  renderComparisonPeriodResults();
 });
 $("changeTypeSelect").addEventListener("change", () => {
   state.changeOffset = 0;

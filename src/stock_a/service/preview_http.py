@@ -1561,6 +1561,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "namespace_id": history["namespace_id"],
                             "source_set_id": source_context["source_set_id"],
                         },
+                        "calendar_id": calendar_payload["calendar_id"],
                         "calendar_revision": calendar_revision,
                         "history_window": {
                             "start_session": sessions[0].isoformat(),

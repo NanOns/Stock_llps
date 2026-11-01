@@ -57,6 +57,40 @@
             </table>
           </div>
           <section
+            id="comparisonPeriodComparison"
+            class="comparison-event-history"
+            aria-labelledby="comparisonPeriodTitle"
+          >
+            <div class="panel-head">
+              <div>
+                <h3 id="comparisonPeriodTitle">同源闭周/月结构与RAW价格指数</h3>
+                <p>
+                  按ISO自然周或自然月对齐现役PG
+                  Raw周期。只有所有选中来源代码共同完整且已闭合的周期才建立该周期类型自己的t0；这是SOURCE_SYMBOL_ONLY、RAW_UNADJUSTED、NON_PIT_RETROSPECTIVE对照，不是RPS、市场排名或交易信号。
+                </p>
+              </div>
+              <span id="comparisonPeriodCount" class="count">等待周期</span>
+            </div>
+            <div class="comparison-controls">
+              <label>
+                横向周期
+                <select id="comparisonPeriodKind">
+                  <option value="WEEK" selected>ISO自然周</option>
+                  <option value="MONTH">自然月</option>
+                </select>
+              </label>
+            </div>
+            <div id="comparisonPeriodStatus" class="population" role="status">
+              读取同一SEALED来源快照下的周期数据后显示。
+            </div>
+            <div class="table-wrap">
+              <table class="comparison-table">
+                <thead id="comparisonPeriodHead"></thead>
+                <tbody id="comparisonPeriodRows"></tbody>
+              </table>
+            </div>
+          </section>
+          <section
             id="comparisonEventHistory"
             class="comparison-event-history"
             aria-labelledby="comparisonEventTitle"
