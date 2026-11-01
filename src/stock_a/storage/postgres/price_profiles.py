@@ -960,7 +960,10 @@ WITH old_rows AS (
                AND o.producer_version=n.producer_version
                AND o.calculation_scope=n.calculation_scope
                AND o.price_coordinate=n.price_coordinate
-               AND o.profile_field_ids=n.profile_field_ids,
+               AND cardinality(o.profile_field_ids)=11
+               AND cardinality(n.profile_field_ids)=11
+               AND o.profile_field_ids @> n.profile_field_ids
+               AND o.profile_field_ids <@ n.profile_field_ids,
                FALSE
            ) AS profile_compatible,
            o.ma5_quality AS before_ma5_quality, n.ma5_quality AS after_ma5_quality,
@@ -1107,9 +1110,17 @@ WITH old_rows AS (
                          AND after_close_ma20_relation IS NOT NULL
                          AND before_close_ma20_relation IS DISTINCT FROM after_close_ma20_relation
                     THEN 'RAW_CLOSE_VS_MA20_CHANGED'::text END,
-               CASE WHEN profile_compatible AND (
-                         before_profile_statuses IS DISTINCT FROM after_profile_statuses
-                         OR before_profile_qualities IS DISTINCT FROM after_profile_qualities)
+               CASE WHEN profile_compatible AND EXISTS (
+                         SELECT 1
+                         FROM unnest(before_profile_field_ids) AS field(field_id)
+                         WHERE before_profile_statuses[
+                                   array_position(before_profile_field_ids, field.field_id)]
+                                   IS DISTINCT FROM after_profile_statuses[
+                                   array_position(after_profile_field_ids, field.field_id)]
+                            OR before_profile_qualities[
+                                   array_position(before_profile_field_ids, field.field_id)]
+                                   IS DISTINCT FROM after_profile_qualities[
+                                   array_position(after_profile_field_ids, field.field_id)])
                     THEN 'PROFILE_STATE_CHANGED'::text END,
                CASE WHEN core_compatible AND (
                          before_ma5_quality IS DISTINCT FROM after_ma5_quality
@@ -1299,6 +1310,8 @@ def read_profile_change_page(
     limit: int,
     source_symbol: str | None = None,
     change_type: str = "ALL",
+    profile_field_id: str | None = None,
+    profile_change_kind: str | None = None,
     before_source_set_id: str | None = None,
     before_package_sha256: str | None = None,
     before_profile_revision: str | None = None,
@@ -1339,6 +1352,32 @@ def read_profile_change_page(
         )
     if change_type not in change_types:
         raise PriceProfilePgError("PROFILE_CHANGE_FILTER_INVALID", "变化类型筛选值无效")
+    profile_change_kinds = {
+        "QUALITY_CHANGED",
+        "STATUS_CHANGED",
+        "ANY_STATE_CHANGED",
+    }
+    if (profile_field_id is None) != (profile_change_kind is None):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_FIELD_FILTER_INVALID",
+            "Profile11字段与质量/状态变化类别必须成对提供",
+        )
+    if (
+        profile_field_id is not None
+        and profile_field_id not in _PROFILE_QUERY_FIELD_IDS
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_FIELD_INVALID",
+            "Profile11字段不在已采用的11项合同白名单中",
+        )
+    if (
+        profile_change_kind is not None
+        and profile_change_kind not in profile_change_kinds
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_FIELD_KIND_INVALID",
+            "Profile11字段变化类别只接受QUALITY_CHANGED/STATUS_CHANGED/ANY_STATE_CHANGED",
+        )
     if source_symbol is not None and (
         not isinstance(source_symbol, str)
         or source_symbol != source_symbol.strip()
@@ -1473,6 +1512,58 @@ LIMIT %s""",
         highlight_rows = [
             dict(zip(highlight_names, row, strict=True)) for row in cursor.fetchall()
         ]
+        page_conditions = [
+            "cardinality(change_types)>0",
+            "(%s='ALL' OR %s=ANY(change_types))",
+            "(%s::text IS NULL OR strpos(source_symbol,%s::text)>0)",
+        ]
+        page_filter_parameters: list[Any] = [
+            change_type,
+            change_type,
+            symbol_search,
+            symbol_search,
+        ]
+        if profile_field_id is not None and profile_change_kind is not None:
+            page_conditions.append(
+                """profile_compatible
+  AND array_position(before_profile_field_ids,%s::text) IS NOT NULL
+  AND array_position(after_profile_field_ids,%s::text) IS NOT NULL
+  AND CASE %s
+        WHEN 'QUALITY_CHANGED' THEN
+          before_profile_qualities[array_position(before_profile_field_ids,%s::text)]
+            IS DISTINCT FROM
+          after_profile_qualities[array_position(after_profile_field_ids,%s::text)]
+        WHEN 'STATUS_CHANGED' THEN
+          before_profile_statuses[array_position(before_profile_field_ids,%s::text)]
+            IS DISTINCT FROM
+          after_profile_statuses[array_position(after_profile_field_ids,%s::text)]
+        WHEN 'ANY_STATE_CHANGED' THEN
+          before_profile_qualities[array_position(before_profile_field_ids,%s::text)]
+            IS DISTINCT FROM
+          after_profile_qualities[array_position(after_profile_field_ids,%s::text)]
+          OR before_profile_statuses[array_position(before_profile_field_ids,%s::text)]
+            IS DISTINCT FROM
+          after_profile_statuses[array_position(after_profile_field_ids,%s::text)]
+        ELSE FALSE
+      END"""
+            )
+            page_filter_parameters.extend(
+                (
+                    profile_field_id,
+                    profile_field_id,
+                    profile_change_kind,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                    profile_field_id,
+                )
+            )
+        page_where = "WHERE " + "\n  AND ".join(page_conditions)
+        page_parameters = (*base_parameters, *page_filter_parameters)
         cursor.execute(
             _PROFILE_CHANGE_CTES
             + """SELECT source_symbol, before_present, after_present,
@@ -1514,23 +1605,24 @@ LIMIT %s""",
        before_bias20_atr_quality, after_bias20_atr_quality, before_bias20_atr_reason, after_bias20_atr_reason,
        count(*) OVER ()::bigint AS filtered_total
 FROM classified
-WHERE cardinality(change_types)>0
-  AND (%s='ALL' OR %s=ANY(change_types))
-  AND (%s::text IS NULL OR strpos(source_symbol,%s::text)>0)
+"""
+            + page_where
+            + """
 ORDER BY source_symbol COLLATE "C"
 LIMIT %s OFFSET %s""",
-            (
-                *base_parameters,
-                change_type,
-                change_type,
-                symbol_search,
-                symbol_search,
-                limit,
-                offset,
-            ),
+            (*page_parameters, limit, offset),
         )
         names = [item.name for item in cursor.description]
         rows = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
+        if rows:
+            filtered_total = int(rows[0]["filtered_total"])
+        else:
+            cursor.execute(
+                _PROFILE_CHANGE_CTES
+                + f"SELECT count(*)::bigint AS filtered_total FROM classified\n{page_where}",
+                page_parameters,
+            )
+            filtered_total = int(cursor.fetchone()[0])
 
     for row in (*rows, *highlight_rows):
         row["change_types"] = list(row["change_types"] or [])
@@ -1539,7 +1631,8 @@ LIMIT %s OFFSET %s""",
         )
         row["profile_field_changes"] = []
         if row["profile_compatible"]:
-            ids = row["before_profile_field_ids"] or []
+            before_ids = row["before_profile_field_ids"] or []
+            after_ids = row["after_profile_field_ids"] or []
             before_statuses = row["before_profile_statuses"] or []
             after_statuses = row["after_profile_statuses"] or []
             before_qualities = row["before_profile_qualities"] or []
@@ -1547,35 +1640,50 @@ LIMIT %s OFFSET %s""",
             before_reasons = row["before_profile_reasons"] or []
             after_reasons = row["after_profile_reasons"] or []
             if (
-                len(ids)
+                len(before_ids)
                 == len(before_statuses)
                 == len(after_statuses)
                 == len(before_qualities)
                 == len(after_qualities)
                 == len(before_reasons)
                 == len(after_reasons)
+                == len(after_ids)
+                and len(set(before_ids)) == len(before_ids)
+                and len(set(after_ids)) == len(after_ids)
+                and set(before_ids) == set(after_ids)
             ):
-                row["profile_field_changes"] = [
-                    {
-                        "field_id": field_id,
-                        "before_status": before_status,
-                        "after_status": after_status,
-                        "before_quality": before_quality,
-                        "after_quality": after_quality,
-                        "before_reason": before_reason or None,
-                        "after_reason": after_reason or None,
-                    }
-                    for field_id, before_status, after_status, before_quality, after_quality, before_reason, after_reason in zip(
-                        ids,
+                before_fields = {
+                    field_id: (status, quality, reason)
+                    for field_id, status, quality, reason in zip(
+                        before_ids,
                         before_statuses,
-                        after_statuses,
                         before_qualities,
-                        after_qualities,
                         before_reasons,
+                        strict=True,
+                    )
+                }
+                after_fields = {
+                    field_id: (status, quality, reason)
+                    for field_id, status, quality, reason in zip(
+                        after_ids,
+                        after_statuses,
+                        after_qualities,
                         after_reasons,
                         strict=True,
                     )
-                    if before_status != after_status or before_quality != after_quality
+                }
+                row["profile_field_changes"] = [
+                    {
+                        "field_id": field_id,
+                        "before_status": before_value[0],
+                        "after_status": after_value[0],
+                        "before_quality": before_value[1],
+                        "after_quality": after_value[1],
+                        "before_reason": before_value[2] or None,
+                        "after_reason": after_value[2] or None,
+                    }
+                    for field_id, before_value in before_fields.items()
+                    if before_value[:2] != (after_value := after_fields[field_id])[:2]
                 ]
         row["core_quality_changes"] = [
             {
@@ -1598,7 +1706,6 @@ LIMIT %s OFFSET %s""",
         for key, value in tuple(row.items()):
             if isinstance(value, date):
                 row[key] = value.isoformat()
-    filtered_total = int(rows[0]["filtered_total"]) if rows else 0
     for row in rows:
         row.pop("filtered_total", None)
     return {
@@ -1626,6 +1733,11 @@ LIMIT %s OFFSET %s""",
             if offset + len(rows) < filtered_total
             else None,
         },
+        "profile_field_filter": (
+            {"field_id": profile_field_id, "kind": profile_change_kind}
+            if profile_field_id is not None
+            else None
+        ),
         "rows": rows,
         "database_write": False,
         "core_recalculated": False,

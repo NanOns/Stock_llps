@@ -194,6 +194,18 @@
             </select></label
           >
           <label
+            >Profile11指定字段<select id="changeProfileFieldSelect">
+              <option value="">不按字段质量/状态变化筛选</option>
+            </select></label
+          ><label
+            >字段变化类别<select id="changeProfileKindSelect" disabled>
+              <option value="">请先选择Profile11字段</option>
+              <option value="ANY_STATE_CHANGED">质量或状态变化</option>
+              <option value="QUALITY_CHANGED">仅质量变化</option>
+              <option value="STATUS_CHANGED">仅状态变化</option>
+            </select></label
+          >
+          <label
             >精确来源代码 / 变化筛选<input
               id="changeSymbolInput"
               placeholder="SH.或SZ.加六位数字"
@@ -482,7 +494,7 @@
                 <th>来源代码</th>
                 <th>实际变化</th>
                 <th>RAW收盘 / MA20关系</th>
-                <th>Profile11状态变化</th>
+                <th>Profile11字段前后质量 / 状态 / 原因</th>
                 <th>Core质量或原因变化</th>
                 <th>详情</th>
               </tr>

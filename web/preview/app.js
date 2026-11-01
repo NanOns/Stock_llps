@@ -2750,11 +2750,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-      snapshot.target_session === point.session_date &&
-      snapshot.package_sha256 === point.package_sha256 &&
-      snapshot.namespace_id === point.namespace_id &&
-      snapshot.source_set_id === selectedSourceSet &&
-      snapshot.field_ids?.length,
+    snapshot.target_session === point.session_date &&
+    snapshot.package_sha256 === point.package_sha256 &&
+    snapshot.namespace_id === point.namespace_id &&
+    snapshot.source_set_id === selectedSourceSet &&
+    snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -3258,6 +3258,10 @@ async function returnToChanges() {
         profileSnapshotKey(binding.after_snapshot) ||
       $("changeSymbolInput").value.trim().toUpperCase() !== binding.symbol ||
       $("changeTypeSelect").value !== binding.change_filter ||
+      $("changeProfileFieldSelect").value !==
+        (binding.profile_change_field || "") ||
+      $("changeProfileKindSelect").value !==
+        (binding.profile_change_kind || "") ||
       state.changeOffset !== binding.change_offset ||
       state.changeLimit !== binding.change_limit ||
       state.changeBinding?.origin !== "exact-symbol" ||
@@ -3279,6 +3283,9 @@ async function returnToChanges() {
     $("changeAfterSelect").value = profileSnapshotKey(binding.after_snapshot);
     $("changeSymbolInput").value = binding.symbol;
     $("changeTypeSelect").value = binding.change_filter || "ALL";
+    $("changeProfileFieldSelect").value = binding.profile_change_field || "";
+    $("changeProfileKindSelect").disabled = !binding.profile_change_field;
+    $("changeProfileKindSelect").value = binding.profile_change_kind || "";
     state.changeOffset = binding.change_offset ?? 0;
     state.changeLimit = binding.change_limit ?? state.changeLimit;
     $("versionSelect").value =
@@ -4806,6 +4813,8 @@ function openChangeTimeline(item, side) {
           before_snapshot: { ...state.changeBinding.before_snapshot },
           after_snapshot: { ...state.changeBinding.after_snapshot },
           change_filter: $("changeTypeSelect").value,
+          profile_change_field: $("changeProfileFieldSelect").value,
+          profile_change_kind: $("changeProfileKindSelect").value,
           change_offset: state.changeOffset,
           change_limit: state.changeLimit,
         }
@@ -5060,19 +5069,45 @@ function showChangeDetail(item) {
     table.innerHTML =
       "<thead><tr><th>字段</th><th>前日状态 / 质量 / 原因</th><th>后日状态 / 质量 / 原因</th></tr></thead>";
     const body = document.createElement("tbody");
-    (
-      item.before_profile_field_ids ||
-      item.after_profile_field_ids ||
-      []
-    ).forEach((field, index) =>
-      tableRow(body, [
-        item.profile_compatible || !item.pair_status
-          ? field
-          : `${text(item.before_profile_field_ids?.[index])} → ${text(item.after_profile_field_ids?.[index])}`,
-        `${text(item.before_profile_statuses?.[index])} / ${text(item.before_profile_qualities?.[index])} / ${text(item.before_profile_reasons?.[index])}`,
-        `${text(item.after_profile_statuses?.[index])} / ${text(item.after_profile_qualities?.[index])} / ${text(item.after_profile_reasons?.[index])}`,
+    const fieldValues = (item, side) => {
+      const ids = item[`${side}_profile_field_ids`] || [];
+      const statuses = item[`${side}_profile_statuses`] || [];
+      const qualities = item[`${side}_profile_qualities`] || [];
+      const reasons = item[`${side}_profile_reasons`] || [];
+      if (
+        ids.length !== statuses.length ||
+        ids.length !== qualities.length ||
+        ids.length !== reasons.length
+      )
+        return new Map();
+      return new Map(
+        ids.map((field, index) => [
+          field,
+          {
+            status: statuses[index],
+            quality: qualities[index],
+            reason: reasons[index],
+          },
+        ]),
+      );
+    };
+    const beforeFields = fieldValues(item, "before");
+    const afterFields = fieldValues(item, "after");
+    const fieldIds = [
+      ...new Set([
+        ...(item.before_profile_field_ids || []),
+        ...(item.after_profile_field_ids || []),
       ]),
-    );
+    ];
+    for (const field of fieldIds) {
+      const beforeField = beforeFields.get(field);
+      const afterField = afterFields.get(field);
+      const describe = (value) =>
+        value
+          ? `${text(value.status)} / ${text(value.quality)} / ${text(value.reason)}`
+          : "该侧无此字段";
+      tableRow(body, [field, describe(beforeField), describe(afterField)]);
+    }
     table.append(body);
     const wrap = document.createElement("div");
     wrap.className = "table-wrap";
@@ -5297,6 +5332,7 @@ async function compareSourceProfilePair(notice = null) {
   }
 }
 function populateChangeSnapshots(snapshots) {
+  populateChangeProfileFields();
   const complete = snapshots
     .filter((item) => item.complete)
     .slice()
@@ -5365,6 +5401,24 @@ function populateChangeSnapshots(snapshots) {
       "",
       "",
     ]);
+  }
+}
+function populateChangeProfileFields() {
+  const fieldSelect = $("changeProfileFieldSelect");
+  const selectedField = fieldSelect.value;
+  fieldSelect.replaceChildren(new Option("不按字段质量/状态变化筛选", ""));
+  for (const field of Object.keys(profileFieldLabels)) {
+    fieldSelect.append(new Option(profileFieldLabel(field), field));
+  }
+  fieldSelect.value = Object.hasOwn(profileFieldLabels, selectedField)
+    ? selectedField
+    : "";
+  const kindSelect = $("changeProfileKindSelect");
+  kindSelect.disabled = !fieldSelect.value;
+  if (!fieldSelect.value) {
+    kindSelect.value = "";
+  } else if (!kindSelect.value) {
+    kindSelect.value = "ANY_STATE_CHANGED";
   }
 }
 function profileSnapshotKey(snapshot) {
@@ -6665,6 +6719,14 @@ async function runChanges(requestId) {
     limit: String(state.changeLimit),
     change_type: $("changeTypeSelect").value,
   });
+  const profileFieldId = $("changeProfileFieldSelect").value || null;
+  const profileChangeKind = profileFieldId
+    ? $("changeProfileKindSelect").value
+    : null;
+  if (profileFieldId) {
+    params.set("profile_field_id", profileFieldId);
+    params.set("profile_change_kind", profileChangeKind);
+  }
   for (const [prefix, snapshot] of [
     ["before", beforeSnapshot],
     ["after", afterSnapshot],
@@ -6685,6 +6747,34 @@ async function runChanges(requestId) {
     if (requestId !== state.changeRequest) return;
     const s = data.summary;
     const p = data.page;
+    const expectedProfileFieldFilter = profileFieldId
+      ? { field_id: profileFieldId, kind: profileChangeKind }
+      : null;
+    if (
+      (expectedProfileFieldFilter === null &&
+        data.profile_field_filter !== null) ||
+      (expectedProfileFieldFilter !== null &&
+        (data.profile_field_filter?.field_id !== profileFieldId ||
+          data.profile_field_filter?.kind !== profileChangeKind)) ||
+      data.rows.some((item) => {
+        const selected = (item.profile_field_changes || []).find(
+          (change) => change.field_id === profileFieldId,
+        );
+        if (!profileFieldId) return false;
+        if (!selected) return true;
+        if (profileChangeKind === "QUALITY_CHANGED")
+          return selected.before_quality === selected.after_quality;
+        if (profileChangeKind === "STATUS_CHANGED")
+          return selected.before_status === selected.after_status;
+        return (
+          selected.before_quality === selected.after_quality &&
+          selected.before_status === selected.after_status
+        );
+      })
+    )
+      throw new Error(
+        "Profile11双日字段筛选与精确变化响应不一致，已停止展示。",
+      );
     state.changeBinding = {
       namespace_id: data.namespace_id,
       before_snapshot: data.before_snapshot,
@@ -6695,27 +6785,31 @@ async function runChanges(requestId) {
       offset: p.offset,
       limit: p.limit,
       change_type: $("changeTypeSelect").value,
+      profile_field_id: profileFieldId,
+      profile_change_kind: profileChangeKind,
       symbol: $("changeSymbolInput").value.trim(),
     };
     renderChangeHighlights(data, data.session_relation);
     state.changeTotal = p.total;
     $("changeCount").textContent = `${s.changed_source_symbol_count}个变化对象`;
     $("changeSummary").textContent =
-      `${sessionRelationLabel(data.session_relation)} · 快照分母 ${data.before_snapshot.source_symbol_count}/${data.before_snapshot.expected_source_symbol_count} 与 ${data.after_snapshot.source_symbol_count}/${data.after_snapshot.expected_source_symbol_count} · 并集 ${s.source_symbol_union_count} · 交集 ${s.intersection_count} · 起始独有 ${s.before_only_count} · 结束独有 ${s.after_only_count} · 跨source_set ${s.cross_source_set_pair_count} · 跨价格坐标 ${s.cross_price_coordinate_pair_count} · Core/Profile不可比 ${s.core_semantics_incomparable_count}/${s.profile_semantics_incomparable_count} · 收盘/MA20未知 ${s.close_ma20_unknown_count} · Profile未观察 ${s.profile_unobserved_pair_count} · 完整变化 ${s.changed_source_symbol_count} · 当前筛选 ${p.total} · 选股未评价。`;
+      `${sessionRelationLabel(data.session_relation)} · 快照分母 ${data.before_snapshot.source_symbol_count}/${data.before_snapshot.expected_source_symbol_count} 与 ${data.after_snapshot.source_symbol_count}/${data.after_snapshot.expected_source_symbol_count} · 并集 ${s.source_symbol_union_count} · 交集 ${s.intersection_count} · 起始独有 ${s.before_only_count} · 结束独有 ${s.after_only_count} · 跨source_set ${s.cross_source_set_pair_count} · 跨价格坐标 ${s.cross_price_coordinate_pair_count} · Core/Profile不可比 ${s.core_semantics_incomparable_count}/${s.profile_semantics_incomparable_count} · 收盘/MA20未知 ${s.close_ma20_unknown_count} · Profile未观察 ${s.profile_unobserved_pair_count} · 完整变化 ${s.changed_source_symbol_count} · ${profileFieldId ? `Profile11 ${profileFieldLabel(profileFieldId)} ${profileChangeKind}` : "Profile11字段变化未过滤"} · 当前筛选 ${p.total} · 选股未评价。`;
     $("changePageStatus").textContent =
       `偏移 ${p.offset} · 本页 ${p.count}/${p.limit} · 筛选总计 ${p.total}`;
     $("changePrev").disabled = p.offset === 0;
     $("changeNext").disabled = p.next_offset === null;
     $("changeLast").disabled = p.total === 0 || p.offset + p.limit >= p.total;
-    if (!data.rows.length)
-      tableRow($("changeRows"), [
-        "没有匹配的实际变化；可在下方画像搜索中逐股查看来源池状态和UNKNOWN原因。",
-        "",
-        "",
-        "",
-        "",
-        "",
-      ]);
+    if (!data.rows.length) {
+      const emptyMessage =
+        p.total === 0
+          ? profileFieldId
+            ? `真实零匹配：该精确双日快照中没有${profileFieldLabel(profileFieldId)}的${profileChangeKind}记录；完整来源并集和未变化/不可比统计仍保持原分母。`
+            : "没有符合当前条件的实际变化；完整来源并集和未变化/不可比统计仍保持原分母。"
+          : p.offset >= p.total
+            ? `当前偏移${p.offset}已越过末页；筛选总数仍为${p.total}，请返回第一页查看。`
+            : "当前偏移没有成员；完整筛选总数仍按PG全集计算。";
+      tableRow($("changeRows"), [emptyMessage, "", "", "", "", ""]);
+    }
     for (const item of data.rows) {
       const row = document.createElement("tr");
       cell(row, item.source_symbol);
@@ -6729,14 +6823,19 @@ async function runChanges(requestId) {
         row,
         `${text(item.before_close_ma20_relation)} → ${text(item.after_close_ma20_relation)}`,
       );
-      cell(
-        row,
-        item.profile_compatible
+      const selectedProfileChange = profileFieldId
+        ? (item.profile_field_changes || []).find(
+            (change) => change.field_id === profileFieldId,
+          )
+        : null;
+      const profileChangeText = selectedProfileChange
+        ? `${profileFieldLabel(profileFieldId)} · 质量 ${text(selectedProfileChange.before_quality)} → ${text(selectedProfileChange.after_quality)} · 状态 ${text(selectedProfileChange.before_status)} → ${text(selectedProfileChange.after_status)} · 原因 ${text(selectedProfileChange.before_reason)} → ${text(selectedProfileChange.after_reason)}`
+        : item.profile_compatible
           ? (item.profile_field_changes || [])
               .map((change) => change.field_id)
               .join("、") || "无"
-          : "不可比",
-      );
+          : "不可比";
+      cell(row, profileChangeText);
       cell(
         row,
         (item.core_quality_changes || [])
@@ -7516,6 +7615,18 @@ $("comparisonEventKind").addEventListener("change", () => {
   refreshComparisonEventHistory();
 });
 $("changeTypeSelect").addEventListener("change", () => {
+  state.changeOffset = 0;
+  loadChanges();
+});
+$("changeProfileFieldSelect").addEventListener("change", () => {
+  const fieldId = $("changeProfileFieldSelect").value;
+  const kindSelect = $("changeProfileKindSelect");
+  kindSelect.disabled = !fieldId;
+  kindSelect.value = fieldId ? "ANY_STATE_CHANGED" : "";
+  state.changeOffset = 0;
+  loadChanges();
+});
+$("changeProfileKindSelect").addEventListener("change", () => {
   state.changeOffset = 0;
   loadChanges();
 });

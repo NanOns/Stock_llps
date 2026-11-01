@@ -788,6 +788,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "limit",
                         "symbol",
                         "change_type",
+                        "profile_field_id",
+                        "profile_change_kind",
                     },
                 )
                 if not {"before_session", "after_session"}.issubset(values):
@@ -820,6 +822,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     ),
                     source_symbol=symbol,
                     change_type=values.get("change_type", "ALL"),
+                    profile_field_id=values.get("profile_field_id"),
+                    profile_change_kind=values.get("profile_change_kind"),
                     before_source_set_id=values.get("before_source_set_id"),
                     before_package_sha256=values.get("before_package_sha256"),
                     before_profile_revision=values.get("before_profile_revision"),
