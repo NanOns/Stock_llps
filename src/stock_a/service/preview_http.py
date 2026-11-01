@@ -764,6 +764,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE",
                         "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
                         "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
+                        "namespace_id": snapshots["namespace_id"],
                         "snapshots": snapshots["snapshots"],
                         "database_write": False,
                         "ddl_executed": False,
@@ -1117,7 +1118,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     core_field=values.get("core_field"),
                     core_quality=values.get("core_quality"),
                 )
-                if result["status"] == "NO_MATCH":
+                if result["status"] == "NO_MATCH" and result["page"]["total"] > 0:
                     raise PreviewHttpError(
                         404,
                         "PROFILE_NO_MATCH",

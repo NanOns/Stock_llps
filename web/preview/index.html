@@ -289,6 +289,27 @@
               <option value="PRICE_FIELDS_UNKNOWN">价格字段未知</option>
               <option value="READ_FAILED">目标读取失败</option>
             </select></label
+          ><label
+            >Core字段<select id="profileCoreFieldSelect">
+              <option value="ALL">全部Core字段</option>
+              <option value="core.ma5">MA5</option>
+              <option value="core.ma10">MA10</option>
+              <option value="core.ma20">MA20</option>
+              <option value="core.ma60">MA60</option>
+              <option value="core.atr20">ATR20</option>
+              <option value="core.clv">CLV</option>
+              <option value="core.prior_high20">前20会话最高价</option>
+              <option value="core.ret20">20会话收益率</option>
+              <option value="core.pos60">60会话价格位置</option>
+              <option value="core.bias20_atr">相对MA20的ATR偏离</option>
+            </select></label
+          ><label
+            >Core质量状态<select id="profileCoreQualitySelect">
+              <option value="ALL">全部质量状态</option>
+              <option value="OBSERVED">OBSERVED · 可观察</option>
+              <option value="UNKNOWN">UNKNOWN · 未知</option>
+              <option value="NOT_APPLICABLE">NOT_APPLICABLE · 不适用</option>
+            </select></label
           ><button id="searchProfiles" type="button">查询画像</button>
         </div>
         <div id="profileMessage" class="population" role="status">
@@ -305,13 +326,16 @@
                 <th>MA20</th>
                 <th>ATR20</th>
                 <th>CLV</th>
+                <th id="profileCoreValueHeader">
+                  所选Core字段 / 值 / 质量 / 原因
+                </th>
                 <th>价格状态 / 原因</th>
                 <th>详情</th>
               </tr>
             </thead>
             <tbody id="profileRows">
               <tr>
-                <td colspan="9" class="muted">请选择已保存的PG画像版本。</td>
+                <td colspan="10" class="muted">请选择已保存的PG画像版本。</td>
               </tr>
             </tbody>
           </table>
@@ -517,7 +541,7 @@
                     <th>原因</th>
                   </tr>
                 </thead>
-                <tbody id="profileRows"></tbody>
+                <tbody id="stockProfileRows"></tbody>
               </table>
             </div>
             <section class="timeline-research" aria-labelledby="timelineTitle">

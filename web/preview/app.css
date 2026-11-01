@@ -434,6 +434,12 @@ footer {
   border-radius: 9px;
   background: #f8fafb;
 }
+.profile-detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 12px;
+}
 .profile-detail h3 {
   margin-top: 10px;
 }

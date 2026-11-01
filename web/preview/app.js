@@ -2,6 +2,7 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   versions: [],
+  namespace_id: null,
   version: null,
   offset: 0,
   limit: 20,
@@ -108,6 +109,8 @@ const labels = {
   PRICE_COORDINATE_INCOMPATIBLE: "两端价格坐标不兼容",
   CORE_SEMANTICS_UNKNOWN: "Core语义缺失",
   CORE_SEMANTICS_INCOMPATIBLE: "Core语义不兼容",
+  CURRENT_SESSION_UNKNOWN: "当前交易会话数据未知",
+  ZERO_PRICE_RANGE: "目标日最高价与最低价相同",
   MA20_QUALITY_UNKNOWN: "MA20质量未知",
   PRICE_VALUE_MISSING: "价格值缺失",
   RELATION_UNKNOWN: "关系未知",
@@ -127,6 +130,22 @@ const profileLabels = {
   "profile.closed_week_trend": "闭合周趋势",
   "profile.closed_month_trend": "闭合月趋势",
 };
+const profileCoreFields = [
+  { value: "core.ma5", key: "ma5", label: "MA5" },
+  { value: "core.ma10", key: "ma10", label: "MA10" },
+  { value: "core.ma20", key: "ma20", label: "MA20" },
+  { value: "core.ma60", key: "ma60", label: "MA60" },
+  { value: "core.atr20", key: "atr20", label: "ATR20" },
+  { value: "core.clv", key: "clv", label: "CLV" },
+  {
+    value: "core.prior_high20",
+    key: "prior_high20",
+    label: "前20会话最高价",
+  },
+  { value: "core.ret20", key: "ret20", label: "20会话收益率" },
+  { value: "core.pos60", key: "pos60", label: "60会话价格位置" },
+  { value: "core.bias20_atr", key: "bias20_atr", label: "相对MA20的ATR偏离" },
+];
 const text = (v) => {
   if (v === null || v === undefined) return "—";
   if (typeof v === "object") {
@@ -181,7 +200,7 @@ function clearResult() {
   $("stockResult").classList.remove("timeline-only");
   $("coreRows").replaceChildren();
   $("allCoreRows").replaceChildren();
-  $("profileRows").replaceChildren();
+  $("stockProfileRows").replaceChildren();
   $("rawSummary").replaceChildren();
   setMessage("");
 }
@@ -724,12 +743,14 @@ async function loadCatalog() {
   state.stockRequest++;
   clearResult();
   clearChainReadiness("正在从PostgreSQL只读读取来源日期与版本目录…");
+  state.namespace_id = null;
   $("versionSelect").disabled = true;
   $("versionSelect").replaceChildren(new Option("正在读取PG目录…", ""));
   $("population").textContent = "正在从PostgreSQL只读读取来源日期与版本目录。";
   try {
     const data = await api("/api/preview/catalog?offset=0&limit=100");
     if (catalogRequest !== state.catalogRequest) return;
+    state.namespace_id = data.namespace_id;
     state.versions = data.versions;
     $("versionSelect").replaceChildren(
       new Option("— 请选择目标日期与来源包版本 —", ""),
@@ -1180,7 +1201,7 @@ async function queryStock(event) {
   const v = selectedVersion();
   if (!v) {
     setMessage("请先从真实PG目录选择目标日期和来源包版本。");
-    return;
+    return false;
   }
   const symbol = $("symbolInput").value.trim();
   const count = Number($("windowInput").value);
@@ -1196,7 +1217,7 @@ async function queryStock(event) {
   if (!symbol || !Number.isInteger(count) || count < 1 || count > 75) {
     clearResult();
     setMessage("来源代码与会话数无效；会话数须为1至75。");
-    return;
+    return false;
   }
   clearResult();
   $("queryStock").disabled = true;
@@ -1264,10 +1285,10 @@ async function queryStock(event) {
       result.core.fields,
       Object.keys(result.core.fields).sort(),
     );
-    $("profileRows").replaceChildren();
+    $("stockProfileRows").replaceChildren();
     for (const component of result.profile_preview.components) {
       const componentKey = component.field_id || "";
-      tableRow($("profileRows"), [
+      tableRow($("stockProfileRows"), [
         `${profileLabels[componentKey] || componentKey} · ${componentKey}`,
         component.status === "EVALUATED" ? component.quality : component.status,
         component.value,
@@ -1296,11 +1317,13 @@ async function queryStock(event) {
           previousTimelineContext?.persistedProfileSnapshot || null,
       });
     }
+    return true;
   } catch (error) {
     if (!requestIsCurrent()) return;
     $("stockResult").hidden = Boolean(!keepTimeline || !state.timeline);
     setMessage(error.message);
     if (keepTimeline && state.timeline) renderTimeline(state.timeline);
+    return false;
   } finally {
     if (requestIsCurrent()) $("queryStock").disabled = false;
   }
@@ -1823,6 +1846,13 @@ function renderTimelineReturnControls(context, selected) {
     button.className = "quiet";
     button.textContent = "返回画像变化详情";
     button.addEventListener("click", returnToChanges);
+    returnRoot.append(button);
+  } else if (context?.origin === "profile") {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = "返回画像筛选结果";
+    button.addEventListener("click", returnToProfileSearch);
     returnRoot.append(button);
   }
   if (
@@ -2673,6 +2703,7 @@ function showProfileDetail(item) {
   meta.className = "profile-detail-meta";
   const details = [
     ["来源范围", item.calculation_scope],
+    ["命名空间", item.namespace_id],
     ["研究资格", `${item.identity_status} · ${item.pit_status}`],
     ["source_set_id", item.source_set_id],
     ["来源包SHA-256", item.package_sha256],
@@ -2781,6 +2812,70 @@ function showProfileDetail(item) {
   profileWrap.className = "table-wrap";
   profileWrap.append(profileTable);
   root.append(profileWrap);
+  const actions = document.createElement("div");
+  actions.className = "profile-detail-actions";
+  const timelineButton = document.createElement("button");
+  timelineButton.type = "button";
+  timelineButton.textContent = "查看75会话 RAW K / Core";
+  timelineButton.addEventListener("click", () => {
+    void openProfileTimeline(item);
+  });
+  actions.append(timelineButton);
+  root.append(actions);
+}
+async function openProfileTimeline(item) {
+  const root = $("profileDetail");
+  const value = `${item.target_session}|${item.package_sha256}`;
+  const version = state.versions.find(
+    (candidate) =>
+      candidate.session_date === item.target_session &&
+      candidate.package_sha256 === item.package_sha256,
+  );
+  const option = Array.from($("versionSelect").options).find(
+    (candidate) => candidate.value === value,
+  );
+  if (!version || !option || !item.namespace_id || !item.source_set_id) {
+    appendText(
+      root,
+      "p",
+      "当前PG目录没有这条画像对应的精确RAW来源版本或source_set；已停止跳转，没有回退其它版本。",
+      "message",
+    );
+    return;
+  }
+  $("versionSelect").value = value;
+  $("symbolInput").value = item.source_symbol;
+  $("windowInput").value = "75";
+  const loaded = await queryStock({ preventDefault() {} });
+  if (!loaded) {
+    appendText(
+      root,
+      "p",
+      "精确来源版本的RAW / Core读取未完成；画像筛选上下文仍保留。",
+      "message",
+    );
+    return;
+  }
+  const persistedProfileSnapshot = {
+    target_session: item.target_session,
+    namespace_id: item.namespace_id,
+    source_set_id: item.source_set_id,
+    package_sha256: item.package_sha256,
+    profile_revision: item.profile_revision,
+  };
+  await queryTimeline({
+    namespace_id: item.namespace_id,
+    source_set_id: item.source_set_id,
+    origin: "profile",
+    persistedProfileSnapshot,
+  });
+  $("timelinePanel").scrollIntoView({ behavior: "smooth", block: "start" });
+}
+function returnToProfileSearch() {
+  $("profileBrowserTitle").scrollIntoView({
+    behavior: "smooth",
+    block: "start",
+  });
 }
 const changeTypeLabels = {
   BEFORE_ONLY: "仅起始快照存在",
@@ -4177,7 +4272,11 @@ async function loadProfileSnapshots() {
     const data = await api("/api/source-symbol-price-profiles/snapshots");
     $("dataBoundary").textContent =
       `研究冻结于${data.research_cutoff}。当前页面展示来源候选，不代表官方上市总体、稳定证券身份、交易状态或选股结论；自动日更、Head发布及生产切换暂停。`;
-    state.profileSnapshots = data.snapshots || [];
+    state.profileSnapshots = (data.snapshots || []).map((item) => ({
+      ...item,
+      namespace_id:
+        item.namespace_id || data.namespace_id || state.namespace_id,
+    }));
     populateChangeSnapshots(state.profileSnapshots);
     $("profileSnapshotSelect").replaceChildren(
       new Option("— 请选择精确画像日期 / source_set / revision —", ""),
@@ -4188,6 +4287,10 @@ async function loadProfileSnapshots() {
         `${item.target_session} · ${item.source_set_id.slice(0, 8)} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话 · rev ${item.profile_revision.slice(0, 10)}`,
         key,
       );
+      option.title =
+        `${item.target_session} · namespace ${item.namespace_id || "未提供"} · ` +
+        `source_set_id ${item.source_set_id} · package SHA ${item.package_sha256} · ` +
+        `profile_revision ${item.profile_revision}`;
       option.disabled = !item.complete;
       $("profileSnapshotSelect").append(option);
     }
@@ -4208,14 +4311,41 @@ async function loadProfileSnapshots() {
   }
 }
 async function loadProfilePage() {
+  if (state.timelineContext?.origin === "profile") invalidateTimeline();
   const snapshot = selectedProfileSnapshot();
   const requestId = ++state.profileRequest;
+  const coreField = $("profileCoreFieldSelect").value;
+  const coreQuality = $("profileCoreQualitySelect").value;
+  const hasCoreField = coreField !== "ALL";
+  const hasCoreQuality = coreQuality !== "ALL";
+  const selectedCore = profileCoreFields.find(
+    (item) => item.value === coreField,
+  );
+  $("profileCoreValueHeader").textContent = selectedCore
+    ? `${selectedCore.label} · 数值 / 质量 / 原因`
+    : "所选Core字段 / 值 / 质量 / 原因";
   clearProfileDetail();
   $("profileRows").replaceChildren();
+  $("profileCount").textContent = "查询中";
+  $("profilePageStatus").textContent = "查询中";
+  $("profilePrev").disabled = true;
+  $("profileNext").disabled = true;
+  $("profileLast").disabled = true;
+  if (hasCoreField !== hasCoreQuality) {
+    $("profileMessage").textContent =
+      "Core字段与质量状态需要成对选择；旧结果已清除，当前筛选尚未执行。";
+    $("profileCount").textContent = "筛选未执行";
+    $("profilePageStatus").textContent = "请完成配对选择";
+    $("profilePrev").disabled = true;
+    $("profileNext").disabled = true;
+    $("profileLast").disabled = true;
+    return;
+  }
   if (!snapshot) {
     $("profileMessage").textContent =
       "请先选择一个完整、已持久化的精确画像版本。";
     $("profilePageStatus").textContent = "—";
+    $("profileCount").textContent = "未查询";
     $("profilePrev").disabled = true;
     $("profileNext").disabled = true;
     $("profileLast").disabled = true;
@@ -4233,6 +4363,10 @@ async function loadProfilePage() {
     target_bar_status: $("profileBarStatusSelect").value,
     price_window_status: $("profileWindowStatusSelect").value,
   });
+  if (hasCoreField) {
+    params.set("core_field", coreField);
+    params.set("core_quality", coreQuality);
+  }
   const symbol = $("profileSymbolInput").value.trim();
   if (symbol) params.set("symbol", symbol);
   $("profileMessage").textContent =
@@ -4241,16 +4375,54 @@ async function loadProfilePage() {
     const data = await api(`/api/source-symbol-price-profiles?${params}`);
     if (requestId !== state.profileRequest) return;
     const page = data.page;
+    if (
+      data.target_session !== snapshot.target_session ||
+      data.namespace_id !== snapshot.namespace_id ||
+      data.source_set_id !== snapshot.source_set_id ||
+      data.package_sha256 !== snapshot.package_sha256 ||
+      data.profile_revision !== snapshot.profile_revision ||
+      page.offset !== state.profileOffset ||
+      page.limit !== state.profileLimit
+    )
+      throw new Error(
+        "画像响应与选定的精确来源版本或分页上下文不一致，已停止展示。",
+      );
+    const binding =
+      `${snapshot.target_session} · namespace ${data.namespace_id || snapshot.namespace_id || "未提供"} · ` +
+      `source_set_id ${data.source_set_id} · 包SHA ${data.package_sha256} · ` +
+      `profile_revision ${data.profile_revision}`;
     state.profileTotal = page.total;
     $("profileCount").textContent = `${page.count}条 / 筛选分母${page.total}`;
+    const filterDescription = hasCoreField
+      ? `${selectedCore.label} / ${coreQuality}`
+      : "Core质量未过滤";
+    const windowDescription = data.history_window?.start
+      ? ` · 窗口 ${data.history_window.start} 至 ${data.history_window.end}（${data.history_window.requested_session_count}会话）`
+      : "";
     $("profileMessage").textContent =
-      `${data.target_session} · P03 ${data.source_set_id} · 窗口 ${data.history_window.start} 至 ${data.history_window.end}（${data.history_window.requested_session_count}会话） · NON_PIT来源代码研究，不是正式上市Universe。`;
+      `${page.total === 0 ? "当前来源版本没有符合此条件的记录。" : ""}${binding} · ${filterDescription}${windowDescription} · NON_PIT来源代码研究，不是正式上市Universe。`;
     $("profilePageStatus").textContent =
       `偏移 ${page.offset} · 本页 ${page.count}/${page.limit} · 总计 ${page.total}`;
     $("profilePrev").disabled = page.offset === 0;
     $("profileNext").disabled = page.next_offset === null;
     $("profileLast").disabled =
       page.total === 0 || page.offset + page.limit >= page.total;
+    if (!data.rows.length) {
+      tableRow($("profileRows"), [
+        page.total === 0
+          ? "当前来源版本没有符合此条件的记录。"
+          : "当前偏移没有成员。",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+        "",
+      ]);
+    }
     for (const item of data.rows) {
       const tr = document.createElement("tr");
       cell(tr, item.source_symbol);
@@ -4266,6 +4438,10 @@ async function loadProfilePage() {
       cell(tr, `${text(item.ma20)} · ${text(item.ma20_quality)}`);
       cell(tr, `${text(item.atr20)} · ${text(item.atr20_quality)}`);
       cell(tr, `${text(item.clv)} · ${text(item.clv_quality)}`);
+      const selectedCoreValue = selectedCore
+        ? `${selectedCore.label} · ${text(item[selectedCore.key])} · ${item[`${selectedCore.key}_quality`]}（${text(item[`${selectedCore.key}_quality`])}） · 原因 ${text(item[`${selectedCore.key}_reason`])}`
+        : "筛选字段可在详情中查看值、质量与原因";
+      cell(tr, selectedCoreValue);
       cell(
         tr,
         `${text(item.price_window_status)}${item.price_window_reason ? ` · ${item.price_window_reason}` : ""}`,
@@ -4283,7 +4459,8 @@ async function loadProfilePage() {
   } catch (error) {
     if (requestId !== state.profileRequest) return;
     tableRow($("profileRows"), [
-      "没有匹配的PG画像",
+      "画像查询失败",
+      "",
       "",
       "",
       "",
@@ -4294,14 +4471,42 @@ async function loadProfilePage() {
       "",
     ]);
     $("profileMessage").textContent = `画像查询未返回记录：${error.message}`;
-    $("profileCount").textContent = "0条匹配记录";
+    $("profileCount").textContent = "画像查询失败";
     $("profilePageStatus").textContent = "无匹配结果";
     $("profilePrev").disabled = true;
     $("profileNext").disabled = true;
     $("profileLast").disabled = true;
   }
 }
-$("reloadCatalog").addEventListener("click", loadCatalog);
+function clearProfilePageResults(message, count = "待查询") {
+  if (state.timelineContext?.origin === "profile") invalidateTimeline();
+  state.profileRequest++;
+  clearProfileDetail();
+  $("profileRows").replaceChildren();
+  $("profileCount").textContent = count;
+  $("profilePageStatus").textContent = "—";
+  $("profilePrev").disabled = true;
+  $("profileNext").disabled = true;
+  $("profileLast").disabled = true;
+  $("profileMessage").textContent = message;
+}
+function submitProfileSearch() {
+  state.profileOffset = 0;
+  const hasCoreField = $("profileCoreFieldSelect").value !== "ALL";
+  const hasCoreQuality = $("profileCoreQualitySelect").value !== "ALL";
+  if (hasCoreField !== hasCoreQuality) {
+    clearProfilePageResults(
+      "Core字段与质量状态需要成对选择；旧结果已清除，当前筛选尚未执行。",
+      "筛选未执行",
+    );
+    return;
+  }
+  void loadProfilePage();
+}
+$("reloadCatalog").addEventListener("click", async () => {
+  await loadCatalog();
+  await loadProfileSnapshots();
+});
 $("versionSelect").addEventListener("change", () => {
   state.offset = 0;
   state.stockRequest++;
@@ -4345,29 +4550,33 @@ $("chartModeDay").addEventListener("click", () => setChartMode("day"));
 $("chartModeWeek").addEventListener("click", () => setChartMode("week"));
 $("chartModeMonth").addEventListener("click", () => setChartMode("month"));
 $("searchProfiles").addEventListener("click", () => {
+  submitProfileSearch();
+});
+$("profileSymbolInput").addEventListener("input", () => {
   state.profileOffset = 0;
-  loadProfilePage();
+  clearProfilePageResults(
+    "来源代码输入已变化；旧结果已清除，请查询新的精确条件。",
+  );
 });
 $("profileSymbolInput").addEventListener("keydown", (event) => {
   if (event.key === "Enter") {
     event.preventDefault();
-    state.profileOffset = 0;
-    loadProfilePage();
+    submitProfileSearch();
   }
 });
 $("profileSnapshotSelect").addEventListener("change", () => {
-  state.profileOffset = 0;
-  loadProfilePage();
+  submitProfileSearch();
 });
 for (const id of [
   "profileMarketSelect",
   "profileBoardSelect",
   "profileBarStatusSelect",
   "profileWindowStatusSelect",
+  "profileCoreFieldSelect",
+  "profileCoreQualitySelect",
 ]) {
   $(id).addEventListener("change", () => {
-    state.profileOffset = 0;
-    loadProfilePage();
+    submitProfileSearch();
   });
 }
 $("profilePrev").addEventListener("click", () => {
@@ -4506,5 +4715,7 @@ $("priceRelationKindFilter").addEventListener("change", () =>
 $("showPriceRelationUnknown").addEventListener("change", () =>
   renderPriceRelationHistory(state.timeline?.price_relation_history || null),
 );
-loadProfileSnapshots();
-loadCatalog();
+void (async () => {
+  await loadCatalog();
+  await loadProfileSnapshots();
+})();
