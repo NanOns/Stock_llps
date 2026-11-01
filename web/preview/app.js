@@ -1346,6 +1346,7 @@ async function queryStock(event) {
         source_set_id: b.source_set_id || null,
         origin: previousTimelineContext?.origin || "manual",
         returnSelection: previousTimelineContext?.returnSelection || null,
+        returnBinding: previousTimelineContext?.returnBinding || null,
         persistedProfileSnapshot:
           previousTimelineContext?.persistedProfileSnapshot || null,
       });
@@ -2658,11 +2659,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-    snapshot.target_session === point.session_date &&
-    snapshot.package_sha256 === point.package_sha256 &&
-    snapshot.namespace_id === point.namespace_id &&
-    snapshot.source_set_id === selectedSourceSet &&
-    snapshot.field_ids?.length,
+      snapshot.target_session === point.session_date &&
+      snapshot.package_sha256 === point.package_sha256 &&
+      snapshot.namespace_id === point.namespace_id &&
+      snapshot.source_set_id === selectedSourceSet &&
+      snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -3018,10 +3019,112 @@ function returnToTimelineCutoff() {
   $("versionSelect").value = value;
   $("stockForm").requestSubmit();
 }
-function returnToChanges() {
+function exactSymbolReturnState(context) {
+  const binding = context?.returnBinding;
+  const selection = context?.returnSelection;
+  if (
+    context?.origin !== "exact-symbol" ||
+    binding?.origin !== "exact-symbol" ||
+    !binding.namespace_id ||
+    !binding.symbol ||
+    !binding.before_snapshot?.complete ||
+    !binding.after_snapshot?.complete ||
+    binding.before_snapshot.target_session >=
+      binding.after_snapshot.target_session ||
+    context.namespace_id !== binding.namespace_id ||
+    selection?.namespace_id !== binding.namespace_id ||
+    state.namespace_id !== binding.namespace_id ||
+    selection?.symbol !== binding.symbol ||
+    selection?.session_count !== 75
+  )
+    return null;
+  const beforeSnapshot = state.changeSnapshots.find(
+    (snapshot) =>
+      profileSnapshotKey(snapshot) ===
+      profileSnapshotKey(binding.before_snapshot),
+  );
+  const afterSnapshot = state.changeSnapshots.find(
+    (snapshot) =>
+      profileSnapshotKey(snapshot) ===
+      profileSnapshotKey(binding.after_snapshot),
+  );
+  const returnVersion = state.versions.find(
+    (version) =>
+      version.session_date === selection.target_session &&
+      version.package_sha256 === selection.package_sha256,
+  );
+  if (!beforeSnapshot || !afterSnapshot || !returnVersion) return null;
+  return { binding, selection, beforeSnapshot, afterSnapshot, returnVersion };
+}
+
+async function returnToChanges() {
   const context = state.timelineContext;
   const selection = context?.returnSelection;
   const detailItem = state.changeDetailItem;
+  if (context?.origin === "exact-symbol") {
+    const returnState = exactSymbolReturnState(context);
+    if (!returnState) {
+      $("timelineStatus").textContent =
+        "原始精确双日快照或结束版本当前不可用；未回退其它日期或套用旧序位。";
+      return;
+    }
+    const { binding, selection: originalSelection } = returnState;
+    const currentBefore = selectedChangeSnapshot("changeBeforeSelect");
+    const currentAfter = selectedChangeSnapshot("changeAfterSelect");
+    const currentVersion = selectedVersion();
+    const queryContextChanged =
+      !currentBefore ||
+      profileSnapshotKey(currentBefore) !==
+        profileSnapshotKey(binding.before_snapshot) ||
+      !currentAfter ||
+      profileSnapshotKey(currentAfter) !==
+        profileSnapshotKey(binding.after_snapshot) ||
+      $("changeSymbolInput").value.trim().toUpperCase() !== binding.symbol ||
+      $("changeTypeSelect").value !== binding.change_filter ||
+      state.changeOffset !== binding.change_offset ||
+      state.changeLimit !== binding.change_limit ||
+      state.changeBinding?.origin !== "exact-symbol" ||
+      state.changeBinding?.symbol !== binding.symbol ||
+      !state.changeDetailItem ||
+      state.changeDetailItem.source_symbol !== binding.symbol;
+    const mainSelectionChanged =
+      !currentVersion ||
+      currentVersion.target_session !== originalSelection.target_session ||
+      currentVersion.package_sha256 !== originalSelection.package_sha256 ||
+      $("symbolInput").value.trim().toUpperCase() !== binding.symbol ||
+      Number($("windowInput").value) !== originalSelection.session_count;
+    const returnNotice =
+      queryContextChanged || mainSelectionChanged
+        ? `已恢复原精确双日查询 ${binding.before_snapshot.target_session} → ${binding.after_snapshot.target_session} · ${binding.symbol}；重点候选序位已按原source_set、完整包SHA和profile revision重新读取。`
+        : null;
+
+    $("changeBeforeSelect").value = profileSnapshotKey(binding.before_snapshot);
+    $("changeAfterSelect").value = profileSnapshotKey(binding.after_snapshot);
+    $("changeSymbolInput").value = binding.symbol;
+    $("changeTypeSelect").value = binding.change_filter || "ALL";
+    state.changeOffset = binding.change_offset ?? 0;
+    state.changeLimit = binding.change_limit ?? state.changeLimit;
+    $("versionSelect").value =
+      `${originalSelection.target_session}|${originalSelection.package_sha256}`;
+    $("symbolInput").value = originalSelection.symbol;
+    $("windowInput").value = String(originalSelection.session_count);
+    state.stockRequest++;
+    state.timelineRequest++;
+    state.timeline = null;
+    state.timelineContext = null;
+    state.timelineNavigation = false;
+    state.chartPeriodContext = null;
+    state.chartSelection = null;
+    clearRawPeriodState(
+      "返回精确代码核对结果；下一次轨迹查询会按精确身份读取周期数据。",
+    );
+    renderTimeline(null);
+    clearResult();
+    if (queryContextChanged) await loadChanges();
+    await compareSourceProfilePair(returnNotice);
+    $("changeDetail").scrollIntoView({ block: "start" });
+    return;
+  }
   if (
     !context ||
     !["change", "relation"].includes(context.origin) ||
@@ -3112,6 +3215,16 @@ function renderTimelineReturnControls(context, selected) {
     button.type = "button";
     button.className = "quiet";
     button.textContent = "返回RAW关系详情";
+    button.addEventListener("click", returnToChanges);
+    returnRoot.append(button);
+  } else if (
+    context?.origin === "exact-symbol" &&
+    exactSymbolReturnState(context)
+  ) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "quiet";
+    button.textContent = "返回精确代码核对结果";
     button.addEventListener("click", returnToChanges);
     returnRoot.append(button);
   } else if (context?.origin === "profile") {
@@ -3840,6 +3953,7 @@ async function queryTimeline(binding = null) {
     origin: binding?.origin || "manual",
     persistedProfileSnapshot: binding?.persistedProfileSnapshot || null,
     returnSelection: binding?.returnSelection || null,
+    returnBinding: binding?.returnBinding || null,
   };
   state.timelineContext = context;
   renderCandlestickChart(null);
@@ -4474,16 +4588,23 @@ function openChangeTimeline(item, side) {
   const fallback = state.changeBinding?.after_snapshot;
   const returnDate = selected?.target_session || fallback?.target_session;
   const returnSha = selected?.package_sha256 || fallback?.package_sha256;
-  if (
-    !returnDate ||
-    !returnSha ||
-    !state.versions.some(
-      (version) =>
-        version.session_date === returnDate &&
-        version.package_sha256 === returnSha,
-    )
-  )
-    return;
+  const returnVersion = state.versions.find(
+    (version) =>
+      version.session_date === returnDate &&
+      version.package_sha256 === returnSha,
+  );
+  if (!returnVersion) return;
+  const returnBinding =
+    state.changeBinding?.origin === "exact-symbol"
+      ? {
+          ...state.changeBinding,
+          before_snapshot: { ...state.changeBinding.before_snapshot },
+          after_snapshot: { ...state.changeBinding.after_snapshot },
+          change_filter: $("changeTypeSelect").value,
+          change_offset: state.changeOffset,
+          change_limit: state.changeLimit,
+        }
+      : null;
   $("versionSelect").value =
     `${snapshot.target_session}|${snapshot.package_sha256}`;
   $("symbolInput").value = item.source_symbol;
@@ -4518,11 +4639,13 @@ function openChangeTimeline(item, side) {
       semantic_compatible: item.profile_compatible === true,
     },
     returnSelection: {
-      target_session: returnDate,
-      package_sha256: returnSha,
+      target_session: returnVersion.session_date,
+      package_sha256: returnVersion.package_sha256,
+      namespace_id: state.changeBinding.namespace_id,
       symbol: item.source_symbol,
       session_count: 75,
     },
+    returnBinding,
   });
 }
 function appendChangeTimelineLinks(root, item) {
@@ -4866,7 +4989,8 @@ function appendProfilePairValues(root, item) {
   coreWrap.append(coreTable);
   root.append(coreWrap);
 }
-async function compareSourceProfilePair() {
+async function compareSourceProfilePair(notice = null) {
+  if (typeof notice !== "string") notice = null;
   const symbol = $("changeSymbolInput").value.trim().toUpperCase();
   const before = selectedChangeSnapshot("changeBeforeSelect");
   const after = selectedChangeSnapshot("changeAfterSelect");
@@ -4938,6 +5062,7 @@ async function compareSourceProfilePair() {
         `${before.target_session} · source_set ${before.source_set_id} · SHA ${before.package_sha256} · revision ${before.profile_revision} → ${after.target_session} · source_set ${after.source_set_id} · SHA ${after.package_sha256} · revision ${after.profile_revision}`,
         "muted",
       );
+      if (notice) appendText(root, "p", notice, "muted");
       return;
     }
     state.changeBinding = {
@@ -4955,6 +5080,7 @@ async function compareSourceProfilePair() {
       ...data.item,
       highlight_lookup: data.highlight_lookup,
     });
+    if (notice) appendText(root, "p", notice, "muted");
   } catch (error) {
     if (requestId !== state.pairRequest) return;
     root.replaceChildren();
