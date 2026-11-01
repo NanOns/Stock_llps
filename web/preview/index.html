@@ -255,7 +255,7 @@
                 RAW结构关系变化与结束日联合筛选
               </h3>
               <p>
-                三类关系直接比较两端已封存RAW画像。联合筛选在完整来源并集上计算，不依赖旧变化成员或当前页；结束日最多添加两个价格位置AND条件。
+                MA20方向仅比较两个显式已存快照中的RAW数值，不代表逐日斜率或趋势信号。联合筛选在完整来源并集上计算；结束日最多添加两个价格位置AND条件。
               </p>
             </div>
             <span id="priceRelationScreenCount" class="count"
@@ -284,6 +284,16 @@
                 <option value="NOT_COMPARABLE">不可比较</option>
                 <option value="ONLY_BEFORE">仅起始日有来源</option>
                 <option value="ONLY_AFTER">仅结束日有来源</option>
+              </select>
+            </label>
+            <label>
+              双日MA20数值方向
+              <select id="ma20DirectionSelect">
+                <option value="ALL">全部方向</option>
+                <option value="INCREASED">增加</option>
+                <option value="UNCHANGED">不变</option>
+                <option value="DECREASED">减少</option>
+                <option value="UNKNOWN">UNKNOWN（证据不足）</option>
               </select>
             </label>
             <label>
@@ -346,13 +356,14 @@
                   <th>起始日关系与数值质量</th>
                   <th>结束日关系与数值质量</th>
                   <th>两日转移 / 原因</th>
+                  <th>双日MA20方向 / 原因</th>
                   <th>结束日位置条件</th>
                   <th>详情</th>
                 </tr>
               </thead>
               <tbody id="priceRelationScreenRows">
                 <tr>
-                  <td colspan="6" class="muted">等待精确的两日画像版本。</td>
+                  <td colspan="7" class="muted">等待精确的两日画像版本。</td>
                 </tr>
               </tbody>
             </table>

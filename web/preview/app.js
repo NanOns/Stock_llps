@@ -4295,6 +4295,31 @@ const priceRelationStatusLabels = {
   BELOW: "低于",
   UNKNOWN: "不可评价",
 };
+const priceMa20DirectionLabels = {
+  ALL: "全部方向",
+  INCREASED: "增加",
+  UNCHANGED: "不变",
+  DECREASED: "减少",
+  UNKNOWN: "UNKNOWN（证据不足）",
+};
+const priceMa20DirectionReasonLabels = {
+  BEFORE_PROFILE_MISSING: "起始日无画像",
+  AFTER_PROFILE_MISSING: "结束日无画像",
+  PRICE_COORDINATE_MISMATCH: "两端价格坐标不同",
+  PRICE_COORDINATE_UNSUPPORTED: "价格坐标不支持",
+  CORE_SEMANTICS_INCOMPARABLE: "Core语义不可比较",
+  BEFORE_MA20_QUALITY_UNKNOWN: "起始日MA20质量未知",
+  AFTER_MA20_QUALITY_UNKNOWN: "结束日MA20质量未知",
+  BEFORE_MA20_VALUE_MISSING: "起始日MA20值缺失",
+  AFTER_MA20_VALUE_MISSING: "结束日MA20值缺失",
+  BEFORE_MA20_VALUE_INVALID: "起始日MA20数值无效",
+  AFTER_MA20_VALUE_INVALID: "结束日MA20数值无效",
+};
+function priceMa20DirectionReasonText(reason) {
+  const [code, detail] = String(reason || "UNKNOWN").split(/:(.*)/s);
+  const label = priceMa20DirectionReasonLabels[code] || code;
+  return detail ? `${label}：${detail}` : label;
+}
 const profilePairStatusLabels = {
   BOTH_PRESENT: "两侧均有持久画像",
   BEFORE_ONLY: "仅起始快照有画像",
@@ -5186,7 +5211,7 @@ function clearRelationScreen(message = "请选择两个完整PG画像快照。")
   $("priceRelationScreenCount").textContent = "等待精确快照";
   $("priceRelationScreenPage").textContent = "—";
   $("priceRelationScreenRows").replaceChildren();
-  tableRow($("priceRelationScreenRows"), [message, "", "", "", "", ""]);
+  tableRow($("priceRelationScreenRows"), [message, "", "", "", "", "", ""]);
   $("priceRelationScreenSummary").textContent = message;
   $("priceRelationPrev").disabled = true;
   $("priceRelationNext").disabled = true;
@@ -5246,6 +5271,10 @@ function renderRelationScreen(data, requestId) {
   if (requestId !== state.relationRequest) return;
   const field = data.relation_field;
   const counts = data.summary.transition_counts;
+  const ma20Counts = data.summary.ma20_direction_counts;
+  const ma20UnknownReasons = data.summary.ma20_direction_unknown_reason_counts
+    .map((item) => `${priceMa20DirectionReasonText(item.reason)}=${item.count}`)
+    .join("；");
   const reasonText = data.summary.unknown_reason_counts
     .map(
       (item) =>
@@ -5260,10 +5289,12 @@ function renderRelationScreen(data, requestId) {
     : data.source_code_presence?.status === "NO_PERSISTED_SOURCE_ROW"
       ? "该代码在两份快照中都没有持久来源行"
       : data.page.total === 0
-        ? "该代码有持久来源行，但未匹配本次关系或结束日条件"
-        : "该代码符合当前关系和结束日条件";
+        ? "该代码有持久来源行，但未匹配当前方向、关系或结束日条件"
+        : "该代码符合当前方向、关系和结束日条件";
   $("priceRelationScreenCount").textContent =
-    data.page.total + " 个当前组合命中";
+    data.page.total === 0
+      ? "0个当前组合命中（已计算但无匹配）"
+      : data.page.total + " 个当前组合命中";
   $("priceRelationScreenSummary").textContent =
     sessionRelationLabel(data.session_relation) +
     " · 完整来源并集 U=" +
@@ -5274,6 +5305,21 @@ function renderRelationScreen(data, requestId) {
     data.summary.before_only_count +
     "，仅后=" +
     data.summary.after_only_count +
+    "。" +
+    "双日MA20方向（完整并集N=" +
+    data.summary.source_symbol_union_count +
+    "）：增加 " +
+    ma20Counts.INCREASED +
+    "、不变 " +
+    ma20Counts.UNCHANGED +
+    "、减少 " +
+    ma20Counts.DECREASED +
+    "、UNKNOWN " +
+    ma20Counts.UNKNOWN +
+    "；UNKNOWN主因 " +
+    (ma20UnknownReasons || "无UNKNOWN") +
+    "。当前方向筛选 " +
+    (priceMa20DirectionLabels[data.ma20_direction] || data.ma20_direction) +
     "。" +
     priceRelationFieldLabels[field] +
     "：可比较 " +
@@ -5343,6 +5389,7 @@ function renderRelationScreen(data, requestId) {
       "",
       "",
       "",
+      "",
     ]);
   }
   for (const item of data.rows) {
@@ -5372,6 +5419,22 @@ function renderRelationScreen(data, requestId) {
         (transition.transition_reason
           ? " · " + transition.transition_reason
           : ""),
+    );
+    const direction = item.ma20_direction || "UNKNOWN";
+    const beforeMa20 =
+      item.before_ma20 === null || item.before_ma20 === undefined
+        ? "—"
+        : String(item.before_ma20);
+    const afterMa20 =
+      item.after_ma20 === null || item.after_ma20 === undefined
+        ? "—"
+        : String(item.after_ma20);
+    const directionReason = item.ma20_direction_reason
+      ? " · " + priceMa20DirectionReasonText(item.ma20_direction_reason)
+      : "";
+    cell(
+      row,
+      `存储MA20 ${beforeMa20} → ${afterMa20} · ${priceMa20DirectionLabels[direction] || direction}${directionReason}`,
     );
     cell(row, relationEndFilterText(item, data.end_position_filters));
     const detail = document.createElement("td");
@@ -5440,6 +5503,7 @@ async function loadPriceRelations() {
   const requestId = ++state.relationRequest;
   const relationField = $("priceRelationFieldSelect").value;
   const transitionType = $("priceTransitionTypeSelect").value;
+  const ma20Direction = $("ma20DirectionSelect").value;
   const endPositionFilters = positionFields
     .map((field, index) => ({ field, status: positionStatuses[index] }))
     .filter((item) => item.field);
@@ -5448,6 +5512,7 @@ async function loadPriceRelations() {
     after,
     relation_field: relationField,
     transition_type: transitionType,
+    ma20_direction: ma20Direction,
     end_position_filters: endPositionFilters,
     source_symbol: sourceSymbol,
     offset: state.relationOffset,
@@ -5457,10 +5522,11 @@ async function loadPriceRelations() {
   state.relationData = null;
   $("priceRelationScreenCount").textContent = "完整来源池查询中";
   $("priceRelationScreenSummary").textContent =
-    "在同一只读一致视图中计算三字段RAW关系、结束日条件、完整COUNT与分页。";
+    "在同一只读一致视图中计算双日MA20方向、三字段RAW关系、结束日条件、完整分母与SQL分页。";
   $("priceRelationScreenRows").replaceChildren();
   tableRow($("priceRelationScreenRows"), [
     "读取完整来源集合…",
+    "",
     "",
     "",
     "",
@@ -5473,6 +5539,7 @@ async function loadPriceRelations() {
     after_session: after.target_session,
     relation_field: relationField,
     transition_type: transitionType,
+    ma20_direction: ma20Direction,
     offset: String(query.offset),
     limit: String(query.limit),
   });
@@ -5498,7 +5565,15 @@ async function loadPriceRelations() {
     $("priceRelationScreenSummary").textContent =
       "RAW关系查询未完成：" + error.message;
     $("priceRelationScreenRows").replaceChildren();
-    tableRow($("priceRelationScreenRows"), [error.message, "", "", "", "", ""]);
+    tableRow($("priceRelationScreenRows"), [
+      error.message,
+      "",
+      "",
+      "",
+      "",
+      "",
+      "",
+    ]);
     $("priceRelationScreenPage").textContent = "查询失败";
     $("priceRelationPrev").disabled = true;
     $("priceRelationNext").disabled = true;
@@ -6858,6 +6933,10 @@ $("priceRelationFieldSelect").addEventListener("change", () => {
   loadPriceRelations();
 });
 $("priceTransitionTypeSelect").addEventListener("change", () => {
+  state.relationOffset = 0;
+  loadPriceRelations();
+});
+$("ma20DirectionSelect").addEventListener("change", () => {
   state.relationOffset = 0;
   loadPriceRelations();
 });

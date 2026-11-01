@@ -137,6 +137,83 @@ _PRICE_RELATION_TRANSITION_TYPES = frozenset(
         "ONLY_AFTER",
     }
 )
+_PROFILE_MA20_DIRECTIONS = frozenset(
+    {"ALL", "INCREASED", "UNCHANGED", "DECREASED", "UNKNOWN"}
+)
+
+
+def _profile_ma20_direction(row: Mapping[str, Any]) -> tuple[str, str | None]:
+    """证据有效时直接比较双日已存MA20数值，不隐式归零。"""
+    if not row["before_present"]:
+        return "UNKNOWN", "BEFORE_PROFILE_MISSING"
+    if not row["after_present"]:
+        return "UNKNOWN", "AFTER_PROFILE_MISSING"
+    before_coordinate = row["before_price_coordinate"]
+    after_coordinate = row["after_price_coordinate"]
+    if before_coordinate != after_coordinate:
+        return "UNKNOWN", "PRICE_COORDINATE_MISMATCH"
+    if before_coordinate != "RAW_UNADJUSTED":
+        return (
+            "UNKNOWN",
+            f"PRICE_COORDINATE_UNSUPPORTED:{before_coordinate or 'UNKNOWN'}",
+        )
+    if not row["core_compatible"]:
+        return "UNKNOWN", "CORE_SEMANTICS_INCOMPARABLE"
+    for side in ("before", "after"):
+        if row[f"{side}_ma20_quality"] != "OBSERVED":
+            reason = row.get(f"{side}_ma20_reason") or "NO_REASON"
+            return "UNKNOWN", f"{side.upper()}_MA20_QUALITY_UNKNOWN:{reason}"
+        value = row[f"{side}_ma20"]
+        if value is None:
+            return "UNKNOWN", f"{side.upper()}_MA20_VALUE_MISSING"
+        if not isinstance(value, Decimal):
+            raise PriceProfilePgError(
+                "PROFILE_MA20_NUMERIC_TYPE_INVALID",
+                "双日MA20方向只接受PG NUMERIC/Decimal值",
+            )
+        if not value.is_finite() or value <= 0:
+            return "UNKNOWN", f"{side.upper()}_MA20_VALUE_INVALID"
+    before_ma20 = row["before_ma20"]
+    after_ma20 = row["after_ma20"]
+    if after_ma20 > before_ma20:
+        return "INCREASED", None
+    if after_ma20 < before_ma20:
+        return "DECREASED", None
+    return "UNCHANGED", None
+
+
+_PROFILE_MA20_DIRECTION_REASON_SQL = """CASE
+    WHEN NOT before_present THEN 'BEFORE_PROFILE_MISSING'
+    WHEN NOT after_present THEN 'AFTER_PROFILE_MISSING'
+    WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
+      THEN 'PRICE_COORDINATE_MISMATCH'
+    WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+      THEN 'PRICE_COORDINATE_UNSUPPORTED:' ||
+           COALESCE(before_price_coordinate, 'UNKNOWN')
+    WHEN after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+      THEN 'PRICE_COORDINATE_UNSUPPORTED:' ||
+           COALESCE(after_price_coordinate, 'UNKNOWN')
+    WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPARABLE'
+    WHEN before_ma20_quality IS DISTINCT FROM 'OBSERVED'
+      THEN 'BEFORE_MA20_QUALITY_UNKNOWN:' ||
+           COALESCE(before_ma20_reason, 'NO_REASON')
+    WHEN after_ma20_quality IS DISTINCT FROM 'OBSERVED'
+      THEN 'AFTER_MA20_QUALITY_UNKNOWN:' ||
+           COALESCE(after_ma20_reason, 'NO_REASON')
+    WHEN before_ma20 IS NULL THEN 'BEFORE_MA20_VALUE_MISSING'
+    WHEN after_ma20 IS NULL THEN 'AFTER_MA20_VALUE_MISSING'
+    WHEN before_ma20::text IN ('NaN', 'Infinity', '-Infinity')
+      OR before_ma20 <= 0 THEN 'BEFORE_MA20_VALUE_INVALID'
+    WHEN after_ma20::text IN ('NaN', 'Infinity', '-Infinity')
+      OR after_ma20 <= 0 THEN 'AFTER_MA20_VALUE_INVALID'
+    ELSE NULL
+END"""
+_PROFILE_MA20_DIRECTION_SQL = """CASE
+    WHEN ma20_direction_reason IS NOT NULL THEN 'UNKNOWN'
+    WHEN after_ma20 > before_ma20 THEN 'INCREASED'
+    WHEN after_ma20 < before_ma20 THEN 'DECREASED'
+    ELSE 'UNCHANGED'
+END"""
 
 
 def _price_position_status_expression(
@@ -1550,6 +1627,7 @@ def read_profile_relation_screen(
     limit: int,
     relation_field: str,
     transition_type: str = "ALL",
+    ma20_direction: str = "ALL",
     end_position_1_field: str | None = None,
     end_position_1_status: str | None = None,
     end_position_2_field: str | None = None,
@@ -1590,6 +1668,11 @@ def read_profile_relation_screen(
     if transition_type not in _PRICE_RELATION_TRANSITION_TYPES:
         raise PriceProfilePgError(
             "PROFILE_RELATION_TYPE_INVALID", "RAW关系转移分类无效"
+        )
+    if ma20_direction not in _PROFILE_MA20_DIRECTIONS:
+        raise PriceProfilePgError(
+            "PROFILE_MA20_DIRECTION_INVALID",
+            "MA20方向只接受ALL/INCREASED/UNCHANGED/DECREASED/UNKNOWN",
         )
     if source_symbol is not None and (
         not isinstance(source_symbol, str)
@@ -1679,11 +1762,18 @@ def read_profile_relation_screen(
                 f"count(*) FILTER (WHERE after_present AND after_{relation_field}_relation='UNKNOWN')::bigint AS after_unknown_count",
             )
         )
+        count_columns.extend(
+            f"count(*) FILTER (WHERE ma20_direction='{direction}')::bigint AS ma20_{direction.lower()}_count"
+            for direction in ("INCREASED", "UNCHANGED", "DECREASED", "UNKNOWN")
+        )
         filters = []
         filter_parameters: list[Any] = []
         if transition_type != "ALL":
             filters.append(f"{relation_field}_transition_type=%s")
             filter_parameters.append(transition_type)
+        if ma20_direction != "ALL":
+            filters.append("ma20_direction=%s")
+            filter_parameters.append(ma20_direction)
         for field, status in end_filters:
             filters.append(f"after_{field}_relation=%s")
             filter_parameters.append(status)
@@ -1714,6 +1804,19 @@ FROM (
 ) AS unknowns
     GROUP BY side, reason
 ) AS grouped_unknowns"""
+        ma20_unknown_reason_sql = """SELECT COALESCE(
+    jsonb_agg(
+        jsonb_build_object('reason', reason, 'count', row_count)
+        ORDER BY row_count DESC, reason
+    ),
+    '[]'::jsonb
+) AS ma20_direction_unknown_reason_counts
+FROM (
+    SELECT ma20_direction_reason AS reason, count(*)::bigint AS row_count
+    FROM ma20_directional
+    WHERE ma20_direction='UNKNOWN'
+    GROUP BY ma20_direction_reason
+) AS grouped_ma20_unknowns"""
         count_names = [
             "source_symbol_union_count",
             "intersection_count",
@@ -1729,21 +1832,33 @@ FROM (
             "comparable_count",
             "before_unknown_count",
             "after_unknown_count",
+            "ma20_increased_count",
+            "ma20_unchanged_count",
+            "ma20_decreased_count",
+            "ma20_unknown_count",
         ]
         cursor.execute(
             _PROFILE_RELATION_TRANSITION_CTES
-            + ", summary AS (SELECT "
+            + f""", ma20_evidence AS (
+    SELECT *, {_PROFILE_MA20_DIRECTION_REASON_SQL} AS ma20_direction_reason
+    FROM relation_transitions
+), ma20_directional AS (
+    SELECT *, {_PROFILE_MA20_DIRECTION_SQL} AS ma20_direction
+    FROM ma20_evidence
+), summary AS (SELECT """
             + ",\n       ".join(count_columns)
-            + f"""\nFROM relation_transitions
+            + f"""\nFROM ma20_directional
 ), unknown_reason_counts AS (
     {unknown_reason_sql}
+), ma20_direction_unknown_reason_counts AS (
+    {ma20_unknown_reason_sql}
 ), source_code_presence AS (
     SELECT count(*) FILTER (WHERE before_present)::bigint AS before_count,
            count(*) FILTER (WHERE after_present)::bigint AS after_count
     FROM relation_transitions
     WHERE %s::text IS NOT NULL AND source_symbol=%s
 ), filtered AS (
-    SELECT * FROM relation_transitions WHERE {filter_sql}
+    SELECT * FROM ma20_directional WHERE {filter_sql}
 ), filtered_total AS (
     SELECT count(*)::bigint AS filtered_count FROM filtered
 ), page_rows AS (
@@ -1753,12 +1868,14 @@ FROM (
 )
 SELECT summary.*,
        unknown_reason_counts.unknown_reason_counts,
+       ma20_direction_unknown_reason_counts.ma20_direction_unknown_reason_counts,
        source_code_presence.before_count AS source_code_before_count,
        source_code_presence.after_count AS source_code_after_count,
        filtered_total.filtered_count,
        page_rows.*
 FROM summary
 CROSS JOIN unknown_reason_counts
+CROSS JOIN ma20_direction_unknown_reason_counts
 CROSS JOIN source_code_presence
 CROSS JOIN filtered_total
 LEFT JOIN page_rows ON TRUE
@@ -1777,11 +1894,15 @@ ORDER BY page_rows.source_symbol COLLATE "C" """,
         first = dict(zip(names, result_rows[0], strict=True))
         summary = {name: first[name] for name in count_names}
         unknown_reason_counts = first["unknown_reason_counts"]
+        ma20_direction_unknown_reason_counts = first[
+            "ma20_direction_unknown_reason_counts"
+        ]
         filtered_total = int(first["filtered_count"])
         source_code_before_count = int(first["source_code_before_count"])
         source_code_after_count = int(first["source_code_after_count"])
         metadata_names = set(count_names) | {
             "unknown_reason_counts",
+            "ma20_direction_unknown_reason_counts",
             "filtered_count",
             "source_code_before_count",
             "source_code_after_count",
@@ -1793,6 +1914,15 @@ ORDER BY page_rows.source_symbol COLLATE "C" """,
                 continue
             for name in metadata_names:
                 row.pop(name, None)
+            classified_direction, classified_reason = _profile_ma20_direction(row)
+            if (
+                row.get("ma20_direction") != classified_direction
+                or row.get("ma20_direction_reason") != classified_reason
+            ):
+                raise PriceProfilePgError(
+                    "PROFILE_MA20_DIRECTION_PROJECTION_MISMATCH",
+                    "PG关系方向投影与Decimal复核不一致",
+                )
             rows.append(row)
 
     field_definition = _PRICE_POSITION_QUERY_FIELDS
@@ -1829,6 +1959,23 @@ ORDER BY page_rows.source_symbol COLLATE "C" """,
             "comparable_count",
         )
     }
+    ma20_direction_counts = {
+        direction: int(summary[f"ma20_{direction.lower()}_count"] or 0)
+        for direction in ("INCREASED", "UNCHANGED", "DECREASED", "UNKNOWN")
+    }
+    if sum(ma20_direction_counts.values()) != int(summary["source_symbol_union_count"]):
+        raise PriceProfilePgError(
+            "PROFILE_MA20_DIRECTION_DENOMINATOR_MISMATCH",
+            "双日MA20四态计数未覆盖完整来源并集",
+        )
+    if (
+        sum(int(item["count"] or 0) for item in ma20_direction_unknown_reason_counts)
+        != ma20_direction_counts["UNKNOWN"]
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_MA20_UNKNOWN_REASON_COVERAGE_MISMATCH",
+            "UNKNOWN主原因计数未覆盖全部方向UNKNOWN来源",
+        )
     source_code_presence = None
     if source_symbol is not None:
         if source_code_before_count and source_code_after_count:
@@ -1852,6 +1999,7 @@ ORDER BY page_rows.source_symbol COLLATE "C" """,
         "after_snapshot": after,
         "relation_field": relation_field,
         "transition_type": transition_type,
+        "ma20_direction": ma20_direction,
         "source_code_presence": source_code_presence,
         "end_position_filters": [
             {"field": field, "status": status} for field, status in end_filters
@@ -1867,6 +2015,8 @@ ORDER BY page_rows.source_symbol COLLATE "C" """,
             "after_unknown_count": int(summary["after_unknown_count"]),
             "transition_counts": transition_counts,
             "unknown_reason_counts": unknown_reason_counts,
+            "ma20_direction_counts": ma20_direction_counts,
+            "ma20_direction_unknown_reason_counts": ma20_direction_unknown_reason_counts,
             "filtered_count": filtered_total,
         },
         "page": {
