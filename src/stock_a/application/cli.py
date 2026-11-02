@@ -945,6 +945,36 @@ def _parser() -> argparse.ArgumentParser:
     source_market_breadth.add_argument(
         "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
     )
+    source_d1_breakout = commands.add_parser(
+        "source-d1-breakout-preview",
+        help="只读预览精确SEALED来源池的ALG-29原始突破谓词",
+    )
+    source_d1_breakout.add_argument(
+        "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
+    )
+    source_d1_breakout.add_argument(
+        "--research-cutoff", required=True, help="研究数据截止交易会话YYYY-MM-DD"
+    )
+    source_d1_breakout.add_argument(
+        "--source-set-id", required=True, help="目标日SEALED P03 source_set UUID"
+    )
+    source_d1_breakout.add_argument(
+        "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
+    )
+    selection = source_d1_breakout.add_mutually_exclusive_group()
+    selection.add_argument(
+        "--symbol", help="可选单个精确来源代码SH./六位数字或SZ./六位数字"
+    )
+    selection.add_argument("--offset", type=int, help="分页偏移，需与--limit同时使用")
+    source_d1_breakout.add_argument(
+        "--limit", type=int, help="来源池分页数量，1至100；配合--offset使用"
+    )
+    source_d1_breakout.add_argument(
+        "--pg-history-session-count",
+        type=int,
+        default=75,
+        help="按现役官方日历读取的历史会话数，1至75，默认75",
+    )
     price_profile = commands.add_parser(
         "source-symbol-price-profile",
         help="按精确P03封口版本计算、保存或分页查询来源代码级NON_PIT价格画像",
@@ -2461,6 +2491,268 @@ def _run_source_raw_catalog(args: argparse.Namespace) -> int:
     )
     _emit(result)
     return _EXIT_OK
+
+
+def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
+    target = _parse_source_set_date(args.target_session)
+    cutoff = _parse_source_set_date(args.research_cutoff)
+    if target > cutoff:
+        raise DiagnosticError(
+            "D1_BREAKOUT_DATE_AFTER_CUTOFF",
+            "目标交易会话晚于研究截止会话，拒绝读取PG",
+            _EXIT_ARGUMENT,
+        )
+    if re.fullmatch(r"[0-9a-f]{64}", args.package_sha256) is None:
+        raise DiagnosticError(
+            "D1_BREAKOUT_PACKAGE_SHA_INVALID",
+            "必须提供完整64位小写package SHA-256",
+            _EXIT_ARGUMENT,
+        )
+    try:
+        canonical_source_set_id = str(uuid.UUID(args.source_set_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise DiagnosticError(
+            "D1_BREAKOUT_SOURCE_SET_ID_INVALID",
+            "source_set_id必须为规范UUID",
+            _EXIT_ARGUMENT,
+        ) from error
+    if canonical_source_set_id != args.source_set_id:
+        raise DiagnosticError(
+            "D1_BREAKOUT_SOURCE_SET_ID_INVALID",
+            "source_set_id必须为规范UUID",
+            _EXIT_ARGUMENT,
+        )
+
+    if args.symbol is not None:
+        if args.limit is not None:
+            raise DiagnosticError(
+                "D1_BREAKOUT_SELECTION_INVALID",
+                "单来源代码模式不能同时提供分页limit",
+                _EXIT_ARGUMENT,
+            )
+        offset, limit = 0, 1
+        source_symbol = args.symbol
+    else:
+        if args.offset is None or args.limit is None:
+            raise DiagnosticError(
+                "D1_BREAKOUT_SELECTION_REQUIRED",
+                "请提供--symbol，或同时提供分页--offset与--limit",
+                _EXIT_ARGUMENT,
+            )
+        offset, limit = args.offset, args.limit
+        source_symbol = None
+    if (
+        type(offset) is not int
+        or offset < 0
+        or type(limit) is not int
+        or not 1 <= limit <= 100
+    ):
+        raise DiagnosticError(
+            "D1_BREAKOUT_PAGE_INVALID",
+            "分页offset须为非负整数且limit须为1至100",
+            _EXIT_ARGUMENT,
+        )
+
+    _resolved_target, sessions, calendar_revision = _pg_history_window(
+        target.isoformat(), args.pg_history_session_count
+    )
+    config, config_path = _load_runtime_config()
+    try:
+        page = read_raw_daily_history_page(
+            config,
+            target_session=target,
+            package_sha256=args.package_sha256,
+            sessions=sessions,
+            offset=offset,
+            limit=limit,
+            market="ALL",
+            board="ALL",
+            source_symbol=source_symbol,
+        )
+        target_rows = [
+            row
+            for candidate in page["candidates"]
+            for row in candidate["history_rows"]
+            if row["session_date"] == target
+        ]
+        source_context = read_sealed_source_context(
+            config,
+            target_session=target,
+            package_sha256=args.package_sha256,
+            namespace_id=page["namespace_id"],
+            target_raw_rows=target_rows,
+            expected_raw_row_count=page["version_row_count"],
+        )
+        if source_context["source_set_id"] != args.source_set_id:
+            raise PgResearchBindingError(
+                "D1_BREAKOUT_SOURCE_SET_ID_MISMATCH",
+                "指定source_set_id与目标日精确SEALED来源集合不一致",
+            )
+        if (
+            page["version_status"] != "CLOSED"
+            or not page["partition_closed"]
+            or page["version_row_count"] != source_context["raw_row_count"]
+            or page["version_expected_row_count"]
+            != source_context["capture_expected_row_count"]
+            or (source_symbol is not None and not page["candidates"])
+        ):
+            raise PgResearchBindingError(
+                "D1_BREAKOUT_SOURCE_POOL_NOT_CLOSED",
+                "目标日来源池与精确SEALED分母未闭合，拒绝生成谓词结果",
+            )
+
+        profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+        preview = research_universe_pg_history_preview(
+            target_session=target.isoformat(),
+            package_sha256=args.package_sha256,
+            session_dates=sessions,
+            page=page,
+            profile_contract=profile_contract,
+            include_profile_preview=False,
+            include_raw_breakout=True,
+        )
+    except RawSourcePgError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "dml_executed": False,
+            },
+            error=True,
+        )
+        return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    except PgResearchBindingError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "dml_executed": False,
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
+    except DayChainContractError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "dml_executed": False,
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
+
+    candidate_by_symbol = {item["source_symbol"]: item for item in page["candidates"]}
+    results = []
+    predicate_counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0}
+    consumer_failures = 0
+    for item in preview["results"]:
+        candidate = candidate_by_symbol[item["symbol"]]
+        target_row = next(
+            row for row in candidate["history_rows"] if row["session_date"] == target
+        )
+        predicate = item.get("raw_d1_breakout_predicate")
+        if item.get("consumer_status") != "RESEARCHED" or not isinstance(
+            predicate, dict
+        ):
+            consumer_failures += 1
+        else:
+            state = predicate["predicates"]["result"]["state"]
+            predicate_counts[state] += 1
+        results.append(
+            {
+                "symbol": item["symbol"],
+                "consumer_status": item.get("consumer_status"),
+                "consumer_error_code": item.get("consumer_error_code"),
+                "target_bar_status": item.get("target_bar_status"),
+                "history_records_complete": item.get("history_records_complete"),
+                "price_window_status": item.get("price_window_status"),
+                "source_revision": {
+                    "source_entry_sha256": target_row.get("source_entry_sha256"),
+                    "source_capture_id": str(target_row["source_capture_id"]),
+                    "source_content_id": target_row.get("source_content_id"),
+                    "package_sha256": target_row["package_sha256"].strip(),
+                    "source_clock_role": target_row.get("source_clock_role"),
+                    "source_time_quality": source_context["source_time_quality"],
+                    "source_available_at": target_row.get("source_available_at"),
+                    "observed_started_at": target_row.get("observed_started_at"),
+                    "observed_completed_at": target_row.get("observed_completed_at"),
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "coordinate_id": f"RAW:TDX_SOURCE_SYMBOL:{item['symbol']}",
+                },
+                "capture_revisions": item.get("source_capture_revisions"),
+                "raw_d1_breakout_predicate": predicate,
+            }
+        )
+
+    page_is_complete = (
+        consumer_failures == 0 and sum(predicate_counts.values()) == page["page_count"]
+    )
+    result = {
+        "ok": page_is_complete,
+        "status": "SOURCE_LEVEL_RAW_BREAKOUT_PREDICATE_PREVIEW"
+        if page_is_complete
+        else "PARTIAL_EVIDENCE",
+        "research_mode": "NON_PIT_RETROSPECTIVE",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "target_session": target.isoformat(),
+        "research_cutoff": cutoff.isoformat(),
+        "calendar_revision": calendar_revision,
+        "package_sha256": args.package_sha256,
+        "namespace_id": source_context["namespace_id"],
+        "source_set_id": source_context["source_set_id"],
+        "source_set_status": source_context["seal_status"],
+        "source_time_quality": source_context["source_time_quality"],
+        "source_available_at": source_context["source_available_at"],
+        "price_unit_status": source_context["price_unit_status"],
+        "amount_unit_status": source_context["amount_unit_status"],
+        "volume_unit_status": source_context["volume_unit_status"],
+        "source_pool_actual_total": source_context["raw_row_count"],
+        "page": {
+            "offset": offset,
+            "limit": limit,
+            "page_count": page["page_count"],
+            "filtered_total": page["total_count"],
+            "source_pool_actual_total": source_context["raw_row_count"],
+            "next_offset": page["next_offset"],
+            "symbols": [item["source_symbol"] for item in page["candidates"]],
+            "stable_order": "source_symbol ASC",
+        },
+        "predicate_counts": predicate_counts,
+        "consumer_failure_count": consumer_failures,
+        "predicate_partition_closed": page_is_complete,
+        "results": results,
+        "formal_downstream": {
+            "d1_anchor": "NOT_EVALUATED",
+            "episode": "NOT_EVALUATED",
+            "d2_seed_focus": "NOT_EVALUATED",
+            "trade_signal": "NOT_EVALUATED",
+        },
+        "execution": {
+            "configuration_path": str(config_path),
+            "database_transaction": "REPEATABLE_READ_READ_ONLY",
+            "database_write_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+            "source_zip_opened": False,
+            "source_recalculated": False,
+        },
+    }
+    _emit(result, error=not page_is_complete)
+    return _EXIT_OK if page_is_complete else _EXIT_UNAVAILABLE
 
 
 def _fraction_payload(value: Fraction | None) -> dict[str, Any] | None:
@@ -5630,6 +5922,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_symbol_price_profile(args)
         if args.command == "source-market-breadth":
             return _run_source_market_breadth(args)
+        if args.command == "source-d1-breakout-preview":
+            return _run_source_d1_breakout_preview(args)
         if args.command == "source-p04-read":
             return _run_source_p04_read(args)
         if args.command == "source-ingress-plan":

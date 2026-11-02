@@ -2007,10 +2007,11 @@ def read_raw_daily_history_page(
     limit: int,
     market: str,
     board: str,
+    source_symbol: str | None = None,
 ) -> dict[str, Any]:
     """SQL过滤并分页选候选，再以单个只读PG事务批量读取本页历史。"""
     selected_sessions = _validate_history_query(
-        source_symbol=None,
+        source_symbol=source_symbol,
         target_session=target_session,
         package_sha256=package_sha256,
         sessions=sessions,
@@ -2037,6 +2038,7 @@ def read_raw_daily_history_page(
             """SELECT bar_status, count(*) FROM stock.source_raw_daily
 WHERE namespace_id=%s::uuid AND session_date=%s AND package_sha256=%s
   AND (%s='ALL' OR market=%s) AND (%s='ALL' OR board=%s)
+  AND (%s::text IS NULL OR source_symbol=%s::text)
 GROUP BY bar_status ORDER BY bar_status""",
             (
                 namespace_id,
@@ -2046,6 +2048,8 @@ GROUP BY bar_status ORDER BY bar_status""",
                 market,
                 board,
                 board,
+                source_symbol,
+                source_symbol,
             ),
         )
         by_status = {status: int(count) for status, count in cursor.fetchall()}
@@ -2054,6 +2058,7 @@ GROUP BY bar_status ORDER BY bar_status""",
             """SELECT source_symbol, market, board FROM stock.source_raw_daily
 WHERE namespace_id=%s::uuid AND session_date=%s AND package_sha256=%s
   AND (%s='ALL' OR market=%s) AND (%s='ALL' OR board=%s)
+  AND (%s::text IS NULL OR source_symbol=%s::text)
 ORDER BY source_symbol LIMIT %s OFFSET %s""",
             (
                 namespace_id,
@@ -2063,6 +2068,8 @@ ORDER BY source_symbol LIMIT %s OFFSET %s""",
                 market,
                 board,
                 board,
+                source_symbol,
+                source_symbol,
                 limit,
                 offset,
             ),
@@ -2116,6 +2123,7 @@ ORDER BY source_symbol LIMIT %s OFFSET %s""",
         "version_expected_row_count": expected_rows,
         "market_filter": market,
         "board_filter": board,
+        "source_symbol_filter": source_symbol,
         "candidates": candidates,
         "source_zip_opened": False,
         "source_recalculated": False,

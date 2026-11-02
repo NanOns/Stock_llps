@@ -27,6 +27,7 @@ from stock_a.research.core import (
     MarketSessionCalendar,
     calculate_core,
 )
+from stock_a.research.breakout import evaluate_raw_breakout_predicate
 from stock_a.research.profile import (
     ProfileHandoff,
     ProfileInput,
@@ -4070,6 +4071,7 @@ def research_stock_pg_history_preview(
     profile_contract: dict[str, Any],
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
     include_profile_preview: bool = True,
+    include_raw_breakout: bool = False,
 ) -> dict[str, Any]:
     """把明确PG Raw窗口适配至现役Core和Profile11研究预览。"""
     target = _parse_target(target_session)
@@ -4359,7 +4361,7 @@ def research_stock_pg_history_preview(
     history_records_status = (
         "RECORDS_COMPLETE" if history_records_complete else "HISTORY_ROW_NOT_STORED"
     )
-    return {
+    result = {
         "ok": True,
         "contract": "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1",
         "status": "RESEARCH_PREVIEW_NON_PIT",
@@ -4474,6 +4476,58 @@ def research_stock_pg_history_preview(
             "network_access": False,
         },
     }
+    if include_raw_breakout:
+        close_field = (
+            target_bar.raw_close
+            if target_bar is not None
+            else unknown("TARGET_BAR_MISSING")
+        )
+        evaluation = evaluate_raw_breakout_predicate(
+            close_field,
+            core["core.prior_high20"],
+            core["core.atr20"],
+            core["core.clv"],
+        )
+        for predicate in (evaluation["p1"], evaluation["p2"]):
+            predicate["evidence"] = {
+                key: _render_value(value)
+                for key, value in predicate["evidence"].items()
+            }
+        result["raw_d1_breakout_predicate"] = {
+            "scope": "SOURCE_SYMBOL_ONLY_RAW_UNADJUSTED_NON_PIT_RETROSPECTIVE",
+            "target_session": target.isoformat(),
+            "price_coordinate": "RAW_UNADJUSTED",
+            "coordinate_id": coordinate_id,
+            "core_producer_symbol": "stock_a.research.core:calculate_core",
+            "core_producer_source_sha256": _profile_preview_source_digest(
+                Path(__file__).with_name("core.py"), "calculate_core"
+            ),
+            "core_field_ids": [
+                "core.prior_high20",
+                "core.atr20",
+                "core.clv",
+            ],
+            "inputs": {
+                "C": _render_field(close_field),
+                "core.prior_high20": _render_field(core["core.prior_high20"]),
+                "core.atr20": _render_field(core["core.atr20"]),
+                "core.clv": _render_field(core["core.clv"]),
+            },
+            "official_dependency_window": {
+                "calendar_id": calendar_payload["calendar_id"],
+                "calendar_revision": calendar_revision,
+                "start_session": expected_sessions[0].isoformat(),
+                "end_session": expected_sessions[-1].isoformat(),
+                "official_session_count": len(expected_sessions),
+                "prior_high20_actual_bars": 20,
+                "prior_high20_excludes_target": True,
+                "atr20_true_ranges": 20,
+                "atr20_dependency_actual_bars": 21,
+                "clv_target_bar_only": True,
+            },
+            "predicates": evaluation,
+        }
+    return result
 
 
 def _timeline_relation(
@@ -5546,6 +5600,8 @@ def research_universe_pg_history_preview(
     profile_contract: dict[str, Any],
     closed_period_bars_by_symbol: Mapping[str, Mapping[str, Sequence[object]]]
     | None = None,
+    include_profile_preview: bool = True,
+    include_raw_breakout: bool = False,
 ) -> dict[str, Any]:
     """以PG SQL分页候选结果生成来源符号级Core/Profile质量摘要。"""
     results: list[dict[str, Any]] = []
@@ -5568,6 +5624,8 @@ def research_universe_pg_history_preview(
                     if isinstance(closed_period_bars_by_symbol, Mapping)
                     else None
                 ),
+                include_profile_preview=include_profile_preview,
+                include_raw_breakout=include_raw_breakout,
             )
         except ResearchEntryError as error:
             field_registry = (
@@ -5737,7 +5795,12 @@ def research_universe_pg_history_preview(
             )
             continue
         fields = preview.get("core", {}).get("fields", {})
-        components = preview.get("profile_preview", {}).get("components", [])
+        profile_preview = preview.get("profile_preview")
+        components = (
+            profile_preview.get("components", [])
+            if isinstance(profile_preview, Mapping)
+            else []
+        )
         profile_status_counts: dict[str, int] = {}
         profile_unavailable = []
         for component in components:
@@ -5773,64 +5836,66 @@ def research_universe_pg_history_preview(
             )
             if name in fields
         }
-        results.append(
-            {
-                "symbol": symbol,
-                "status": preview.get("status"),
-                "consumer_status": "RESEARCHED",
-                "consumer_error_code": None,
-                "identity_status": preview.get("identity_status"),
-                "source_object_status": preview.get("source_object_status"),
-                "target_bar_status": preview.get("target_bar_status"),
-                "price_research_status": preview.get("price_research_status"),
-                "stable_security_id_status": preview.get("stable_security_id_status"),
-                "listing_status": preview.get("listing_status"),
-                "suspension_status": preview.get("suspension_status"),
-                "pit_status": preview.get("pit_status"),
-                "window": preview.get("window"),
-                "history_status": preview.get("history_status"),
-                "history_records_complete": preview.get("history_records_complete"),
-                "history_records_status": preview.get("history_records_status"),
-                "price_window_usable": preview.get("price_window_usable"),
-                "price_window_status": preview.get("price_window_status"),
-                "price_window_reason": preview.get("price_window_reason"),
-                "price_window_valid_bar_count": preview.get(
-                    "price_window_valid_bar_count"
-                ),
-                "price_window_expected_bar_count": preview.get(
-                    "price_window_expected_bar_count"
-                ),
-                "ma20_window_valid_bar_count": preview.get(
-                    "ma20_window_valid_bar_count"
-                ),
-                "ma20_window_expected_bar_count": preview.get(
-                    "ma20_window_expected_bar_count"
-                ),
-                "missing_history_sessions": preview.get("missing_history_sessions"),
-                "price_quality_counts": preview.get("quality", {}).get(
-                    "price_quality_counts"
-                ),
-                "core_price_fields": selected_fields,
-                "core_unknown_field_count": preview.get("core", {}).get(
-                    "unknown_field_count"
-                ),
-                "core_unknown_reason_counts": preview.get("core", {}).get(
-                    "unknown_reason_counts"
-                ),
-                "profile_rule_count": len(components),
-                "profile_status_counts": dict(sorted(profile_status_counts.items())),
-                "profile_components": [
-                    {
-                        "field_id": item.get("field_id"),
-                        "status": item.get("status"),
-                        "quality": item.get("quality"),
-                        "reason": item.get("reason"),
-                    }
-                    for item in components
-                ],
-                "profile_unavailable": profile_unavailable,
-            }
-        )
+        result_item = {
+            "symbol": symbol,
+            "status": preview.get("status"),
+            "consumer_status": "RESEARCHED",
+            "consumer_error_code": None,
+            "identity_status": preview.get("identity_status"),
+            "source_object_status": preview.get("source_object_status"),
+            "target_bar_status": preview.get("target_bar_status"),
+            "price_research_status": preview.get("price_research_status"),
+            "stable_security_id_status": preview.get("stable_security_id_status"),
+            "listing_status": preview.get("listing_status"),
+            "suspension_status": preview.get("suspension_status"),
+            "pit_status": preview.get("pit_status"),
+            "window": preview.get("window"),
+            "history_status": preview.get("history_status"),
+            "history_records_complete": preview.get("history_records_complete"),
+            "history_records_status": preview.get("history_records_status"),
+            "price_window_usable": preview.get("price_window_usable"),
+            "price_window_status": preview.get("price_window_status"),
+            "price_window_reason": preview.get("price_window_reason"),
+            "price_window_valid_bar_count": preview.get("price_window_valid_bar_count"),
+            "price_window_expected_bar_count": preview.get(
+                "price_window_expected_bar_count"
+            ),
+            "ma20_window_valid_bar_count": preview.get("ma20_window_valid_bar_count"),
+            "ma20_window_expected_bar_count": preview.get(
+                "ma20_window_expected_bar_count"
+            ),
+            "missing_history_sessions": preview.get("missing_history_sessions"),
+            "price_quality_counts": preview.get("quality", {}).get(
+                "price_quality_counts"
+            ),
+            "core_price_fields": selected_fields,
+            "core_unknown_field_count": preview.get("core", {}).get(
+                "unknown_field_count"
+            ),
+            "core_unknown_reason_counts": preview.get("core", {}).get(
+                "unknown_reason_counts"
+            ),
+            "profile_rule_count": len(components),
+            "profile_status_counts": dict(sorted(profile_status_counts.items())),
+            "profile_components": [
+                {
+                    "field_id": item.get("field_id"),
+                    "status": item.get("status"),
+                    "quality": item.get("quality"),
+                    "reason": item.get("reason"),
+                }
+                for item in components
+            ],
+            "profile_unavailable": profile_unavailable,
+        }
+        if include_raw_breakout:
+            result_item["source_capture_revisions"] = preview.get("source", {}).get(
+                "capture_revisions"
+            )
+            result_item["raw_d1_breakout_predicate"] = preview.get(
+                "raw_d1_breakout_predicate"
+            )
+        results.append(result_item)
     return {
         "ok": True,
         "contract": "STOCK_A_PG_SOURCE_SYMBOL_UNIVERSE_CORE_PROFILE_PREVIEW_R1",

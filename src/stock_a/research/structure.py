@@ -6,6 +6,7 @@ from fractions import Fraction
 from stock_a.canonical.identity import semantic_digest
 from stock_a.domain import ContractError, FieldValue, unknown
 from stock_a.research.admission import Event
+from stock_a.research.breakout import breakout_clv_passes, breakout_price_passes
 from stock_a.research.facts import boolean, number, capability
 
 CONTRACT = "STOCK_A_D1_STRUCTURE_TYPE_REGISTRY_R1"
@@ -154,7 +155,9 @@ def generate(
             bounds = (o, (o + c) / 2) if kind == "IMPULSE_BODY" else (l, l)
     elif kind == "BREAKOUT_PLATFORM":
         level = vals["prior_high20"]
-        if c > level + vals["atr_today"] / 10 and vals["clv"] >= Fraction(7, 10):
+        if breakout_price_passes(c, level, vals["atr_today"]) and breakout_clv_passes(
+            vals["clv"]
+        ):
             bounds = level, level  # 缓冲用于突破谓词，不改成D0的PHC20或扩大锚价带
     elif kind.startswith("PIVOT_"):
         rows = _window(pivot5, statuses, 5, ordinal)
