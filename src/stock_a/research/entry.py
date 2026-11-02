@@ -4072,6 +4072,7 @@ def research_stock_pg_history_preview(
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
     include_profile_preview: bool = True,
     include_raw_breakout: bool = False,
+    allow_missing_target_row: bool = False,
 ) -> dict[str, Any]:
     """把明确PG Raw窗口适配至现役Core和Profile11研究预览。"""
     target = _parse_target(target_session)
@@ -4129,7 +4130,7 @@ def research_stock_pg_history_preview(
             "PG_HISTORY_MISSING_SESSION_BINDING_INVALID",
             "PG历史缺失会话清单与实际Raw行不一致",
         )
-    if target not in present_dates:
+    if target not in present_dates and not allow_missing_target_row:
         raise ResearchEntryError(
             "PG_HISTORY_TARGET_ROW_MISSING", "PG历史Raw没有精确目标日行，拒绝跨日回退"
         )
@@ -4143,8 +4144,10 @@ def research_stock_pg_history_preview(
             "PG_HISTORY_REVISION_MISMATCH", "PG历史行混入不同来源代码、包SHA或namespace"
         )
     rows_by_session = {row["session_date"]: row for row in rows}
-    target_row = rows_by_session[target]
-    target_bar = _decoded_day_from_pg_raw(target_row)
+    target_row = rows_by_session.get(target)
+    target_bar = _decoded_day_from_pg_raw(target_row) if target_row else None
+    if target_row is None:
+        target_row = {"bar_status": "HISTORY_ROW_NOT_STORED"}
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
     history: list[CoreObservation] = []
     status_counts = {
@@ -4299,6 +4302,7 @@ def research_stock_pg_history_preview(
         "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
         "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
         "READ_FAILED": "TDX_READ_FAILED",
+        "HISTORY_ROW_NOT_STORED": "HISTORY_ROW_NOT_STORED",
     }[target_row["bar_status"]]
     price_window_sessions = expected_sessions[-21:]
     ma20_window_sessions = expected_sessions[-20:]
@@ -4396,12 +4400,12 @@ def research_stock_pg_history_preview(
             "storage": "POSTGRESQL_TYPED_SOURCE_RAW",
             "namespace_id": namespace_id,
             "package_sha256": package_sha256,
-            "dataset_id": target_row["dataset_id"],
-            "source_content_id": target_row["source_content_id"],
+            "dataset_id": target_row.get("dataset_id"),
+            "source_content_id": target_row.get("source_content_id"),
             "source_entry_sha256": entry_shas[0] if entry_shas else None,
-            "target_source_capture_id": target_row["source_capture_id"],
-            "source_clock_role": target_row["capture_clock_role"],
-            "source_time_quality": target_row["capture_time_quality"],
+            "target_source_capture_id": target_row.get("source_capture_id"),
+            "source_clock_role": target_row.get("capture_clock_role"),
+            "source_time_quality": target_row.get("capture_time_quality"),
             "source_available_at": None,
             "capture_revisions": captures_by_session,
         },
@@ -4480,7 +4484,11 @@ def research_stock_pg_history_preview(
         close_field = (
             target_bar.raw_close
             if target_bar is not None
-            else unknown("TARGET_BAR_MISSING")
+            else unknown(
+                "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+                if target not in present_dates
+                else "TARGET_BAR_MISSING"
+            )
         )
         evaluation = evaluate_raw_breakout_predicate(
             close_field,

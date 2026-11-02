@@ -975,6 +975,11 @@ def _parser() -> argparse.ArgumentParser:
         default=75,
         help="按现役官方日历读取的历史会话数，1至75，默认75",
     )
+    source_d1_breakout.add_argument("--history-start", help="历史观察起始官方会话")
+    source_d1_breakout.add_argument("--history-end", help="历史观察结束官方会话")
+    source_d1_breakout.add_argument(
+        "--history-last", type=int, help="观察最近N个官方会话，1至75"
+    )
     price_profile = commands.add_parser(
         "source-symbol-price-profile",
         help="按精确P03封口版本计算、保存或分页查询来源代码级NON_PIT价格画像",
@@ -2523,6 +2528,21 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             _EXIT_ARGUMENT,
         )
 
+    history_mode = any(
+        (args.history_start, args.history_end, args.history_last is not None)
+    )
+    if history_mode and (
+        args.symbol is None
+        or (args.history_last is not None and (args.history_start or args.history_end))
+        or (args.history_last is None and not (args.history_start and args.history_end))
+        or (args.history_last is not None and not 1 <= args.history_last <= 75)
+    ):
+        raise DiagnosticError(
+            "D1_BREAKOUT_HISTORY_SELECTION_INVALID",
+            "历史模式须指定单代码及起止会话，或最近1至75个会话",
+            _EXIT_ARGUMENT,
+        )
+
     if args.symbol is not None:
         if args.limit is not None:
             raise DiagnosticError(
@@ -2556,6 +2576,31 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
     _resolved_target, sessions, calendar_revision = _pg_history_window(
         target.isoformat(), args.pg_history_session_count
     )
+    history_sessions = ()
+    if history_mode:
+        if args.history_last is not None:
+            if args.history_last > len(sessions):
+                raise DiagnosticError(
+                    "D1_BREAKOUT_HISTORY_RANGE_INVALID",
+                    "请求超出读取窗口",
+                    _EXIT_ARGUMENT,
+                )
+            history_sessions = sessions[-args.history_last :]
+        else:
+            start = _parse_source_set_date(args.history_start)
+            end = _parse_source_set_date(args.history_end)
+            if (
+                start not in sessions
+                or end not in sessions
+                or start > end
+                or end > cutoff
+            ):
+                raise DiagnosticError(
+                    "D1_BREAKOUT_HISTORY_RANGE_INVALID",
+                    "历史起止须在读取窗口内且为官方会话",
+                    _EXIT_ARGUMENT,
+                )
+            history_sessions = tuple(day for day in sessions if start <= day <= end)
     config, config_path = _load_runtime_config()
     try:
         page = read_raw_daily_history_page(
@@ -2602,6 +2647,106 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             )
 
         profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+        if history_mode:
+            from stock_a.storage.postgres.source_set_ingress import (
+                read_p04_source_input,
+            )
+
+            sealed = read_p04_source_input(
+                config, target_session=target, package_sha256=args.package_sha256
+            )
+            if (
+                sealed.get("status") != "AVAILABLE"
+                or sealed.get("source_set_id") != source_context["source_set_id"]
+                or sealed.get("namespace_id") != source_context["namespace_id"]
+                or sealed.get("seal_status") != "SEALED"
+                or not sealed.get("sealed_at")
+            ):
+                raise PgResearchBindingError(
+                    "D1_BREAKOUT_SOURCE_CLOCK_MISMATCH",
+                    "来源封口时钟与精确来源集合不一致",
+                )
+            candidate = page["candidates"][0]
+            rows = candidate["history_rows"]
+            points = []
+            counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0}
+            for day in history_sessions:
+                window = tuple(session for session in sessions if session <= day)
+                bounded_rows = tuple(row for row in rows if row["session_date"] <= day)
+                observed = research_stock_pg_history_preview(
+                    symbol=source_symbol,
+                    target_session=day.isoformat(),
+                    package_sha256=args.package_sha256,
+                    session_dates=window,
+                    history_rows=bounded_rows,
+                    namespace_id=page["namespace_id"],
+                    profile_contract=profile_contract,
+                    include_profile_preview=False,
+                    include_raw_breakout=True,
+                    allow_missing_target_row=True,
+                )
+                predicate = observed["raw_d1_breakout_predicate"]
+                counts[predicate["predicates"]["result"]["state"]] += 1
+                row = next(
+                    (item for item in bounded_rows if item["session_date"] == day), None
+                )
+                points.append(
+                    {
+                        "session": day.isoformat(),
+                        "source_capture_id": str(row["source_capture_id"])
+                        if row
+                        else None,
+                        "source_entry_sha256": row.get("source_entry_sha256")
+                        if row
+                        else None,
+                        "source_available_at": row.get("source_available_at")
+                        if row
+                        else None,
+                        "source_observed_started_at": row.get("observed_started_at")
+                        if row
+                        else None,
+                        "source_observed_completed_at": row.get("observed_completed_at")
+                        if row
+                        else None,
+                        "target_bar_status": observed["target_bar_status"],
+                        "price_window_status": observed["price_window_status"],
+                        "price_window_reason": observed["price_window_reason"],
+                        "predicate": predicate,
+                    }
+                )
+            _emit(
+                {
+                    "ok": True,
+                    "status": "SOURCE_LEVEL_RAW_BREAKOUT_HISTORY",
+                    "research_mode": "NON_PIT_RETROSPECTIVE",
+                    "identity_status": "SOURCE_SYMBOL_ONLY",
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "symbol": source_symbol,
+                    "target_session": target.isoformat(),
+                    "research_cutoff": cutoff.isoformat(),
+                    "calendar_revision": calendar_revision,
+                    "source": source_context,
+                    "source_capture_started_at": sealed.get("capture_read_started_at"),
+                    "source_capture_validated_at": sealed.get("capture_validated_at"),
+                    "source_sealed_at": sealed.get("sealed_at"),
+                    "n_total": len(points),
+                    "n_true": counts["TRUE"],
+                    "n_false": counts["FALSE"],
+                    "n_unknown": counts["UNKNOWN"],
+                    "points": points,
+                    "formal_downstream": {
+                        "d1_anchor": "NOT_EVALUATED",
+                        "episode": "NOT_EVALUATED",
+                    },
+                    "execution": {
+                        "database_transaction": "REPEATABLE_READ_READ_ONLY",
+                        "database_write_attempted": False,
+                        "ddl_executed": False,
+                        "dml_executed": False,
+                    },
+                }
+            )
+            return _EXIT_OK
         preview = research_universe_pg_history_preview(
             target_session=target.isoformat(),
             package_sha256=args.package_sha256,
@@ -2639,7 +2784,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             error=True,
         )
         return _EXIT_UNAVAILABLE
-    except DayChainContractError as error:
+    except (DayChainContractError, ResearchEntryError) as error:
         _emit(
             {
                 "ok": False,
