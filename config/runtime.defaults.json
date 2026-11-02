@@ -198,7 +198,7 @@
     "deployment_instance_uuid": "ff29a9f9-074e-4e37-b64f-e04db9ec933c",
     "cluster_system_identifier": "7688198230782699460",
     "deployment_applied": true,
-    "migration_digest": "beef8c809ecaa30054b7291c11299eed78da38975f6e6e7ec257e87b55676635",
+    "migration_digest": "8f4e2023195330b093ab26241d074d747d0061880c3114daacd6f0f6e5772d3b",
     "business_login": "stock_a"
   }
 }

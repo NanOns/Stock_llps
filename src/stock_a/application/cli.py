@@ -141,6 +141,14 @@ from stock_a.application.runtime_config import (
 from stock_a.application.research_window import (
     resolve_pg_history_window as _pg_history_window,
 )
+from stock_a.application.tdx_sector_members import (
+    TdxSectorMembersApplicationError,
+    TdxSectorMembersPgError,
+    TdxSectorSourceError,
+    ingest_tdx_sector_members,
+    read_tdx_sector_catalog,
+    read_tdx_sector_members,
+)
 
 _READ_ERROR_EXIT_CODES = {
     "SOURCE_NOT_CONFIGURED": _EXIT_UNAVAILABLE,
@@ -877,6 +885,45 @@ def _parser() -> argparse.ArgumentParser:
     raw_catalog.add_argument(
         "--limit", type=int, default=100, help="每页版本数，默认100，最多200"
     )
+    sector_members = commands.add_parser(
+        "source-tdx-sector-members",
+        help="接入或只读查询本机TDX行业、概念成员及精确PG研究上下文",
+    )
+    sector_actions = sector_members.add_subparsers(
+        dest="sector_action", parser_class=ChineseParser, required=True
+    )
+    sector_ingest = sector_actions.add_parser(
+        "ingest", help="只读解析唯一配置TDX根并幂等写入三个成员表"
+    )
+    sector_ingest.add_argument(
+        "--confirm-task-scope",
+        required=True,
+        choices=("R03_TDX_REAL_SECTOR_MEMBERS_TO_PG_R1",),
+        help="显式绑定本批已批准任务范围",
+    )
+    sector_catalog = sector_actions.add_parser(
+        "catalog", help="分页查询精确行业或概念来源快照目录"
+    )
+    sector_catalog.add_argument("--snapshot-id", required=True)
+    sector_catalog.add_argument("--board-kind", choices=("INDUSTRY", "CONCEPT"))
+    sector_catalog.add_argument("--search", help="名称子串或原生编号")
+    sector_catalog.add_argument("--offset", type=int, default=0)
+    sector_catalog.add_argument("--limit", type=int, default=100)
+    sector_query = sector_actions.add_parser(
+        "members", help="读取精确板块成员与SEALED B_t、Core/Profile状态"
+    )
+    sector_query.add_argument("--snapshot-id", required=True)
+    sector_query.add_argument(
+        "--board-kind", required=True, choices=("INDUSTRY", "CONCEPT")
+    )
+    sector_query.add_argument("--board-native-id", required=True)
+    sector_query.add_argument("--target-session", required=True)
+    sector_query.add_argument("--research-cutoff", required=True)
+    sector_query.add_argument("--source-set-id", required=True)
+    sector_query.add_argument("--package-sha256", required=True)
+    sector_query.add_argument("--profile-revision")
+    sector_query.add_argument("--offset", type=int, default=0)
+    sector_query.add_argument("--limit", type=int, default=100)
     source_set = commands.add_parser(
         "source-set-candidate",
         help="按精确日期与TDX包SHA预检或读取P03来源集合候选",
@@ -2548,6 +2595,97 @@ def _run_source_raw_catalog(args: argparse.Namespace) -> int:
     )
     _emit(result)
     return _EXIT_OK
+
+
+def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
+    config, config_path = _load_runtime_config()
+    try:
+        if args.sector_action == "ingest":
+            if args.confirm_task_scope != "R03_TDX_REAL_SECTOR_MEMBERS_TO_PG_R1":
+                raise DiagnosticError(
+                    "TASK_SCOPE_REQUIRED",
+                    "来源成员写入必须绑定本批R03任务范围",
+                    _EXIT_ARGUMENT,
+                )
+            result = ingest_tdx_sector_members(config)
+        elif args.sector_action == "catalog":
+            result = read_tdx_sector_catalog(
+                config,
+                snapshot_id=args.snapshot_id,
+                board_kind=args.board_kind,
+                search=args.search,
+                offset=args.offset,
+                limit=args.limit,
+            )
+        elif args.sector_action == "members":
+            result = read_tdx_sector_members(
+                config,
+                snapshot_id=args.snapshot_id,
+                board_kind=args.board_kind,
+                board_native_id=args.board_native_id,
+                target_session=_parse_source_set_date(args.target_session),
+                research_cutoff=_parse_source_set_date(args.research_cutoff),
+                source_set_id=args.source_set_id,
+                package_sha256=args.package_sha256,
+                profile_revision=args.profile_revision,
+                offset=args.offset,
+                limit=args.limit,
+            )
+        else:
+            raise DiagnosticError(
+                "SECTOR_ACTION_INVALID", "未登记的行业概念成员操作", _EXIT_ARGUMENT
+            )
+    except DiagnosticError:
+        raise
+    except (TdxSectorMembersApplicationError, TdxSectorSourceError) as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "operation": args.sector_action,
+                "database_io_attempted": False,
+                "database_write_attempted": False,
+                "dml_executed": False,
+                "ddl_executed": False,
+                "source_modified": False,
+                "source_downloaded": False,
+            },
+            error=True,
+        )
+        return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    except TdxSectorMembersPgError as error:
+        write_attempted = args.sector_action == "ingest"
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "operation": args.sector_action,
+                "database_io_attempted": True,
+                "database_write_attempted": write_attempted,
+                "dml_executed": None if write_attempted else False,
+                "ddl_executed": False,
+                "source_modified": False,
+                "source_downloaded": False,
+            },
+            error=True,
+        )
+        return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    result.update(
+        {
+            "ok": result.get("status") not in {"NO_MATCH", "REJECTED"},
+            "operation": args.sector_action,
+            "configuration_path": str(config_path),
+            "database_io_attempted": True,
+            "ddl_executed": False,
+            "source_zip_opened": False,
+        }
+    )
+    _emit(result)
+    return _EXIT_OK if result["ok"] else _EXIT_UNAVAILABLE
 
 
 def _discover_source_d1_true(
@@ -7829,6 +7967,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_vipdata_persist(args)
         if args.command == "source-raw-catalog":
             return _run_source_raw_catalog(args)
+        if args.command == "source-tdx-sector-members":
+            return _run_source_tdx_sector_members(args)
         if args.command == "source-set-candidate":
             return _run_source_set_candidate(args, compute_candidate=True)
         if args.command == "source-set-catalog":

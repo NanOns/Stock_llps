@@ -60,6 +60,12 @@ _MIGRATIONS = (
         ("migrations", "0008_r02_price_profile_ma10_comment.sql"),
         "b9128fa7def0dbeeddc8658c11cc5804c7c8e895df6270d4ce115ee9dd2eafb2",
     ),
+    (
+        9,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0009_r03_tdx_sector_source_members.sql"),
+        "397cd13c11cc1b0859704c5dd4b1aa9ef8ddb310189714981ff870363f4030e2",
+    ),
 )
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
@@ -68,6 +74,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_P03_FORMAL_TWO_DAY_WRITE_R1": frozenset({6}),
     "R02_TDX_SOURCE_SYMBOL_PRICE_PROFILE_0007_R1": frozenset({7}),
     "R02_FROZEN_75D_ALGORITHMS_CHANGE_R2": frozenset({8}),
+    "R03_TDX_REAL_SECTOR_MEMBERS_TO_PG_R1": frozenset({9}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -118,6 +125,18 @@ _RELATIONS_BY_MIGRATION_COUNT = {
         "source_sets",
         "source_set_capabilities",
         "source_symbol_price_profiles",
+    },
+    9: _R01_TABLES
+    | {
+        "source_raw_daily",
+        "source_set_candidates",
+        "source_set_candidate_inputs",
+        "source_sets",
+        "source_set_capabilities",
+        "source_symbol_price_profiles",
+        "tdx_sector_source_snapshots",
+        "tdx_sector_catalog",
+        "tdx_sector_members",
     },
 }
 
