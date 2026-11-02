@@ -1719,6 +1719,250 @@ def read_raw_daily_history_stock(
     }
 
 
+def read_sealed_source_market_breadth_history(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    source_set_id: str,
+    package_sha256: str,
+    session_window: Sequence[date],
+) -> dict[str, Any]:
+    """一次只读事务读取SEALED来源篮及同包SHA的四个价格会话。"""
+    if (
+        type(target_session) is not date
+        or type(research_cutoff) is not date
+        or target_session > research_cutoff
+    ):
+        raise RawSourcePgError(
+            "MARKET_BREADTH_DATE_INVALID",
+            "目标会话必须是明确日期且不晚于研究截止日",
+        )
+    if not isinstance(source_set_id, str):
+        raise RawSourcePgError(
+            "MARKET_BREADTH_SOURCE_SET_INVALID", "必须显式提供SEALED source_set_id"
+        )
+    try:
+        canonical_source_set_id = str(uuid.UUID(source_set_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise RawSourcePgError(
+            "MARKET_BREADTH_SOURCE_SET_INVALID", "source_set_id必须为规范UUID"
+        ) from error
+    if canonical_source_set_id != source_set_id:
+        raise RawSourcePgError(
+            "MARKET_BREADTH_SOURCE_SET_INVALID", "source_set_id必须为规范UUID"
+        )
+    if not isinstance(package_sha256, str) or _SHA256.fullmatch(package_sha256) is None:
+        raise RawSourcePgError(
+            "MARKET_BREADTH_PACKAGE_SHA_INVALID", "必须显式提供完整小写包SHA-256"
+        )
+    if (
+        not isinstance(session_window, (tuple, list))
+        or len(session_window) != 5
+        or any(type(session) is not date for session in session_window)
+        or tuple(sorted(set(session_window))) != tuple(session_window)
+        or session_window[-1] != target_session
+        or any(session > research_cutoff for session in session_window)
+    ):
+        raise RawSourcePgError(
+            "MARKET_BREADTH_SESSION_WINDOW_INVALID",
+            "必须提供截止日内t-4至t的五个相邻官方会话",
+        )
+
+    price_sessions = (
+        session_window[0],
+        session_window[1],
+        session_window[3],
+        session_window[4],
+    )
+    source_set_columns = (
+        "namespace_id::text AS namespace_id",
+        "ingress_attempt_id::text AS ingress_attempt_id",
+        "target_session AS target_session",
+        "package_sha256 AS package_sha256",
+        "source_set_id::text AS source_set_id",
+        "revision_id AS revision_id",
+        "source_content_id AS source_content_id",
+        "source_capture_id::text AS source_capture_id",
+        "source_byte_count AS source_byte_count",
+        "parser_contract AS parser_contract",
+        "source_digest AS source_digest",
+        "source_raw_digest AS source_raw_digest",
+        "source_dataset_id AS source_dataset_id",
+        "capture_expected_row_count AS capture_expected_row_count",
+        "raw_row_count AS raw_row_count",
+        "target_present_count AS target_present_count",
+        "target_missing_count AS target_missing_count",
+        "read_failed_count AS read_failed_count",
+        "capture_read_started_at AS capture_read_started_at",
+        "capture_validated_at AS capture_validated_at",
+        "source_available_at AS source_available_at",
+        "source_time_quality AS source_time_quality",
+        "source_clock_role AS source_clock_role",
+        "price_unit_status AS price_unit_status",
+        "calendar_id AS calendar_id",
+        "calendar_revision AS calendar_revision",
+        "calendar_sha256 AS calendar_sha256",
+        "durability_status AS durability_status",
+        "commit_ack_observed_at AS commit_ack_observed_at",
+        "durable_at AS durable_at",
+        "durability_source_capture_id::text AS durability_source_capture_id",
+        "durability_source_digest AS durability_source_digest",
+        "seal_digest_sha256 AS seal_digest_sha256",
+        "seal_status AS seal_status",
+        "seal_writer_transaction_id AS seal_writer_transaction_id",
+        "sealed_at AS sealed_at",
+    )
+
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        cursor.execute(
+            f"SELECT {', '.join(source_set_columns)} FROM stock.source_sets "
+            "WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid "
+            "AND target_session=%s AND package_sha256=%s",
+            (namespace_id, source_set_id, target_session, package_sha256),
+        )
+        source_set_rows = [
+            dict(zip([item.name for item in cursor.description], row, strict=True))
+            for row in cursor.fetchall()
+        ]
+        if len(source_set_rows) != 1:
+            raise RawSourcePgError(
+                "MARKET_BREADTH_SOURCE_SET_NO_MATCH",
+                "PG中没有唯一匹配的namespace、目标日、source_set和包SHA",
+            )
+        source_set = source_set_rows[0]
+        if (
+            source_set["seal_status"] != "SEALED"
+            or source_set["source_set_id"] != source_set_id
+            or source_set["namespace_id"] != namespace_id
+            or source_set["target_session"] != target_session
+            or source_set["package_sha256"].strip() != package_sha256
+            or source_set["durability_status"] != "VERIFIED_POST_COMMIT_READBACK"
+            or source_set["source_dataset_id"] != _DATASET_ID
+            or source_set["seal_digest_sha256"] is None
+            or source_set["durability_source_capture_id"]
+            != source_set["source_capture_id"]
+            or source_set["durability_source_digest"] != source_set["source_digest"]
+            or source_set["raw_row_count"] != source_set["capture_expected_row_count"]
+            or source_set["raw_row_count"]
+            != source_set["target_present_count"]
+            + source_set["target_missing_count"]
+            + source_set["read_failed_count"]
+            or source_set["read_failed_count"] != 0
+            or source_set["commit_ack_observed_at"] is None
+            or source_set["durable_at"] is None
+            or source_set["sealed_at"] is None
+            or source_set["sealed_at"] < source_set["durable_at"]
+            or source_set["commit_ack_observed_at"] > source_set["durable_at"]
+        ):
+            raise RawSourcePgError(
+                "MARKET_BREADTH_SOURCE_SET_SEAL_INVALID",
+                "SEALED来源集合身份、封口摘要或行数分母不闭合",
+            )
+        if not 1 <= source_set["raw_row_count"] <= 5000:
+            raise RawSourcePgError(
+                "MARKET_BREADTH_SOURCE_LIMIT_EXCEEDED",
+                "来源集合不在现行完整保留容量内；拒绝截断或抽样",
+            )
+
+        target_rows = _read_raw_rows(
+            cursor, namespace_id, target_session, package_sha256
+        )
+        source_symbols = tuple(row["source_symbol"] for row in target_rows)
+        target_status_counts = {
+            status: sum(row["bar_status"] == status for row in target_rows)
+            for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED")
+        }
+        target_reference_errors = sum(
+            str(row["namespace_id"]) != namespace_id
+            or row["session_date"] != target_session
+            or row["package_sha256"].strip() != package_sha256
+            or str(row["source_capture_id"]) != source_set["source_capture_id"]
+            or row["source_content_id"] != source_set["source_content_id"]
+            for row in target_rows
+        )
+        target_raw_digest = _row_digest(target_rows)
+        if (
+            len(target_rows) != source_set["raw_row_count"]
+            or len(source_symbols) != len(set(source_symbols))
+            or target_reference_errors != 0
+            or target_status_counts["TARGET_PRESENT"]
+            != source_set["target_present_count"]
+            or target_status_counts["TARGET_MISSING"]
+            != source_set["target_missing_count"]
+            or target_status_counts["READ_FAILED"] != source_set["read_failed_count"]
+            or target_raw_digest != source_set["source_raw_digest"]
+        ):
+            raise RawSourcePgError(
+                "MARKET_BREADTH_SOURCE_SET_RAW_MISMATCH",
+                "目标日Raw行数、业务键、质量分区或封口SHA不一致",
+            )
+
+        cursor.execute(
+            f"SELECT {_RAW_SELECT} FROM stock.source_raw_daily "
+            "WHERE namespace_id=%s::uuid AND source_symbol=ANY(%s::text[]) "
+            "AND session_date=ANY(%s::date[]) AND package_sha256=%s "
+            "ORDER BY source_symbol, session_date",
+            (namespace_id, list(source_symbols), list(price_sessions), package_sha256),
+        )
+        history_rows = [
+            dict(zip(_RAW_COLUMNS, row, strict=True)) for row in cursor.fetchall()
+        ]
+
+    expected_symbols = set(source_symbols)
+    expected_sessions = set(price_sessions)
+    history_keys = [(row["source_symbol"], row["session_date"]) for row in history_rows]
+    history_reference_errors = sum(
+        str(row["namespace_id"]) != namespace_id
+        or row["source_symbol"] not in expected_symbols
+        or row["session_date"] not in expected_sessions
+        or row["package_sha256"].strip() != package_sha256
+        or row["bar_status"] not in _BAR_STATUSES
+        for row in history_rows
+    )
+    if (
+        len(history_rows) > len(source_symbols) * len(price_sessions)
+        or len(history_keys) != len(set(history_keys))
+        or history_reference_errors != 0
+    ):
+        raise RawSourcePgError(
+            "MARKET_BREADTH_HISTORY_REFERENCE_INVALID",
+            "同包SHA历史Raw行包含重复键或越界来源身份",
+        )
+
+    output_source_set = {key: _db_scalar(value) for key, value in source_set.items()}
+    observations = [
+        {
+            "namespace_id": str(row["namespace_id"]),
+            "source_symbol": row["source_symbol"],
+            "session_date": row["session_date"],
+            "package_sha256": row["package_sha256"].strip(),
+            "raw_close": row["raw_close"],
+            "price_quality": row["price_quality"],
+            "price_reason": row["price_reason"],
+            "bar_status": row["bar_status"],
+            "price_coordinate": "RAW_UNADJUSTED",
+        }
+        for row in history_rows
+    ]
+    return {
+        "namespace_id": namespace_id,
+        "source_set": output_source_set,
+        "source_symbols": source_symbols,
+        "target_raw_row_count": len(target_rows),
+        "target_raw_digest": target_raw_digest,
+        "target_status_counts": target_status_counts,
+        "price_sessions": tuple(price_sessions),
+        "history_rows": observations,
+        "history_row_count": len(observations),
+        "transaction": "REPEATABLE_READ_READ_ONLY",
+        "database_write_attempted": False,
+        "ddl_executed": False,
+        "dml_executed": False,
+        "source_zip_opened": False,
+    }
+
+
 def _page_version_status(
     cursor: Any, namespace_id: str, target_session: date, package_sha256: str
 ) -> tuple[str, int, int | None]:
