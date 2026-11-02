@@ -865,6 +865,11 @@ def _parser() -> argparse.ArgumentParser:
         "source-raw-catalog",
         help="只读查询PG中Stock A Raw来源日期版本目录",
     )
+    raw_catalog.add_argument(
+        "--research-cutoff",
+        required=True,
+        help="必填研究截止会话，格式YYYY-MM-DD",
+    )
     raw_catalog.add_argument("--year", type=int, help="可选年份筛选Raw目录")
     raw_catalog.add_argument("--offset", type=int, default=0, help="版本页偏移，默认0")
     raw_catalog.add_argument(
@@ -2488,10 +2493,12 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
 
 
 def _run_source_raw_catalog(args: argparse.Namespace) -> int:
+    max_target_session = _parse_source_set_date(args.research_cutoff)
     config, config_path = _load_runtime_config()
     try:
         result = read_raw_daily_catalog(
             config,
+            max_target_session=max_target_session,
             year=args.year,
             offset=args.offset,
             limit=args.limit,
