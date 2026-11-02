@@ -11,10 +11,12 @@ from stock_a.sources.tdx.sector_members import (
     parse_sector_source_inputs,
     read_sector_source_inputs,
 )
+from stock_a.research.entry import ResearchEntryError, _load_calendar
 from stock_a.storage.postgres.tdx_sector_members import (
     TdxSectorMembersPgError,
     persist_sector_source_snapshots,
     query_sector_catalog,
+    query_sector_breadth,
     query_sector_members,
 )
 
@@ -119,11 +121,87 @@ def read_tdx_sector_members(
     )
 
 
+def read_tdx_sector_breadth(
+    config: dict[str, Any],
+    *,
+    snapshot_id: str,
+    board_kind: str,
+    board_native_id: str | None,
+    before_session: date,
+    after_session: date,
+    research_cutoff: date,
+    before_source_set_id: str,
+    before_package_sha256: str,
+    before_profile_revision: str,
+    after_source_set_id: str,
+    after_package_sha256: str,
+    after_profile_revision: str,
+    offset: int,
+    limit: int,
+    member_offset: int,
+    member_limit: int,
+) -> dict[str, Any]:
+    try:
+        calendar, _metadata, calendar_revision, sessions = _load_calendar(after_session)
+    except ResearchEntryError as error:
+        raise TdxSectorMembersApplicationError(
+            "OFFICIAL_CALENDAR_UNAVAILABLE", str(error)
+        ) from error
+    session_indexes = {
+        session
+        if isinstance(session, date)
+        else date.fromisoformat(str(session)): index
+        for index, session in enumerate(sessions)
+    }
+    before_index = session_indexes.get(before_session)
+    after_index = session_indexes.get(after_session)
+    if before_index is None or after_index is None:
+        raise TdxSectorMembersApplicationError(
+            "PROFILE_SESSION_NOT_IN_OFFICIAL_CALENDAR",
+            "两端画像日期必须是所选官方日历中的真实交易会话",
+        )
+    result = query_sector_breadth(
+        config,
+        snapshot_id=snapshot_id,
+        board_kind=board_kind,
+        board_native_id=board_native_id,
+        before_session=before_session,
+        after_session=after_session,
+        research_cutoff=research_cutoff,
+        before_source_set_id=before_source_set_id,
+        before_package_sha256=before_package_sha256,
+        before_profile_revision=before_profile_revision,
+        after_source_set_id=after_source_set_id,
+        after_package_sha256=after_package_sha256,
+        after_profile_revision=after_profile_revision,
+        official_calendar_id=str(calendar["calendar_id"]),
+        official_calendar_revision=str(calendar_revision),
+        offset=offset,
+        limit=limit,
+        member_offset=member_offset,
+        member_limit=member_limit,
+    )
+    result["session_relation"] = {
+        "status": (
+            "CONSECUTIVE_OFFICIAL_SESSIONS"
+            if after_index == before_index + 1
+            else "NONCONSECUTIVE_OFFICIAL_SESSIONS"
+        ),
+        "before_session": before_session.isoformat(),
+        "after_session": after_session.isoformat(),
+        "calendar_id": str(calendar["calendar_id"]),
+        "calendar_revision": str(calendar_revision),
+        "reason": None,
+    }
+    return result
+
+
 __all__ = [
     "TdxSectorMembersApplicationError",
     "TdxSectorMembersPgError",
     "TdxSectorSourceError",
     "ingest_tdx_sector_members",
     "read_tdx_sector_catalog",
+    "read_tdx_sector_breadth",
     "read_tdx_sector_members",
 ]

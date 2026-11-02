@@ -146,6 +146,7 @@ from stock_a.application.tdx_sector_members import (
     TdxSectorMembersPgError,
     TdxSectorSourceError,
     ingest_tdx_sector_members,
+    read_tdx_sector_breadth,
     read_tdx_sector_catalog,
     read_tdx_sector_members,
 )
@@ -924,6 +925,29 @@ def _parser() -> argparse.ArgumentParser:
     sector_query.add_argument("--profile-revision")
     sector_query.add_argument("--offset", type=int, default=0)
     sector_query.add_argument("--limit", type=int, default=100)
+    sector_breadth = sector_actions.add_parser(
+        "breadth", help="读取真实行业或概念完整成员的两日MA20广度及关系变化"
+    )
+    sector_breadth.add_argument("--snapshot-id", required=True)
+    sector_breadth.add_argument(
+        "--board-kind", required=True, choices=("INDUSTRY", "CONCEPT")
+    )
+    sector_breadth.add_argument(
+        "--board-native-id", help="可选精确原生板块编号；省略时按板块分页"
+    )
+    sector_breadth.add_argument("--before-session", required=True)
+    sector_breadth.add_argument("--after-session", required=True)
+    sector_breadth.add_argument("--research-cutoff", required=True)
+    sector_breadth.add_argument("--before-source-set-id", required=True)
+    sector_breadth.add_argument("--before-package-sha256", required=True)
+    sector_breadth.add_argument("--before-profile-revision", required=True)
+    sector_breadth.add_argument("--after-source-set-id", required=True)
+    sector_breadth.add_argument("--after-package-sha256", required=True)
+    sector_breadth.add_argument("--after-profile-revision", required=True)
+    sector_breadth.add_argument("--offset", type=int, default=0)
+    sector_breadth.add_argument("--limit", type=int, default=30)
+    sector_breadth.add_argument("--member-offset", type=int, default=0)
+    sector_breadth.add_argument("--member-limit", type=int, default=30)
     source_set = commands.add_parser(
         "source-set-candidate",
         help="按精确日期与TDX包SHA预检或读取P03来源集合候选",
@@ -2630,6 +2654,26 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 profile_revision=args.profile_revision,
                 offset=args.offset,
                 limit=args.limit,
+            )
+        elif args.sector_action == "breadth":
+            result = read_tdx_sector_breadth(
+                config,
+                snapshot_id=args.snapshot_id,
+                board_kind=args.board_kind,
+                board_native_id=args.board_native_id,
+                before_session=_parse_source_set_date(args.before_session),
+                after_session=_parse_source_set_date(args.after_session),
+                research_cutoff=_parse_source_set_date(args.research_cutoff),
+                before_source_set_id=args.before_source_set_id,
+                before_package_sha256=args.before_package_sha256,
+                before_profile_revision=args.before_profile_revision,
+                after_source_set_id=args.after_source_set_id,
+                after_package_sha256=args.after_package_sha256,
+                after_profile_revision=args.after_profile_revision,
+                offset=args.offset,
+                limit=args.limit,
+                member_offset=args.member_offset,
+                member_limit=args.member_limit,
             )
         else:
             raise DiagnosticError(

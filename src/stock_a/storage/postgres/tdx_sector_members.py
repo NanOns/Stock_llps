@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections import Counter
 from datetime import date
+from decimal import Decimal
+from fractions import Fraction
 import re
 from typing import Any, Iterable, Sequence
 import uuid
@@ -16,11 +18,19 @@ from stock_a.sources.tdx.sector_members import (
 )
 from stock_a.storage.postgres.source_raw import RawSourcePgError, _transaction
 
+from .price_profiles import (
+    PriceProfilePgError,
+    _PROFILE_CHANGE_CTES,
+    _profile_change_snapshot_parameters,
+    _snapshot_for_session,
+)
+
 
 MAX_SNAPSHOT_INSERTS = 8
 MAX_CATALOG_INSERTS = 12_000
 MAX_MEMBER_INSERTS = 500_000
 MAX_PAGE_SIZE = 100
+MAX_BREADTH_PAGE_SIZE = 30
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -874,6 +884,711 @@ ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         "ddl_executed": False,
         "source_zip_opened": False,
         "source_downloaded": False,
+    }
+
+
+def _breadth_source_set(
+    cursor: Any,
+    *,
+    namespace_id: str,
+    target_session: date,
+    source_set_id: str,
+    package_sha256: str,
+    profile_revision: str,
+) -> dict[str, Any]:
+    cursor.execute(
+        """SELECT source_set_id::text, target_session, package_sha256,
+       revision_id, source_capture_id::text, raw_row_count, seal_status,
+       durability_status, source_time_quality, source_available_at
+FROM stock.source_sets
+WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
+  AND target_session=%s::date AND package_sha256=%s""",
+        (namespace_id, source_set_id, target_session, package_sha256),
+    )
+    row = cursor.fetchone()
+    if row is None or row[6:8] != (
+        "SEALED",
+        "VERIFIED_POST_COMMIT_READBACK",
+    ):
+        raise TdxSectorMembersPgError(
+            "SEALED_SOURCE_SET_NOT_FOUND",
+            "未找到完全匹配且已验证耐久性的SEALED P03来源集合",
+        )
+    raw_count = int(row[5])
+    if raw_count > MAX_MEMBER_INSERTS:
+        raise TdxSectorMembersPgError(
+            "BREADTH_SOURCE_ROW_BUDGET_EXCEEDED",
+            "精确SEALED来源集合超过广度读取行数上限",
+        )
+    cursor.execute(
+        """SELECT count(*)::bigint,
+       count(DISTINCT source_symbol)::bigint,
+       count(*) FILTER (WHERE bar_status='TARGET_PRESENT')::bigint,
+       count(*) FILTER (WHERE bar_status='TARGET_MISSING')::bigint,
+       count(*) FILTER (WHERE bar_status='READ_FAILED')::bigint
+FROM stock.source_raw_daily
+WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
+  AND session_date=%s::date AND package_sha256=%s""",
+        (namespace_id, row[4], target_session, package_sha256),
+    )
+    raw_counts = cursor.fetchone()
+    if int(raw_counts[0]) != raw_count or int(raw_counts[1]) != raw_count:
+        raise TdxSectorMembersPgError(
+            "SEALED_SOURCE_RAW_COUNT_MISMATCH",
+            "精确P03来源集合与Raw代码集合分母不一致",
+        )
+    cursor.execute(
+        """SELECT count(*)::bigint,
+       count(*) FILTER (WHERE source_set_revision=%s)::bigint,
+       count(*) FILTER (WHERE source_capture_id=%s::uuid)::bigint
+FROM stock.source_symbol_price_profiles
+WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
+  AND target_session=%s::date AND package_sha256=%s
+  AND profile_revision=%s""",
+        (
+            row[3],
+            row[4],
+            namespace_id,
+            source_set_id,
+            target_session,
+            package_sha256,
+            profile_revision,
+        ),
+    )
+    profile_counts = cursor.fetchone()
+    if any(int(value) != raw_count for value in profile_counts):
+        raise TdxSectorMembersPgError(
+            "PROFILE_SOURCE_IDENTITY_MISMATCH",
+            "画像行分母、P03修订或source_capture_id与精确SEALED来源集合不一致",
+        )
+    return {
+        "source_set_id": str(row[0]),
+        "target_session": row[1],
+        "package_sha256": str(row[2]).strip(),
+        "revision_id": int(row[3]),
+        "source_capture_id": str(row[4]),
+        "source_symbol_count": raw_count,
+        "seal_status": str(row[6]),
+        "durability_status": str(row[7]),
+        "source_time_quality": str(row[8]),
+        "source_available_at": row[9].isoformat() if row[9] else None,
+        "profile_revision": profile_revision,
+    }
+
+
+def _validate_breadth_request(
+    *,
+    snapshot_id: str,
+    board_kind: str,
+    board_native_id: str | None,
+    before_session: date,
+    after_session: date,
+    research_cutoff: date,
+    identities: Sequence[str],
+    offset: int,
+    limit: int,
+    member_offset: int,
+    member_limit: int,
+) -> None:
+    _validate_snapshot_uuid(snapshot_id)
+    if board_kind not in {"INDUSTRY", "CONCEPT"}:
+        raise TdxSectorMembersPgError(
+            "BOARD_KIND_INVALID", "板块类型必须为INDUSTRY或CONCEPT"
+        )
+    if board_native_id is not None and (
+        not isinstance(board_native_id, str) or not board_native_id.strip()
+    ):
+        raise TdxSectorMembersPgError(
+            "BOARD_ID_INVALID", "原生板块编号必须是非空精确字符串"
+        )
+    if (
+        type(before_session) is not date
+        or type(after_session) is not date
+        or type(research_cutoff) is not date
+        or before_session >= after_session
+        or after_session > research_cutoff
+    ):
+        raise TdxSectorMembersPgError(
+            "BREADTH_SESSION_RANGE_INVALID",
+            "对照会话必须递增且结束日不晚于显式研究截止日",
+        )
+    if len(identities) != 6 or any(not isinstance(value, str) for value in identities):
+        raise TdxSectorMembersPgError(
+            "BREADTH_PROFILE_IDENTITY_INVALID",
+            "两端必须提供有效source_set UUID、包SHA和profile revision SHA",
+        )
+    _validate_source_set_uuid(identities[0])
+    _validate_source_set_uuid(identities[3])
+    if any(_SHA256.fullmatch(identities[index]) is None for index in (1, 2, 4, 5)):
+        raise TdxSectorMembersPgError(
+            "BREADTH_PROFILE_IDENTITY_INVALID",
+            "两端必须提供有效source_set UUID、包SHA和profile revision SHA",
+        )
+    if (
+        type(offset) is not int
+        or not 0 <= offset <= MAX_CATALOG_INSERTS
+        or type(limit) is not int
+        or not 1 <= limit <= MAX_BREADTH_PAGE_SIZE
+        or type(member_offset) is not int
+        or not 0 <= member_offset <= MAX_MEMBER_INSERTS
+        or type(member_limit) is not int
+        or not 1 <= member_limit <= MAX_BREADTH_PAGE_SIZE
+    ):
+        raise TdxSectorMembersPgError(
+            "BREADTH_PAGE_INVALID",
+            "板块和变化成员分页偏移或大小超出固定范围（每页最多30）",
+        )
+
+
+def _summarize_sector_breadth_rows(
+    rows: Sequence[dict[str, Any]],
+    *,
+    source_snapshot: dict[str, Any],
+    before_source: dict[str, Any],
+    after_source: dict[str, Any],
+    member_offset: int,
+    member_limit: int,
+) -> list[dict[str, Any]]:
+    relation_names = ("ABOVE", "EQUAL", "BELOW", "UNKNOWN")
+    transition_names = tuple(
+        f"{before}_TO_{after}"
+        for before in ("BELOW", "EQUAL", "ABOVE")
+        for after in ("BELOW", "EQUAL", "ABOVE")
+    )
+    grouped: dict[tuple[str, str], dict[str, Any]] = {}
+    for row in rows:
+        key = (str(row["board_kind"]), str(row["board_native_id"]))
+        item = grouped.setdefault(
+            key,
+            {
+                "board_kind": key[0],
+                "board_native_id": key[1],
+                "board_name": str(row["board_name"]),
+                "members": {},
+            },
+        )
+        symbol = row["source_symbol"]
+        if symbol is None:
+            continue
+        symbol = str(symbol)
+        if symbol in item["members"]:
+            raise TdxSectorMembersPgError(
+                "BREADTH_MEMBER_DUPLICATE",
+                "精确板块成员与两日画像连接产生重复来源代码",
+            )
+        item["members"][symbol] = row
+
+    summaries: list[dict[str, Any]] = []
+    for key in sorted(grouped, key=lambda value: (value[0], value[1])):
+        board = grouped[key]
+        members = board["members"]
+        side_counts = {
+            side: {
+                "source_member_total": len(members),
+                "matched_b_t": 0,
+                "profile_available": 0,
+                "positions": dict.fromkeys(relation_names, 0),
+                "unknown_reasons": Counter(),
+            }
+            for side in ("before", "after")
+        }
+        transitions = dict.fromkeys(transition_names, 0)
+        both_days_matched = 0
+        before_only = 0
+        after_only = 0
+        incompatible_common = 0
+        changed_members: list[dict[str, Any]] = []
+
+        for symbol in sorted(members):
+            row = members[symbol]
+            observations: dict[str, str] = {}
+            for side, field_prefix in (("before", "before"), ("after", "after")):
+                counts = side_counts[side]
+                matched = bool(row[f"{field_prefix}_raw_matched"])
+                present = bool(row[f"{field_prefix}_profile_present"])
+                if matched:
+                    counts["matched_b_t"] += 1
+                if present:
+                    counts["profile_available"] += 1
+                relation = row[f"{field_prefix}_relation"]
+                if not matched:
+                    relation = "UNKNOWN"
+                    reason = "NOT_IN_EXACT_SEALED_B_T"
+                elif not present:
+                    relation = "UNKNOWN"
+                    reason = "PROFILE_NOT_STORED"
+                elif relation not in {"ABOVE", "EQUAL", "BELOW"}:
+                    relation = "UNKNOWN"
+                    reason = row[f"{field_prefix}_unknown_reason"] or "RELATION_UNKNOWN"
+                else:
+                    reason = None
+                counts["positions"][relation] += 1
+                if relation == "UNKNOWN":
+                    counts["unknown_reasons"][str(reason)] += 1
+                else:
+                    observations[side] = str(relation)
+
+            before_match = bool(row["before_raw_matched"])
+            after_match = bool(row["after_raw_matched"])
+            if before_match and after_match:
+                both_days_matched += 1
+            elif before_match:
+                before_only += 1
+            elif after_match:
+                after_only += 1
+
+            before_relation = observations.get("before")
+            after_relation = observations.get("after")
+            pair_compatible = (
+                before_match
+                and after_match
+                and bool(row["before_profile_present"])
+                and bool(row["after_profile_present"])
+                and bool(row["pair_compatible"])
+                and before_relation is not None
+                and after_relation is not None
+            )
+            if before_match and after_match and not pair_compatible:
+                incompatible_common += 1
+            if not pair_compatible:
+                continue
+            transition = f"{before_relation}_TO_{after_relation}"
+            transitions[transition] += 1
+            if before_relation != after_relation:
+                change_type = (
+                    "STRICT_CROSS_UP"
+                    if transition == "BELOW_TO_ABOVE"
+                    else "STRICT_CROSS_DOWN"
+                    if transition == "ABOVE_TO_BELOW"
+                    else "EQUAL_BOUNDARY_CHANGE"
+                    if "EQUAL" in transition
+                    else "RELATION_CHANGED"
+                )
+                changed_members.append(
+                    {
+                        "source_symbol": symbol,
+                        "before_relation": before_relation,
+                        "after_relation": after_relation,
+                        "transition": transition,
+                        "change_type": change_type,
+                        "before_raw_close": row["before_raw_close"],
+                        "before_ma20": row["before_ma20"],
+                        "before_ma20_quality": row["before_ma20_quality"],
+                        "after_raw_close": row["after_raw_close"],
+                        "after_ma20": row["after_ma20"],
+                        "after_ma20_quality": row["after_ma20_quality"],
+                        "membership_quality": row["membership_quality"],
+                    }
+                )
+
+        member_total = len(members)
+        per_day: dict[str, dict[str, Any]] = {}
+        for side, counts in side_counts.items():
+            positions = counts["positions"]
+            if sum(positions.values()) != member_total:
+                raise TdxSectorMembersPgError(
+                    "BREADTH_POSITION_INVARIANT_FAILED",
+                    f"{side}端四类MA20状态未覆盖完整板块成员分母",
+                )
+            if sum(counts["unknown_reasons"].values()) != positions["UNKNOWN"]:
+                raise TdxSectorMembersPgError(
+                    "BREADTH_UNKNOWN_REASON_INVARIANT_FAILED",
+                    f"{side}端UNKNOWN主原因未互斥覆盖",
+                )
+            evaluated = sum(positions[name] for name in ("ABOVE", "EQUAL", "BELOW"))
+            per_day[side] = {
+                "target_session": (
+                    before_source["target_session"].isoformat()
+                    if side == "before"
+                    else after_source["target_session"].isoformat()
+                ),
+                "source_member_total": member_total,
+                "matched_b_t": counts["matched_b_t"],
+                "unmatched_b_t": member_total - counts["matched_b_t"],
+                "profile_available_count": counts["profile_available"],
+                "profile_missing_count": member_total - counts["profile_available"],
+                "evaluated_count": evaluated,
+                "positions": positions,
+                "eligible_coverage_fraction": {
+                    "numerator": evaluated,
+                    "denominator": member_total,
+                },
+                "unknown_reasons": [
+                    {"reason": reason, "count": count}
+                    for reason, count in sorted(counts["unknown_reasons"].items())
+                ],
+            }
+
+        compatible_count = sum(transitions.values())
+        if compatible_count != both_days_matched - incompatible_common:
+            raise TdxSectorMembersPgError(
+                "BREADTH_COMMON_SET_INVARIANT_FAILED",
+                "共同可比集合不等于两端共同Raw成员扣除不可比项",
+            )
+        before_above = sum(
+            count
+            for transition, count in transitions.items()
+            if transition.startswith("ABOVE_TO_")
+        )
+        after_above = sum(
+            count
+            for transition, count in transitions.items()
+            if transition.endswith("_TO_ABOVE")
+        )
+        delta = (
+            Fraction(100 * (after_above - before_above), compatible_count)
+            if compatible_count
+            else None
+        )
+        changed_members.sort(key=lambda value: value["source_symbol"])
+        changed_total = len(changed_members)
+        page = changed_members[member_offset : member_offset + member_limit]
+        summaries.append(
+            {
+                "board_kind": board["board_kind"],
+                "board_native_id": board["board_native_id"],
+                "board_name": board["board_name"],
+                "source_member_total": member_total,
+                "empty_board": member_total == 0,
+                "before": per_day["before"],
+                "after": per_day["after"],
+                "paired": {
+                    "both_days_matched_count": both_days_matched,
+                    "before_only_b_t_count": before_only,
+                    "after_only_b_t_count": after_only,
+                    "incompatible_common_count": incompatible_common,
+                    "compatible_count": compatible_count,
+                    "transition_matrix": transitions,
+                    "strict_cross_up_count": transitions["BELOW_TO_ABOVE"],
+                    "strict_cross_down_count": transitions["ABOVE_TO_BELOW"],
+                    "equal_transition_count": sum(
+                        count
+                        for transition, count in transitions.items()
+                        if "EQUAL" in transition
+                    ),
+                    "paired_above_before_count": before_above,
+                    "paired_above_after_count": after_above,
+                    "delta_above_percentage_points": (
+                        {
+                            "numerator": 100 * (after_above - before_above),
+                            "denominator": compatible_count,
+                            "decimal_4dp": f"{Decimal(delta.numerator) / Decimal(delta.denominator):.4f}",
+                        }
+                        if delta is not None
+                        else None
+                    ),
+                    "zero_common_set_is_unknown": compatible_count == 0,
+                },
+                "changed_members": page,
+                "changed_member_count": changed_total,
+                "changed_member_offset": member_offset,
+                "changed_member_limit": member_limit,
+                "changed_member_display_count": len(page),
+                "changed_member_next_offset": (
+                    member_offset + len(page)
+                    if member_offset + len(page) < changed_total
+                    else None
+                ),
+                "members_action_identity": {
+                    "operation": "source-tdx-sector-members members",
+                    "snapshot_id": source_snapshot["snapshot_id"],
+                    "board_kind": board["board_kind"],
+                    "board_native_id": board["board_native_id"],
+                    "target_session": after_source["target_session"].isoformat(),
+                    "research_cutoff": after_source["research_cutoff"].isoformat(),
+                    "source_set_id": after_source["source_set_id"],
+                    "package_sha256": after_source["package_sha256"],
+                    "profile_revision": after_source["profile_revision"],
+                    "offset": 0,
+                    "limit": 30,
+                },
+            }
+        )
+    return summaries
+
+
+def query_sector_breadth(
+    config: dict[str, Any],
+    *,
+    snapshot_id: str,
+    board_kind: str,
+    board_native_id: str | None,
+    before_session: date,
+    after_session: date,
+    research_cutoff: date,
+    before_source_set_id: str,
+    before_package_sha256: str,
+    before_profile_revision: str,
+    after_source_set_id: str,
+    after_package_sha256: str,
+    after_profile_revision: str,
+    official_calendar_id: str,
+    official_calendar_revision: str,
+    offset: int,
+    limit: int,
+    member_offset: int,
+    member_limit: int,
+) -> dict[str, Any]:
+    identities = (
+        before_source_set_id,
+        before_package_sha256,
+        before_profile_revision,
+        after_source_set_id,
+        after_package_sha256,
+        after_profile_revision,
+    )
+    _validate_breadth_request(
+        snapshot_id=snapshot_id,
+        board_kind=board_kind,
+        board_native_id=board_native_id,
+        before_session=before_session,
+        after_session=after_session,
+        research_cutoff=research_cutoff,
+        identities=identities,
+        offset=offset,
+        limit=limit,
+        member_offset=member_offset,
+        member_limit=member_limit,
+    )
+    if not official_calendar_id or not official_calendar_revision:
+        raise TdxSectorMembersPgError(
+            "OFFICIAL_CALENDAR_IDENTITY_INVALID",
+            "必须绑定正式官方日历身份及修订",
+        )
+
+    try:
+        with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+            cursor.execute(
+                """SELECT snapshot_id::text, source_kind, source_file_sha256,
+       source_path_role, source_file_size, observed_at, source_valid_on,
+       source_known_at, source_available_at, clock_quality, research_mode,
+       parse_contract_version, rows_declared, source_quality
+FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
+                (snapshot_id,),
+            )
+            snapshot_row = cursor.fetchone()
+            if snapshot_row is None:
+                raise TdxSectorMembersPgError(
+                    "SECTOR_SNAPSHOT_NOT_FOUND", "未找到精确TDX成员来源快照"
+                )
+            source_snapshot = _snapshot_payload(snapshot_row)
+            if (
+                source_snapshot["research_mode"]
+                != "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"
+            ):
+                raise TdxSectorMembersPgError(
+                    "SECTOR_SNAPSHOT_MODE_REJECTED",
+                    "只接受明确标注为当前成员后验回看的TDX来源快照",
+                )
+            try:
+                before_profile = _snapshot_for_session(
+                    cursor,
+                    namespace_id=namespace_id,
+                    target_session=before_session,
+                    max_target_session=research_cutoff,
+                    source_set_id=before_source_set_id,
+                    package_sha256=before_package_sha256,
+                    profile_revision=before_profile_revision,
+                )
+                after_profile = _snapshot_for_session(
+                    cursor,
+                    namespace_id=namespace_id,
+                    target_session=after_session,
+                    max_target_session=research_cutoff,
+                    source_set_id=after_source_set_id,
+                    package_sha256=after_package_sha256,
+                    profile_revision=after_profile_revision,
+                )
+            except PriceProfilePgError as error:
+                raise TdxSectorMembersPgError(error.code, str(error)) from error
+
+            for profile in (before_profile, after_profile):
+                if (
+                    profile["history_calendar_id"] != official_calendar_id
+                    or profile["history_calendar_revision"]
+                    != official_calendar_revision
+                ):
+                    raise TdxSectorMembersPgError(
+                        "PROFILE_CALENDAR_IDENTITY_MISMATCH",
+                        "画像快照官方日历身份或修订与现行官方日历不一致",
+                    )
+
+            before_source = _breadth_source_set(
+                cursor,
+                namespace_id=namespace_id,
+                target_session=before_session,
+                source_set_id=before_source_set_id,
+                package_sha256=before_package_sha256,
+                profile_revision=before_profile_revision,
+            )
+            after_source = _breadth_source_set(
+                cursor,
+                namespace_id=namespace_id,
+                target_session=after_session,
+                source_set_id=after_source_set_id,
+                package_sha256=after_package_sha256,
+                profile_revision=after_profile_revision,
+            )
+            before_source["research_cutoff"] = research_cutoff
+            after_source["research_cutoff"] = research_cutoff
+
+            filter_sql = ""
+            filter_params: tuple[Any, ...] = ()
+            if board_native_id is not None:
+                filter_sql = " AND c.board_native_id=%s"
+                filter_params = (board_native_id,)
+            cursor.execute(
+                """SELECT count(DISTINCT c.board_native_id)::bigint,
+       count(m.source_symbol)::bigint
+FROM stock.tdx_sector_catalog c
+LEFT JOIN stock.tdx_sector_members m
+  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
+ AND m.board_native_id=c.board_native_id
+WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
+                + filter_sql,
+                (snapshot_id, board_kind, *filter_params),
+            )
+            catalog_count, member_count = (int(value) for value in cursor.fetchone())
+            if board_native_id is not None and catalog_count == 0:
+                raise TdxSectorMembersPgError(
+                    "SECTOR_BOARD_NOT_FOUND",
+                    "指定板块类型和原生编号不在精确成员快照目录中",
+                )
+            if catalog_count > MAX_CATALOG_INSERTS or member_count > MAX_MEMBER_INSERTS:
+                raise TdxSectorMembersPgError(
+                    "BREADTH_MEMBER_BUDGET_EXCEEDED",
+                    "所选板块目录或完整成员关系超过固定只读预算",
+                )
+
+            member_filter_sql = ""
+            if board_native_id is not None:
+                member_filter_sql = " AND c.board_native_id=%s"
+            query = (
+                _PROFILE_CHANGE_CTES
+                + """
+SELECT c.board_kind, c.board_native_id, c.board_name,
+       m.source_symbol, m.membership_quality, m.source_record_ordinal,
+       (rb.source_symbol IS NOT NULL) AS before_raw_matched,
+       rb.raw_close::text AS before_raw_close,
+       (ra.source_symbol IS NOT NULL) AS after_raw_matched,
+       ra.raw_close::text AS after_raw_close,
+       x.before_present AS before_profile_present,
+       x.after_present AS after_profile_present,
+       x.before_source_pool_close_ma20_relation AS before_relation,
+       x.before_source_pool_unknown_reason AS before_unknown_reason,
+       x.after_source_pool_close_ma20_relation AS after_relation,
+       x.after_source_pool_unknown_reason AS after_unknown_reason,
+       x.source_pool_pair_compatible AS pair_compatible,
+       x.before_ma20::text AS before_ma20,
+       x.before_ma20_quality AS before_ma20_quality,
+       x.before_ma20_reason AS before_ma20_reason,
+       x.after_ma20::text AS after_ma20,
+       x.after_ma20_quality AS after_ma20_quality,
+       x.after_ma20_reason AS after_ma20_reason
+FROM stock.tdx_sector_catalog c
+LEFT JOIN stock.tdx_sector_members m
+  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
+ AND m.board_native_id=c.board_native_id
+LEFT JOIN classified x ON x.source_symbol=m.source_symbol
+LEFT JOIN stock.source_raw_daily rb
+  ON rb.namespace_id=%s::uuid AND rb.source_capture_id=%s::uuid
+ AND rb.source_symbol=m.source_symbol AND rb.session_date=%s::date
+ AND rb.package_sha256=%s
+LEFT JOIN stock.source_raw_daily ra
+  ON ra.namespace_id=%s::uuid AND ra.source_capture_id=%s::uuid
+ AND ra.source_symbol=m.source_symbol AND ra.session_date=%s::date
+ AND ra.package_sha256=%s
+WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
+                + member_filter_sql
+                + """
+ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
+"""
+            )
+            parameters = (
+                *_profile_change_snapshot_parameters(namespace_id, before_profile),
+                *_profile_change_snapshot_parameters(namespace_id, after_profile),
+                namespace_id,
+                before_source["source_capture_id"],
+                before_session,
+                before_package_sha256,
+                namespace_id,
+                after_source["source_capture_id"],
+                after_session,
+                after_package_sha256,
+                snapshot_id,
+                board_kind,
+                *filter_params,
+            )
+            cursor.execute(query, parameters)
+            names = [column.name for column in cursor.description]
+            member_rows = [
+                dict(zip(names, row, strict=True)) for row in cursor.fetchall()
+            ]
+    except TdxSectorMembersPgError:
+        raise
+    except RawSourcePgError as error:
+        raise TdxSectorMembersPgError(error.code, str(error)) from error
+
+    summaries = _summarize_sector_breadth_rows(
+        member_rows,
+        source_snapshot=source_snapshot,
+        before_source=before_source,
+        after_source=after_source,
+        member_offset=member_offset,
+        member_limit=member_limit,
+    )
+    page = summaries[offset : offset + limit]
+    return {
+        "status": "AVAILABLE" if summaries else "EMPTY",
+        "analysis_scope": "PERSISTED_TDX_SECTOR_MEMBER_MA20_BREADTH",
+        "snapshot": {
+            "snapshot_id": source_snapshot["snapshot_id"],
+            "source_kind": source_snapshot["source_kind"],
+            "source_file_sha256": source_snapshot["source_file_sha256"],
+            "source_path_role": source_snapshot["source_path_role"],
+            "source_file_size": source_snapshot["source_file_size"],
+            "source_observed_at": source_snapshot["observed_at"],
+            "source_valid_on": source_snapshot["source_valid_on"],
+            "source_known_at": source_snapshot["source_known_at"],
+            "source_available_at": source_snapshot["source_available_at"],
+            "source_clock_quality": source_snapshot["clock_quality"],
+            "research_mode": source_snapshot["research_mode"],
+            "source_quality": source_snapshot["source_quality"],
+            "quality_counts": _source_quality_counts(source_snapshot["source_quality"]),
+        },
+        "before_snapshot": before_profile,
+        "after_snapshot": after_profile,
+        "before_source_set": before_source,
+        "after_source_set": after_source,
+        "filter": {"board_kind": board_kind, "board_native_id": board_native_id},
+        "board_total_count": len(summaries),
+        "offset": offset,
+        "limit": limit,
+        "display_count": len(page),
+        "empty_page_out_of_range": bool(summaries and offset >= len(summaries)),
+        "member_offset": member_offset,
+        "member_limit": member_limit,
+        "boards": page,
+        "research_scope": "SOURCE_SYMBOL_ONLY",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE/NON_PIT_RETROSPECTIVE",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "formal_historical_sector_qualification": "UNKNOWN_NOT_CONNECTED",
+        "rotation_score_or_rank_created": False,
+        "database_read": {
+            "database": "stock_a",
+            "schema": "stock",
+            "account": "stock_a",
+            "server": "127.0.0.1:5432",
+            "transaction": "REPEATABLE READ READ ONLY",
+            "database_write_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+            "dml_rows_affected": 0,
+            "core_recalculated": False,
+            "source_files_read": False,
+            "source_downloaded": False,
+        },
     }
 
 
