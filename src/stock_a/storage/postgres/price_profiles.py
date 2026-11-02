@@ -202,6 +202,18 @@ _BIAS20_ATR_BAND_DEFINITIONS = {
         "definition": "Core质量、精确分数、RAW价格坐标或相关价格质量不可用。",
     },
 }
+_BIAS20_ATR_STATE_VALUES = frozenset(
+    {
+        "ALL",
+        "FAR_BELOW_ONE",
+        "NEAR_BELOW_ONE",
+        "AT_MA20",
+        "NEAR_ABOVE_ONE",
+        "FAR_ABOVE_ONE",
+        "UNKNOWN",
+        "ABSENT",
+    }
+)
 _BIAS20_ATR_UNKNOWN_SQL = """(
     p.bias20_atr_quality IS DISTINCT FROM 'OBSERVED'
     OR p.bias20_atr_exact_numerator IS NULL
@@ -891,7 +903,137 @@ ORDER BY p.source_set_id, p.profile_revision""",
     return snapshot
 
 
-_PROFILE_CHANGE_CTES = """
+def _bias20_atr_state_expression(side: str) -> str:
+    if side not in {"before", "after"}:
+        raise ValueError("side must be before or after")
+    return f"""CASE
+        WHEN NOT {side}_present THEN 'ABSENT'::text
+        WHEN {side}_bias20_atr_quality IS DISTINCT FROM 'OBSERVED'
+          OR {side}_bias20_atr_exact_numerator IS NULL
+          OR {side}_bias20_atr_exact_denominator IS NULL
+          OR {side}_bias20_atr_exact_denominator <= 0
+          OR {side}_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+          OR {side}_ma20_quality IS DISTINCT FROM 'OBSERVED'
+          OR {side}_ma20 IS NULL
+          OR {side}_atr20_quality IS DISTINCT FROM 'OBSERVED'
+          OR {side}_atr20 IS NULL
+          OR {side}_atr20 <= 0
+          OR NOT {side}_raw_record_present
+          OR {side}_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+          OR {side}_raw_close IS NULL
+          THEN 'UNKNOWN'::text
+        WHEN {side}_bias20_atr_exact_numerator::numeric
+             < -{side}_bias20_atr_exact_denominator::numeric
+          THEN 'FAR_BELOW_ONE'::text
+        WHEN {side}_bias20_atr_exact_numerator::numeric = 0
+          THEN 'AT_MA20'::text
+        WHEN {side}_bias20_atr_exact_numerator::numeric < 0
+          THEN 'NEAR_BELOW_ONE'::text
+        WHEN {side}_bias20_atr_exact_numerator::numeric
+             <= {side}_bias20_atr_exact_denominator::numeric
+          THEN 'NEAR_ABOVE_ONE'::text
+        ELSE 'FAR_ABOVE_ONE'::text
+    END"""
+
+
+def _bias20_atr_state_reason_expression(side: str) -> str:
+    if side not in {"before", "after"}:
+        raise ValueError("side must be before or after")
+    return f"""CASE
+        WHEN NOT {side}_present THEN 'NO_PERSISTED_PROFILE'
+        WHEN {side}_bias20_atr_quality IS DISTINCT FROM 'OBSERVED'
+          THEN COALESCE({side}_bias20_atr_reason,
+                        'BIAS20_ATR_QUALITY=' ||
+                        COALESCE({side}_bias20_atr_quality, 'UNKNOWN'))
+        WHEN {side}_bias20_atr_exact_numerator IS NULL
+          OR {side}_bias20_atr_exact_denominator IS NULL
+          OR {side}_bias20_atr_exact_denominator <= 0
+          THEN 'BIAS20_ATR_EXACT_VALUE_UNAVAILABLE'
+        WHEN {side}_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+          THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'
+        WHEN {side}_ma20_quality IS DISTINCT FROM 'OBSERVED'
+          OR {side}_ma20 IS NULL
+          THEN COALESCE({side}_ma20_reason,
+                        'MA20_QUALITY_OR_VALUE_UNAVAILABLE')
+        WHEN {side}_atr20_quality IS DISTINCT FROM 'OBSERVED'
+          OR {side}_atr20 IS NULL
+          OR {side}_atr20 <= 0
+          THEN COALESCE({side}_atr20_reason,
+                        'ATR20_NOT_POSITIVE_OR_UNAVAILABLE')
+        WHEN NOT {side}_raw_record_present
+          THEN 'RAW_ROW_MISSING'
+        WHEN {side}_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+          OR {side}_raw_close IS NULL
+          THEN 'RAW_PRICE_QUALITY_UNKNOWN:' ||
+               COALESCE({side}_raw_price_reason,
+                        {side}_window_reason,
+                        'NO_REASON')
+        ELSE NULL::text
+    END"""
+
+
+_BIAS20_ATR_PAIR_COMPATIBILITY_SQL = """CASE
+    WHEN NOT before_present OR NOT after_present THEN 'SINGLE_SIDE'::text
+    WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+      OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+      OR NOT core_compatible THEN 'PAIR_INCOMPARABLE'::text
+    WHEN before_bias20_atr_state='UNKNOWN'
+      OR after_bias20_atr_state='UNKNOWN' THEN 'PAIR_UNKNOWN'::text
+    ELSE 'COMPARABLE'::text
+END"""
+
+
+_BIAS20_ATR_PAIR_REASON_SQL = """CASE
+    WHEN NOT before_present THEN 'BEFORE_PROFILE_ABSENT'
+    WHEN NOT after_present THEN 'AFTER_PROFILE_ABSENT'
+    WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
+      THEN 'PRICE_COORDINATE_MISMATCH:' ||
+           COALESCE(before_price_coordinate, 'UNKNOWN') || '->' ||
+           COALESCE(after_price_coordinate, 'UNKNOWN')
+    WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+      OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+      THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED:' ||
+           COALESCE(before_price_coordinate, 'UNKNOWN') || '->' ||
+           COALESCE(after_price_coordinate, 'UNKNOWN')
+    WHEN NOT core_compatible AND before_semantics_sha256
+         IS DISTINCT FROM after_semantics_sha256
+      THEN 'CORE_SEMANTICS_SHA_MISMATCH:' ||
+           COALESCE(before_semantics_sha256, 'UNKNOWN') || '->' ||
+           COALESCE(after_semantics_sha256, 'UNKNOWN')
+    WHEN NOT core_compatible AND before_producer_contract
+         IS DISTINCT FROM after_producer_contract
+      THEN 'CORE_PRODUCER_CONTRACT_MISMATCH:' ||
+           COALESCE(before_producer_contract, 'UNKNOWN') || '->' ||
+           COALESCE(after_producer_contract, 'UNKNOWN')
+    WHEN NOT core_compatible AND before_producer_version
+         IS DISTINCT FROM after_producer_version
+      THEN 'CORE_PRODUCER_VERSION_MISMATCH:' ||
+           COALESCE(before_producer_version, 'UNKNOWN') || '->' ||
+           COALESCE(after_producer_version, 'UNKNOWN')
+    WHEN NOT core_compatible AND before_calculation_scope
+         IS DISTINCT FROM after_calculation_scope
+      THEN 'CORE_CALCULATION_SCOPE_MISMATCH:' ||
+           COALESCE(before_calculation_scope, 'UNKNOWN') || '->' ||
+           COALESCE(after_calculation_scope, 'UNKNOWN')
+    WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'
+    WHEN before_bias20_atr_state='UNKNOWN'
+      AND after_bias20_atr_state='UNKNOWN'
+      THEN 'BOTH_ENDPOINTS_UNKNOWN:' ||
+           COALESCE(before_bias20_atr_state_reason, 'NO_REASON') || ' / ' ||
+           COALESCE(after_bias20_atr_state_reason, 'NO_REASON')
+    WHEN before_bias20_atr_state='UNKNOWN'
+      THEN 'BEFORE_ENDPOINT_UNKNOWN:' ||
+           COALESCE(before_bias20_atr_state_reason, 'NO_REASON')
+    WHEN after_bias20_atr_state='UNKNOWN'
+      THEN 'AFTER_ENDPOINT_UNKNOWN:' ||
+           COALESCE(after_bias20_atr_state_reason, 'NO_REASON')
+    WHEN before_bias20_atr_state IS DISTINCT FROM after_bias20_atr_state
+      THEN 'COMPARABLE_STATE_CHANGED'
+    ELSE 'COMPARABLE_STATE_UNCHANGED'
+END"""
+
+
+_PROFILE_CHANGE_CTES = f"""
 WITH old_rows AS (
     SELECT p.*,
            r.source_symbol IS NOT NULL AS joined_raw_present,
@@ -1000,6 +1142,10 @@ WITH old_rows AS (
            n.pos60 AS after_pos60,
            o.bias20_atr AS before_bias20_atr,
            n.bias20_atr AS after_bias20_atr,
+           o.bias20_atr_exact_numerator AS before_bias20_atr_exact_numerator,
+           n.bias20_atr_exact_numerator AS after_bias20_atr_exact_numerator,
+           o.bias20_atr_exact_denominator AS before_bias20_atr_exact_denominator,
+           n.bias20_atr_exact_denominator AS after_bias20_atr_exact_denominator,
            o.ma20_quality AS before_ma20_quality,
            n.ma20_quality AS after_ma20_quality,
            o.price_coordinate AS before_price_coordinate,
@@ -1178,7 +1324,7 @@ WITH old_rows AS (
             AND before_board IS NOT DISTINCT FROM after_board), FALSE)
                 AS source_pool_pair_compatible
     FROM source_pool_relations
-), classified AS (
+), classified_base AS (
     SELECT *,
            array_remove(ARRAY[
                CASE WHEN before_present AND NOT after_present THEN 'BEFORE_ONLY'::text END,
@@ -1242,6 +1388,39 @@ WITH old_rows AS (
                CASE WHEN core_compatible AND (before_bias20_atr_quality IS DISTINCT FROM after_bias20_atr_quality OR before_bias20_atr_reason IS DISTINCT FROM after_bias20_atr_reason) THEN 'core.bias20_atr'::text END
            ], NULL) AS core_quality_changed_fields
     FROM relations
+), bias20_atr_states AS (
+    SELECT *,
+           {_bias20_atr_state_expression("before")}
+               AS before_bias20_atr_state,
+           {_bias20_atr_state_expression("after")}
+               AS after_bias20_atr_state,
+           {_bias20_atr_state_reason_expression("before")}
+               AS before_bias20_atr_state_reason,
+           {_bias20_atr_state_reason_expression("after")}
+               AS after_bias20_atr_state_reason
+    FROM classified_base
+), bias20_atr_pairs AS (
+    SELECT *,
+           {_BIAS20_ATR_PAIR_COMPATIBILITY_SQL}
+               AS bias20_atr_pair_compatibility
+    FROM bias20_atr_states
+), classified AS (
+    SELECT *,
+           {_BIAS20_ATR_PAIR_REASON_SQL} AS bias20_atr_pair_reason,
+           CASE
+             WHEN before_bias20_atr_state='ABSENT'
+               THEN 'BEFORE_ABSENT'::text
+             WHEN after_bias20_atr_state='ABSENT'
+               THEN 'AFTER_ABSENT'::text
+             WHEN bias20_atr_pair_compatibility='PAIR_INCOMPARABLE'
+               THEN 'PAIR_INCOMPARABLE'::text
+             WHEN bias20_atr_pair_compatibility='PAIR_UNKNOWN'
+               THEN 'PAIR_UNKNOWN'::text
+             WHEN before_bias20_atr_state IS DISTINCT FROM after_bias20_atr_state
+               THEN 'COMPARABLE_STATE_CHANGED'::text
+             ELSE 'COMPARABLE_STATE_UNCHANGED'::text
+           END AS bias20_atr_transition_status
+    FROM bias20_atr_pairs
 )
 """
 
@@ -1396,6 +1575,8 @@ def read_profile_change_page(
     change_type: str = "ALL",
     profile_field_id: str | None = None,
     profile_change_kind: str | None = None,
+    before_bias20_atr_state: str = "ALL",
+    after_bias20_atr_state: str = "ALL",
     before_source_set_id: str | None = None,
     before_package_sha256: str | None = None,
     before_profile_revision: str | None = None,
@@ -1436,6 +1617,16 @@ def read_profile_change_page(
         )
     if change_type not in change_types:
         raise PriceProfilePgError("PROFILE_CHANGE_FILTER_INVALID", "变化类型筛选值无效")
+    if (
+        not isinstance(before_bias20_atr_state, str)
+        or before_bias20_atr_state not in _BIAS20_ATR_STATE_VALUES
+        or not isinstance(after_bias20_atr_state, str)
+        or after_bias20_atr_state not in _BIAS20_ATR_STATE_VALUES
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_BIAS20_ATR_STATE_INVALID",
+            "双日MA20-ATR距离状态只接受ALL、五个精确数值状态、UNKNOWN或ABSENT",
+        )
     profile_change_kinds = {
         "QUALITY_CHANGED",
         "STATUS_CHANGED",
@@ -1596,17 +1787,26 @@ LIMIT %s""",
         highlight_rows = [
             dict(zip(highlight_names, row, strict=True)) for row in cursor.fetchall()
         ]
-        page_conditions = [
-            "cardinality(change_types)>0",
-            "(%s='ALL' OR %s=ANY(change_types))",
-            "(%s::text IS NULL OR strpos(source_symbol,%s::text)>0)",
-        ]
-        page_filter_parameters: list[Any] = [
-            change_type,
-            change_type,
-            symbol_search,
-            symbol_search,
-        ]
+        has_bias20_atr_state_filter = (
+            before_bias20_atr_state != "ALL" or after_bias20_atr_state != "ALL"
+        )
+        page_conditions = []
+        page_filter_parameters: list[Any] = []
+        if not has_bias20_atr_state_filter:
+            page_conditions.append("cardinality(change_types)>0")
+            page_conditions.append("(%s='ALL' OR %s=ANY(change_types))")
+            page_filter_parameters.extend((change_type, change_type))
+        elif change_type != "ALL":
+            page_conditions.append("%s=ANY(change_types)")
+            page_filter_parameters.append(change_type)
+        page_conditions.append("(%s::text IS NULL OR strpos(source_symbol,%s::text)>0)")
+        page_filter_parameters.extend((symbol_search, symbol_search))
+        if before_bias20_atr_state != "ALL":
+            page_conditions.append("before_bias20_atr_state=%s")
+            page_filter_parameters.append(before_bias20_atr_state)
+        if after_bias20_atr_state != "ALL":
+            page_conditions.append("after_bias20_atr_state=%s")
+            page_filter_parameters.append(after_bias20_atr_state)
         if profile_field_id is not None and profile_change_kind is not None:
             page_conditions.append(
                 """profile_compatible
@@ -1686,7 +1886,18 @@ LIMIT %s""",
        before_prior_high20_quality, after_prior_high20_quality, before_prior_high20_reason, after_prior_high20_reason,
        before_ret20_quality, after_ret20_quality, before_ret20_reason, after_ret20_reason,
        before_pos60_quality, after_pos60_quality, before_pos60_reason, after_pos60_reason,
-       before_bias20_atr_quality, after_bias20_atr_quality, before_bias20_atr_reason, after_bias20_atr_reason,
+       before_bias20_atr_quality, after_bias20_atr_quality,
+       before_bias20_atr_reason, after_bias20_atr_reason,
+       before_raw_record_present, after_raw_record_present,
+       before_target_price_quality, after_target_price_quality,
+       before_atr20, after_atr20,
+       before_bias20_atr, after_bias20_atr,
+       before_bias20_atr_exact_numerator, after_bias20_atr_exact_numerator,
+       before_bias20_atr_exact_denominator, after_bias20_atr_exact_denominator,
+       before_bias20_atr_state, after_bias20_atr_state,
+       before_bias20_atr_state_reason, after_bias20_atr_state_reason,
+       bias20_atr_pair_compatibility, bias20_atr_pair_reason,
+       bias20_atr_transition_status,
        count(*) OVER ()::bigint AS filtered_total
 FROM classified
 """
@@ -1822,6 +2033,11 @@ LIMIT %s OFFSET %s""",
             if profile_field_id is not None
             else None
         ),
+        "bias20_atr_state_filter": {
+            "before": before_bias20_atr_state,
+            "after": after_bias20_atr_state,
+            "uses_full_source_union": has_bias20_atr_state_filter,
+        },
         "rows": rows,
         "database_write": False,
         "core_recalculated": False,

@@ -790,6 +790,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "change_type",
                         "profile_field_id",
                         "profile_change_kind",
+                        "before_bias20_atr_state",
+                        "after_bias20_atr_state",
                     },
                 )
                 if not {"before_session", "after_session"}.issubset(values):
@@ -824,6 +826,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     change_type=values.get("change_type", "ALL"),
                     profile_field_id=values.get("profile_field_id"),
                     profile_change_kind=values.get("profile_change_kind"),
+                    before_bias20_atr_state=values.get(
+                        "before_bias20_atr_state", "ALL"
+                    ),
+                    after_bias20_atr_state=values.get("after_bias20_atr_state", "ALL"),
                     before_source_set_id=values.get("before_source_set_id"),
                     before_package_sha256=values.get("before_package_sha256"),
                     before_profile_revision=values.get("before_profile_revision"),

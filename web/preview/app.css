@@ -610,7 +610,13 @@ footer {
   grid-template-columns: repeat(4, minmax(160px, 1fr));
 }
 .change-table {
-  min-width: 980px;
+  min-width: 1260px;
+}
+.change-distance-cell {
+  min-width: 410px;
+  max-width: 560px;
+  line-height: 1.45;
+  white-space: normal;
 }
 .relation-controls + .population {
   margin-bottom: 10px;

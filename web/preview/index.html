@@ -203,7 +203,7 @@
           <div>
             <h2 id="changeBrowserTitle">两日画像变化与早期结构观察</h2>
             <p>
-              只比较已接受PG画像；MA20关系要求同RAW坐标且两日收盘与MA20均为OBSERVED。
+              双日距离状态按各自已存精确分子/分母与RAW、MA20、ATR20质量划分；启用距离筛选时会检索完整来源并集，可能包含未出现在原变化分类中的代码。UNKNOWN、ABSENT与PAIR_INCOMPARABLE分开说明。非官方相邻会话只表示两期比较，不代表未来信号。
             </p>
           </div>
           <span id="changeCount" class="count">等待PG画像目录</span>
@@ -215,6 +215,30 @@
           <label
             >比较结束快照<select id="changeAfterSelect" disabled></select
           ></label>
+          <label
+            >起始MA20/ATR距离<select id="changeBeforeBias20AtrStateSelect">
+              <option value="ALL">全部状态（不筛选）</option>
+              <option value="FAR_BELOW_ONE">MA20下方超过1 ATR</option>
+              <option value="NEAR_BELOW_ONE">MA20下方1 ATR以内</option>
+              <option value="AT_MA20">等于MA20</option>
+              <option value="NEAR_ABOVE_ONE">MA20上方1 ATR以内</option>
+              <option value="FAR_ABOVE_ONE">MA20上方超过1 ATR</option>
+              <option value="UNKNOWN">未知（质量或坐标不可用）</option>
+              <option value="ABSENT">无起始日持久画像</option>
+            </select></label
+          >
+          <label
+            >结束MA20/ATR距离<select id="changeAfterBias20AtrStateSelect">
+              <option value="ALL">全部状态（不筛选）</option>
+              <option value="FAR_BELOW_ONE">MA20下方超过1 ATR</option>
+              <option value="NEAR_BELOW_ONE">MA20下方1 ATR以内</option>
+              <option value="AT_MA20">等于MA20</option>
+              <option value="NEAR_ABOVE_ONE">MA20上方1 ATR以内</option>
+              <option value="FAR_ABOVE_ONE">MA20上方超过1 ATR</option>
+              <option value="UNKNOWN">未知（质量或坐标不可用）</option>
+              <option value="ABSENT">无结束日持久画像</option>
+            </select></label
+          >
           <label
             >变化类型<select id="changeTypeSelect">
               <option value="ALL">所有实际变化</option>
@@ -527,6 +551,7 @@
               <tr>
                 <th>来源代码</th>
                 <th>实际变化</th>
+                <th>MA20/ATR距离（精确前后）</th>
                 <th>RAW收盘 / MA20关系</th>
                 <th>Profile11字段前后质量 / 状态 / 原因</th>
                 <th>Core质量或原因变化</th>
@@ -535,7 +560,7 @@
             </thead>
             <tbody id="changeRows">
               <tr>
-                <td colspan="6" class="muted">等待比较两个已保存画像。</td>
+                <td colspan="7" class="muted">等待比较两个已保存画像。</td>
               </tr>
             </tbody>
           </table>

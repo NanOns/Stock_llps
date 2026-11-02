@@ -3786,6 +3786,10 @@ async function returnToChanges() {
         (binding.profile_change_field || "") ||
       $("changeProfileKindSelect").value !==
         (binding.profile_change_kind || "") ||
+      $("changeBeforeBias20AtrStateSelect").value !==
+        (binding.before_bias20_atr_state || "ALL") ||
+      $("changeAfterBias20AtrStateSelect").value !==
+        (binding.after_bias20_atr_state || "ALL") ||
       state.changeOffset !== binding.change_offset ||
       state.changeLimit !== binding.change_limit ||
       state.changeBinding?.origin !== "exact-symbol" ||
@@ -3810,6 +3814,10 @@ async function returnToChanges() {
     $("changeProfileFieldSelect").value = binding.profile_change_field || "";
     $("changeProfileKindSelect").disabled = !binding.profile_change_field;
     $("changeProfileKindSelect").value = binding.profile_change_kind || "";
+    $("changeBeforeBias20AtrStateSelect").value =
+      binding.before_bias20_atr_state || "ALL";
+    $("changeAfterBias20AtrStateSelect").value =
+      binding.after_bias20_atr_state || "ALL";
     state.changeOffset = binding.change_offset ?? 0;
     state.changeLimit = binding.change_limit ?? state.changeLimit;
     $("versionSelect").value =
@@ -3839,6 +3847,46 @@ async function returnToChanges() {
     !selection
   )
     return;
+  const changeReturnBinding =
+    context.origin === "change" &&
+    context.returnBinding?.return_origin === "change-list"
+      ? context.returnBinding
+      : null;
+  if (changeReturnBinding) {
+    const beforeSnapshot = state.changeSnapshots.find(
+      (snapshot) =>
+        profileSnapshotKey(snapshot) ===
+        profileSnapshotKey(changeReturnBinding.before_snapshot),
+    );
+    const afterSnapshot = state.changeSnapshots.find(
+      (snapshot) =>
+        profileSnapshotKey(snapshot) ===
+        profileSnapshotKey(changeReturnBinding.after_snapshot),
+    );
+    if (
+      !beforeSnapshot?.complete ||
+      !afterSnapshot?.complete ||
+      changeReturnBinding.namespace_id !== state.namespace_id
+    )
+      return;
+    $("changeBeforeSelect").value = profileSnapshotKey(beforeSnapshot);
+    $("changeAfterSelect").value = profileSnapshotKey(afterSnapshot);
+    $("changeTypeSelect").value = changeReturnBinding.change_type || "ALL";
+    $("changeProfileFieldSelect").value =
+      changeReturnBinding.profile_field_id || "";
+    $("changeProfileKindSelect").disabled =
+      !changeReturnBinding.profile_field_id;
+    $("changeProfileKindSelect").value =
+      changeReturnBinding.profile_change_kind || "";
+    $("changeBeforeBias20AtrStateSelect").value =
+      changeReturnBinding.before_bias20_atr_state || "ALL";
+    $("changeAfterBias20AtrStateSelect").value =
+      changeReturnBinding.after_bias20_atr_state || "ALL";
+    $("changeSymbolInput").value = changeReturnBinding.symbol || "";
+    state.changeOffset = changeReturnBinding.change_offset ?? 0;
+    state.changeLimit = changeReturnBinding.change_limit ?? state.changeLimit;
+    state.changeBinding = { ...changeReturnBinding, origin: "change" };
+  }
   const value = `${selection.target_session}|${selection.package_sha256}`;
   if (
     !Array.from($("versionSelect").options).some((item) => item.value === value)
@@ -4986,6 +5034,20 @@ const changeTypeLabels = {
   PROFILE_STATE_CHANGED: "Profile状态/质量变化",
   CORE_QUALITY_CHANGED: "Core质量/原因变化",
 };
+const bias20AtrStateLabels = {
+  ALL: "全部状态（不筛选）",
+  FAR_BELOW_ONE: "MA20下方超过1 ATR",
+  NEAR_BELOW_ONE: "MA20下方1 ATR以内",
+  AT_MA20: "等于MA20",
+  NEAR_ABOVE_ONE: "MA20上方1 ATR以内",
+  FAR_ABOVE_ONE: "MA20上方超过1 ATR",
+  UNKNOWN: "未知（质量或坐标不可用）",
+  ABSENT: "无该日持久画像",
+  SINGLE_SIDE: "仅单侧有画像",
+  PAIR_INCOMPARABLE: "两侧语义或坐标不可比",
+  PAIR_UNKNOWN: "两侧质量不足以比较",
+  COMPARABLE: "两侧可比",
+};
 const priceRelationFieldLabels = {
   c_vs_ma20: "收盘与MA20",
   c_vs_prior_high20: "收盘与排除当日的前20高点",
@@ -5274,11 +5336,15 @@ function appendHighlightLookup(root, item, lookup = item?.highlight_lookup) {
 }
 function exactPairComparisonCandidate(item) {
   const binding = state.changeBinding;
-  const snapshot = binding?.origin === "exact-symbol" && binding.after_snapshot;
+  const supportsSourceBasket = ["exact-symbol", "change"].includes(
+    binding?.origin,
+  );
+  const snapshot = supportsSourceBasket && binding.after_snapshot;
   if (
     !snapshot?.complete ||
     item.after_present !== true ||
-    item.source_symbol !== binding.symbol ||
+    (binding.origin === "exact-symbol" &&
+      item.source_symbol !== binding.symbol) ||
     item.after_source_set_id !== snapshot.source_set_id ||
     item.after_package_sha256 !== snapshot.package_sha256 ||
     item.after_profile_revision !== snapshot.profile_revision
@@ -5291,7 +5357,8 @@ function exactPairComparisonCandidate(item) {
     source_set_id: snapshot.source_set_id,
     package_sha256: snapshot.package_sha256,
     profile_revision: snapshot.profile_revision,
-    origin_label: "精确双日画像核对",
+    origin_label:
+      binding.origin === "change" ? "双日状态筛查" : "精确双日画像核对",
   };
 }
 function resolveChangeTimelineSide(item, side, binding, versions) {
@@ -5340,10 +5407,27 @@ function openChangeTimeline(item, side) {
           change_filter: $("changeTypeSelect").value,
           profile_change_field: $("changeProfileFieldSelect").value,
           profile_change_kind: $("changeProfileKindSelect").value,
+          before_bias20_atr_state: $("changeBeforeBias20AtrStateSelect").value,
+          after_bias20_atr_state: $("changeAfterBias20AtrStateSelect").value,
           change_offset: state.changeOffset,
           change_limit: state.changeLimit,
         }
-      : null;
+      : state.changeBinding?.origin === "change"
+        ? {
+            ...state.changeBinding,
+            before_snapshot: { ...state.changeBinding.before_snapshot },
+            after_snapshot: { ...state.changeBinding.after_snapshot },
+            change_type: $("changeTypeSelect").value,
+            profile_field_id: $("changeProfileFieldSelect").value,
+            profile_change_kind: $("changeProfileKindSelect").value,
+            before_bias20_atr_state: $("changeBeforeBias20AtrStateSelect")
+              .value,
+            after_bias20_atr_state: $("changeAfterBias20AtrStateSelect").value,
+            change_offset: state.changeOffset,
+            change_limit: state.changeLimit,
+            return_origin: "change-list",
+          }
+        : null;
   $("versionSelect").value =
     `${snapshot.target_session}|${snapshot.package_sha256}`;
   $("symbolInput").value = item.source_symbol;
@@ -5556,10 +5640,35 @@ function showChangeDetail(item) {
   ])
     readinessDetail(meta, label, text(value));
   root.append(meta);
+  if (
+    item.before_bias20_atr_state &&
+    item.after_bias20_atr_state &&
+    item.bias20_atr_pair_compatibility
+  ) {
+    appendText(root, "h3", "双日 MA20 / ATR 精确距离状态");
+    for (const [side, label] of [
+      ["before", "起始"],
+      ["after", "结束"],
+    ]) {
+      const endpointValue = (field) => text(item[`${side}_${field}`]);
+      appendText(
+        root,
+        "p",
+        `${label}：${changeBias20AtrStateText(item, side)} · 坐标 ${endpointValue("price_coordinate")} · 目标价质量 ${endpointValue("target_price_quality")} · RAW收盘 ${endpointValue("raw_close")} (${endpointValue("raw_price_quality")} / ${endpointValue("raw_price_reason")}) · MA20 ${endpointValue("ma20")} (${endpointValue("ma20_quality")} / ${endpointValue("ma20_reason")}) · ATR20 ${endpointValue("atr20")} (${endpointValue("atr20_quality")} / ${endpointValue("atr20_reason")})`,
+        "population",
+      );
+    }
+    appendText(
+      root,
+      "p",
+      `两端可比性：${bias20AtrStateLabels[item.bias20_atr_pair_compatibility] || item.bias20_atr_pair_compatibility} · ${item.bias20_atr_transition_status} · ${text(item.bias20_atr_pair_reason)}。只有COMPARABLE且状态不同才表示本次两个已存快照的距离状态不同；不构成未来预警或交易信号。`,
+      "muted",
+    );
+  }
   if (item.pair_status) appendProfilePairValues(root, item);
   appendPriceRelationTransitions(root, item);
   appendChangeTimelineLinks(root, item);
-  if (state.changeBinding?.origin === "exact-symbol") {
+  if (["exact-symbol", "change"].includes(state.changeBinding?.origin)) {
     appendText(root, "h3", "加入结束日来源版多股临时对照");
     const candidate = exactPairComparisonCandidate(item);
     const add = makeComparisonAddButton(candidate);
@@ -5809,6 +5918,8 @@ async function compareSourceProfilePair(notice = null) {
         limit: 1,
         change_type: "ALL",
         symbol,
+        before_bias20_atr_state: $("changeBeforeBias20AtrStateSelect").value,
+        after_bias20_atr_state: $("changeAfterBias20AtrStateSelect").value,
         origin: "exact-symbol",
       };
       root.replaceChildren();
@@ -5839,6 +5950,8 @@ async function compareSourceProfilePair(notice = null) {
       limit: 1,
       change_type: "ALL",
       symbol,
+      before_bias20_atr_state: $("changeBeforeBias20AtrStateSelect").value,
+      after_bias20_atr_state: $("changeAfterBias20AtrStateSelect").value,
       origin: "exact-symbol",
     };
     showChangeDetail({
@@ -6331,15 +6444,7 @@ function loadPriceRelations() {
   $("priceRelationScreenSummary").textContent =
     "筛选已变化；连续操作合并后读取最新组合。";
   $("priceRelationScreenRows").replaceChildren();
-  tableRow($("priceRelationScreenRows"), [
-    "等待筛选稳定…",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-  ]);
+  tableRow($("priceRelationScreenRows"), ["等待筛选稳定…", "", "", "", "", ""]);
   $("priceRelationScreenPage").textContent = "查询中";
   $("priceRelationPrev").disabled = true;
   $("priceRelationNext").disabled = true;
@@ -6462,15 +6567,7 @@ async function runPriceRelations(requestId) {
     $("priceRelationScreenSummary").textContent =
       "RAW关系查询未完成：" + error.message;
     $("priceRelationScreenRows").replaceChildren();
-    tableRow($("priceRelationScreenRows"), [
-      error.message,
-      "",
-      "",
-      "",
-      "",
-      "",
-      "",
-    ]);
+    tableRow($("priceRelationScreenRows"), [error.message, "", "", "", "", ""]);
     $("priceRelationScreenPage").textContent = "查询失败";
     $("priceRelationPrev").disabled = true;
     $("priceRelationNext").disabled = true;
@@ -7161,6 +7258,7 @@ function loadChanges() {
     "",
     "",
     "",
+    "",
   ]);
   $("changeHighlightsRows").replaceChildren();
   tableRow($("changeHighlightsRows"), [
@@ -7243,6 +7341,8 @@ async function runChanges(requestId) {
     offset: String(state.changeOffset),
     limit: String(state.changeLimit),
     change_type: $("changeTypeSelect").value,
+    before_bias20_atr_state: $("changeBeforeBias20AtrStateSelect").value,
+    after_bias20_atr_state: $("changeAfterBias20AtrStateSelect").value,
   });
   const profileFieldId = $("changeProfileFieldSelect").value || null;
   const profileChangeKind = profileFieldId
@@ -7300,6 +7400,55 @@ async function runChanges(requestId) {
       throw new Error(
         "Profile11双日字段筛选与精确变化响应不一致，已停止展示。",
       );
+    const expectedBias20AtrStateFilter = {
+      before: $("changeBeforeBias20AtrStateSelect").value,
+      after: $("changeAfterBias20AtrStateSelect").value,
+      uses_full_source_union:
+        $("changeBeforeBias20AtrStateSelect").value !== "ALL" ||
+        $("changeAfterBias20AtrStateSelect").value !== "ALL",
+    };
+    const snapshotMatches = (received, expected) =>
+      Boolean(
+        received?.complete &&
+        profileSnapshotKey(received) === profileSnapshotKey(expected) &&
+        typeof received.history_calendar_id === "string" &&
+        received.history_calendar_id.length > 0 &&
+        typeof received.history_calendar_revision === "string" &&
+        received.history_calendar_revision.length > 0 &&
+        received.window_start === expected.window_start &&
+        received.window_end === expected.window_end &&
+        received.history_session_count === expected.history_session_count &&
+        received.source_symbol_count === expected.source_symbol_count &&
+        received.expected_source_symbol_count ===
+          expected.expected_source_symbol_count,
+      );
+    if (
+      data.namespace_id !== state.namespace_id ||
+      beforeSnapshot.namespace_id !== state.namespace_id ||
+      afterSnapshot.namespace_id !== state.namespace_id ||
+      !snapshotMatches(data.before_snapshot, beforeSnapshot) ||
+      !snapshotMatches(data.after_snapshot, afterSnapshot) ||
+      data.before_snapshot.history_calendar_id !==
+        data.after_snapshot.history_calendar_id ||
+      data.before_snapshot.history_calendar_revision !==
+        data.after_snapshot.history_calendar_revision ||
+      data.bias20_atr_state_filter?.before !==
+        expectedBias20AtrStateFilter.before ||
+      data.bias20_atr_state_filter?.after !==
+        expectedBias20AtrStateFilter.after ||
+      data.bias20_atr_state_filter?.uses_full_source_union !==
+        expectedBias20AtrStateFilter.uses_full_source_union ||
+      data.rows.some(
+        (item) =>
+          !item.before_bias20_atr_state ||
+          !item.after_bias20_atr_state ||
+          !item.bias20_atr_pair_compatibility ||
+          !item.bias20_atr_transition_status,
+      )
+    )
+      throw new Error(
+        "双日MA20/ATR状态筛选与PG完整并集响应身份不一致，已停止展示。",
+      );
     state.changeBinding = {
       namespace_id: data.namespace_id,
       before_snapshot: data.before_snapshot,
@@ -7312,13 +7461,20 @@ async function runChanges(requestId) {
       change_type: $("changeTypeSelect").value,
       profile_field_id: profileFieldId,
       profile_change_kind: profileChangeKind,
+      before_bias20_atr_state: expectedBias20AtrStateFilter.before,
+      after_bias20_atr_state: expectedBias20AtrStateFilter.after,
       symbol: $("changeSymbolInput").value.trim(),
+      origin: "change",
     };
     renderChangeHighlights(data, data.session_relation);
     state.changeTotal = p.total;
-    $("changeCount").textContent = `${s.changed_source_symbol_count}个变化对象`;
+    const hasDistanceFilter =
+      expectedBias20AtrStateFilter.uses_full_source_union;
+    $("changeCount").textContent = hasDistanceFilter
+      ? `${p.total}条MA20/ATR状态筛查命中`
+      : `${s.changed_source_symbol_count}个变化对象`;
     $("changeSummary").textContent =
-      `${sessionRelationLabel(data.session_relation)} · 快照分母 ${data.before_snapshot.source_symbol_count}/${data.before_snapshot.expected_source_symbol_count} 与 ${data.after_snapshot.source_symbol_count}/${data.after_snapshot.expected_source_symbol_count} · 并集 ${s.source_symbol_union_count} · 交集 ${s.intersection_count} · 起始独有 ${s.before_only_count} · 结束独有 ${s.after_only_count} · 跨source_set ${s.cross_source_set_pair_count} · 跨价格坐标 ${s.cross_price_coordinate_pair_count} · Core/Profile不可比 ${s.core_semantics_incomparable_count}/${s.profile_semantics_incomparable_count} · 收盘/MA20未知 ${s.close_ma20_unknown_count} · Profile未观察 ${s.profile_unobserved_pair_count} · 完整变化 ${s.changed_source_symbol_count} · ${profileFieldId ? `Profile11 ${profileFieldLabel(profileFieldId)} ${profileChangeKind}` : "Profile11字段变化未过滤"} · 当前筛选 ${p.total} · 选股未评价。`;
+      `${sessionRelationLabel(data.session_relation)} · 快照分母 ${data.before_snapshot.source_symbol_count}/${data.before_snapshot.expected_source_symbol_count} 与 ${data.after_snapshot.source_symbol_count}/${data.after_snapshot.expected_source_symbol_count} · 并集 ${s.source_symbol_union_count} · 交集 ${s.intersection_count} · 起始独有 ${s.before_only_count} · 结束独有 ${s.after_only_count} · 跨source_set ${s.cross_source_set_pair_count} · 跨价格坐标 ${s.cross_price_coordinate_pair_count} · Core/Profile不可比 ${s.core_semantics_incomparable_count}/${s.profile_semantics_incomparable_count} · 收盘/MA20未知 ${s.close_ma20_unknown_count} · Profile未观察 ${s.profile_unobserved_pair_count} · 完整变化 ${s.changed_source_symbol_count} · ${profileFieldId ? `Profile11 ${profileFieldLabel(profileFieldId)} ${profileChangeKind}` : "Profile11字段变化未过滤"} · 距离筛选 ${bias20AtrStateLabels[expectedBias20AtrStateFilter.before]} → ${bias20AtrStateLabels[expectedBias20AtrStateFilter.after]} · 当前命中 ${p.total} · ${hasDistanceFilter ? "距离筛查可包含现役变化分类为空的代码；并不代表状态发生变化或交易信号。" : "选股未评价。"}`;
     $("changePageStatus").textContent =
       `偏移 ${p.offset} · 本页 ${p.count}/${p.limit} · 筛选总计 ${p.total}`;
     $("changePrev").disabled = p.offset === 0;
@@ -7327,13 +7483,15 @@ async function runChanges(requestId) {
     if (!data.rows.length) {
       const emptyMessage =
         p.total === 0
-          ? profileFieldId
-            ? `真实零匹配：该精确双日快照中没有${profileFieldLabel(profileFieldId)}的${profileChangeKind}记录；完整来源并集和未变化/不可比统计仍保持原分母。`
-            : "没有符合当前条件的实际变化；完整来源并集和未变化/不可比统计仍保持原分母。"
+          ? expectedBias20AtrStateFilter.uses_full_source_union
+            ? "真实零匹配：完整双日来源并集中没有同时满足所选起始与结束距离状态及其它AND条件的代码。"
+            : profileFieldId
+              ? `真实零匹配：该精确双日快照中没有${profileFieldLabel(profileFieldId)}的${profileChangeKind}记录；完整来源并集和未变化/不可比统计仍保持原分母。`
+              : "没有符合当前条件的实际变化；完整来源并集和未变化/不可比统计仍保持原分母。"
           : p.offset >= p.total
             ? `当前偏移${p.offset}已越过末页；筛选总数仍为${p.total}，请返回第一页查看。`
             : "当前偏移没有成员；完整筛选总数仍按PG全集计算。";
-      tableRow($("changeRows"), [emptyMessage, "", "", "", "", ""]);
+      tableRow($("changeRows"), [emptyMessage, "", "", "", "", "", ""]);
     }
     for (const item of data.rows) {
       const row = document.createElement("tr");
@@ -7344,6 +7502,7 @@ async function runChanges(requestId) {
           .map((type) => changeTypeLabels[type] || type)
           .join("、"),
       );
+      row.append(changeBias20AtrDistanceCell(item));
       cell(
         row,
         `${text(item.before_close_ma20_relation)} → ${text(item.after_close_ma20_relation)}`,
@@ -7383,7 +7542,7 @@ async function runChanges(requestId) {
     $("changeHighlightsSummary").textContent =
       `PG重点变化摘要不可用：${error.message}`;
     tableRow($("changeHighlightsRows"), [error.message, "", "", "", "", ""]);
-    tableRow($("changeRows"), [error.message, "", "", "", "", ""]);
+    tableRow($("changeRows"), [error.message, "", "", "", "", "", ""]);
     $("changeCount").textContent = "变化查询失败";
     $("changeSummary").textContent = `PG变化查询未完成：${error.message}`;
     $("changePageStatus").textContent = "查询失败";
@@ -7551,6 +7710,32 @@ function profileBias20AtrRowText(item) {
     `${text(item.bias20_atr)} ATR · 精确 ${text(numerator)}/${text(denominator)} · ` +
     `OBSERVED · ${text(item.price_coordinate)}`
   );
+}
+function changeBias20AtrStateText(item, side) {
+  const state = item[`${side}_bias20_atr_state`] || "UNKNOWN";
+  const label = bias20AtrStateLabels[state] || state;
+  if (state === "ABSENT") return `${label}（不推断停牌、退市或上市）`;
+  const numerator = String(item[`${side}_bias20_atr_exact_numerator`] ?? "");
+  const denominator = String(
+    item[`${side}_bias20_atr_exact_denominator`] ?? "",
+  );
+  const fraction =
+    numerator && denominator ? `${numerator}/${denominator}` : "不可用";
+  const reason = item[`${side}_bias20_atr_state_reason`] || "无额外原因";
+  const quality = item[`${side}_bias20_atr_quality`] || "UNKNOWN";
+  return `${label} (${state}) · bias ${text(item[`${side}_bias20_atr`])} · 精确 ${fraction} · 质量 ${quality} · 原因 ${reason}`;
+}
+function changeBias20AtrDistanceCell(item) {
+  const root = document.createElement("td");
+  root.className = "change-distance-cell";
+  appendText(root, "div", `起始：${changeBias20AtrStateText(item, "before")}`);
+  appendText(root, "div", `结束：${changeBias20AtrStateText(item, "after")}`);
+  appendText(
+    root,
+    "div",
+    `比较：${bias20AtrStateLabels[item.bias20_atr_pair_compatibility] || item.bias20_atr_pair_compatibility} · ${item.bias20_atr_transition_status} · ${text(item.bias20_atr_pair_reason)}`,
+  );
+  return root;
 }
 function profilePositionRowText(item, conditions) {
   if (!conditions.length) return "未启用价格位置条件";
@@ -8239,6 +8424,15 @@ $("changeProfileKindSelect").addEventListener("change", () => {
   state.changeOffset = 0;
   loadChanges();
 });
+for (const id of [
+  "changeBeforeBias20AtrStateSelect",
+  "changeAfterBias20AtrStateSelect",
+]) {
+  $(id).addEventListener("change", () => {
+    state.changeOffset = 0;
+    loadChanges();
+  });
+}
 $("priceRelationFieldSelect").addEventListener("change", () => {
   state.relationOffset = 0;
   loadPriceRelations();
