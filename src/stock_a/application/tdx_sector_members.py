@@ -1036,6 +1036,8 @@ def read_tdx_sector_strength(
     limit: int,
     member_offset: int,
     member_limit: int,
+    include_all_boards: bool = False,
+    include_all_member_symbols: bool = False,
 ) -> dict[str, Any]:
     """按完整TDX成员集合计算来源级Core收益中位数及三会话变化。"""
     if sort_by not in {"ret5", "ret20", "delta5", "delta20"}:
@@ -1056,6 +1058,9 @@ def read_tdx_sector_strength(
         or member_offset < 0
         or type(member_limit) is not int
         or not 0 <= member_limit <= 100
+        or type(include_all_boards) is not bool
+        or type(include_all_member_symbols) is not bool
+        or (include_all_member_symbols and not include_all_boards)
     ):
         raise TdxSectorMembersApplicationError(
             "STRENGTH_PAGE_INVALID",
@@ -1101,6 +1106,14 @@ def read_tdx_sector_strength(
         official_calendar_revision=str(calendar_revision),
         window_sessions=window_sessions,
     )
+    expected_source_kind = (
+        "TDX_TDXHY_CFG" if board_kind == "INDUSTRY" else "TDX_INFOHARBOR_BLOCK_DAT"
+    )
+    if data["snapshot"]["source_kind"] != expected_source_kind:
+        raise TdxSectorMembersApplicationError(
+            "SNAPSHOT_BOARD_KIND_MISMATCH",
+            "TDX成员快照原始来源类型与板块类型不匹配",
+        )
     source_set = data["source_set"]
     target_capture_id = source_set["source_capture_id"]
     raw_by_key = {
@@ -1268,7 +1281,7 @@ def read_tdx_sector_strength(
     mapped_total = sum(
         summary["target_core_profile_mapped_member_count"] for summary in summaries
     )
-    return {
+    output = {
         "status": "AVAILABLE" if page else ("NO_MATCH" if changed_only else "EMPTY"),
         "analysis_scope": "NON_PIT_RETROSPECTIVE_CURRENT_TDX_MEMBER_CORE_RETURN_STRENGTH",
         "snapshot": {
@@ -1291,6 +1304,7 @@ def read_tdx_sector_strength(
             "research_mode": snapshot["research_mode"],
         },
         "target_source_set": source_set,
+        "namespace_id": data["namespace_id"],
         "target_profile_snapshot": data["profile_snapshot"],
         "official_calendar": data["official_calendar"],
         "target_session": target_session.isoformat(),
@@ -1343,6 +1357,27 @@ def read_tdx_sector_strength(
         "return_fields_calculated": ["core.ret5", "core.ret20"],
         "non_return_core_factors_recalculated": [],
     }
+    if include_all_boards:
+        output["all_boards_for_linkage"] = summaries
+        output["strength_sort_values_for_linkage"] = {
+            native_id: {
+                field: (
+                    {"numerator": value.numerator, "denominator": value.denominator}
+                    if value is not None
+                    else None
+                )
+                for field, value in values.items()
+            }
+            for native_id, values in sort_values.items()
+        }
+    if include_all_member_symbols:
+        output["all_member_symbols_for_linkage"] = {
+            board["board_native_id"]: sorted(
+                {str(member["source_symbol"]) for member in board["members"]}
+            )
+            for board in data["boards"]
+        }
+    return output
 
 
 __all__ = [
