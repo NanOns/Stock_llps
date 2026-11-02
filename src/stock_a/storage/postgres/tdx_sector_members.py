@@ -16,7 +16,11 @@ from stock_a.sources.tdx.sector_members import (
     SectorSourceSnapshot,
     TdxSectorSourceError,
 )
-from stock_a.storage.postgres.source_raw import RawSourcePgError, _transaction
+from stock_a.storage.postgres.source_raw import (
+    RawSourcePgError,
+    _read_history_rows,
+    _transaction,
+)
 
 from .price_profiles import (
     PriceProfilePgError,
@@ -31,6 +35,9 @@ MAX_CATALOG_INSERTS = 12_000
 MAX_MEMBER_INSERTS = 500_000
 MAX_PAGE_SIZE = 100
 MAX_BREADTH_PAGE_SIZE = 30
+MAX_STRENGTH_BOARD_PAGE_SIZE = 100
+MAX_STRENGTH_MEMBER_PAGE_SIZE = 100
+MAX_STRENGTH_HISTORY_ROWS = 500_000
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 
 
@@ -1763,6 +1770,360 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
             "core_recalculated": False,
             "source_files_read": False,
             "source_downloaded": False,
+        },
+    }
+
+
+def query_sector_strength(
+    config: dict[str, Any],
+    *,
+    snapshot_id: str,
+    board_kind: str,
+    board_native_id: str | None,
+    target_session: date,
+    research_cutoff: date,
+    source_set_id: str,
+    package_sha256: str,
+    profile_revision: str | None,
+    official_calendar_id: str,
+    official_calendar_revision: str,
+    window_sessions: Sequence[date],
+) -> dict[str, Any]:
+    """在一个只读快照中读取精确板块、目标P03与同包Raw历史。"""
+    _validate_snapshot_uuid(snapshot_id)
+    _validate_source_set_uuid(source_set_id)
+    if board_kind not in {"INDUSTRY", "CONCEPT"}:
+        raise TdxSectorMembersPgError(
+            "BOARD_KIND_INVALID", "板块类型必须为INDUSTRY或CONCEPT"
+        )
+    if board_native_id is not None and (
+        not isinstance(board_native_id, str)
+        or not board_native_id.strip()
+        or len(board_native_id) > 100
+    ):
+        raise TdxSectorMembersPgError(
+            "BOARD_ID_INVALID", "原生板块编号必须是非空且不超过100字的精确值"
+        )
+    if (
+        type(target_session) is not date
+        or type(research_cutoff) is not date
+        or target_session > research_cutoff
+    ):
+        raise TdxSectorMembersPgError(
+            "SESSION_DATE_INVALID", "目标官方会话必须不晚于显式研究截止日"
+        )
+    if _SHA256.fullmatch(package_sha256) is None:
+        raise TdxSectorMembersPgError(
+            "PACKAGE_SHA_INVALID", "来源包SHA必须是64位小写十六进制值"
+        )
+    if profile_revision is not None and _SHA256.fullmatch(profile_revision) is None:
+        raise TdxSectorMembersPgError(
+            "PROFILE_REVISION_INVALID", "画像修订SHA必须是64位小写十六进制值"
+        )
+    if (
+        not official_calendar_id
+        or not official_calendar_revision
+        or not isinstance(window_sessions, (tuple, list))
+        or not window_sessions
+        or any(type(session) is not date for session in window_sessions)
+        or tuple(sorted(set(window_sessions))) != tuple(window_sessions)
+        or window_sessions[-1] != target_session
+        or any(session > research_cutoff for session in window_sessions)
+    ):
+        raise TdxSectorMembersPgError(
+            "OFFICIAL_CALENDAR_IDENTITY_INVALID",
+            "必须绑定有序官方会话窗、日历身份及研究截止日",
+        )
+
+    try:
+        with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+            cursor.execute(
+                """SELECT snapshot_id::text, source_kind, source_file_sha256,
+       source_path_role, source_file_size, observed_at, source_valid_on,
+       source_known_at, source_available_at, clock_quality, research_mode,
+       parse_contract_version, rows_declared, source_quality
+FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
+                (snapshot_id,),
+            )
+            snapshot_row = cursor.fetchone()
+            if snapshot_row is None:
+                raise TdxSectorMembersPgError(
+                    "SECTOR_SNAPSHOT_NOT_FOUND", "未找到精确TDX成员来源快照"
+                )
+            source_snapshot = _snapshot_payload(snapshot_row)
+            if (
+                source_snapshot["research_mode"]
+                != "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"
+            ):
+                raise TdxSectorMembersPgError(
+                    "SECTOR_SNAPSHOT_MODE_REJECTED",
+                    "当前TDX成员快照仅可作为NON_PIT后验研究输入",
+                )
+
+            cursor.execute(
+                """SELECT DISTINCT profile_revision
+FROM stock.source_symbol_price_profiles
+WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
+  AND target_session=%s::date AND package_sha256=%s
+ORDER BY profile_revision""",
+                (namespace_id, source_set_id, target_session, package_sha256),
+            )
+            profile_revisions = [str(row[0]).strip() for row in cursor.fetchall()]
+            selected_profile = profile_revision
+            if selected_profile is None and len(profile_revisions) == 1:
+                selected_profile = profile_revisions[0]
+            elif selected_profile is None and len(profile_revisions) > 1:
+                raise TdxSectorMembersPgError(
+                    "PROFILE_REVISION_REQUIRED",
+                    "目标P03来源集合有多个画像修订，必须显式选择profile revision",
+                )
+            elif selected_profile is None:
+                raise TdxSectorMembersPgError(
+                    "PROFILE_REVISION_NOT_FOUND",
+                    "目标P03来源集合没有已保存的Core画像修订",
+                )
+            elif selected_profile not in profile_revisions:
+                raise TdxSectorMembersPgError(
+                    "PROFILE_REVISION_NOT_FOUND",
+                    "精确目标P03来源集合中不存在指定画像修订",
+                )
+
+            try:
+                profile_snapshot = _snapshot_for_session(
+                    cursor,
+                    namespace_id=namespace_id,
+                    target_session=target_session,
+                    max_target_session=research_cutoff,
+                    source_set_id=source_set_id,
+                    package_sha256=package_sha256,
+                    profile_revision=selected_profile,
+                )
+            except PriceProfilePgError as error:
+                raise TdxSectorMembersPgError(error.code, str(error)) from error
+            if (
+                profile_snapshot["history_calendar_id"] != official_calendar_id
+                or profile_snapshot["history_calendar_revision"]
+                != official_calendar_revision
+            ):
+                raise TdxSectorMembersPgError(
+                    "PROFILE_CALENDAR_IDENTITY_MISMATCH",
+                    "目标Core画像绑定的官方日历身份或修订与现行官方日历不一致",
+                )
+            source_set = _breadth_source_set(
+                cursor,
+                namespace_id=namespace_id,
+                target_session=target_session,
+                source_set_id=source_set_id,
+                package_sha256=package_sha256,
+                profile_revision=selected_profile,
+            )
+
+            board_filter_sql = ""
+            board_filter_params: tuple[Any, ...] = ()
+            if board_native_id is not None:
+                board_filter_sql = " AND c.board_native_id=%s"
+                board_filter_params = (board_native_id,)
+            cursor.execute(
+                """SELECT count(DISTINCT c.board_native_id)::bigint,
+       count(m.source_symbol)::bigint
+FROM stock.tdx_sector_catalog c
+LEFT JOIN stock.tdx_sector_members m
+  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
+ AND m.board_native_id=c.board_native_id
+WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
+                + board_filter_sql,
+                (snapshot_id, board_kind, *board_filter_params),
+            )
+            board_count, member_count = (int(value) for value in cursor.fetchone())
+            if board_native_id is not None and board_count == 0:
+                raise TdxSectorMembersPgError(
+                    "SECTOR_BOARD_NOT_FOUND",
+                    "指定板块类型和原生编号不在精确成员快照目录中",
+                )
+            if board_count > MAX_CATALOG_INSERTS or member_count > MAX_MEMBER_INSERTS:
+                raise TdxSectorMembersPgError(
+                    "STRENGTH_MEMBER_BUDGET_EXCEEDED",
+                    "所选板块目录或完整成员关系超过固定只读预算",
+                )
+            cursor.execute(
+                """SELECT c.board_kind, c.board_native_id, c.board_name,
+       m.source_symbol, m.membership_quality, m.source_record_ordinal
+FROM stock.tdx_sector_catalog c
+LEFT JOIN stock.tdx_sector_members m
+  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
+ AND m.board_native_id=c.board_native_id
+WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
+                + board_filter_sql
+                + """
+ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
+                (snapshot_id, board_kind, *board_filter_params),
+            )
+            boards: list[dict[str, Any]] = []
+            boards_by_id: dict[str, dict[str, Any]] = {}
+            symbols: set[str] = set()
+            for kind, native_id, name, symbol, quality, ordinal in cursor.fetchall():
+                native_id = str(native_id)
+                board = boards_by_id.get(native_id)
+                if board is None:
+                    board = {
+                        "board_kind": kind,
+                        "board_native_id": native_id,
+                        "board_name": name,
+                        "members": [],
+                    }
+                    boards_by_id[native_id] = board
+                    boards.append(board)
+                if symbol is None:
+                    continue
+                symbol = str(symbol)
+                board["members"].append(
+                    {
+                        "source_symbol": symbol,
+                        "membership_quality": quality,
+                        "source_record_ordinal": int(ordinal),
+                    }
+                )
+                symbols.add(symbol)
+
+            window_slots = len(symbols) * len(window_sessions)
+            if window_slots > MAX_STRENGTH_HISTORY_ROWS:
+                raise TdxSectorMembersPgError(
+                    "STRENGTH_HISTORY_BUDGET_EXCEEDED",
+                    "板块成员乘官方会话窗超过固定Raw历史读取预算",
+                )
+            profile_rows: list[dict[str, Any]] = []
+            raw_rows: list[dict[str, Any]] = []
+            revision_counts: dict[tuple[str, date], dict[str, int]] = {}
+            if symbols:
+                ordered_symbols = sorted(symbols)
+                cursor.execute(
+                    """SELECT p.source_symbol, p.source_capture_id::text,
+       p.price_coordinate, p.calculation_scope, p.producer_contract,
+       p.producer_version, p.producer_contract_sha256::text,
+       p.ret20::text, p.ret20_exact_numerator::text,
+       p.ret20_exact_denominator::text, p.ret20_quality, p.ret20_reason
+FROM stock.source_symbol_price_profiles p
+WHERE p.namespace_id=%s::uuid AND p.source_set_id=%s::uuid
+  AND p.target_session=%s::date AND p.package_sha256=%s
+  AND p.profile_revision=%s AND p.source_symbol=ANY(%s)
+ORDER BY p.source_symbol COLLATE "C" """,
+                    (
+                        namespace_id,
+                        source_set_id,
+                        target_session,
+                        package_sha256,
+                        selected_profile,
+                        ordered_symbols,
+                    ),
+                )
+                profile_columns = [item.name for item in cursor.description]
+                profile_rows = [
+                    dict(zip(profile_columns, row, strict=True))
+                    for row in cursor.fetchall()
+                ]
+                cursor.execute(
+                    """SELECT source_symbol, session_date,
+       count(*)::bigint, count(DISTINCT package_sha256)::bigint,
+       count(DISTINCT source_capture_id)::bigint
+FROM stock.source_raw_daily
+WHERE namespace_id=%s::uuid AND source_symbol=ANY(%s)
+  AND session_date=ANY(%s::date[])
+GROUP BY source_symbol, session_date""",
+                    (namespace_id, ordered_symbols, list(window_sessions)),
+                )
+                revision_rows = cursor.fetchall()
+                revision_total = sum(int(row[2]) for row in revision_rows)
+                if revision_total > MAX_STRENGTH_HISTORY_ROWS:
+                    raise TdxSectorMembersPgError(
+                        "STRENGTH_HISTORY_BUDGET_EXCEEDED",
+                        "所选成员官方会话窗的Raw修订总行数超过固定只读预算",
+                    )
+                revision_counts = {
+                    (str(row[0]), row[1]): {
+                        "row_count": int(row[2]),
+                        "package_count": int(row[3]),
+                        "capture_count": int(row[4]),
+                    }
+                    for row in revision_rows
+                }
+                raw_rows = _read_history_rows(
+                    cursor,
+                    namespace_id=namespace_id,
+                    source_symbols=ordered_symbols,
+                    sessions=window_sessions,
+                    package_sha256=package_sha256,
+                )
+            profile_capture_ids = {
+                str(row["source_capture_id"]) for row in profile_rows
+            }
+            if profile_capture_ids and profile_capture_ids != {
+                source_set["source_capture_id"]
+            }:
+                raise TdxSectorMembersPgError(
+                    "PROFILE_SOURCE_IDENTITY_MISMATCH",
+                    "TDX板块成员命中的Core画像source_capture_id与SEALED P03不一致",
+                )
+            supported_profile_producers = {
+                "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1",
+                "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R2",
+            }
+            profile_contract_identities = {
+                (
+                    row["calculation_scope"],
+                    row["producer_contract"],
+                    row["producer_version"],
+                    row["producer_contract_sha256"],
+                )
+                for row in profile_rows
+            }
+            if profile_rows and (
+                len(profile_contract_identities) != 1
+                or any(
+                    row["source_capture_id"] is None
+                    or row["calculation_scope"] != "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE"
+                    or row["producer_contract"] not in supported_profile_producers
+                    for row in profile_rows
+                )
+            ):
+                raise TdxSectorMembersPgError(
+                    "PROFILE_CORE_CONTRACT_MISMATCH",
+                    "目标Core画像不属于当前固定来源代码Core合同",
+                )
+    except TdxSectorMembersPgError:
+        raise
+    except RawSourcePgError as error:
+        raise TdxSectorMembersPgError(error.code, str(error)) from error
+
+    return {
+        "namespace_id": namespace_id,
+        "snapshot": source_snapshot,
+        "source_set": source_set,
+        "profile_snapshot": profile_snapshot,
+        "official_calendar": {
+            "calendar_id": official_calendar_id,
+            "calendar_revision": official_calendar_revision,
+        },
+        "window_sessions": tuple(window_sessions),
+        "boards": boards,
+        "member_relationship_count": member_count,
+        "distinct_source_symbol_count": len(symbols),
+        "profile_rows": profile_rows,
+        "raw_rows": raw_rows,
+        "raw_revision_counts": revision_counts,
+        "database_read": {
+            "database": "stock_a",
+            "schema": "stock",
+            "account": "stock_a",
+            "server": "127.0.0.1:5432",
+            "transaction": "REPEATABLE READ READ ONLY",
+            "source_raw_rows_read": len(raw_rows),
+            "raw_revision_groups_read": len(revision_counts),
+            "profile_rows_read": len(profile_rows),
+            "database_write_attempted": False,
+            "dml_executed": False,
+            "dml_rows_affected": 0,
+            "ddl_executed": False,
+            "migration_executed": False,
         },
     }
 

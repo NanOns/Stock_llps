@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date, datetime
+from decimal import Decimal, ROUND_HALF_EVEN, localcontext
+from fractions import Fraction
 import hashlib
 import json
 import re
@@ -21,6 +24,12 @@ from stock_a.sources.tdx.remote_sector import (
     fetch_remote_sector_files,
     validate_remote_sector_files,
 )
+from stock_a.domain import FieldValue, unknown
+from stock_a.research.core import (
+    CoreObservation,
+    MarketSessionCalendar,
+    calculate_core_return,
+)
 from stock_a.research.entry import ResearchEntryError, _load_calendar
 from stock_a.storage.postgres.tdx_sector_members import (
     TdxSectorMembersPgError,
@@ -29,6 +38,7 @@ from stock_a.storage.postgres.tdx_sector_members import (
     query_sector_catalog,
     query_sector_breadth,
     query_sector_members,
+    query_sector_strength,
     verify_remote_sector_source_readback,
 )
 
@@ -593,6 +603,748 @@ def read_tdx_sector_breadth(
     return result
 
 
+def _fraction_from_raw(value: Any) -> Fraction:
+    if isinstance(value, Fraction):
+        return value
+    return Fraction(Decimal(str(value)))
+
+
+def _fraction_payload(value: Fraction | None) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    with localcontext() as context:
+        context.prec = 40
+        decimal_value = Decimal(value.numerator) / Decimal(value.denominator)
+        decimal_value = decimal_value.quantize(
+            Decimal("0.00000001"), rounding=ROUND_HALF_EVEN
+        )
+    return {
+        "numerator": value.numerator,
+        "denominator": value.denominator,
+        "decimal_8dp": format(decimal_value, ".8f"),
+    }
+
+
+def _median_fraction(values: list[Fraction]) -> Fraction | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    middle = len(ordered) // 2
+    if len(ordered) % 2:
+        return ordered[middle]
+    return (ordered[middle - 1] + ordered[middle]) / 2
+
+
+def _raw_window_observation(
+    *,
+    source_symbol: str,
+    session: date,
+    raw_by_key: dict[tuple[str, date], dict[str, Any]],
+    revision_counts: dict[tuple[str, date], dict[str, int]],
+    target_session: date,
+    target_capture_id: str,
+) -> tuple[CoreObservation, str | None]:
+    key = (source_symbol, session)
+    revisions = revision_counts.get(key)
+    row = raw_by_key.get(key)
+    if revisions is None or revisions["row_count"] == 0:
+        reason = "RAW_HISTORY_SESSION_NOT_STORED"
+        return (
+            CoreObservation(
+                session=session,
+                state="UNKNOWN",
+                coordinate_id="RAW_UNADJUSTED",
+                close=unknown(reason),
+            ),
+            reason,
+        )
+    if (
+        revisions["row_count"] != 1
+        or revisions["package_count"] != 1
+        or revisions["capture_count"] != 1
+    ):
+        reason = "SOURCE_REVISION_OR_CAPTURE_AMBIGUOUS"
+        return (
+            CoreObservation(
+                session=session,
+                state="UNKNOWN",
+                coordinate_id="RAW_UNADJUSTED",
+                close=unknown(reason),
+            ),
+            reason,
+        )
+    if row is None:
+        reason = "SOURCE_PACKAGE_MISMATCH"
+        return (
+            CoreObservation(
+                session=session,
+                state="UNKNOWN",
+                coordinate_id="RAW_UNADJUSTED",
+                close=unknown(reason),
+            ),
+            reason,
+        )
+    if session == target_session and row["source_capture_id"] != target_capture_id:
+        reason = "TARGET_SOURCE_CAPTURE_MISMATCH"
+        return (
+            CoreObservation(
+                session=session,
+                state="UNKNOWN",
+                coordinate_id="RAW_UNADJUSTED",
+                close=unknown(reason),
+            ),
+            reason,
+        )
+    if row.get("price_coordinate") != "RAW_UNADJUSTED":
+        reason = "PRICE_COORDINATE_INCOMPATIBLE"
+        return (
+            CoreObservation(
+                session=session,
+                state="UNKNOWN",
+                coordinate_id=str(row.get("price_coordinate") or "UNKNOWN"),
+                close=unknown(reason),
+            ),
+            reason,
+        )
+    status = row.get("bar_status")
+    if status != "TARGET_PRESENT":
+        reason = row.get("bar_reason") or (
+            "TARGET_BAR_MISSING"
+            if status == "TARGET_MISSING"
+            else "SOURCE_ENTRY_READ_FAILED"
+        )
+        return (
+            CoreObservation(
+                session=session,
+                state="UNKNOWN",
+                coordinate_id="RAW_UNADJUSTED",
+                close=unknown(str(reason)),
+            ),
+            str(reason),
+        )
+    if row.get("price_quality") != "OBSERVED":
+        reason = row.get("price_reason") or "RAW_PRICE_QUALITY_UNKNOWN"
+        return (
+            CoreObservation(
+                session=session,
+                state="UNKNOWN",
+                coordinate_id="RAW_UNADJUSTED",
+                close=unknown(str(reason)),
+            ),
+            str(reason),
+        )
+
+    fields: dict[str, FieldValue] = {}
+    for name in ("open", "high", "low", "close"):
+        value = row.get(f"raw_{name}")
+        if value is None:
+            fields[name] = unknown(f"RAW_{name.upper()}_MISSING")
+        else:
+            try:
+                fields[name] = FieldValue(_fraction_from_raw(value))
+            except (ArithmeticError, TypeError, ValueError):
+                fields[name] = unknown(f"DATA_INVALID_{name.upper()}")
+    observation = CoreObservation(
+        session=session,
+        state="ACTUAL",
+        coordinate_id="RAW_UNADJUSTED",
+        open=fields["open"],
+        high=fields["high"],
+        low=fields["low"],
+        close=fields["close"],
+        amount=unknown("UNIT_AUTHORITY_NOT_USED_BY_RETURN"),
+        volume=unknown("UNIT_AUTHORITY_NOT_USED_BY_RETURN"),
+    )
+    return observation, None
+
+
+def _return_reason(
+    result: FieldValue,
+    *,
+    observations: list[CoreObservation],
+    issues: list[str | None],
+    periods: int,
+) -> str | None:
+    if result.quality == "OBSERVED":
+        return None
+    if len(observations) >= periods + 1:
+        window_issues = issues[-periods - 1 :]
+        first_issue = next((reason for reason in window_issues if reason), None)
+        if first_issue:
+            return first_issue
+    return result.reason or "CORE_RETURN_UNKNOWN"
+
+
+def _metric_endpoint_summary(
+    members: list[dict[str, Any]],
+    member_returns: dict[str, dict[str, Any]],
+    *,
+    endpoint: str,
+    field: str,
+) -> dict[str, Any]:
+    values: list[Fraction] = []
+    unknown_reasons: Counter[str] = Counter()
+    for member in members:
+        item = member_returns[member["source_symbol"]][endpoint][field]
+        if item["value"] is None:
+            unknown_reasons[item["reason"] or "CORE_RETURN_UNKNOWN"] += 1
+        else:
+            values.append(item["value"])
+    total = len(members)
+    median = _median_fraction(values)
+    return {
+        "source_member_total": total,
+        "evaluated_count": len(values),
+        "unknown_count": total - len(values),
+        "coverage": {
+            "numerator": len(values),
+            "denominator": total,
+            "fraction": _fraction_payload(
+                Fraction(len(values), total) if total else None
+            ),
+        },
+        "median": _fraction_payload(median),
+        "median_unknown_reason": "NO_EVALUABLE_MEMBERS" if median is None else None,
+        "unknown_reason_counts": [
+            {"reason": reason, "count": count}
+            for reason, count in sorted(unknown_reasons.items())
+        ],
+    }
+
+
+def _summarize_strength_board(
+    board: dict[str, Any],
+    *,
+    member_returns: dict[str, dict[str, Any]],
+    target_profile_symbols: set[str],
+    target_endpoint: str,
+    prior_endpoint: str,
+    member_offset: int,
+    member_limit: int,
+) -> tuple[dict[str, Any], dict[str, Fraction | None]]:
+    members = board["members"]
+    member_symbols = [member["source_symbol"] for member in members]
+    fields = {"ret5": "ret5", "ret20": "ret20"}
+    metrics: dict[str, Any] = {}
+    sort_values: dict[str, Fraction | None] = {}
+    metric_values: dict[str, dict[str, Fraction | None]] = {}
+    for label, field in fields.items():
+        target_summary = _metric_endpoint_summary(
+            members,
+            member_returns,
+            endpoint=target_endpoint,
+            field=field,
+        )
+        prior_summary = _metric_endpoint_summary(
+            members,
+            member_returns,
+            endpoint=prior_endpoint,
+            field=field,
+        )
+        common = [
+            symbol
+            for symbol in member_symbols
+            if member_returns[symbol][target_endpoint][field]["value"] is not None
+            and member_returns[symbol][prior_endpoint][field]["value"] is not None
+        ]
+        target_common = _median_fraction(
+            [
+                member_returns[symbol][target_endpoint][field]["value"]
+                for symbol in common
+            ]
+        )
+        prior_common = _median_fraction(
+            [
+                member_returns[symbol][prior_endpoint][field]["value"]
+                for symbol in common
+            ]
+        )
+        delta = target_common - prior_common if common else None
+        metrics[label] = {
+            "target": target_summary,
+            "three_official_sessions_before": prior_summary,
+            "common_evaluable": {
+                "count": len(common),
+                "coverage": {
+                    "numerator": len(common),
+                    "denominator": len(members),
+                    "fraction": _fraction_payload(
+                        Fraction(len(common), len(members)) if members else None
+                    ),
+                },
+                "target_median": _fraction_payload(target_common),
+                "three_official_sessions_before_median": _fraction_payload(
+                    prior_common
+                ),
+                "delta": _fraction_payload(delta),
+                "unknown_reason": "NO_COMMON_EVALUABLE_MEMBERS" if not common else None,
+            },
+        }
+        sort_values[f"delta{label[3:]}"] = delta
+        sort_values[label] = _median_fraction(
+            [
+                member_returns[symbol][target_endpoint][field]["value"]
+                for symbol in member_symbols
+                if member_returns[symbol][target_endpoint][field]["value"] is not None
+            ]
+        )
+        metric_values[label] = {
+            "target": sort_values[label],
+            "prior": _median_fraction(
+                [
+                    member_returns[symbol][prior_endpoint][field]["value"]
+                    for symbol in member_symbols
+                    if member_returns[symbol][prior_endpoint][field]["value"]
+                    is not None
+                ]
+            ),
+            "delta": delta,
+        }
+
+    target_ret5 = metrics["ret5"]["target"]
+    target_ret20 = metrics["ret20"]["target"]
+    member_total = len(members)
+    ret5_coverage_met = bool(
+        member_total and 5 * target_ret5["evaluated_count"] >= 4 * member_total
+    )
+    ret20_coverage_met = bool(
+        member_total and 5 * target_ret20["evaluated_count"] >= 4 * member_total
+    )
+    meets_minimum = member_total >= 5 and ret5_coverage_met and ret20_coverage_met
+    mapped_count = sum(symbol in target_profile_symbols for symbol in member_symbols)
+    changed = any(
+        metric_values[field]["delta"] is not None and metric_values[field]["delta"] != 0
+        for field in ("ret5", "ret20")
+    )
+    ordered_members = sorted(members, key=lambda row: row["source_symbol"])
+    selected_members = ordered_members[member_offset : member_offset + member_limit]
+    member_items = []
+    for member in selected_members:
+        symbol = member["source_symbol"]
+        member_metrics = {}
+        for label in fields:
+            target_value = member_returns[symbol][target_endpoint][label]
+            prior_value = member_returns[symbol][prior_endpoint][label]
+            member_metrics[label] = {
+                "target": {
+                    "value": _fraction_payload(target_value["value"]),
+                    "quality": "OBSERVED"
+                    if target_value["value"] is not None
+                    else "UNKNOWN",
+                    "reason": target_value["reason"],
+                    "value_source": target_value["value_source"],
+                },
+                "three_official_sessions_before": {
+                    "value": _fraction_payload(prior_value["value"]),
+                    "quality": "OBSERVED"
+                    if prior_value["value"] is not None
+                    else "UNKNOWN",
+                    "reason": prior_value["reason"],
+                    "value_source": prior_value["value_source"],
+                },
+                "in_common_evaluable_set": (
+                    target_value["value"] is not None
+                    and prior_value["value"] is not None
+                ),
+            }
+        member_items.append(
+            {
+                **member,
+                "exact_target_core_profile_present": symbol in target_profile_symbols,
+                "returns": member_metrics,
+            }
+        )
+    output = {
+        "board_kind": board["board_kind"],
+        "board_native_id": board["board_native_id"],
+        "board_name": board["board_name"],
+        "source_member_total": member_total,
+        "target_core_profile_mapped_member_count": mapped_count,
+        "target_core_profile_unmapped_member_count": member_total - mapped_count,
+        "minimum_quality_requirements": {
+            "alg21_minimum_source_members": 5,
+            "alg21_minimum_coverage": "0.8",
+            "meets_source_member_minimum": member_total >= 5,
+            "meets_target_ret5_coverage_minimum": ret5_coverage_met,
+            "meets_target_ret20_coverage_minimum": ret20_coverage_met,
+            "research_fact_gate": (
+                "MEETS_ALG21_MINIMUM_THRESHOLDS"
+                if meets_minimum
+                else "BELOW_ALG21_MINIMUM_THRESHOLDS"
+            ),
+            "formal_sector_native_qualification": "NOT_EVALUATED_BY_THIS_ACTION",
+        },
+        "returns": metrics,
+        "changed": changed,
+        "member_page": {
+            "offset": member_offset,
+            "limit": member_limit,
+            "count": len(member_items),
+            "total": member_total,
+            "next_offset": (
+                member_offset + len(member_items)
+                if member_offset + len(member_items) < member_total
+                else None
+            ),
+            "members_omitted_by_request": member_limit == 0,
+            "members": member_items,
+        },
+    }
+    return output, sort_values
+
+
+def _rank_strength_boards(
+    summaries: list[dict[str, Any]],
+    sort_values: dict[str, dict[str, Fraction | None]],
+    *,
+    sort_by: str,
+    direction: str,
+    changed_only: bool,
+    offset: int,
+    limit: int,
+) -> tuple[list[dict[str, Any]], int, int]:
+    descending = direction == "STRONGER"
+
+    def sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+        value = sort_values[item["board_native_id"]][sort_by]
+        if value is None:
+            return True, Fraction(0), item["board_native_id"]
+        return False, -value if descending else value, item["board_native_id"]
+
+    ordered = sorted(summaries, key=sort_key)
+    filtered = (
+        [item for item in ordered if item["changed"]] if changed_only else ordered
+    )
+    return filtered[offset : offset + limit], len(ordered), len(filtered)
+
+
+def read_tdx_sector_strength(
+    config: dict[str, Any],
+    *,
+    snapshot_id: str,
+    board_kind: str,
+    board_native_id: str | None,
+    target_session: date,
+    research_cutoff: date,
+    source_set_id: str,
+    package_sha256: str,
+    profile_revision: str | None,
+    changed_only: bool,
+    sort_by: str,
+    direction: str,
+    offset: int,
+    limit: int,
+    member_offset: int,
+    member_limit: int,
+) -> dict[str, Any]:
+    """按完整TDX成员集合计算来源级Core收益中位数及三会话变化。"""
+    if sort_by not in {"ret5", "ret20", "delta5", "delta20"}:
+        raise TdxSectorMembersApplicationError(
+            "STRENGTH_SORT_FIELD_INVALID",
+            "强弱排序字段必须为ret5、ret20、delta5或delta20",
+        )
+    if direction not in {"STRONGER", "WEAKER"}:
+        raise TdxSectorMembersApplicationError(
+            "STRENGTH_SORT_DIRECTION_INVALID", "排序方向必须为STRONGER或WEAKER"
+        )
+    if (
+        type(offset) is not int
+        or offset < 0
+        or type(limit) is not int
+        or not 1 <= limit <= 100
+        or type(member_offset) is not int
+        or member_offset < 0
+        or type(member_limit) is not int
+        or not 0 <= member_limit <= 100
+    ):
+        raise TdxSectorMembersApplicationError(
+            "STRENGTH_PAGE_INVALID",
+            "板块页须为1至100行；成员页须为0至100行；offset不得为负",
+        )
+    if type(target_session) is not date or type(research_cutoff) is not date:
+        raise TdxSectorMembersApplicationError(
+            "SESSION_DATE_INVALID", "目标日与研究截止日必须是有效官方会话日期"
+        )
+    if target_session > research_cutoff:
+        raise TdxSectorMembersApplicationError(
+            "SESSION_AFTER_CUTOFF", "目标交易日不得晚于显式研究截止日"
+        )
+    try:
+        calendar, _metadata, calendar_revision, calendar_sessions = _load_calendar(
+            target_session
+        )
+    except ResearchEntryError as error:
+        raise TdxSectorMembersApplicationError(error.code, str(error)) from error
+    target_index = calendar_sessions.index(target_session)
+    if target_index < 23:
+        raise TdxSectorMembersApplicationError(
+            "STRENGTH_WINDOW_LEFT_TRUNCATED",
+            "目标日之前不足24个官方会话，不能同时计算20会话收益及三会话前态",
+        )
+    window_sessions = tuple(calendar_sessions[target_index - 23 : target_index + 1])
+    prior_session = window_sessions[-4]
+    if any(session > research_cutoff for session in window_sessions):
+        raise TdxSectorMembersApplicationError(
+            "SESSION_AFTER_CUTOFF", "价格窗口包含晚于显式研究截止日的官方会话"
+        )
+    data = query_sector_strength(
+        config,
+        snapshot_id=snapshot_id,
+        board_kind=board_kind,
+        board_native_id=board_native_id,
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        source_set_id=source_set_id,
+        package_sha256=package_sha256,
+        profile_revision=profile_revision,
+        official_calendar_id=str(calendar["calendar_id"]),
+        official_calendar_revision=str(calendar_revision),
+        window_sessions=window_sessions,
+    )
+    source_set = data["source_set"]
+    target_capture_id = source_set["source_capture_id"]
+    raw_by_key = {
+        (str(row["source_symbol"]), row["session_date"]): row
+        for row in data["raw_rows"]
+    }
+    profile_by_symbol = {str(row["source_symbol"]): row for row in data["profile_rows"]}
+    symbols = sorted(
+        {
+            member["source_symbol"]
+            for board in data["boards"]
+            for member in board["members"]
+        }
+    )
+    source_entry_sha_by_symbol: dict[str, set[str]] = {
+        symbol: set() for symbol in symbols
+    }
+    for row in data["raw_rows"]:
+        entry_sha = row.get("source_entry_sha256")
+        if entry_sha:
+            source_entry_sha_by_symbol[str(row["source_symbol"])].add(str(entry_sha))
+    official_calendar = MarketSessionCalendar(
+        calendar_id=str(calendar["calendar_id"]),
+        revision=str(calendar_revision),
+        sessions=window_sessions,
+    )
+    target_endpoint = "target"
+    prior_endpoint = "three_official_sessions_before"
+    endpoint_indexes = {
+        target_endpoint: len(window_sessions) - 1,
+        prior_endpoint: len(window_sessions) - 4,
+    }
+    member_returns: dict[str, dict[str, Any]] = {}
+    for symbol in symbols:
+        observations: list[CoreObservation] = []
+        observation_issues: list[str | None] = []
+        for session in window_sessions:
+            observation, issue = _raw_window_observation(
+                source_symbol=symbol,
+                session=session,
+                raw_by_key=raw_by_key,
+                revision_counts=data["raw_revision_counts"],
+                target_session=target_session,
+                target_capture_id=target_capture_id,
+            )
+            observations.append(observation)
+            observation_issues.append(issue)
+        if len(source_entry_sha_by_symbol[symbol]) > 1:
+            observation_issues = [
+                issue or "SOURCE_ENTRY_SHA_CONFLICT" for issue in observation_issues
+            ]
+            observations = [
+                CoreObservation(
+                    session=row.session,
+                    state="UNKNOWN",
+                    coordinate_id="RAW_UNADJUSTED",
+                    close=unknown("SOURCE_ENTRY_SHA_CONFLICT"),
+                )
+                for row in observations
+            ]
+        endpoint_values: dict[str, dict[str, Any]] = {}
+        for endpoint, end_index in endpoint_indexes.items():
+            endpoint_history = observations[: end_index + 1]
+            endpoint_issues = observation_issues[: end_index + 1]
+            endpoint_calendar = MarketSessionCalendar(
+                calendar_id=official_calendar.calendar_id,
+                revision=official_calendar.revision,
+                sessions=window_sessions[: end_index + 1],
+            )
+            endpoint_values[endpoint] = {}
+            for periods in (5, 20):
+                field = f"ret{periods}"
+                result = calculate_core_return(
+                    endpoint_history,
+                    periods=periods,
+                    official_calendar=endpoint_calendar,
+                )
+                value = result.value if result.quality == "OBSERVED" else None
+                reason = _return_reason(
+                    result,
+                    observations=endpoint_history,
+                    issues=endpoint_issues,
+                    periods=periods,
+                )
+                value_source = "CORE_RETURN_KERNEL_FROM_EXACT_PACKAGE_RAW_WINDOW"
+                if endpoint == target_endpoint and periods == 20:
+                    profile = profile_by_symbol.get(symbol)
+                    if profile is None:
+                        value = None
+                        reason = "CORE_PROFILE_NOT_IN_EXACT_TARGET_SOURCE_SET"
+                        value_source = "EXACT_TARGET_CORE_PROFILE_REQUIRED"
+                    elif profile["price_coordinate"] != "RAW_UNADJUSTED":
+                        value = None
+                        reason = "PRICE_COORDINATE_INCOMPATIBLE"
+                        value_source = "EXACT_TARGET_CORE_PROFILE_REQUIRED"
+                    elif profile["ret20_quality"] != "OBSERVED":
+                        value = None
+                        reason = profile["ret20_reason"] or (
+                            "CORE_RET20_QUALITY_"
+                            + str(profile["ret20_quality"] or "UNKNOWN")
+                        )
+                        value_source = "EXACT_TARGET_CORE_PROFILE"
+                    else:
+                        numerator = profile["ret20_exact_numerator"]
+                        denominator = profile["ret20_exact_denominator"]
+                        try:
+                            stored_value = Fraction(int(numerator), int(denominator))
+                        except (
+                            ArithmeticError,
+                            TypeError,
+                            ValueError,
+                            ZeroDivisionError,
+                        ):
+                            stored_value = None
+                        if (
+                            stored_value is None
+                            or denominator is None
+                            or int(denominator) <= 0
+                        ):
+                            value = None
+                            reason = "CORE_RET20_EXACT_VALUE_UNAVAILABLE"
+                            value_source = "EXACT_TARGET_CORE_PROFILE"
+                        elif (
+                            result.quality != "OBSERVED" or stored_value != result.value
+                        ):
+                            value = None
+                            reason = "CORE_PROFILE_RET20_RAW_WINDOW_MISMATCH"
+                            value_source = "EXACT_TARGET_CORE_PROFILE_VERIFIED_BY_RAW"
+                        else:
+                            value = stored_value
+                            reason = None
+                            value_source = "EXACT_TARGET_CORE_PROFILE_VERIFIED_BY_RAW"
+                endpoint_values[endpoint][field] = {
+                    "value": value,
+                    "reason": reason,
+                    "value_source": value_source,
+                }
+        member_returns[symbol] = endpoint_values
+
+    summaries: list[dict[str, Any]] = []
+    sort_values: dict[str, dict[str, Fraction | None]] = {}
+    target_profile_symbols = set(profile_by_symbol)
+    for board in data["boards"]:
+        summary, values = _summarize_strength_board(
+            board,
+            member_returns=member_returns,
+            target_profile_symbols=target_profile_symbols,
+            target_endpoint=target_endpoint,
+            prior_endpoint=prior_endpoint,
+            member_offset=member_offset,
+            member_limit=member_limit,
+        )
+        summaries.append(summary)
+        sort_values[board["board_native_id"]] = values
+    page, full_board_count, filtered_board_count = _rank_strength_boards(
+        summaries,
+        sort_values,
+        sort_by=sort_by,
+        direction=direction,
+        changed_only=changed_only,
+        offset=offset,
+        limit=limit,
+    )
+    snapshot = data["snapshot"]
+    mapped_total = sum(
+        summary["target_core_profile_mapped_member_count"] for summary in summaries
+    )
+    return {
+        "status": "AVAILABLE" if page else ("NO_MATCH" if changed_only else "EMPTY"),
+        "analysis_scope": "NON_PIT_RETROSPECTIVE_CURRENT_TDX_MEMBER_CORE_RETURN_STRENGTH",
+        "snapshot": {
+            "snapshot_id": snapshot["snapshot_id"],
+            "source_kind": snapshot["source_kind"],
+            "source_file_sha256": snapshot["source_file_sha256"],
+            "source_observed_at": snapshot["observed_at"],
+            "source_valid_on": snapshot["source_valid_on"],
+            "source_known_at": snapshot["source_known_at"],
+            "source_available_at": snapshot["source_available_at"],
+            "source_clock_quality": snapshot["clock_quality"],
+            "source_quality": snapshot["source_quality"],
+            "quality_counts": {
+                **{
+                    key: value
+                    for key, value in snapshot.items()
+                    if key in {"rows_declared", "parse_contract_version"}
+                },
+            },
+            "research_mode": snapshot["research_mode"],
+        },
+        "target_source_set": source_set,
+        "target_profile_snapshot": data["profile_snapshot"],
+        "official_calendar": data["official_calendar"],
+        "target_session": target_session.isoformat(),
+        "three_official_sessions_before": prior_session.isoformat(),
+        "window_sessions": [session.isoformat() for session in window_sessions],
+        "research_cutoff": research_cutoff.isoformat(),
+        "price_coordinate": "RAW_UNADJUSTED",
+        "entity_identity": "SOURCE_SYMBOL_ONLY",
+        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "formal_sector_native_qualification": "NOT_EVALUATED_BY_THIS_ACTION",
+        "formal_rps_percentile_created": False,
+        "rotation_state_created": False,
+        "filter": {
+            "board_kind": board_kind,
+            "board_native_id": board_native_id,
+            "changed_only": changed_only,
+            "sort_by": sort_by,
+            "direction": direction,
+        },
+        "board_total_count": full_board_count,
+        "board_changed_count": sum(bool(item["changed"]) for item in summaries),
+        "board_filtered_count": filtered_board_count,
+        "member_relationship_count": data["member_relationship_count"],
+        "distinct_source_symbol_count": data["distinct_source_symbol_count"],
+        "target_core_profile_mapped_member_relationships": mapped_total,
+        "page": {
+            "offset": offset,
+            "limit": limit,
+            "count": len(page),
+            "total": filtered_board_count,
+            "next_offset": offset + len(page)
+            if offset + len(page) < filtered_board_count
+            else None,
+            "stable_tie_order": "board_native_id ASC COLLATE C",
+            "summaries_computed_before_pagination": True,
+        },
+        "boards": page,
+        "return_provenance": {
+            "target_ret20": "Exact SEALED target P03 Core profile ret20, accepted only when its exact value matches the same-package Raw Core return kernel.",
+            "ret5_and_prior_endpoint_returns": "Existing Core return kernel over exact same-package RAW official-session window; no other Core fields recalculated.",
+            "comparison": "Each horizon uses its own fixed common evaluable source-symbol set; target and prior medians are both recomputed on that same set.",
+            "membership_is_post_hoc": True,
+        },
+        "database_read": data["database_read"],
+        "database_write_attempted": False,
+        "ddl_executed": False,
+        "dml_executed": False,
+        "dml_rows_affected": 0,
+        "return_fields_calculated": ["core.ret5", "core.ret20"],
+        "non_return_core_factors_recalculated": [],
+    }
+
+
 __all__ = [
     "TdxSectorMembersApplicationError",
     "TdxSectorMembersPgError",
@@ -601,4 +1353,5 @@ __all__ = [
     "read_tdx_sector_catalog",
     "read_tdx_sector_breadth",
     "read_tdx_sector_members",
+    "read_tdx_sector_strength",
 ]

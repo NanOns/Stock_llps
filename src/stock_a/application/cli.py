@@ -150,6 +150,7 @@ from stock_a.application.tdx_sector_members import (
     read_tdx_sector_breadth,
     read_tdx_sector_catalog,
     read_tdx_sector_members,
+    read_tdx_sector_strength,
 )
 from stock_a.sources.tdx.remote_sector import TdxRemoteSectorError
 
@@ -977,6 +978,48 @@ def _parser() -> argparse.ArgumentParser:
     sector_breadth.add_argument("--limit", type=int, default=30)
     sector_breadth.add_argument("--member-offset", type=int, default=0)
     sector_breadth.add_argument("--member-limit", type=int, default=30)
+    sector_strength = sector_actions.add_parser(
+        "strength",
+        help="按精确当前TDX成员快照比较5/20会话来源级Core收益与三会话前变化",
+    )
+    sector_strength.add_argument("--snapshot-id", required=True)
+    sector_strength.add_argument(
+        "--board-kind", required=True, choices=("INDUSTRY", "CONCEPT")
+    )
+    sector_strength.add_argument(
+        "--board-native-id", help="精确原生板块编号；省略时查询所选类型全部板块"
+    )
+    sector_strength.add_argument("--target-session", required=True)
+    sector_strength.add_argument("--research-cutoff", required=True)
+    sector_strength.add_argument("--source-set-id", required=True)
+    sector_strength.add_argument("--package-sha256", required=True)
+    sector_strength.add_argument("--profile-revision")
+    sector_strength.add_argument(
+        "--sort-by",
+        choices=("delta20", "delta5", "ret20", "ret5"),
+        default="delta20",
+        help="排序字段：同集合20/5会话变化或目标日20/5会话收益中位数",
+    )
+    sector_strength.add_argument(
+        "--direction",
+        choices=("STRONGER", "WEAKER"),
+        default="STRONGER",
+        help="按数值从高到低展示变强方向，或从低到高展示变弱方向",
+    )
+    sector_strength.add_argument(
+        "--changed-only",
+        action="store_true",
+        help="只显示共同可评估集合发生非零变化的板块",
+    )
+    sector_strength.add_argument("--offset", type=int, default=0)
+    sector_strength.add_argument("--limit", type=int, default=30)
+    sector_strength.add_argument("--member-offset", type=int, default=0)
+    sector_strength.add_argument(
+        "--member-limit",
+        type=int,
+        default=30,
+        help="每板块成员页大小，0表示只显示板块汇总，最多100",
+    )
     source_set = commands.add_parser(
         "source-set-candidate",
         help="按精确日期与TDX包SHA预检或读取P03来源集合候选",
@@ -2712,6 +2755,25 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 after_source_set_id=args.after_source_set_id,
                 after_package_sha256=args.after_package_sha256,
                 after_profile_revision=args.after_profile_revision,
+                offset=args.offset,
+                limit=args.limit,
+                member_offset=args.member_offset,
+                member_limit=args.member_limit,
+            )
+        elif args.sector_action == "strength":
+            result = read_tdx_sector_strength(
+                config,
+                snapshot_id=args.snapshot_id,
+                board_kind=args.board_kind,
+                board_native_id=args.board_native_id,
+                target_session=_parse_source_set_date(args.target_session),
+                research_cutoff=_parse_source_set_date(args.research_cutoff),
+                source_set_id=args.source_set_id,
+                package_sha256=args.package_sha256,
+                profile_revision=args.profile_revision,
+                changed_only=args.changed_only,
+                sort_by=args.sort_by,
+                direction=args.direction,
                 offset=args.offset,
                 limit=args.limit,
                 member_offset=args.member_offset,

@@ -500,6 +500,31 @@ def _return(history: Sequence[CoreObservation], periods: int) -> FieldValue:
     )
 
 
+def calculate_core_return(
+    history: Sequence[CoreObservation],
+    *,
+    periods: int,
+    official_calendar: MarketSessionCalendar,
+) -> FieldValue:
+    """只计算现役Core的指定会话收益字段，供精确窗口读取复用。"""
+    if periods not in {5, 20}:
+        raise ContractError("Core收益窗口只接受现役5或20会话合同")
+    if not isinstance(official_calendar, MarketSessionCalendar):
+        raise ContractError("Core收益计算必须传入版本化官方市场会话日历")
+    _validate_history(history, official_calendar)
+    latest = history[-1]
+    if latest.state != "ACTUAL":
+        reason = {
+            "UNKNOWN": "CURRENT_SESSION_UNKNOWN",
+            "CONFIRMED_SUSPENSION": "CURRENT_SESSION_SUSPENDED",
+            "PRE_LISTING": "CURRENT_SESSION_PRE_LISTING",
+            "ADJUSTMENT_UNKNOWN": "PRICE_IDENTITY_UNKNOWN",
+            "IDENTITY_UNKNOWN": "SECURITY_IDENTITY_UNKNOWN",
+        }[latest.state]
+        return unknown(reason)
+    return _return(history, periods)
+
+
 def _derived_price_ratios(result, current_prices):
     current = current_prices[0] if current_prices else None
     for target, numerator, denominator in (
