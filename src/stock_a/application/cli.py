@@ -112,6 +112,7 @@ from stock_a.research.entry import (
     research_compare,
     research_stock,
     research_stock_pg_history_preview,
+    research_stock_pg_support_followup_preview,
     research_universe_preview,
     research_universe_pg_history_preview,
 )
@@ -989,6 +990,10 @@ def _parser() -> argparse.ArgumentParser:
     source_d1_breakout.add_argument("--history-end", help="历史观察结束官方会话")
     source_d1_breakout.add_argument(
         "--history-last", type=int, help="观察最近N个官方会话，1至75"
+    )
+    source_d1_breakout.add_argument(
+        "--support-anchor-session",
+        help="显式指定一个历史D1突破平台出生会话；仅限单代码历史模式",
     )
     price_profile = commands.add_parser(
         "source-symbol-price-profile",
@@ -2968,6 +2973,15 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
     history_mode = any(
         (args.history_start, args.history_end, args.history_last is not None)
     )
+    support_anchor = None
+    if args.support_anchor_session is not None:
+        if args.only_true or args.symbol is None or not history_mode:
+            raise DiagnosticError(
+                "D1_BREAKOUT_SUPPORT_SELECTION_INVALID",
+                "--support-anchor-session必须与--symbol及单股历史范围同时使用",
+                _EXIT_ARGUMENT,
+            )
+        support_anchor = _parse_source_set_date(args.support_anchor_session)
     if args.previous_state is not None and not args.only_true:
         raise DiagnosticError(
             "D1_BREAKOUT_PREVIOUS_STATE_SELECTION_INVALID",
@@ -3061,6 +3075,31 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     _EXIT_ARGUMENT,
                 )
             history_sessions = tuple(day for day in sessions if start <= day <= end)
+    if support_anchor is not None:
+        if support_anchor not in sessions:
+            raise DiagnosticError(
+                "D1_BREAKOUT_SUPPORT_ANCHOR_NOT_OFFICIAL",
+                "显式平台出生会话不在当前版本化官方会话窗口内",
+                _EXIT_ARGUMENT,
+            )
+        if support_anchor not in history_sessions:
+            raise DiagnosticError(
+                "D1_BREAKOUT_SUPPORT_ANCHOR_OUT_OF_RANGE",
+                "显式平台出生会话必须在请求的单股历史范围内",
+                _EXIT_ARGUMENT,
+            )
+        if support_anchor >= target:
+            raise DiagnosticError(
+                "D1_BREAKOUT_SUPPORT_ANCHOR_NOT_HISTORICAL",
+                "平台出生会话必须早于目标会话；出生日不参与同日自证",
+                _EXIT_ARGUMENT,
+            )
+        if not history_sessions or history_sessions[-1] != target:
+            raise DiagnosticError(
+                "D1_BREAKOUT_SUPPORT_TARGET_NOT_HISTORY_END",
+                "支撑观察历史范围必须以目标会话结束，避免输出范围与截止点不一致",
+                _EXIT_ARGUMENT,
+            )
     config, config_path = _load_runtime_config()
     try:
         if args.only_true:
@@ -3142,9 +3181,20 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     "D1_BREAKOUT_SOURCE_CLOCK_MISMATCH",
                     "来源封口时钟与精确来源集合不一致",
                 )
+            if support_anchor is not None:
+                official_calendar = _official_calendar(target)
+                if any(
+                    sealed.get(key) != official_calendar[key]
+                    for key in ("calendar_id", "calendar_revision", "calendar_sha256")
+                ):
+                    raise PgResearchBindingError(
+                        "D1_BREAKOUT_SUPPORT_CALENDAR_MISMATCH",
+                        "支撑历史来源封口与当前版本化官方日历身份、修订或摘要不一致",
+                    )
             candidate = page["candidates"][0]
             rows = candidate["history_rows"]
             points = []
+            support_history_points = []
             counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0}
             for day in history_sessions:
                 window = tuple(session for session in sessions if session <= day)
@@ -3190,10 +3240,38 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                         "predicate": predicate,
                     }
                 )
+                if support_anchor is not None:
+                    support_history_points.append(
+                        {
+                            "session": day,
+                            "row": row,
+                            "preview": observed,
+                            "history_max_session": max(
+                                (item["session_date"] for item in bounded_rows),
+                                default=None,
+                            ),
+                        }
+                    )
+            support_followup = None
+            if support_anchor is not None:
+                support_followup = research_stock_pg_support_followup_preview(
+                    symbol=source_symbol,
+                    target_session=target,
+                    support_anchor_session=support_anchor,
+                    official_sessions=sessions,
+                    requested_sessions=history_sessions,
+                    history_points=support_history_points,
+                    package_sha256=args.package_sha256,
+                    source_set_id=args.source_set_id,
+                    source_context=source_context,
+                    sealed_source=sealed,
+                )
             _emit(
                 {
                     "ok": True,
-                    "status": "SOURCE_LEVEL_RAW_BREAKOUT_HISTORY",
+                    "status": "SOURCE_LEVEL_RAW_BREAKOUT_HISTORY_WITH_SUPPORT_FOLLOWUP"
+                    if support_anchor is not None
+                    else "SOURCE_LEVEL_RAW_BREAKOUT_HISTORY",
                     "research_mode": "NON_PIT_RETROSPECTIVE",
                     "identity_status": "SOURCE_SYMBOL_ONLY",
                     "price_coordinate": "RAW_UNADJUSTED",
@@ -3210,6 +3288,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     "n_false": counts["FALSE"],
                     "n_unknown": counts["UNKNOWN"],
                     "points": points,
+                    "support_followup": support_followup,
                     "formal_downstream": {
                         "d1_anchor": "NOT_EVALUATED",
                         "episode": "NOT_EVALUATED",
