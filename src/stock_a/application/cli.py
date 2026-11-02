@@ -146,10 +146,12 @@ from stock_a.application.tdx_sector_members import (
     TdxSectorMembersPgError,
     TdxSectorSourceError,
     ingest_tdx_sector_members,
+    refresh_remote_tdx_sector_members,
     read_tdx_sector_breadth,
     read_tdx_sector_catalog,
     read_tdx_sector_members,
 )
+from stock_a.sources.tdx.remote_sector import TdxRemoteSectorError
 
 _READ_ERROR_EXIT_CODES = {
     "SOURCE_NOT_CONFIGURED": _EXIT_UNAVAILABLE,
@@ -888,7 +890,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     sector_members = commands.add_parser(
         "source-tdx-sector-members",
-        help="接入或只读查询本机TDX行业、概念成员及精确PG研究上下文",
+        help="接入或只读查询本机与远端TDX行业、概念成员及精确PG研究上下文",
     )
     sector_actions = sector_members.add_subparsers(
         dest="sector_action", parser_class=ChineseParser, required=True
@@ -901,6 +903,33 @@ def _parser() -> argparse.ArgumentParser:
         required=True,
         choices=("R03_TDX_REAL_SECTOR_MEMBERS_TO_PG_R1",),
         help="显式绑定本批已批准任务范围",
+    )
+    sector_refresh = sector_actions.add_parser(
+        "refresh-remote",
+        help="不启动通达信客户端，校验或追加远端TDX行业与概念成员快照",
+    )
+    sector_refresh.add_argument(
+        "--confirm-task-scope",
+        required=True,
+        choices=("R03_TDX_HEADLESS_SECTOR_SOURCE_REFRESH_R1",),
+        help="显式绑定本批已批准远端成员刷新范围",
+    )
+    sector_refresh.add_argument(
+        "--validate-only",
+        action="store_true",
+        help="只下载并校验远端成员原件、差异与PG身份，不执行INSERT",
+    )
+    sector_refresh.add_argument(
+        "--validated-source-sha256",
+        action="append",
+        metavar="文件=SHA256",
+        help="绑定TRF01核验的远端文件原件SHA；同一文件名只可出现一次",
+    )
+    sector_refresh.add_argument(
+        "--oracle-set-sha256",
+        action="append",
+        metavar="INDUSTRY|CONCEPT=SHA256",
+        help="绑定TRF02独立目录与成员集合SHA；新增PG版本时必填",
     )
     sector_catalog = sector_actions.add_parser(
         "catalog", help="分页查询精确行业或概念来源快照目录"
@@ -2632,6 +2661,19 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                     _EXIT_ARGUMENT,
                 )
             result = ingest_tdx_sector_members(config)
+        elif args.sector_action == "refresh-remote":
+            if args.confirm_task_scope != "R03_TDX_HEADLESS_SECTOR_SOURCE_REFRESH_R1":
+                raise DiagnosticError(
+                    "TASK_SCOPE_REQUIRED",
+                    "远端成员刷新必须绑定本批R03任务范围",
+                    _EXIT_ARGUMENT,
+                )
+            result = refresh_remote_tdx_sector_members(
+                config,
+                validate_only=args.validate_only,
+                validated_source_sha256=args.validated_source_sha256,
+                oracle_set_sha256=args.oracle_set_sha256,
+            )
         elif args.sector_action == "catalog":
             result = read_tdx_sector_catalog(
                 config,
@@ -2681,7 +2723,11 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
             )
     except DiagnosticError:
         raise
-    except (TdxSectorMembersApplicationError, TdxSectorSourceError) as error:
+    except (
+        TdxSectorMembersApplicationError,
+        TdxSectorSourceError,
+        TdxRemoteSectorError,
+    ) as error:
         _emit(
             {
                 "ok": False,
@@ -2700,7 +2746,9 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
         )
         return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
     except TdxSectorMembersPgError as error:
-        write_attempted = args.sector_action == "ingest"
+        write_attempted = args.sector_action == "ingest" or (
+            args.sector_action == "refresh-remote" and not args.validate_only
+        )
         _emit(
             {
                 "ok": False,
@@ -2720,12 +2768,13 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
         return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
     result.update(
         {
-            "ok": result.get("status") not in {"NO_MATCH", "REJECTED"},
+            "ok": result.get("status")
+            not in {"NO_MATCH", "REJECTED", "BLOCKED_REVISION_KEY"},
             "operation": args.sector_action,
             "configuration_path": str(config_path),
             "database_io_attempted": True,
             "ddl_executed": False,
-            "source_zip_opened": False,
+            "source_zip_opened": result.get("zhb_zip") is not None,
         }
     )
     _emit(result)

@@ -36,6 +36,9 @@ class SourceFileEvidence:
     sha256: str
     size_bytes: int
     last_write_time_utc: str
+    source_label: str | None = None
+    source_protocol: str | None = None
+    source_archive_sha256: str | None = None
 
 
 @dataclass(frozen=True)
@@ -81,8 +84,18 @@ class SectorSourceInputs:
     files: Mapping[str, SourceFileEvidence]
 
 
+@dataclass(frozen=True)
+class RemoteSectorParseOutcome:
+    snapshots: tuple[SectorSourceSnapshot, ...]
+    rejected_sources: tuple[dict[str, str], ...]
+
+
 def _sha256(raw: bytes) -> str:
     return hashlib.sha256(raw).hexdigest()
+
+
+def _source_label(item: SourceFileEvidence) -> str:
+    return item.source_label or f"TDX_INSTALL/{item.relative_path}"
 
 
 def _file_evidence(root: Path, relative_path: str) -> SourceFileEvidence:
@@ -299,11 +312,15 @@ def _industry_snapshot(
             f"{reason}={count}" for reason, count in sorted(unresolved.items())
         )
     source_role = (
-        "PRIMARY=TDX_INSTALL/T0002/hq_cache/tdxhy.cfg;"
-        "INDUSTRY_NAME_AND_NATIVE_ID_DIRECTORY="
-        "TDX_INSTALL/T0002/hq_cache/tdxzs.cfg;"
-        f"DIRECTORY_SHA256={directory_file.sha256};TYPE_FILTER=2"
+        f"PRIMARY={_source_label(assignment_file)};"
+        f"INDUSTRY_NAME_AND_NATIVE_ID_DIRECTORY={_source_label(directory_file)};"
+        f"DIRECTORY_SHA256={directory_file.sha256}"
     )
+    if directory_file.source_protocol is not None:
+        source_role += f";DIRECTORY_PROTOCOL={directory_file.source_protocol}"
+    if directory_file.source_archive_sha256 is not None:
+        source_role += f";ARCHIVE_SHA256={directory_file.source_archive_sha256}"
+    source_role += ";TYPE_FILTER=2"
     return SectorSourceSnapshot(
         snapshot_id=_snapshot_uuid(
             "TDX_TDXHY_CFG", assignment_file.sha256, "TDX_INDUSTRY_MEMBERSHIP_R1"
@@ -456,8 +473,13 @@ def _concept_snapshot(
         source_kind="TDX_INFOHARBOR_BLOCK_DAT",
         source_file_sha256=concept_file.sha256,
         source_path_role=(
-            "PRIMARY=TDX_INSTALL/T0002/hq_cache/infoharbor_block.dat;"
+            f"PRIMARY={_source_label(concept_file)};"
             "INCLUDED_PREFIX=GN;EXCLUDED_PREFIX=FG,ZS"
+            + (
+                f";SOURCE_PROTOCOL={concept_file.source_protocol}"
+                if concept_file.source_protocol is not None
+                else ""
+            )
         ),
         source_file_size=concept_file.size_bytes,
         observed_at=observed_at,
@@ -510,3 +532,62 @@ def parse_sector_source_inputs(
     industry_snapshot = _industry_snapshot(assignment, directory, observed_at)
     concept_snapshot = _concept_snapshot(concept, observed_at)
     return industry_snapshot, concept_snapshot
+
+
+def parse_remote_sector_source_inputs(
+    inputs: SectorSourceInputs, *, observed_at: datetime
+) -> tuple[SectorSourceSnapshot, ...]:
+    """按远端实际可得类别分别解析，不回退到本地TDX原件。"""
+    outcome = parse_remote_sector_source_inputs_with_status(
+        inputs, observed_at=observed_at
+    )
+    if not outcome.snapshots:
+        if outcome.rejected_sources:
+            first = outcome.rejected_sources[0]
+            raise TdxSectorSourceError(first["code"], first["message"])
+        raise TdxSectorSourceError(
+            "BLOCKED_REMOTE_SOURCE", "TDX远端没有可完整验证的行业或概念成员来源"
+        )
+    return outcome.snapshots
+
+
+def parse_remote_sector_source_inputs_with_status(
+    inputs: SectorSourceInputs, *, observed_at: datetime
+) -> RemoteSectorParseOutcome:
+    """分别解析行业与概念，单类坏源不阻塞另一类独立成员来源。"""
+    snapshots: list[SectorSourceSnapshot] = []
+    rejected: list[dict[str, str]] = []
+    assignment = inputs.files.get("T0002/hq_cache/tdxhy.cfg")
+    directory = inputs.files.get("T0002/hq_cache/tdxzs.cfg")
+    concept = inputs.files.get("T0002/hq_cache/infoharbor_block.dat")
+    if assignment is not None and directory is not None:
+        try:
+            snapshots.append(_industry_snapshot(assignment, directory, observed_at))
+        except TdxSectorSourceError as error:
+            rejected.append(
+                {
+                    "source_kind": "TDX_TDXHY_CFG",
+                    "code": error.code,
+                    "message": str(error),
+                }
+            )
+    elif assignment is not None or directory is not None:
+        rejected.append(
+            {
+                "source_kind": "TDX_TDXHY_CFG",
+                "code": "REMOTE_INDUSTRY_SOURCE_INCOMPLETE",
+                "message": "tdxhy.cfg与tdxzs.cfg必须来自同一远端服务器并同时完整",
+            }
+        )
+    if concept is not None:
+        try:
+            snapshots.append(_concept_snapshot(concept, observed_at))
+        except TdxSectorSourceError as error:
+            rejected.append(
+                {
+                    "source_kind": "TDX_INFOHARBOR_BLOCK_DAT",
+                    "code": error.code,
+                    "message": str(error),
+                }
+            )
+    return RemoteSectorParseOutcome(tuple(snapshots), tuple(rejected))

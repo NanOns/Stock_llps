@@ -248,6 +248,181 @@ WHERE source_kind=%s AND source_file_sha256=%s AND parse_contract_version=%s""",
     return True
 
 
+def _stable_snapshot_matches_without_source_path(
+    actual: dict, expected: SectorSourceSnapshot
+) -> bool:
+    return (
+        actual["snapshot_id"] == expected.snapshot_id
+        and actual["source_kind"] == expected.source_kind
+        and actual["source_file_sha256"].strip() == expected.source_file_sha256
+        and actual["source_file_size"] == expected.source_file_size
+        and actual["source_valid_on"] == expected.source_valid_on
+        and actual["source_known_at"] == expected.source_known_at
+        and actual["source_available_at"] == expected.source_available_at
+        and actual["clock_quality"] == expected.clock_quality
+        and actual["research_mode"] == expected.research_mode
+        and actual["parse_contract_version"] == expected.parse_contract_version
+        and actual["rows_declared"] == expected.rows_declared
+        and actual["source_quality"] == expected.source_quality
+    )
+
+
+def _directory_sha256(source_path_role: str) -> str | None:
+    match = re.search(
+        r"(?:^|;)DIRECTORY_SHA256=([0-9a-f]{64})(?:;|$)", source_path_role
+    )
+    return match.group(1) if match else None
+
+
+def inspect_remote_sector_source_revisions(
+    config: dict[str, Any], snapshots: Sequence[SectorSourceSnapshot]
+) -> dict[str, Any]:
+    """只读核对远端修订键、PG成员集合和三张表当前容量。"""
+    if not snapshots or len(snapshots) > 2:
+        raise TdxSectorMembersPgError(
+            "PG_INSERT_BUDGET_EXCEEDED", "远端板块来源核对最多接受两个类别"
+        )
+    for snapshot in snapshots:
+        _validate_snapshot(snapshot)
+    revisions: list[dict[str, Any]] = []
+    try:
+        with _transaction(config, write=False) as (_connection, cursor, _namespace_id):
+            cursor.execute(
+                """SELECT
+    (SELECT count(*) FROM stock.tdx_sector_source_snapshots),
+    (SELECT count(*) FROM stock.tdx_sector_catalog),
+    (SELECT count(*) FROM stock.tdx_sector_members)"""
+            )
+            snapshot_count, catalog_count, member_count = map(int, cursor.fetchone())
+            for snapshot in snapshots:
+                actual, catalog, members = _read_snapshot_rows(
+                    cursor, snapshot.snapshot_id
+                )
+                if actual is None:
+                    cursor.execute(
+                        """SELECT snapshot_id::text FROM stock.tdx_sector_source_snapshots
+WHERE source_kind=%s AND source_file_sha256=%s AND parse_contract_version=%s""",
+                        (
+                            snapshot.source_kind,
+                            snapshot.source_file_sha256,
+                            snapshot.parse_contract_version,
+                        ),
+                    )
+                    collision = cursor.fetchone()
+                    revisions.append(
+                        {
+                            "snapshot_id": snapshot.snapshot_id,
+                            "source_kind": snapshot.source_kind,
+                            "decision": (
+                                "BLOCKED_REVISION_KEY" if collision else "NEW_VERSION"
+                            ),
+                            "existing_snapshot_id": collision[0] if collision else None,
+                            "reason_code": (
+                                "SOURCE_REVISION_UNIQUE_KEY_COLLISION"
+                                if collision
+                                else None
+                            ),
+                        }
+                    )
+                    continue
+
+                directory_sha_changed = (
+                    snapshot.source_kind == "TDX_TDXHY_CFG"
+                    and _directory_sha256(actual["source_path_role"])
+                    != _directory_sha256(snapshot.source_path_role)
+                )
+                content_matches = (
+                    _stable_snapshot_matches_without_source_path(actual, snapshot)
+                    and catalog == _expected_catalog(snapshot)
+                    and members == _expected_members(snapshot)
+                )
+                if directory_sha_changed:
+                    decision = "BLOCKED_REVISION_KEY"
+                    reason_code = "INDUSTRY_DIRECTORY_SHA_CHANGED_WITH_SAME_PRIMARY_KEY"
+                elif not content_matches:
+                    decision = "BLOCKED_REVISION_KEY"
+                    reason_code = "SOURCE_REVISION_CONTENT_CONFLICT"
+                else:
+                    decision = "REUSE_IDENTICAL_VERSION"
+                    reason_code = None
+                revisions.append(
+                    {
+                        "snapshot_id": snapshot.snapshot_id,
+                        "source_kind": snapshot.source_kind,
+                        "decision": decision,
+                        "reason_code": reason_code,
+                        "existing_source_path_role": actual["source_path_role"],
+                        "existing_catalog_rows": len(catalog),
+                        "existing_member_rows": len(members),
+                    }
+                )
+    except TdxSectorMembersPgError:
+        raise
+    except RawSourcePgError as error:
+        raise TdxSectorMembersPgError(error.code, str(error)) from error
+    return {
+        "database_counts": {
+            "source_snapshots": snapshot_count,
+            "catalog_rows": catalog_count,
+            "member_rows": member_count,
+        },
+        "revisions": revisions,
+        "database_write_attempted": False,
+        "dml_executed": False,
+        "ddl_executed": False,
+    }
+
+
+def verify_remote_sector_source_readback(
+    config: dict[str, Any], snapshots: Sequence[SectorSourceSnapshot]
+) -> dict[str, Any]:
+    """以新只读事务重新核验已存在的来源行与完整集合。"""
+    readback: dict[str, dict[str, int | str]] = {}
+    try:
+        with _transaction(config, write=False) as (_connection, cursor, _namespace_id):
+            for snapshot in snapshots:
+                actual, catalog, members = _read_snapshot_rows(
+                    cursor, snapshot.snapshot_id
+                )
+                same_directory = (
+                    snapshot.source_kind != "TDX_TDXHY_CFG"
+                    or _directory_sha256(actual["source_path_role"])
+                    == _directory_sha256(snapshot.source_path_role)
+                    if actual is not None
+                    else False
+                )
+                if (
+                    actual is None
+                    or not same_directory
+                    or not _stable_snapshot_matches_without_source_path(
+                        actual, snapshot
+                    )
+                    or catalog != _expected_catalog(snapshot)
+                    or members != _expected_members(snapshot)
+                ):
+                    raise TdxSectorMembersPgError(
+                        "REMOTE_SOURCE_READBACK_MISMATCH",
+                        "远端成员来源经独立只读事务回读不匹配",
+                    )
+                readback[snapshot.snapshot_id] = {
+                    "catalog_rows": len(catalog),
+                    "member_rows": len(members),
+                    "source_file_sha256": snapshot.source_file_sha256,
+                }
+    except TdxSectorMembersPgError:
+        raise
+    except RawSourcePgError as error:
+        raise TdxSectorMembersPgError(error.code, str(error)) from error
+    return {
+        "status": "PASS",
+        "independent_readback_transaction": True,
+        "independent_readback": readback,
+        "database_write_attempted": False,
+        "dml_executed": False,
+        "ddl_executed": False,
+    }
+
+
 def _insert_snapshot(cursor: Any, snapshot: SectorSourceSnapshot) -> None:
     cursor.execute(
         """INSERT INTO stock.tdx_sector_source_snapshots (
