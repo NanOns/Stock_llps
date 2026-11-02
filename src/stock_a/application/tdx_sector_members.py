@@ -94,7 +94,7 @@ def refresh_remote_tdx_sector_members(
 ) -> dict[str, Any]:
     """从有限TDX远端候选校验成员来源，并按已有身份键追加新版本。"""
     try:
-        remote = fetch_remote_sector_files()
+        remote = fetch_remote_sector_files(config)
     except TdxRemoteSectorError:
         raise
     except (OSError, TimeoutError) as error:
@@ -321,6 +321,12 @@ def refresh_remote_tdx_sector_members(
                     "archive_sha256": item.source_archive_sha256,
                 }
             )
+    partial_source = (
+        len(snapshots) < 2
+        or bool(remote.missing_files)
+        or bool(remote.source_failures)
+        or bool(parse_outcome.rejected_sources)
+    )
     result = {
         "status": (
             "BLOCKED_REVISION_KEY"
@@ -329,6 +335,10 @@ def refresh_remote_tdx_sector_members(
             if blocked and validate_only
             else "PARTIAL_REFRESHED"
             if blocked
+            else "PARTIAL_VALIDATED"
+            if validate_only and partial_source
+            else "PARTIAL_REFRESHED"
+            if partial_source
             else "VALIDATED_ONLY"
             if validate_only
             else "REFRESHED"
@@ -337,6 +347,17 @@ def refresh_remote_tdx_sector_members(
         "validate_only": validate_only,
         "remote_host": remote.host,
         "remote_port": 7709,
+        "remote_candidate_sources": list(remote.candidate_sources),
+        "candidate_total": remote.candidate_count,
+        "candidate_content_verified_count": sum(
+            item.get("status") in {"COMPLETE", "PARTIAL"}
+            for item in remote.candidate_attempts
+        ),
+        "candidate_full_service_verified_count": sum(
+            item.get("status") == "COMPLETE" for item in remote.candidate_attempts
+        ),
+        "candidate_skipped_over_budget": remote.skipped_candidate_count,
+        "candidate_discovery_sources": list(remote.discovery_sources),
         "candidate_attempts": list(remote.candidate_attempts),
         "missing_files": list(remote.missing_files),
         "source_failures": list(remote.source_failures),

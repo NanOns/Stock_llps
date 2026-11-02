@@ -906,7 +906,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     sector_refresh = sector_actions.add_parser(
         "refresh-remote",
-        help="不启动通达信客户端，校验或追加远端TDX行业与概念成员快照",
+        help="动态发现并校验远端TDX行业与概念成员来源",
     )
     sector_refresh.add_argument(
         "--confirm-task-scope",
@@ -2741,6 +2741,11 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 "ddl_executed": False,
                 "source_modified": False,
                 "source_downloaded": False,
+                **(
+                    {"details": error.details}
+                    if isinstance(error, TdxRemoteSectorError) and error.details
+                    else {}
+                ),
             },
             error=True,
         )
