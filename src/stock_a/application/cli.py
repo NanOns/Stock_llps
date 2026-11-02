@@ -967,6 +967,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     selection.add_argument("--offset", type=int, help="分页偏移，需与--limit同时使用")
     source_d1_breakout.add_argument(
+        "--only-true",
+        action="store_true",
+        help="先计算完整来源池，再分页返回原始突破TRUE",
+    )
+    source_d1_breakout.add_argument(
         "--limit", type=int, help="来源池分页数量，1至100；配合--offset使用"
     )
     source_d1_breakout.add_argument(
@@ -2508,6 +2513,249 @@ def _run_source_raw_catalog(args: argparse.Namespace) -> int:
     return _EXIT_OK
 
 
+def _discover_source_d1_true(
+    config,
+    config_path,
+    target,
+    cutoff,
+    sessions,
+    calendar_revision,
+    source_set_id,
+    package_sha256,
+    offset,
+    limit,
+) -> dict[str, Any]:
+    """完整评价封口来源池后，才对TRUE集合分页。"""
+    from stock_a.storage.postgres.source_set_ingress import read_p04_source_input
+
+    contract = load_day_chain_contract(_CONFIG_ROOT).document
+    counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0}
+    reasons: dict[str, int] = {}
+    matches = []
+    seen: set[str] = set()
+    source_context = None
+    source_offset = 0
+    previous = None
+    while True:
+        page = read_raw_daily_history_page(
+            config,
+            target_session=target,
+            package_sha256=package_sha256,
+            sessions=sessions,
+            offset=source_offset,
+            limit=100,
+            market="ALL",
+            board="ALL",
+        )
+        candidates = page["candidates"]
+        target_rows = []
+        for candidate in candidates:
+            symbol = candidate["source_symbol"]
+            rows = candidate["history_rows"]
+            dates = [row["session_date"] for row in rows]
+            if (
+                symbol in seen
+                or (previous is not None and symbol <= previous)
+                or len(dates) != len(set(dates))
+                or any(day not in sessions for day in dates)
+            ):
+                raise PgResearchBindingError(
+                    "D1_BREAKOUT_POOL_DUPLICATE_OR_WINDOW_INVALID",
+                    "来源代码或历史窗口不闭合",
+                )
+            target_matches = [row for row in rows if row["session_date"] == target]
+            if len(target_matches) != 1:
+                raise PgResearchBindingError(
+                    "D1_BREAKOUT_TARGET_ROW_INVALID", "来源代码缺少唯一目标日Raw行"
+                )
+            target_rows.extend(target_matches)
+            seen.add(symbol)
+            previous = symbol
+        context = read_sealed_source_context(
+            config,
+            target_session=target,
+            package_sha256=package_sha256,
+            namespace_id=page["namespace_id"],
+            target_raw_rows=target_rows,
+            expected_raw_row_count=page["version_row_count"],
+        )
+        if source_context is None:
+            source_context = context
+            sealed = read_p04_source_input(
+                config, target_session=target, package_sha256=package_sha256
+            )
+            if (
+                sealed.get("source_set_id") != source_set_id
+                or sealed.get("namespace_id") != context["namespace_id"]
+                or sealed.get("seal_status") != "SEALED"
+                or not sealed.get("sealed_at")
+            ):
+                raise PgResearchBindingError(
+                    "D1_BREAKOUT_SOURCE_CLOCK_MISMATCH", "来源封口或时钟不一致"
+                )
+        if (
+            context["source_set_id"] != source_set_id
+            or any(
+                context[key] != source_context[key]
+                for key in (
+                    "namespace_id",
+                    "source_set_id",
+                    "revision_id",
+                    "source_digest",
+                    "source_raw_digest",
+                    "source_capture_id",
+                    "raw_row_count",
+                )
+            )
+            or page["version_status"] != "CLOSED"
+            or not page["partition_closed"]
+            or page["total_count"] != context["raw_row_count"]
+            or page["version_expected_row_count"]
+            != context["capture_expected_row_count"]
+            or page["offset"] != source_offset
+            or page["page_count"] != len(candidates)
+            or len(target_rows) != len(candidates)
+        ):
+            raise PgResearchBindingError(
+                "D1_BREAKOUT_SOURCE_POOL_NOT_CLOSED", "来源页或SEALED分母不一致"
+            )
+        preview = research_universe_pg_history_preview(
+            target_session=target.isoformat(),
+            package_sha256=package_sha256,
+            session_dates=sessions,
+            page=page,
+            profile_contract=contract,
+            include_profile_preview=False,
+            include_raw_breakout=True,
+        )
+        if len(preview["results"]) != len(candidates):
+            raise PgResearchBindingError(
+                "D1_BREAKOUT_CONSUMER_INCOMPLETE", "来源页计算结果数量不一致"
+            )
+        for candidate, row, item in zip(
+            candidates, target_rows, preview["results"], strict=True
+        ):
+            predicate = item.get("raw_d1_breakout_predicate")
+            if (
+                item.get("symbol") != candidate["source_symbol"]
+                or item.get("consumer_status") != "RESEARCHED"
+                or not isinstance(predicate, dict)
+            ):
+                raise PgResearchBindingError(
+                    "D1_BREAKOUT_CONSUMER_INCOMPLETE", "来源代码计算失败或错绑"
+                )
+            state = predicate["predicates"]["result"]["state"]
+            if state not in counts:
+                raise PgResearchBindingError(
+                    "D1_BREAKOUT_STATE_INVALID", "原始谓词状态无效"
+                )
+            counts[state] += 1
+            if state == "UNKNOWN":
+                reason = (
+                    predicate["predicates"]["result"].get("reason")
+                    or "UNKNOWN_REASON_NOT_PROVIDED"
+                )
+                reasons[reason] = reasons.get(reason, 0) + 1
+            if state == "TRUE":
+                matches.append(
+                    {
+                        "symbol": item["symbol"],
+                        "consumer_status": item["consumer_status"],
+                        "target_bar_status": item.get("target_bar_status"),
+                        "history_records_complete": item.get(
+                            "history_records_complete"
+                        ),
+                        "price_window_status": item.get("price_window_status"),
+                        "source_revision": {
+                            "source_entry_sha256": row.get("source_entry_sha256"),
+                            "source_capture_id": str(row["source_capture_id"]),
+                            "source_content_id": row.get("source_content_id"),
+                            "package_sha256": row["package_sha256"].strip(),
+                            "source_clock_role": row.get("source_clock_role"),
+                            "source_time_quality": context["source_time_quality"],
+                            "source_available_at": row.get("source_available_at"),
+                            "observed_started_at": row.get("observed_started_at"),
+                            "observed_completed_at": row.get("observed_completed_at"),
+                            "price_coordinate": "RAW_UNADJUSTED",
+                            "coordinate_id": f"RAW:TDX_SOURCE_SYMBOL:{item['symbol']}",
+                        },
+                        "capture_revisions": item.get("source_capture_revisions"),
+                        "raw_d1_breakout_predicate": predicate,
+                    }
+                )
+        next_offset = page["next_offset"]
+        expected_next = source_offset + len(candidates)
+        if next_offset is None:
+            if expected_next != page["total_count"]:
+                raise PgResearchBindingError(
+                    "D1_BREAKOUT_POOL_INCOMPLETE", "来源池提前结束"
+                )
+            break
+        if (
+            not candidates
+            or next_offset != expected_next
+            or next_offset >= page["total_count"]
+        ):
+            raise PgResearchBindingError(
+                "D1_BREAKOUT_PAGE_INVALID", "来源分页游标不连续"
+            )
+        source_offset = next_offset
+    if len(seen) != source_context["raw_row_count"] or sum(counts.values()) != len(
+        seen
+    ):
+        raise PgResearchBindingError(
+            "D1_BREAKOUT_POOL_INCOMPLETE", "来源全集与互斥计数不一致"
+        )
+    source_context["target_raw_binding_count"] = len(seen)
+    source_context["target_raw_binding_verified"] = True
+    selected = matches[offset : offset + limit]
+    return {
+        "ok": True,
+        "status": "SOURCE_LEVEL_RAW_BREAKOUT_TRUE_DISCOVERY",
+        "contract": "ALG-29_RAW_BREAKOUT_PREDICATE",
+        "research_mode": "NON_PIT_RETROSPECTIVE",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "target_session": target.isoformat(),
+        "research_cutoff": cutoff.isoformat(),
+        "calendar_revision": calendar_revision,
+        "source": source_context,
+        "source_capture_started_at": sealed.get("capture_read_started_at"),
+        "source_capture_validated_at": sealed.get("capture_validated_at"),
+        "source_sealed_at": sealed.get("sealed_at"),
+        "source_pool_actual_total": len(seen),
+        "predicate_counts": counts,
+        "unknown_reason_counts": dict(sorted(reasons.items())),
+        "predicate_partition_closed": True,
+        "page": {
+            "offset": offset,
+            "limit": limit,
+            "page_count": len(selected),
+            "filtered_total": len(matches),
+            "next_offset": offset + len(selected)
+            if offset + len(selected) < len(matches)
+            else None,
+            "stable_order": "source_symbol ASC",
+            "symbols": [item["symbol"] for item in selected],
+        },
+        "results": selected,
+        "formal_downstream": {
+            "d1_anchor": "NOT_EVALUATED",
+            "episode": "NOT_EVALUATED",
+            "d2_seed_focus": "NOT_EVALUATED",
+            "trade_signal": "NOT_EVALUATED",
+        },
+        "execution": {
+            "configuration_path": str(config_path),
+            "database_transaction": "REPEATABLE_READ_READ_ONLY",
+            "database_write_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+            "source_zip_opened": False,
+        },
+    }
+
+
 def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
     target = _parse_source_set_date(args.target_session)
     cutoff = _parse_source_set_date(args.research_cutoff)
@@ -2541,6 +2789,12 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
     history_mode = any(
         (args.history_start, args.history_end, args.history_last is not None)
     )
+    if args.only_true and (args.symbol is not None or history_mode):
+        raise DiagnosticError(
+            "D1_BREAKOUT_SELECTION_INVALID",
+            "--only-true不可与单代码或历史模式同时使用",
+            _EXIT_ARGUMENT,
+        )
     if history_mode and (
         args.symbol is None
         or (args.history_last is not None and (args.history_start or args.history_end))
@@ -2613,6 +2867,21 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             history_sessions = tuple(day for day in sessions if start <= day <= end)
     config, config_path = _load_runtime_config()
     try:
+        if args.only_true:
+            result = _discover_source_d1_true(
+                config,
+                config_path,
+                target,
+                cutoff,
+                sessions,
+                calendar_revision,
+                args.source_set_id,
+                args.package_sha256,
+                offset,
+                limit,
+            )
+            _emit(result)
+            return _EXIT_OK
         page = read_raw_daily_history_page(
             config,
             target_session=target,
