@@ -972,6 +972,11 @@ def _parser() -> argparse.ArgumentParser:
         help="先计算完整来源池，再分页返回原始突破TRUE",
     )
     source_d1_breakout.add_argument(
+        "--previous-state",
+        choices=("ALL", "TRUE", "FALSE", "UNKNOWN"),
+        help="仅配合--only-true：按紧邻前一官方会话的原始D1三态分类后过滤",
+    )
+    source_d1_breakout.add_argument(
         "--limit", type=int, help="来源池分页数量，1至100；配合--offset使用"
     )
     source_d1_breakout.add_argument(
@@ -2524,13 +2529,30 @@ def _discover_source_d1_true(
     package_sha256,
     offset,
     limit,
+    previous_state=None,
 ) -> dict[str, Any]:
     """完整评价封口来源池后，才对TRUE集合分页。"""
     from stock_a.storage.postgres.source_set_ingress import read_p04_source_input
 
+    if previous_state is not None and previous_state not in {
+        "ALL",
+        "TRUE",
+        "FALSE",
+        "UNKNOWN",
+    }:
+        raise PgResearchBindingError(
+            "D1_BREAKOUT_PREVIOUS_STATE_INVALID", "前态筛选值无效"
+        )
+    if previous_state is not None and len(sessions) < 2:
+        raise PgResearchBindingError(
+            "D1_BREAKOUT_PREVIOUS_SESSION_UNAVAILABLE",
+            "前态筛选至少需要目标会话及其紧邻前一官方会话",
+        )
+    previous_session = sessions[-2] if previous_state is not None else None
     loaded_contract = load_day_chain_contract(_CONFIG_ROOT)
     contract = loaded_contract.document
     counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0}
+    previous_counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0}
     reasons: dict[str, int] = {}
     matches = []
     seen: set[str] = set()
@@ -2667,32 +2689,142 @@ def _discover_source_d1_true(
                 )
                 reasons[reason] = reasons.get(reason, 0) + 1
             if state == "TRUE":
-                matches.append(
-                    {
-                        "symbol": item["symbol"],
-                        "consumer_status": item["consumer_status"],
-                        "target_bar_status": item.get("target_bar_status"),
-                        "history_records_complete": item.get(
+                result = {
+                    "symbol": item["symbol"],
+                    "consumer_status": item["consumer_status"],
+                    "target_bar_status": item.get("target_bar_status"),
+                    "history_records_complete": item.get("history_records_complete"),
+                    "price_window_status": item.get("price_window_status"),
+                    "source_revision": {
+                        "source_entry_sha256": row.get("source_entry_sha256"),
+                        "source_capture_id": str(row["source_capture_id"]),
+                        "source_content_id": row.get("source_content_id"),
+                        "package_sha256": row["package_sha256"].strip(),
+                        "source_clock_role": row.get("source_clock_role"),
+                        "source_time_quality": context["source_time_quality"],
+                        "source_available_at": row.get("source_available_at"),
+                        "observed_started_at": row.get("observed_started_at"),
+                        "observed_completed_at": row.get("observed_completed_at"),
+                        "price_coordinate": "RAW_UNADJUSTED",
+                        "coordinate_id": f"RAW:TDX_SOURCE_SYMBOL:{item['symbol']}",
+                    },
+                    "capture_revisions": item.get("source_capture_revisions"),
+                    "raw_d1_breakout_predicate": predicate,
+                }
+                if previous_state is not None:
+                    previous_window = tuple(
+                        day for day in sessions if day <= previous_session
+                    )
+                    previous_rows = tuple(
+                        history_row
+                        for history_row in candidate["history_rows"]
+                        if history_row["session_date"] <= previous_session
+                    )
+                    previous_dates = {
+                        history_row["session_date"] for history_row in previous_rows
+                    }
+                    if any(
+                        history_row.get("source_symbol") != candidate["source_symbol"]
+                        or history_row.get("package_sha256") != package_sha256
+                        or history_row.get("namespace_id") != page["namespace_id"]
+                        or history_row["session_date"] > previous_session
+                        for history_row in previous_rows
+                    ):
+                        raise PgResearchBindingError(
+                            "D1_BREAKOUT_PREVIOUS_HISTORY_BINDING_INVALID",
+                            "前态历史越过前一官方会话或来源身份不一致",
+                        )
+                    previous_preview = research_stock_pg_history_preview(
+                        symbol=candidate["source_symbol"],
+                        target_session=previous_session.isoformat(),
+                        package_sha256=package_sha256,
+                        session_dates=previous_window,
+                        history_rows=previous_rows,
+                        missing_history_sessions=tuple(
+                            day for day in previous_window if day not in previous_dates
+                        ),
+                        namespace_id=page["namespace_id"],
+                        profile_contract=contract,
+                        include_profile_preview=False,
+                        include_raw_breakout=True,
+                        allow_missing_target_row=True,
+                    )
+                    previous_predicate = previous_preview.get(
+                        "raw_d1_breakout_predicate"
+                    )
+                    if not isinstance(previous_predicate, dict):
+                        raise PgResearchBindingError(
+                            "D1_BREAKOUT_PREVIOUS_CONSUMER_INCOMPLETE",
+                            "前一官方会话的ALG-29计算未返回谓词证据",
+                        )
+                    prior_state = previous_predicate["predicates"]["result"]["state"]
+                    if prior_state not in previous_counts:
+                        raise PgResearchBindingError(
+                            "D1_BREAKOUT_PREVIOUS_STATE_INVALID",
+                            "前一官方会话的原始谓词状态无效",
+                        )
+                    previous_counts[prior_state] += 1
+                    previous_row = next(
+                        (
+                            history_row
+                            for history_row in previous_rows
+                            if history_row["session_date"] == previous_session
+                        ),
+                        None,
+                    )
+                    result["adjacent_comparison"] = {
+                        "previous_official_session": previous_session.isoformat(),
+                        "current_session": target.isoformat(),
+                        "official_sessions_adjacent": True,
+                        "previous_state": prior_state,
+                        "current_state": state,
+                        "transition_type": f"{prior_state}_TO_{state}",
+                        "previous_bar_status": previous_preview.get(
+                            "target_bar_status"
+                        ),
+                        "previous_history_records_complete": previous_preview.get(
                             "history_records_complete"
                         ),
-                        "price_window_status": item.get("price_window_status"),
-                        "source_revision": {
-                            "source_entry_sha256": row.get("source_entry_sha256"),
-                            "source_capture_id": str(row["source_capture_id"]),
-                            "source_content_id": row.get("source_content_id"),
-                            "package_sha256": row["package_sha256"].strip(),
-                            "source_clock_role": row.get("source_clock_role"),
-                            "source_time_quality": context["source_time_quality"],
-                            "source_available_at": row.get("source_available_at"),
-                            "observed_started_at": row.get("observed_started_at"),
-                            "observed_completed_at": row.get("observed_completed_at"),
+                        "previous_price_window_status": previous_preview.get(
+                            "price_window_status"
+                        ),
+                        "previous_price_window_reason": previous_preview.get(
+                            "price_window_reason"
+                        ),
+                        "previous_source_revision": {
+                            "source_entry_sha256": previous_row.get(
+                                "source_entry_sha256"
+                            )
+                            if previous_row
+                            else None,
+                            "source_capture_id": str(previous_row["source_capture_id"])
+                            if previous_row
+                            else None,
+                            "source_content_id": previous_row.get("source_content_id")
+                            if previous_row
+                            else None,
+                            "package_sha256": package_sha256,
+                            "source_available_at": previous_row.get(
+                                "source_available_at"
+                            )
+                            if previous_row
+                            else None,
+                            "observed_started_at": previous_row.get(
+                                "observed_started_at"
+                            )
+                            if previous_row
+                            else None,
+                            "observed_completed_at": previous_row.get(
+                                "observed_completed_at"
+                            )
+                            if previous_row
+                            else None,
                             "price_coordinate": "RAW_UNADJUSTED",
                             "coordinate_id": f"RAW:TDX_SOURCE_SYMBOL:{item['symbol']}",
                         },
-                        "capture_revisions": item.get("source_capture_revisions"),
-                        "raw_d1_breakout_predicate": predicate,
+                        "raw_d1_breakout_predicate": previous_predicate,
                     }
-                )
+                matches.append(result)
         next_offset = page["next_offset"]
         expected_next = source_offset + len(candidates)
         if next_offset is None:
@@ -2718,8 +2850,22 @@ def _discover_source_d1_true(
         )
     source_context["target_raw_binding_count"] = len(seen)
     source_context["target_raw_binding_verified"] = True
-    selected = matches[offset : offset + limit]
-    return {
+    if previous_state is not None and sum(previous_counts.values()) != counts["TRUE"]:
+        raise PgResearchBindingError(
+            "D1_BREAKOUT_PREVIOUS_PARTITION_INCOMPLETE",
+            "当日TRUE候选的前态TRUE/FALSE/UNKNOWN分区未闭合",
+        )
+    filtered_matches = (
+        matches
+        if previous_state in (None, "ALL")
+        else [
+            item
+            for item in matches
+            if item["adjacent_comparison"]["previous_state"] == previous_state
+        ]
+    )
+    selected = filtered_matches[offset : offset + limit]
+    result = {
         "ok": True,
         "status": "SOURCE_LEVEL_RAW_BREAKOUT_TRUE_DISCOVERY",
         "contract": "ALG-29_RAW_BREAKOUT_PREDICATE",
@@ -2746,9 +2892,9 @@ def _discover_source_d1_true(
             "offset": offset,
             "limit": limit,
             "page_count": len(selected),
-            "filtered_total": len(matches),
+            "filtered_total": len(filtered_matches),
             "next_offset": offset + len(selected)
-            if offset + len(selected) < len(matches)
+            if offset + len(selected) < len(filtered_matches)
             else None,
             "stable_order": "source_symbol ASC",
             "symbols": [item["symbol"] for item in selected],
@@ -2769,6 +2915,24 @@ def _discover_source_d1_true(
             "source_zip_opened": False,
         },
     }
+    if previous_state is not None:
+        official_calendar = _official_calendar(target)
+        result["previous_state_filter"] = previous_state
+        result["previous_session"] = previous_session.isoformat()
+        result["official_calendar"] = {
+            "calendar_id": official_calendar["calendar_id"],
+            "calendar_revision": official_calendar["calendar_revision"],
+            "calendar_sha256": official_calendar["calendar_sha256"],
+            "adjacency_verified_from_session_window": True,
+        }
+        result["current_true_total"] = counts["TRUE"]
+        result["previous_state_counts"] = previous_counts
+        result["previous_state_partition_closed"] = (
+            sum(previous_counts.values()) == counts["TRUE"]
+        )
+        result["page"]["previous_state_filter"] = previous_state
+        result["page"]["filtered_total"] = len(filtered_matches)
+    return result
 
 
 def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
@@ -2804,6 +2968,18 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
     history_mode = any(
         (args.history_start, args.history_end, args.history_last is not None)
     )
+    if args.previous_state is not None and not args.only_true:
+        raise DiagnosticError(
+            "D1_BREAKOUT_PREVIOUS_STATE_SELECTION_INVALID",
+            "--previous-state仅可与--only-true配合使用",
+            _EXIT_ARGUMENT,
+        )
+    if args.previous_state is not None and args.pg_history_session_count < 2:
+        raise DiagnosticError(
+            "D1_BREAKOUT_PREVIOUS_WINDOW_TOO_SHORT",
+            "--previous-state至少需要包含目标会话及其紧邻前一官方会话的窗口",
+            _EXIT_ARGUMENT,
+        )
     if args.only_true and (args.symbol is not None or history_mode):
         raise DiagnosticError(
             "D1_BREAKOUT_SELECTION_INVALID",
@@ -2899,6 +3075,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 args.package_sha256,
                 offset,
                 limit,
+                previous_state=args.previous_state,
             )
             _emit(result)
             return _EXIT_OK
