@@ -1111,6 +1111,16 @@ def _parser() -> argparse.ArgumentParser:
         action="store_true",
         help="显式逐行读取Raw并按该来源版本的实际行数重算封口摘要",
     )
+    coverage = commands.add_parser(
+        "source-p04-identity-coverage", help="只读封口来源代码与身份隔离覆盖"
+    )
+    coverage.add_argument("--target-session", required=True, help="目标交易会话")
+    coverage.add_argument("--research-cutoff", required=True, help="研究截止日")
+    coverage.add_argument("--source-set-id", required=True, help="精确来源集合ID")
+    coverage.add_argument("--package-sha256", required=True, help="完整来源包SHA-256")
+    coverage.add_argument("--symbol", help="可选精确来源代码")
+    coverage.add_argument("--offset", type=int, default=0, help="分页偏移")
+    coverage.add_argument("--limit", type=int, default=30, help="页大小1至100")
     preview_serve = commands.add_parser(
         "preview-serve",
         help="显式启动本机PG来源级研究预览页面（仅127.0.0.1:28766）",
@@ -3567,6 +3577,41 @@ def _run_source_p03_write(args: argparse.Namespace) -> int:
     result["phase0_status"] = phase0_result.get("status")
     _emit(result)
     return _EXIT_OK if result.get("formal_p03_complete") else _EXIT_UNAVAILABLE
+
+
+def _run_source_p04_identity_coverage(args: argparse.Namespace) -> int:
+    from stock_a.storage.postgres.source_raw import RawSourcePgError
+    from stock_a.storage.postgres.source_set_ingress import (
+        SourceSetIngressError,
+        read_p04_identity_coverage,
+    )
+
+    config, _ = _load_runtime_config()
+    try:
+        result = read_p04_identity_coverage(
+            config,
+            target_session=_parse_source_set_date(args.target_session),
+            research_cutoff=_parse_source_set_date(args.research_cutoff),
+            source_set_id=args.source_set_id,
+            package_sha256=args.package_sha256,
+            source_symbol=args.symbol,
+            offset=args.offset,
+            limit=args.limit,
+        )
+    except (ValueError, RawSourcePgError, SourceSetIngressError) as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "BLOCKED",
+                "code": getattr(error, "code", "P04_COVERAGE_FAILED"),
+                "message": str(error),
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
+    result["ok"] = True
+    _emit(result)
+    return _EXIT_OK
 
 
 def _run_source_p04_read(args: argparse.Namespace) -> int:
@@ -6069,6 +6114,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_market_breadth(args)
         if args.command == "source-d1-breakout-preview":
             return _run_source_d1_breakout_preview(args)
+        if args.command == "source-p04-identity-coverage":
+            return _run_source_p04_identity_coverage(args)
         if args.command == "source-p04-read":
             return _run_source_p04_read(args)
         if args.command == "source-ingress-plan":

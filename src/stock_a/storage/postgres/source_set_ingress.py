@@ -1297,3 +1297,150 @@ def inspect_p04_source_input(
     return read_p04_source_input(
         config, target_session=target_session, package_sha256=package_sha256
     )
+
+
+def read_p04_identity_coverage(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    source_set_id: str,
+    package_sha256: str,
+    source_symbol: str | None = None,
+    offset: int = 0,
+    limit: int = 30,
+) -> dict[str, Any]:
+    """读取精确封口来源代码覆盖；身份依据尚未核实时绝不签发实体。"""
+    if type(research_cutoff) is not date or target_session > research_cutoff:
+        raise ValueError("目标会话不得晚于研究截止日")
+    if type(offset) is not int or not 0 <= offset <= 2**31 - 1:
+        raise ValueError("offset必须是非负整数")
+    if type(limit) is not int or not 1 <= limit <= 100:
+        raise ValueError("limit必须在1至100之间")
+    sealed = read_p04_source_input(
+        config, target_session=target_session, package_sha256=package_sha256
+    )
+    if sealed.get("status") != "AVAILABLE":
+        raise ValueError("没有精确已封口来源集合")
+    if str(sealed["source_set_id"]) != source_set_id:
+        raise ValueError("来源集合ID与精确封口版本不一致")
+    with source_raw._transaction(config, write=False) as (_, cursor, namespace_id):
+        if str(namespace_id) != sealed["namespace_id"]:
+            raise ValueError("来源命名空间不一致")
+        cursor.execute(
+            "SELECT revision_id, seal_digest_sha256 FROM stock.source_sets "
+            "WHERE namespace_id=%s AND target_session=%s AND package_sha256=%s "
+            "AND source_set_id=%s AND seal_status='SEALED'",
+            (namespace_id, target_session, package_sha256, source_set_id),
+        )
+        version = cursor.fetchall()
+        if len(version) != 1 or version[0] != (
+            sealed["revision_id"],
+            sealed["seal_digest_sha256"],
+        ):
+            raise ValueError("来源封口版本在读取间发生变化")
+        params = (namespace_id, target_session, package_sha256)
+        cursor.execute(
+            "SELECT bar_status, count(*), count(DISTINCT source_symbol) "
+            "FROM stock.source_raw_daily WHERE namespace_id=%s AND session_date=%s "
+            "AND package_sha256=%s GROUP BY bar_status ORDER BY bar_status",
+            params,
+        )
+        groups = cursor.fetchall()
+        counts = {state: int(n) for state, n, _ in groups}
+        total = sum(counts.values())
+        if any(n != distinct for _, n, distinct in groups):
+            raise ValueError("来源代码在状态内重复")
+        cursor.execute(
+            "SELECT count(DISTINCT source_symbol) FROM stock.source_raw_daily "
+            "WHERE namespace_id=%s AND session_date=%s AND package_sha256=%s",
+            params,
+        )
+        if cursor.fetchone()[0] != total or total != sealed["raw_row_count"]:
+            raise ValueError("来源代码重复、状态冲突或与封口分母不一致")
+        cursor.execute(
+            "SELECT count(DISTINCT r.source_symbol) FROM stock.source_raw_daily r "
+            "JOIN stock.identity_observations i ON i.namespace_id=r.namespace_id "
+            "AND i.source_symbol=r.source_symbol "
+            "WHERE r.namespace_id=%s AND r.session_date=%s AND r.package_sha256=%s "
+            "AND (i.target_session IS NULL OR i.target_session<=%s)",
+            (*params, target_session),
+        )
+        observed = int(cursor.fetchone()[0])
+        cursor.execute(
+            "SELECT r.source_symbol,r.bar_status,r.bar_reason,r.price_quality, "
+            "r.price_reason,r.observed_started_at,r.observed_completed_at, "
+            "r.source_available_at, EXISTS(SELECT 1 FROM stock.identity_observations i "
+            "WHERE i.namespace_id=r.namespace_id AND i.source_symbol=r.source_symbol "
+            "AND (i.target_session IS NULL OR i.target_session<=%s)) "
+            "FROM stock.source_raw_daily r WHERE r.namespace_id=%s "
+            "AND r.session_date=%s AND r.package_sha256=%s "
+            "AND (%s::text IS NULL OR r.source_symbol=%s) "
+            "ORDER BY r.source_symbol LIMIT %s OFFSET %s",
+            (target_session, *params, source_symbol, source_symbol, limit, offset),
+        )
+        rows = cursor.fetchall()
+    known_states = {"TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED"}
+    other = {key: value for key, value in counts.items() if key not in known_states}
+    items = []
+    for (
+        symbol,
+        state,
+        reason,
+        quality,
+        price_reason,
+        started,
+        completed,
+        available,
+        has_identity,
+    ) in rows:
+        items.append(
+            {
+                "source_symbol": symbol,
+                "bar_status": state,
+                "bar_reason": reason,
+                "price_quality": quality,
+                "price_reason": price_reason,
+                "observed_started_at": started.isoformat(),
+                "observed_completed_at": completed.isoformat(),
+                "source_available_at": available.isoformat() if available else None,
+                "identity_status": "UNKNOWN"
+                if has_identity
+                else "UNMAPPED_QUARANTINED",
+                "identity_reason": "IDENTITY_EVIDENCE_REQUIRES_VERIFICATION"
+                if has_identity
+                else "NO_SAVED_IDENTITY_OBSERVATION_FOR_DATE",
+                "security_id": None,
+                "listing_status": "UNKNOWN",
+                "suspension_status": "UNKNOWN",
+                "st_status": "UNKNOWN",
+            }
+        )
+    return {
+        "status": "AVAILABLE",
+        "source_set": sealed,
+        "research_cutoff": research_cutoff.isoformat(),
+        "source_count": total,
+        "bar_status_counts": counts,
+        "other_bar_statuses": other,
+        "identity_counts": {
+            "proven_by_this_reader": 0,
+            "quarantined_no_observation": total - observed,
+            "observation_requires_verification": observed,
+        },
+        "identity_observation_status": "PRESENT_REQUIRES_VERIFICATION"
+        if observed
+        else "NONE_FOR_SOURCE_SET",
+        "bao_identity_status": "NOT_VERIFIED",
+        "stable_identity_status": "NOT_READY",
+        "official_data_universe": None,
+        "official_research_universe": None,
+        "strict_pit": "NOT_PROVEN",
+        "source_symbol_filter": source_symbol,
+        "offset": offset,
+        "limit": limit,
+        "page_count": len(items),
+        "rows": items,
+        "database_write": False,
+        "ddl_executed": False,
+    }
