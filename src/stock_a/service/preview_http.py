@@ -12,7 +12,7 @@ import socket
 import sys
 import threading
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID
 

@@ -66,6 +66,11 @@ def evaluate_raw_breakout_predicate(
     field_reasons: dict[str, str | None] = {}
     for name, field in fields.items():
         value, reason = _observed_number(field, name)
+        if reason is None and (
+            (name in {"close", "prior_high20", "atr20"} and value <= 0)
+            or (name == "clv" and not 0 <= value <= 1)
+        ):
+            reason = f"DATA_INVALID_{name.upper()}"
         values[name] = value
         field_reasons[name] = reason
 

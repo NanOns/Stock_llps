@@ -3274,11 +3274,11 @@ function renderPersistedProfileObservation(point) {
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-    snapshot.target_session === point.session_date &&
-    snapshot.package_sha256 === point.package_sha256 &&
-    snapshot.namespace_id === point.namespace_id &&
-    snapshot.source_set_id === selectedSourceSet &&
-    snapshot.field_ids?.length,
+      snapshot.target_session === point.session_date &&
+      snapshot.package_sha256 === point.package_sha256 &&
+      snapshot.namespace_id === point.namespace_id &&
+      snapshot.source_set_id === selectedSourceSet &&
+      snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -7410,17 +7410,17 @@ async function runChanges(requestId) {
     const snapshotMatches = (received, expected) =>
       Boolean(
         received?.complete &&
-        profileSnapshotKey(received) === profileSnapshotKey(expected) &&
-        typeof received.history_calendar_id === "string" &&
-        received.history_calendar_id.length > 0 &&
-        typeof received.history_calendar_revision === "string" &&
-        received.history_calendar_revision.length > 0 &&
-        received.window_start === expected.window_start &&
-        received.window_end === expected.window_end &&
-        received.history_session_count === expected.history_session_count &&
-        received.source_symbol_count === expected.source_symbol_count &&
-        received.expected_source_symbol_count ===
-          expected.expected_source_symbol_count,
+          profileSnapshotKey(received) === profileSnapshotKey(expected) &&
+          typeof received.history_calendar_id === "string" &&
+          received.history_calendar_id.length > 0 &&
+          typeof received.history_calendar_revision === "string" &&
+          received.history_calendar_revision.length > 0 &&
+          received.window_start === expected.window_start &&
+          received.window_end === expected.window_end &&
+          received.history_session_count === expected.history_session_count &&
+          received.source_symbol_count === expected.source_symbol_count &&
+          received.expected_source_symbol_count ===
+            expected.expected_source_symbol_count,
       );
     if (
       data.namespace_id !== state.namespace_id ||
