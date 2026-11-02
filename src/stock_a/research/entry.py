@@ -4694,6 +4694,190 @@ def research_stock_pg_support_followup_preview(
     return base
 
 
+def classify_source_support_change(
+    support_followup: Mapping[str, Any],
+    *,
+    previous_session: date,
+    target_session: date,
+    post_anchor_session_count: int,
+) -> dict[str, Any]:
+    """将同锚支撑历史两端状态归入来源批次变化类别。"""
+    if (
+        not isinstance(support_followup, Mapping)
+        or type(previous_session) is not date
+        or type(target_session) is not date
+        or previous_session >= target_session
+        or type(post_anchor_session_count) is not int
+        or post_anchor_session_count < 0
+    ):
+        raise ResearchEntryError(
+            "SUPPORT_CHANGE_INPUT_INVALID", "支撑变化比较输入或官方会话无效"
+        )
+
+    status = support_followup.get("status")
+    if status == "NOT_EVALUABLE":
+        return {
+            "classification": "NOT_EVALUABLE",
+            "reason_code": support_followup.get("reason_code")
+            or "SUPPORT_STRUCTURE_NOT_EVALUABLE",
+        }
+    if status != "GENERATED_AND_OBSERVED":
+        return {
+            "classification": "OTHER_EXPLAINED",
+            "reason_code": support_followup.get("reason_code")
+            or f"SUPPORT_FOLLOWUP_{status or 'STATUS_MISSING'}",
+        }
+
+    observations = support_followup.get("observations")
+    if not isinstance(observations, (list, tuple)):
+        raise ResearchEntryError(
+            "SUPPORT_CHANGE_OBSERVATIONS_INVALID", "支撑历史观察列表缺失"
+        )
+    by_session: dict[str, Mapping[str, Any]] = {}
+    for item in observations:
+        if not isinstance(item, Mapping):
+            raise ResearchEntryError(
+                "SUPPORT_CHANGE_OBSERVATION_INVALID", "支撑观察不是有效记录"
+            )
+        session = item.get("session")
+        if not isinstance(session, str) or session in by_session:
+            raise ResearchEntryError(
+                "SUPPORT_CHANGE_OBSERVATION_DUPLICATE", "支撑观察会话缺失或重复"
+            )
+        by_session[session] = item
+
+    previous_key = previous_session.isoformat()
+    target_key = target_session.isoformat()
+    previous = by_session.get(previous_key)
+    current = by_session.get(target_key)
+    if previous is None or current is None:
+        raise ResearchEntryError(
+            "SUPPORT_CHANGE_ENDPOINT_MISSING", "支撑变化端点观察不完整"
+        )
+
+    previous_result = previous.get("support_observation")
+    current_result = current.get("support_observation")
+    if not isinstance(previous_result, Mapping) or not isinstance(
+        current_result, Mapping
+    ):
+        raise ResearchEntryError(
+            "SUPPORT_CHANGE_ENDPOINT_INVALID", "支撑变化端点缺少状态或质量"
+        )
+    previous_state = previous_result.get("state")
+    current_state = current_result.get("state")
+    previous_quality = previous_result.get("quality")
+    current_quality = current_result.get("quality")
+    states = {
+        "IDLE",
+        "APPROACHING",
+        "TESTING",
+        "HELD_TENTATIVE",
+        "RETESTING",
+        "HELD_CONFIRMED",
+        "BREACHED_SHALLOW",
+        "RECLAIMED",
+        "BROKEN",
+        "UNKNOWN",
+    }
+    if previous_state not in states or current_state not in states:
+        raise ResearchEntryError(
+            "SUPPORT_CHANGE_STATE_INVALID", "支撑观察状态不在现役状态机枚举内"
+        )
+
+    reason = None
+    if post_anchor_session_count < 2:
+        classification = "NOT_COMPARABLE"
+        reason = "ANCHOR_BIRTH_OR_INSUFFICIENT_POST_ANCHOR_SESSIONS"
+    elif (
+        previous_state == "UNKNOWN"
+        or current_state == "UNKNOWN"
+        or previous_quality != "OBSERVED"
+        or current_quality != "OBSERVED"
+    ):
+        classification = "UNKNOWN"
+        reason = "SUPPORT_ENDPOINT_UNKNOWN_OR_QUALITY_INSUFFICIENT"
+    elif previous_state != current_state:
+        classification = "CHANGED"
+    else:
+        classification = "UNCHANGED"
+
+    return {
+        "classification": classification,
+        "reason_code": reason,
+        "previous_session": previous_key,
+        "target_session": target_key,
+        "previous_observation": previous,
+        "current_observation": current,
+    }
+
+
+def select_source_support_change_page(
+    results: Sequence[Mapping[str, Any]],
+    *,
+    offset: int,
+    limit: int,
+    change_only: bool,
+) -> dict[str, Any]:
+    """在完整批次分类后按来源代码稳定排序、过滤并分页。"""
+    if (
+        type(offset) is not int
+        or offset < 0
+        or type(limit) is not int
+        or not 1 <= limit <= 100
+        or type(change_only) is not bool
+    ):
+        raise ResearchEntryError("SUPPORT_CHANGE_PAGE_INVALID", "支撑变化分页参数无效")
+    normalized = []
+    seen: set[str] = set()
+    classifications = {
+        "CHANGED",
+        "UNCHANGED",
+        "UNKNOWN",
+        "NOT_COMPARABLE",
+        "NOT_EVALUABLE",
+        "OTHER_EXPLAINED",
+    }
+    for item in results:
+        if not isinstance(item, Mapping):
+            raise ResearchEntryError(
+                "SUPPORT_CHANGE_RESULT_INVALID", "支撑变化批次含非法结果"
+            )
+        symbol = item.get("source_symbol")
+        if (
+            not isinstance(symbol, str)
+            or not symbol
+            or symbol in seen
+            or item.get("change_classification") not in classifications
+        ):
+            raise ResearchEntryError(
+                "SUPPORT_CHANGE_RESULT_IDENTITY_INVALID",
+                "支撑变化批次含重复来源代码或未注册分类",
+            )
+        seen.add(symbol)
+        normalized.append(item)
+
+    ordered = sorted(normalized, key=lambda item: item["source_symbol"])
+    filtered = (
+        [item for item in ordered if item["change_classification"] == "CHANGED"]
+        if change_only
+        else ordered
+    )
+    selected = filtered[offset : offset + limit]
+    end_offset = offset + len(selected)
+    return {
+        "results": selected,
+        "page": {
+            "offset": offset,
+            "limit": limit,
+            "page_count": len(selected),
+            "filtered_total": len(filtered),
+            "next_offset": end_offset if end_offset < len(filtered) else None,
+            "stable_order": "source_symbol ASC",
+            "symbols": [item["source_symbol"] for item in selected],
+        },
+    }
+
+
 def research_stock_pg_history_preview(
     *,
     symbol: str,
