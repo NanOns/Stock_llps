@@ -2593,6 +2593,15 @@ def _discover_source_d1_true(
                 raise PgResearchBindingError(
                     "D1_BREAKOUT_SOURCE_CLOCK_MISMATCH", "来源封口或时钟不一致"
                 )
+            official_calendar = _official_calendar(target)
+            if any(
+                sealed.get(key) != official_calendar[key]
+                for key in ("calendar_id", "calendar_revision", "calendar_sha256")
+            ):
+                raise PgResearchBindingError(
+                    "D1_BREAKOUT_CALENDAR_MISMATCH",
+                    "来源封口与现行官方日历身份、修订或摘要不一致",
+                )
         if (
             context["source_set_id"] != source_set_id
             or any(
@@ -2837,9 +2846,14 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             _EXIT_ARGUMENT,
         )
 
-    _resolved_target, sessions, calendar_revision = _pg_history_window(
-        target.isoformat(), args.pg_history_session_count
-    )
+    try:
+        _resolved_target, sessions, calendar_revision = _pg_history_window(
+            target.isoformat(), args.pg_history_session_count
+        )
+    except ResearchEntryError as error:
+        if not args.only_true:
+            raise
+        raise DiagnosticError(error.code, str(error), _EXIT_ARGUMENT) from error
     history_sessions = ()
     if history_mode:
         if args.history_last is not None:
