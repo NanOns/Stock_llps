@@ -2528,7 +2528,8 @@ def _discover_source_d1_true(
     """完整评价封口来源池后，才对TRUE集合分页。"""
     from stock_a.storage.postgres.source_set_ingress import read_p04_source_input
 
-    contract = load_day_chain_contract(_CONFIG_ROOT).document
+    loaded_contract = load_day_chain_contract(_CONFIG_ROOT)
+    contract = loaded_contract.document
     counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0}
     reasons: dict[str, int] = {}
     matches = []
@@ -2722,6 +2723,11 @@ def _discover_source_d1_true(
         "ok": True,
         "status": "SOURCE_LEVEL_RAW_BREAKOUT_TRUE_DISCOVERY",
         "contract": "ALG-29_RAW_BREAKOUT_PREDICATE",
+        "day_chain_contract": {
+            "contract_id": contract["contract_id"],
+            "version": contract["version"],
+            "assembled_sha256": loaded_contract.assembled_sha256,
+        },
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "price_coordinate": "RAW_UNADJUSTED",
