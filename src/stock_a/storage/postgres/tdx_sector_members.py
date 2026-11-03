@@ -39,6 +39,22 @@ MAX_STRENGTH_BOARD_PAGE_SIZE = 100
 MAX_STRENGTH_MEMBER_PAGE_SIZE = 100
 MAX_STRENGTH_HISTORY_ROWS = 500_000
 _SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_CORE_TRANSITION_KIND_TO_STATUS = {
+    "DAMAGE_NEW": ("price_damage_transition", "FALSE_TO_TRUE"),
+    "DAMAGE_RECOVERED": ("price_damage_transition", "TRUE_TO_FALSE"),
+    "SLOPE_NEG_TO_POS": (
+        "ma_slope20_transition_status",
+        "NEGATIVE_TO_POSITIVE",
+    ),
+    "SLOPE_POS_TO_NEG": (
+        "ma_slope20_transition_status",
+        "POSITIVE_TO_NEGATIVE",
+    ),
+}
+_CORE_TRANSITION_KINDS = ("ALL", *_CORE_TRANSITION_KIND_TO_STATUS)
+_CORE_TRANSITION_ORDER = {
+    kind: index for index, kind in enumerate(_CORE_TRANSITION_KIND_TO_STATUS)
+}
 
 
 class TdxSectorMembersPgError(ValueError):
@@ -1331,6 +1347,8 @@ def _validate_breadth_request(
     limit: int,
     member_offset: int,
     member_limit: int,
+    include_core_transitions: bool,
+    core_transition_kind: str,
 ) -> None:
     _validate_snapshot_uuid(snapshot_id)
     if board_kind not in {"INDUSTRY", "CONCEPT"}:
@@ -1342,6 +1360,25 @@ def _validate_breadth_request(
     ):
         raise TdxSectorMembersPgError(
             "BOARD_ID_INVALID", "原生板块编号必须是非空精确字符串"
+        )
+    if type(include_core_transitions) is not bool:
+        raise TdxSectorMembersPgError(
+            "CORE_TRANSITION_OPTION_INVALID", "Core变化开关必须为布尔值"
+        )
+    if core_transition_kind not in _CORE_TRANSITION_KINDS:
+        raise TdxSectorMembersPgError(
+            "CORE_TRANSITION_KIND_INVALID",
+            "Core变化类型必须为ALL、DAMAGE_NEW、DAMAGE_RECOVERED、SLOPE_NEG_TO_POS或SLOPE_POS_TO_NEG",
+        )
+    if core_transition_kind != "ALL" and not include_core_transitions:
+        raise TdxSectorMembersPgError(
+            "CORE_TRANSITION_OPTION_REQUIRED",
+            "指定Core变化类型时必须同时启用--include-core-transitions",
+        )
+    if core_transition_kind != "ALL" and board_native_id is None:
+        raise TdxSectorMembersPgError(
+            "CORE_TRANSITION_BOARD_REQUIRED",
+            "指定Core变化类型分页时必须提供--board-native-id",
         )
     if (
         type(before_session) is not date
@@ -1382,14 +1419,303 @@ def _validate_breadth_request(
         )
 
 
-def _summarize_sector_breadth_rows(
-    rows: Sequence[dict[str, Any]],
+def _reason_counts(counter: Counter[str]) -> list[dict[str, Any]]:
+    return [
+        {"reason": reason, "count": count} for reason, count in sorted(counter.items())
+    ]
+
+
+def _core_transition_summary(
     *,
+    board: dict[str, Any],
+    members: dict[str, dict[str, Any]],
     source_snapshot: dict[str, Any],
     before_source: dict[str, Any],
     after_source: dict[str, Any],
     member_offset: int,
     member_limit: int,
+    core_transition_kind: str,
+    include_member_page: bool,
+) -> dict[str, Any]:
+    damage_transitions = (
+        "FALSE_TO_TRUE",
+        "TRUE_TO_FALSE",
+        "UNCHANGED_FALSE",
+        "UNCHANGED_TRUE",
+    )
+    signs = ("NEGATIVE", "ZERO", "POSITIVE")
+    slope_transitions = tuple(
+        f"{before}_TO_{after}" for before in signs for after in signs
+    )
+    before_profile_count = 0
+    after_profile_count = 0
+    both_profile_count = 0
+    absent_reasons: Counter[str] = Counter()
+    metric_counts: dict[str, dict[str, Any]] = {
+        "price_damage": {
+            "transition_counts": dict.fromkeys(damage_transitions, 0),
+            "pair_unknown_count": 0,
+            "pair_incomparable_count": 0,
+            "not_computed_count": 0,
+            "reason_counts": Counter(),
+        },
+        "ma_slope20_atr": {
+            "transition_counts": dict.fromkeys(slope_transitions, 0),
+            "pair_unknown_count": 0,
+            "pair_incomparable_count": 0,
+            "not_computed_count": 0,
+            "reason_counts": Counter(),
+        },
+    }
+
+    for row in members.values():
+        before_present = row.get("before_profile_present") is True
+        after_present = row.get("after_profile_present") is True
+        before_profile_count += int(before_present)
+        after_profile_count += int(after_present)
+        both_present = before_present and after_present
+        both_profile_count += int(both_present)
+        if not both_present:
+            if before_present:
+                absent_reasons["AFTER_PROFILE_ABSENT"] += 1
+            elif after_present:
+                absent_reasons["BEFORE_PROFILE_ABSENT"] += 1
+            else:
+                absent_reasons["BOTH_PROFILES_ABSENT"] += 1
+            continue
+
+        for name, compatibility_field, reason_field, transition_field, state_fields in (
+            (
+                "price_damage",
+                "price_damage_pair_compatibility",
+                "price_damage_pair_reason",
+                "price_damage_transition",
+                (
+                    "before_price_damage_state_reason",
+                    "after_price_damage_state_reason",
+                ),
+            ),
+            (
+                "ma_slope20_atr",
+                "ma_slope20_pair_compatibility",
+                "ma_slope20_pair_reason",
+                "ma_slope20_transition_status",
+                (
+                    "before_ma_slope20_atr_state_reason",
+                    "after_ma_slope20_atr_state_reason",
+                ),
+            ),
+        ):
+            counts = metric_counts[name]
+            compatibility = row.get(compatibility_field)
+            if compatibility == "PAIR_COMPARABLE":
+                transition = row.get(transition_field)
+                if transition not in counts["transition_counts"]:
+                    raise TdxSectorMembersPgError(
+                        "CORE_TRANSITION_STATUS_INVALID",
+                        f"{name}可比状态缺少受支持的转移分类",
+                    )
+                counts["transition_counts"][transition] += 1
+            elif compatibility == "PAIR_UNKNOWN":
+                counts["pair_unknown_count"] += 1
+                reason = row.get(reason_field) or compatibility
+                counts["reason_counts"][str(reason)] += 1
+            elif compatibility == "PAIR_INCOMPARABLE":
+                counts["pair_incomparable_count"] += 1
+                reason = row.get(reason_field) or compatibility
+                counts["reason_counts"][str(reason)] += 1
+            else:
+                raise TdxSectorMembersPgError(
+                    "CORE_TRANSITION_COMPATIBILITY_INVALID",
+                    f"{name}双端画像存在时缺少有效兼容性分类",
+                )
+            if any(
+                row.get(field) == "NOT_COMPUTED_FOR_REVISION" for field in state_fields
+            ):
+                counts["not_computed_count"] += 1
+
+    absent_count = len(members) - both_profile_count
+    if (
+        before_profile_count > len(members)
+        or after_profile_count > len(members)
+        or both_profile_count + absent_count != len(members)
+        or sum(absent_reasons.values()) != absent_count
+    ):
+        raise TdxSectorMembersPgError(
+            "CORE_TRANSITION_PROFILE_DENOMINATOR_FAILED",
+            "板块双端画像覆盖与缺失分母未闭合",
+        )
+
+    metric_payload: dict[str, Any] = {}
+    for name, counts in metric_counts.items():
+        transitions = counts["transition_counts"]
+        comparable_count = sum(transitions.values())
+        unknown_count = counts["pair_unknown_count"]
+        incomparable_count = counts["pair_incomparable_count"]
+        unknown_or_incomparable_count = unknown_count + incomparable_count
+        if comparable_count + unknown_or_incomparable_count != both_profile_count:
+            raise TdxSectorMembersPgError(
+                "CORE_TRANSITION_PAIR_DENOMINATOR_FAILED",
+                f"{name}可比、未知/不可比与双端画像分母未闭合",
+            )
+        payload = {
+            "n_both_profile": both_profile_count,
+            "n_comparable": comparable_count,
+            "n_unknown_or_incomparable": unknown_or_incomparable_count,
+            "n_unknown": unknown_count,
+            "n_incomparable": incomparable_count,
+            "n_not_computed_for_revision": counts["not_computed_count"],
+            "n_absent": absent_count,
+            "unknown_is_subset_of_unknown_or_incomparable": True,
+            "not_computed_is_subset_of_unknown_or_incomparable": True,
+            "pair_reason_counts": _reason_counts(counts["reason_counts"]),
+        }
+        if name == "price_damage":
+            payload["transition_counts"] = transitions
+        else:
+            payload["sign_transition_matrix"] = {
+                before: {after: transitions[f"{before}_TO_{after}"] for after in signs}
+                for before in signs
+            }
+        metric_payload[name] = payload
+
+    event_rows: list[dict[str, Any]] = []
+    if include_member_page:
+        for symbol, row in members.items():
+            event_kind = None
+            for kind, (
+                field,
+                expected_status,
+            ) in _CORE_TRANSITION_KIND_TO_STATUS.items():
+                pair_field = (
+                    "price_damage_pair_compatibility"
+                    if field == "price_damage_transition"
+                    else "ma_slope20_pair_compatibility"
+                )
+                if (
+                    row.get(pair_field) == "PAIR_COMPARABLE"
+                    and row.get(field) == expected_status
+                    and (core_transition_kind == "ALL" or kind == core_transition_kind)
+                ):
+                    event_kind = kind
+                    break
+            if event_kind is None:
+                continue
+
+            def endpoint(side: str, source: dict[str, Any]) -> dict[str, Any]:
+                return {
+                    "target_session": source["target_session"].isoformat(),
+                    "source_set_id": source["source_set_id"],
+                    "source_capture_id": source["source_capture_id"],
+                    "package_sha256": source["package_sha256"],
+                    "profile_revision": source["profile_revision"],
+                    "raw_close": row.get(f"{side}_raw_close"),
+                    "raw_price_quality": row.get(f"{side}_raw_price_quality"),
+                    "raw_price_reason": row.get(f"{side}_raw_price_reason"),
+                    "price_damage": {
+                        "value": row.get(f"{side}_price_damage"),
+                        "quality": row.get(f"{side}_price_damage_quality"),
+                        "reason": row.get(f"{side}_price_damage_reason"),
+                        "state_reason": row.get(f"{side}_price_damage_state_reason"),
+                    },
+                    "ma_slope20_atr": {
+                        "value": row.get(f"{side}_ma_slope20_atr"),
+                        "exact_numerator": row.get(
+                            f"{side}_ma_slope20_atr_exact_numerator"
+                        ),
+                        "exact_denominator": row.get(
+                            f"{side}_ma_slope20_atr_exact_denominator"
+                        ),
+                        "quality": row.get(f"{side}_ma_slope20_atr_quality"),
+                        "reason": row.get(f"{side}_ma_slope20_atr_reason"),
+                        "exact_sign": row.get(f"{side}_ma_slope20_atr_sign"),
+                        "state_reason": row.get(f"{side}_ma_slope20_atr_state_reason"),
+                    },
+                }
+
+            event_rows.append(
+                {
+                    "core_transition_kind": event_kind,
+                    "source_symbol": symbol,
+                    "transition": (
+                        row["price_damage_transition"]
+                        if event_kind.startswith("DAMAGE_")
+                        else row["ma_slope20_transition_status"]
+                    ),
+                    "membership": {
+                        "snapshot_id": source_snapshot["snapshot_id"],
+                        "board_kind": board["board_kind"],
+                        "board_native_id": board["board_native_id"],
+                        "membership_quality": row.get("membership_quality"),
+                        "mode": source_snapshot["research_mode"],
+                        "observed_at": source_snapshot["observed_at"],
+                    },
+                    "before": endpoint("before", before_source),
+                    "after": endpoint("after", after_source),
+                    "pair": {
+                        "compatibility": (
+                            row["price_damage_pair_compatibility"]
+                            if event_kind.startswith("DAMAGE_")
+                            else row["ma_slope20_pair_compatibility"]
+                        ),
+                        "reason": (
+                            row["price_damage_pair_reason"]
+                            if event_kind.startswith("DAMAGE_")
+                            else row["ma_slope20_pair_reason"]
+                        ),
+                    },
+                }
+            )
+
+        event_rows.sort(
+            key=lambda item: (
+                _CORE_TRANSITION_ORDER[item["core_transition_kind"]],
+                item["source_symbol"],
+            )
+        )
+    selected_total = len(event_rows)
+    selected_page = event_rows[member_offset : member_offset + member_limit]
+    return {
+        "n_members": len(members),
+        "n_before_profile": before_profile_count,
+        "n_after_profile": after_profile_count,
+        "n_both_profile": both_profile_count,
+        "n_absent": absent_count,
+        "absent_profile_reason_counts": _reason_counts(absent_reasons),
+        "price_damage": metric_payload["price_damage"],
+        "ma_slope20_atr": metric_payload["ma_slope20_atr"],
+        "transition_members": (
+            {
+                "requested_kind": core_transition_kind,
+                "ordering": "CORE_TRANSITION_KIND_THEN_SOURCE_SYMBOL_ASC_C",
+                "offset": member_offset,
+                "limit": member_limit,
+                "total": selected_total,
+                "count": len(selected_page),
+                "next_offset": (
+                    member_offset + len(selected_page)
+                    if member_offset + len(selected_page) < selected_total
+                    else None
+                ),
+                "rows": selected_page,
+            }
+            if include_member_page
+            else None
+        ),
+    }
+
+
+def _summarize_sector_breadth_rows(
+    rows: Sequence[dict[str, Any]],
+    *,
+    board_native_id: str | None,
+    source_snapshot: dict[str, Any],
+    before_source: dict[str, Any],
+    after_source: dict[str, Any],
+    member_offset: int,
+    member_limit: int,
+    include_core_transitions: bool,
+    core_transition_kind: str,
 ) -> list[dict[str, Any]]:
     relation_names = ("ABOVE", "EQUAL", "BELOW", "UNKNOWN")
     transition_names = tuple(
@@ -1585,6 +1911,21 @@ def _summarize_sector_breadth_rows(
         changed_members.sort(key=lambda value: value["source_symbol"])
         changed_total = len(changed_members)
         page = changed_members[member_offset : member_offset + member_limit]
+        core_transitions = (
+            _core_transition_summary(
+                board=board,
+                members=members,
+                source_snapshot=source_snapshot,
+                before_source=before_source,
+                after_source=after_source,
+                member_offset=member_offset,
+                member_limit=member_limit,
+                core_transition_kind=core_transition_kind,
+                include_member_page=board_native_id is not None,
+            )
+            if include_core_transitions
+            else None
+        )
         summaries.append(
             {
                 "board_kind": board["board_kind"],
@@ -1644,6 +1985,11 @@ def _summarize_sector_breadth_rows(
                     "offset": 0,
                     "limit": 30,
                 },
+                **(
+                    {"core_transitions": core_transitions}
+                    if include_core_transitions
+                    else {}
+                ),
             }
         )
     return summaries
@@ -1670,6 +2016,8 @@ def query_sector_breadth(
     limit: int,
     member_offset: int,
     member_limit: int,
+    include_core_transitions: bool = False,
+    core_transition_kind: str = "ALL",
 ) -> dict[str, Any]:
     identities = (
         before_source_set_id,
@@ -1691,6 +2039,8 @@ def query_sector_breadth(
         limit=limit,
         member_offset=member_offset,
         member_limit=member_limit,
+        include_core_transitions=include_core_transitions,
+        core_transition_kind=core_transition_kind,
     )
     if not official_calendar_id or not official_calendar_revision:
         raise TdxSectorMembersPgError(
@@ -1802,9 +2152,23 @@ WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
                     "所选板块目录或完整成员关系超过固定只读预算",
                 )
 
-            member_filter_sql = ""
-            if board_native_id is not None:
-                member_filter_sql = " AND c.board_native_id=%s"
+            cursor.execute(
+                """SELECT c.board_native_id
+FROM stock.tdx_sector_catalog c
+WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
+                + filter_sql
+                + ' ORDER BY c.board_native_id COLLATE "C" OFFSET %s LIMIT %s',
+                (
+                    snapshot_id,
+                    board_kind,
+                    *filter_params,
+                    offset,
+                    limit,
+                ),
+            )
+            page_board_ids = [str(row[0]) for row in cursor.fetchall()]
+
+            member_filter_sql = " AND c.board_native_id=ANY(%s::text[])"
             query = (
                 _PROFILE_CHANGE_CTES
                 + """
@@ -1826,7 +2190,45 @@ SELECT c.board_kind, c.board_native_id, c.board_name,
        x.before_ma20_reason AS before_ma20_reason,
        x.after_ma20::text AS after_ma20,
        x.after_ma20_quality AS after_ma20_quality,
-       x.after_ma20_reason AS after_ma20_reason
+       x.after_ma20_reason AS after_ma20_reason,
+       x.before_raw_price_quality AS before_raw_price_quality,
+       x.before_raw_price_reason AS before_raw_price_reason,
+       x.after_raw_price_quality AS after_raw_price_quality,
+       x.after_raw_price_reason AS after_raw_price_reason,
+       x.before_price_damage AS before_price_damage,
+       x.before_price_damage_quality AS before_price_damage_quality,
+       x.before_price_damage_reason AS before_price_damage_reason,
+       x.before_price_damage_state_reason AS before_price_damage_state_reason,
+       x.after_price_damage AS after_price_damage,
+       x.after_price_damage_quality AS after_price_damage_quality,
+       x.after_price_damage_reason AS after_price_damage_reason,
+       x.after_price_damage_state_reason AS after_price_damage_state_reason,
+       x.price_damage_pair_compatibility AS price_damage_pair_compatibility,
+       x.price_damage_pair_reason AS price_damage_pair_reason,
+       x.price_damage_transition AS price_damage_transition,
+       x.before_ma_slope20_atr::text AS before_ma_slope20_atr,
+       x.before_ma_slope20_atr_exact_numerator::text
+           AS before_ma_slope20_atr_exact_numerator,
+       x.before_ma_slope20_atr_exact_denominator::text
+           AS before_ma_slope20_atr_exact_denominator,
+       x.before_ma_slope20_atr_quality AS before_ma_slope20_atr_quality,
+       x.before_ma_slope20_atr_reason AS before_ma_slope20_atr_reason,
+       x.before_ma_slope20_atr_sign AS before_ma_slope20_atr_sign,
+       x.before_ma_slope20_atr_state_reason
+           AS before_ma_slope20_atr_state_reason,
+       x.after_ma_slope20_atr::text AS after_ma_slope20_atr,
+       x.after_ma_slope20_atr_exact_numerator::text
+           AS after_ma_slope20_atr_exact_numerator,
+       x.after_ma_slope20_atr_exact_denominator::text
+           AS after_ma_slope20_atr_exact_denominator,
+       x.after_ma_slope20_atr_quality AS after_ma_slope20_atr_quality,
+       x.after_ma_slope20_atr_reason AS after_ma_slope20_atr_reason,
+       x.after_ma_slope20_atr_sign AS after_ma_slope20_atr_sign,
+       x.after_ma_slope20_atr_state_reason
+           AS after_ma_slope20_atr_state_reason,
+       x.ma_slope20_pair_compatibility AS ma_slope20_pair_compatibility,
+       x.ma_slope20_pair_reason AS ma_slope20_pair_reason,
+       x.ma_slope20_transition_status AS ma_slope20_transition_status
 FROM stock.tdx_sector_catalog c
 LEFT JOIN stock.tdx_sector_members m
   ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
@@ -1859,7 +2261,7 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
                 after_package_sha256,
                 snapshot_id,
                 board_kind,
-                *filter_params,
+                page_board_ids,
             )
             cursor.execute(query, parameters)
             names = [column.name for column in cursor.description]
@@ -1873,15 +2275,18 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
 
     summaries = _summarize_sector_breadth_rows(
         member_rows,
+        board_native_id=board_native_id,
         source_snapshot=source_snapshot,
         before_source=before_source,
         after_source=after_source,
         member_offset=member_offset,
         member_limit=member_limit,
+        include_core_transitions=include_core_transitions,
+        core_transition_kind=core_transition_kind,
     )
-    page = summaries[offset : offset + limit]
+    page = summaries
     return {
-        "status": "AVAILABLE" if summaries else "EMPTY",
+        "status": "AVAILABLE" if catalog_count else "EMPTY",
         "analysis_scope": "PERSISTED_TDX_SECTOR_MEMBER_MA20_BREADTH",
         "snapshot": {
             "snapshot_id": source_snapshot["snapshot_id"],
@@ -1903,11 +2308,11 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
         "before_source_set": before_source,
         "after_source_set": after_source,
         "filter": {"board_kind": board_kind, "board_native_id": board_native_id},
-        "board_total_count": len(summaries),
+        "board_total_count": catalog_count,
         "offset": offset,
         "limit": limit,
         "display_count": len(page),
-        "empty_page_out_of_range": bool(summaries and offset >= len(summaries)),
+        "empty_page_out_of_range": bool(catalog_count and offset >= catalog_count),
         "member_offset": member_offset,
         "member_limit": member_limit,
         "boards": page,

@@ -580,6 +580,8 @@ def read_tdx_sector_breadth(
     limit: int,
     member_offset: int,
     member_limit: int,
+    include_core_transitions: bool = False,
+    core_transition_kind: str = "ALL",
 ) -> dict[str, Any]:
     try:
         calendar, _metadata, calendar_revision, sessions = _load_calendar(after_session)
@@ -620,6 +622,8 @@ def read_tdx_sector_breadth(
         limit=limit,
         member_offset=member_offset,
         member_limit=member_limit,
+        include_core_transitions=include_core_transitions,
+        core_transition_kind=core_transition_kind,
     )
     result["session_relation"] = {
         "status": (

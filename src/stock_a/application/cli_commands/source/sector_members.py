@@ -190,6 +190,8 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 limit=args.limit,
                 member_offset=args.member_offset,
                 member_limit=args.member_limit,
+                include_core_transitions=args.include_core_transitions,
+                core_transition_kind=args.core_transition_kind,
             )
         elif args.sector_action == "strength":
             result = read_tdx_sector_strength(

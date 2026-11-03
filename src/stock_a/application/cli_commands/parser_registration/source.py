@@ -180,6 +180,23 @@ def register_commands(commands):
     sector_breadth.add_argument("--limit", type=int, default=30)
     sector_breadth.add_argument("--member-offset", type=int, default=0)
     sector_breadth.add_argument("--member-limit", type=int, default=30)
+    sector_breadth.add_argument(
+        "--include-core-transitions",
+        action="store_true",
+        help="附带每板块的Core跨日变化分母、覆盖原因及四类变化计数",
+    )
+    sector_breadth.add_argument(
+        "--core-transition-kind",
+        choices=(
+            "ALL",
+            "DAMAGE_NEW",
+            "DAMAGE_RECOVERED",
+            "SLOPE_NEG_TO_POS",
+            "SLOPE_POS_TO_NEG",
+        ),
+        default="ALL",
+        help="选择指定板块的Core变化成员分页类型；非ALL须指定板块并启用Core变化",
+    )
     sector_strength = sector_actions.add_parser(
         "strength",
         help="按精确当前TDX成员快照比较5/20会话来源级Core收益与三会话前变化",
