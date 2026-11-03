@@ -290,6 +290,20 @@ def register_commands(commands):
     sector_change_stocks.add_argument("--member-offset", type=int, default=0)
     sector_change_stocks.add_argument("--member-limit", type=int, default=30)
     sector_change_stocks.add_argument(
+        "--include-changed-stock-page",
+        action="store_true",
+        help="附加按来源代码全局去重的CHANGED个股分页，不影响板块榜单",
+    )
+    sector_change_stocks.add_argument(
+        "--stock-offset", type=int, default=0, help="全局变化个股分页偏移，默认0"
+    )
+    sector_change_stocks.add_argument(
+        "--stock-limit",
+        type=int,
+        default=30,
+        help="全局变化个股页大小，1至30，默认30",
+    )
+    sector_change_stocks.add_argument(
         "--include-source-market-context",
         action="store_true",
         help="可选附加同一SEALED来源池的市场宽度摘要，不改变板块或D1结果",

@@ -347,10 +347,14 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
         or args.member_offset < 0
         or type(args.member_limit) is not int
         or not 0 <= args.member_limit <= 100
+        or type(args.stock_offset) is not int
+        or args.stock_offset < 0
+        or type(args.stock_limit) is not int
+        or not 1 <= args.stock_limit <= 30
     ):
         raise DiagnosticError(
             "SECTOR_CHANGE_PAGE_INVALID",
-            "板块与成员分页偏移不得为负，板块限1至100、成员限0至100",
+            "板块与成员分页偏移不得为负，板块限1至100、成员限0至100、变化个股限1至30",
             _EXIT_ARGUMENT,
         )
     try:
@@ -426,6 +430,9 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             member_state=args.member_state,
             member_offset=args.member_offset,
             member_limit=args.member_limit,
+            include_changed_stock_page=args.include_changed_stock_page,
+            stock_offset=args.stock_offset,
+            stock_limit=args.stock_limit,
         )
         if getattr(args, "include_source_market_context", False):
             try:

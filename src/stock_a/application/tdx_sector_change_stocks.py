@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from fractions import Fraction
+import re
 from typing import Any, Mapping, Sequence
 
 from stock_a.application.tdx_sector_members import TdxSectorMembersApplicationError
@@ -31,6 +32,7 @@ _MEMBER_STATE_ORDER = {
     "NOT_EVALUABLE": 3,
     "UNCHANGED": 4,
 }
+_SOURCE_SYMBOL_PATTERN = re.compile(r"(?:SH|SZ|BJ)\.[0-9]{6}")
 
 
 def _fraction_value(value: Any) -> Fraction | None:
@@ -152,6 +154,239 @@ def _member_detail(symbol: str, d1_symbol: Mapping[str, Any] | None) -> dict[str
     }
 
 
+def _changed_stock_page(
+    *,
+    discovery: Mapping[str, Any],
+    d1_symbols: Mapping[str, Mapping[str, Any]],
+    all_board_rows: Sequence[Mapping[str, Any]],
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    changed_symbols = sorted(
+        symbol
+        for symbol, detail in d1_symbols.items()
+        if detail.get("summary_state") == "CHANGED"
+    )
+    changed_event_symbols = {
+        symbol
+        for symbol, detail in d1_symbols.items()
+        if any(
+            event.get("change_classification") == "CHANGED"
+            for event in detail.get("anchor_events", [])
+        )
+    }
+    expected_count = discovery.get("unique_changed_symbol_count")
+    if (
+        type(expected_count) is not int
+        or expected_count != len(changed_symbols)
+        or changed_symbols != sorted(changed_event_symbols)
+        or discovery.get("changed_symbol_partition_closed") is not True
+    ):
+        raise TdxSectorMembersApplicationError(
+            "D1_CHANGED_SYMBOL_COUNT_MISMATCH",
+            "全局CHANGED源码集合与既有去重分母或锚事件集合不一致",
+        )
+    if any(
+        _SOURCE_SYMBOL_PATTERN.fullmatch(symbol) is None for symbol in changed_symbols
+    ):
+        raise TdxSectorMembersApplicationError(
+            "D1_CHANGED_SYMBOL_INVALID", "全局CHANGED集合含非法来源代码"
+        )
+
+    source = discovery["source"]
+    required_source_fields = (
+        "namespace_id",
+        "source_set_id",
+        "revision_id",
+        "target_session",
+        "package_sha256",
+        "source_content_id",
+        "source_raw_digest",
+        "source_capture_id",
+    )
+    if any(not source.get(field) for field in required_source_fields):
+        raise TdxSectorMembersApplicationError(
+            "D1_SOURCE_IDENTITY_MISSING", "全局CHANGED页缺少完整SEALED来源引用"
+        )
+    for detail in d1_symbols.values():
+        for event in detail.get("anchor_events", []):
+            event_source = event.get("source")
+            if (
+                not isinstance(event_source, Mapping)
+                or event_source.get("namespace_id") != source["namespace_id"]
+                or event_source.get("source_set_id") != source["source_set_id"]
+                or event_source.get("revision_id") != source["revision_id"]
+                or event_source.get("package_sha256") != source["package_sha256"]
+                or event_source.get("source_content_id") != source["source_content_id"]
+                or event_source.get("source_raw_digest") != source["source_raw_digest"]
+                or event_source.get("source_capture_id") != source["source_capture_id"]
+                or event_source.get("target_capture_id") != source["source_capture_id"]
+                or event.get("target_session") != discovery["target_session"]
+            ):
+                raise TdxSectorMembersApplicationError(
+                    "D1_CHANGED_EVENT_SOURCE_MISMATCH",
+                    "D1变化锚事件与精确SEALED来源包或目标捕获不一致",
+                )
+
+    sectors_by_symbol: dict[str, dict[tuple[str, str, str], dict[str, Any]]] = {
+        symbol: {} for symbol in changed_symbols
+    }
+    for board in all_board_rows:
+        symbols = board.get("_member_symbols")
+        snapshot = board.get("_board_snapshot")
+        kind = board.get("board_kind")
+        native_id = board.get("board_native_id")
+        if (
+            not isinstance(symbols, list)
+            or not isinstance(snapshot, Mapping)
+            or kind not in {"INDUSTRY", "CONCEPT"}
+            or not isinstance(native_id, str)
+        ):
+            raise TdxSectorMembersApplicationError(
+                "R03_BOARD_MEMBER_SET_INVALID", "全局CHANGED页的成员关联输入不完整"
+            )
+        snapshot_id = snapshot.get("snapshot_id")
+        source_kind = snapshot.get("source_kind")
+        source_sha256 = snapshot.get("source_file_sha256")
+        if (
+            not isinstance(snapshot_id, str)
+            or not snapshot_id
+            or not isinstance(source_kind, str)
+            or not isinstance(source_sha256, str)
+        ):
+            raise TdxSectorMembersApplicationError(
+                "R03_SNAPSHOT_IDENTITY_INVALID", "成员关联缺少精确快照身份"
+            )
+        membership_key = (kind, snapshot_id, native_id)
+        for symbol in symbols:
+            memberships = sectors_by_symbol.get(symbol)
+            if memberships is None:
+                continue
+            membership = {
+                "board_kind": kind,
+                "snapshot_id": snapshot_id,
+                "board_native_id": native_id,
+                "board_name": board.get("board_name"),
+                "native_category": "GN" if kind == "CONCEPT" else "INDUSTRY",
+                "source_kind": source_kind,
+                "source_file_sha256": source_sha256,
+                "source_observed_at": snapshot.get("source_observed_at"),
+                "source_valid_on": snapshot.get("source_valid_on"),
+                "source_known_at": snapshot.get("source_known_at"),
+                "source_available_at": snapshot.get("source_available_at"),
+                "source_clock_quality": snapshot.get("source_clock_quality"),
+                "source_quality": snapshot.get("source_quality"),
+                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+            }
+            previous = memberships.get(membership_key)
+            if previous is not None and previous != membership:
+                raise TdxSectorMembersApplicationError(
+                    "R03_BOARD_MEMBERSHIP_DUPLICATE",
+                    "同一快照板块身份的成员关联元数据互相冲突",
+                )
+            memberships[membership_key] = membership
+
+    stock_rows = []
+    for symbol in changed_symbols:
+        member = _member_detail(symbol, d1_symbols[symbol])
+        events = d1_symbols[symbol]["anchor_events"]
+        changed_events = [
+            event for event in events if event.get("change_classification") == "CHANGED"
+        ]
+        if not changed_events:
+            raise TdxSectorMembersApplicationError(
+                "D1_CHANGED_EVENT_MISSING", "CHANGED源码没有对应的变化锚事件"
+            )
+        member["change_state"] = "CHANGED"
+        member["changed_anchor_event_count"] = len(changed_events)
+        member["raw_d1_event_count"] = len(events)
+        member["target_session"] = discovery["target_session"]
+        member["research_cutoff"] = discovery["research_cutoff"]
+        member["event_window_start"] = discovery["event_window_start"]
+        member["source_evidence"] = {
+            field: source[field] for field in required_source_fields
+        }
+        member["source_evidence"].update(
+            {
+                "source_digest": source.get("source_digest"),
+                "seal_status": source.get("seal_status"),
+                "sealed_at": discovery.get("source_sealed_at"),
+                "capture_started_at": discovery.get("source_capture_started_at"),
+                "capture_validated_at": discovery.get("source_capture_validated_at"),
+                "official_calendar": discovery.get("official_calendar"),
+                "price_coordinate": "RAW_UNADJUSTED",
+                "entity_identity": "SOURCE_SYMBOL_ONLY",
+                "pit_status": "NON_PIT_RETROSPECTIVE",
+            }
+        )
+        member["membership_mode"] = "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
+        memberships = sectors_by_symbol[symbol]
+        member["also_in_sectors"] = [memberships[key] for key in sorted(memberships)]
+        member["unmapped_reason"] = (
+            None
+            if member["also_in_sectors"]
+            else "NO_CURRENT_TDX_BOARD_MEMBERSHIP_MATCH"
+        )
+        history_base = [
+            "stock-a",
+            "source-d1-breakout-preview",
+            "--target-session",
+            discovery["target_session"],
+            "--research-cutoff",
+            discovery["research_cutoff"],
+            "--source-set-id",
+            source["source_set_id"],
+            "--package-sha256",
+            source["package_sha256"],
+            "--symbol",
+            symbol,
+            "--history-start",
+            discovery["event_window_start"],
+            "--history-end",
+            discovery["target_session"],
+        ]
+        member["drill_down"] = {
+            "research_stock_argv": [
+                "stock-a",
+                "research-stock",
+                symbol,
+                "--target-session",
+                discovery["target_session"],
+                "--unit-version",
+                "TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1",
+                "--pg-source-history",
+                "--pg-source-sha256",
+                source["package_sha256"],
+            ],
+            "d1_history_argv": [
+                history_base
+                + [
+                    "--support-anchor-session",
+                    event["support_anchor_session"],
+                ]
+                for event in events
+            ]
+            or [history_base],
+        }
+        stock_rows.append(member)
+
+    page_rows = stock_rows[offset : offset + limit]
+    next_offset = offset + len(page_rows)
+    total_count = len(stock_rows)
+    return {
+        "status": "AVAILABLE" if page_rows else "EMPTY",
+        "total_count": total_count,
+        "page": {
+            "offset": offset,
+            "limit": limit,
+            "count": len(page_rows),
+            "next_offset": next_offset if next_offset < total_count else None,
+            "stable_order": "source_symbol ASC COLLATE C",
+        },
+        "stocks": page_rows,
+    }
+
+
 def combine_sector_strength_and_d1_changes(
     strength_results: Sequence[Mapping[str, Any]],
     discovery: Mapping[str, Any],
@@ -167,6 +402,9 @@ def combine_sector_strength_and_d1_changes(
     member_state: str,
     member_offset: int,
     member_limit: int,
+    include_changed_stock_page: bool = False,
+    stock_offset: int = 0,
+    stock_limit: int = 30,
 ) -> dict[str, Any]:
     """先联接完整来源集合，再过滤、排序及分页板块和板内股票。"""
     if (
@@ -192,6 +430,11 @@ def combine_sector_strength_and_d1_changes(
         or member_offset < 0
         or type(member_limit) is not int
         or not 0 <= member_limit <= 100
+        or type(include_changed_stock_page) is not bool
+        or type(stock_offset) is not int
+        or stock_offset < 0
+        or type(stock_limit) is not int
+        or not 1 <= stock_limit <= 30
     ):
         raise TdxSectorMembersApplicationError(
             "SECTOR_CHANGE_PAGE_INVALID", "行业概念联动筛选、排序或分页参数无效"
@@ -277,6 +520,34 @@ def combine_sector_strength_and_d1_changes(
             raise TdxSectorMembersApplicationError(
                 "R03_R04_SOURCE_IDENTITY_MISMATCH",
                 "R03强弱与R04变化不是同目标、同SEALED包、同namespace来源口径",
+            )
+        strength_calendar = strength.get("official_calendar")
+        d1_calendar = discovery.get("official_calendar")
+        strength_revision = (
+            strength_calendar.get("calendar_revision")
+            if isinstance(strength_calendar, Mapping)
+            else None
+        )
+        d1_revision = (
+            d1_calendar.get("calendar_revision")
+            if isinstance(d1_calendar, Mapping)
+            else None
+        )
+        strength_revision_parts = (
+            {item.partition(":")[2] or item for item in strength_revision.split("+")}
+            if isinstance(strength_revision, str)
+            else set()
+        )
+        if (
+            not isinstance(strength_calendar, Mapping)
+            or not isinstance(d1_calendar, Mapping)
+            or strength_calendar.get("calendar_id") != d1_calendar.get("calendar_id")
+            or not isinstance(d1_revision, str)
+            or d1_revision not in strength_revision_parts
+        ):
+            raise TdxSectorMembersApplicationError(
+                "R03_R04_CALENDAR_IDENTITY_MISMATCH",
+                "R03强弱与R04变化没有绑定同一目标官方日历修订",
             )
         summaries = strength.get("all_boards_for_linkage")
         members_by_id = strength.get("all_member_symbols_for_linkage")
@@ -514,7 +785,7 @@ def combine_sector_strength_and_d1_changes(
             },
         }
 
-    return {
+    result = {
         "status": "AVAILABLE"
         if board_page
         else ("NO_MATCH" if changed_only else "EMPTY"),
@@ -604,6 +875,15 @@ def combine_sector_strength_and_d1_changes(
         "source_modified": False,
         "source_downloaded": False,
     }
+    if include_changed_stock_page:
+        result["changed_stock_page"] = _changed_stock_page(
+            discovery=discovery,
+            d1_symbols=d1_symbols,
+            all_board_rows=all_board_rows,
+            offset=stock_offset,
+            limit=stock_limit,
+        )
+    return result
 
 
 __all__ = ["combine_sector_strength_and_d1_changes"]

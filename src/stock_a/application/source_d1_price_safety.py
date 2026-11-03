@@ -36,24 +36,79 @@ def attach_source_d1_price_safety_facts(
     target_session: date,
     research_cutoff: date,
 ) -> dict[str, Any]:
-    """只为返回的板块成员页批量读取RAW并附上两个独立价格事实。"""
+    """为当前显示的成员页及变化个股页一次性读取RAW事实。"""
     started = perf_counter()
     detail = result.get("detail_board")
-    if not isinstance(detail, dict):
+    detail_members: list[dict[str, Any]] | None = None
+    if isinstance(detail, dict):
+        page = detail.get("member_page")
+        members = page.get("members") if isinstance(page, dict) else None
+        if not isinstance(members, list) or any(
+            not isinstance(member, dict) for member in members
+        ):
+            raise PriceSafetyFactError(
+                "PRICE_SAFETY_MEMBER_PAGE_INVALID", "当前返回缺少精确板块成员分页。"
+            )
+        detail_members = members
+    elif detail is not None:
+        raise PriceSafetyFactError(
+            "PRICE_SAFETY_MEMBER_PAGE_INVALID", "当前板块明细不是有效对象。"
+        )
+
+    changed_members: list[dict[str, Any]] | None = None
+    if "changed_stock_page" in result:
+        changed_page = result.get("changed_stock_page")
+        changed_rows = (
+            changed_page.get("stocks") if isinstance(changed_page, dict) else None
+        )
+        page_meta = changed_page.get("page") if isinstance(changed_page, dict) else None
+        if (
+            not isinstance(changed_rows, list)
+            or any(not isinstance(member, dict) for member in changed_rows)
+            or not isinstance(page_meta, dict)
+            or type(page_meta.get("limit")) is not int
+            or not 1 <= page_meta["limit"] <= 30
+            or len(changed_rows) > page_meta["limit"]
+        ):
+            raise PriceSafetyFactError(
+                "PRICE_SAFETY_CHANGED_STOCK_PAGE_INVALID",
+                "全局变化个股分页形状或上限无效。",
+            )
+        changed_symbols = [member.get("source_symbol") for member in changed_rows]
+        if (
+            any(not isinstance(symbol, str) for symbol in changed_symbols)
+            or len(changed_symbols) != len(set(changed_symbols))
+            or any(member.get("change_state") != "CHANGED" for member in changed_rows)
+        ):
+            raise PriceSafetyFactError(
+                "PRICE_SAFETY_CHANGED_STOCK_PAGE_INVALID",
+                "全局变化个股分页含重复代码或非CHANGED对象。",
+            )
+        changed_members = changed_rows
+
+    if detail_members is None and changed_members is None:
         result["price_safety_execution"] = _no_page_execution(
             started, "NO_DISPLAYED_MEMBER_PAGE"
         )
         return result
-    page = detail.get("member_page")
-    members = page.get("members") if isinstance(page, dict) else None
-    if not isinstance(members, list):
-        raise PriceSafetyFactError(
-            "PRICE_SAFETY_MEMBER_PAGE_INVALID", "当前返回缺少精确板块成员分页。"
+    detail_symbols = _page_symbols(detail_members, "PRICE_SAFETY_MEMBER_SYMBOL_INVALID")
+    changed_symbols = _page_symbols(
+        changed_members, "PRICE_SAFETY_MEMBER_SYMBOL_INVALID"
+    )
+    if detail_members and changed_members:
+        if len(detail_members) > 30 or len(changed_members) > 30:
+            raise PriceSafetyFactError(
+                "PRICE_SAFETY_DISPLAY_PAGE_LIMIT_INVALID",
+                "两页同时读取价格事实时，每页最多允许显示30个对象。",
+            )
+    displayed_symbols = tuple(sorted(set(detail_symbols) | set(changed_symbols)))
+    if not displayed_symbols:
+        empty_status = (
+            "EMPTY_DISPLAYED_MEMBER_PAGE"
+            if detail_members is not None
+            else "EMPTY_DISPLAYED_CHANGED_STOCK_PAGE"
         )
-    if not members:
-        result["price_safety_execution"] = _no_page_execution(
-            started, "EMPTY_DISPLAYED_MEMBER_PAGE"
-        )
+        result["price_safety_execution"] = _no_page_execution(started, empty_status)
         return result
 
     source = discovery.get("source")
@@ -101,17 +156,7 @@ def attach_source_d1_price_safety_facts(
             "精确官方日历窗口没有以目标会话结束。",
         )
 
-    member_symbols = [
-        member.get("source_symbol") for member in members if isinstance(member, Mapping)
-    ]
-    if len(member_symbols) != len(members) or any(
-        not isinstance(symbol, str) for symbol in member_symbols
-    ):
-        raise PriceSafetyFactError(
-            "PRICE_SAFETY_MEMBER_SYMBOL_INVALID",
-            "返回成员页含缺失的来源代码。",
-        )
-    symbols = tuple(sorted(set(member_symbols)))
+    symbols = displayed_symbols
 
     batch = read_raw_daily_history_batch(
         config,
@@ -170,17 +215,32 @@ def attach_source_d1_price_safety_facts(
             d0_fact=d0_fact,
         )
 
-    for member in members:
-        member["price_safety_facts"] = facts_by_symbol[member["source_symbol"]]
+    for members in (detail_members, changed_members):
+        if members is None:
+            continue
+        for member in members:
+            member["price_safety_facts"] = facts_by_symbol[member["source_symbol"]]
 
-    result["price_safety_execution"] = {
+    if detail_members and changed_members:
+        scope = "DISPLAYED_CHANGED_STOCK_AND_SECTOR_MEMBER_PAGE_UNION"
+    elif changed_members:
+        scope = "DISPLAYED_CHANGED_STOCK_PAGE_ONLY"
+    else:
+        scope = "DISPLAYED_SECTOR_MEMBER_PAGE_ONLY"
+    execution = {
         "status": "COMPLETED",
-        "scope": "DISPLAYED_SECTOR_MEMBER_PAGE_ONLY",
+        "scope": scope,
         "database_transaction": batch["transaction"],
         "database_reads": batch["raw_history_batch_reads"],
         "raw_history_selects": batch["raw_history_batch_reads"],
         "unique_source_symbols_requested": len(symbols),
-        "displayed_member_rows": len(members),
+        "displayed_member_rows": (
+            len(detail_members or []) + len(changed_members or [])
+            if scope == "DISPLAYED_CHANGED_STOCK_AND_SECTOR_MEMBER_PAGE_UNION"
+            else len(detail_members or [])
+            if scope == "DISPLAYED_SECTOR_MEMBER_PAGE_ONLY"
+            else len(changed_members or [])
+        ),
         "raw_history_rows_read": batch["raw_history_rows_read"],
         "official_core_input_sessions": len(history_sessions),
         "core_calculations": len(facts_by_symbol),
@@ -191,7 +251,23 @@ def attach_source_d1_price_safety_facts(
         "source_zip_opened": batch["source_zip_opened"],
         "elapsed_ms": round((perf_counter() - started) * 1000, 3),
     }
+    if scope == "DISPLAYED_CHANGED_STOCK_AND_SECTOR_MEMBER_PAGE_UNION":
+        execution["displayed_page_rows"] = {
+            "changed_stock_page": len(changed_members or []),
+            "sector_member_page": len(detail_members or []),
+            "unique_source_symbols": len(symbols),
+        }
+    result["price_safety_execution"] = execution
     return result
+
+
+def _page_symbols(members: list[dict[str, Any]] | None, error_code: str) -> list[str]:
+    if members is None:
+        return []
+    symbols = [member.get("source_symbol") for member in members]
+    if any(not isinstance(symbol, str) for symbol in symbols):
+        raise PriceSafetyFactError(error_code, "返回分页含缺失的来源代码。")
+    return symbols
 
 
 def _validate_source_binding(
