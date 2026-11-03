@@ -779,6 +779,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "limit",
                         "symbol",
                         "change_type",
+                        "price_damage_transition",
+                        "ma_slope20_transition",
                         "profile_field_id",
                         "profile_change_kind",
                         "before_bias20_atr_state",
@@ -815,6 +817,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     ),
                     source_symbol=symbol,
                     change_type=values.get("change_type", "ALL"),
+                    price_damage_transition=values.get(
+                        "price_damage_transition", "ALL"
+                    ),
+                    ma_slope20_transition=values.get("ma_slope20_transition", "ALL"),
                     profile_field_id=values.get("profile_field_id"),
                     profile_change_kind=values.get("profile_change_kind"),
                     before_bias20_atr_state=values.get(

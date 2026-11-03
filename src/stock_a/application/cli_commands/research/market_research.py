@@ -179,6 +179,14 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 limit=args.limit,
                 source_symbol=args.symbol,
                 change_type=args.change_type,
+                price_damage_transition=args.price_damage_transition,
+                ma_slope20_transition=args.ma_slope20_transition,
+                before_source_set_id=args.before_source_set_id,
+                before_package_sha256=args.before_package_sha256,
+                before_profile_revision=args.before_profile_revision,
+                after_source_set_id=args.after_source_set_id,
+                after_package_sha256=args.after_package_sha256,
+                after_profile_revision=args.after_profile_revision,
             )
         elif args.action == "query":
             if not all(

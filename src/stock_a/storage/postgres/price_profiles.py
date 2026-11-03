@@ -1293,7 +1293,7 @@ ORDER BY p.source_set_id, p.profile_revision""",
     if len(rows) != 1:
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_AMBIGUOUS",
-            f"{target_session.isoformat()}有多个来源版本；必须先明确唯一已保存快照",
+            f"{target_session.isoformat()}有多个来源版本；请先运行source-symbol-price-profile --action snapshots列出精确键，再为changes显式提供该端source_set_id、package_sha256和profile_revision",
         )
     row = rows[0]
     snapshot = {
@@ -1561,6 +1561,22 @@ WITH old_rows AS (
            n.bias20_atr_exact_numerator AS after_bias20_atr_exact_numerator,
            o.bias20_atr_exact_denominator AS before_bias20_atr_exact_denominator,
            n.bias20_atr_exact_denominator AS after_bias20_atr_exact_denominator,
+           o.ma_slope20_atr AS before_ma_slope20_atr,
+           n.ma_slope20_atr AS after_ma_slope20_atr,
+           o.ma_slope20_atr_exact_numerator AS before_ma_slope20_atr_exact_numerator,
+           n.ma_slope20_atr_exact_numerator AS after_ma_slope20_atr_exact_numerator,
+           o.ma_slope20_atr_exact_denominator AS before_ma_slope20_atr_exact_denominator,
+           n.ma_slope20_atr_exact_denominator AS after_ma_slope20_atr_exact_denominator,
+           o.ma_slope20_atr_quality AS before_ma_slope20_atr_quality,
+           n.ma_slope20_atr_quality AS after_ma_slope20_atr_quality,
+           o.ma_slope20_atr_reason AS before_ma_slope20_atr_reason,
+           n.ma_slope20_atr_reason AS after_ma_slope20_atr_reason,
+           o.price_damage AS before_price_damage,
+           n.price_damage AS after_price_damage,
+           o.price_damage_quality AS before_price_damage_quality,
+           n.price_damage_quality AS after_price_damage_quality,
+           o.price_damage_reason AS before_price_damage_reason,
+           n.price_damage_reason AS after_price_damage_reason,
            o.ma20_quality AS before_ma20_quality,
            n.ma20_quality AS after_ma20_quality,
            o.price_coordinate AS before_price_coordinate,
@@ -1819,7 +1835,7 @@ WITH old_rows AS (
            {_BIAS20_ATR_PAIR_COMPATIBILITY_SQL}
                AS bias20_atr_pair_compatibility
     FROM bias20_atr_states
-), classified AS (
+), bias20_atr_classified AS (
     SELECT *,
            {_BIAS20_ATR_PAIR_REASON_SQL} AS bias20_atr_pair_reason,
            CASE
@@ -1836,6 +1852,260 @@ WITH old_rows AS (
              ELSE 'COMPARABLE_STATE_UNCHANGED'::text
            END AS bias20_atr_transition_status
     FROM bias20_atr_pairs
+), core_transition_states AS (
+    SELECT *,
+           CASE
+             WHEN NOT before_present THEN 'ABSENT'::text
+             WHEN before_price_damage_quality IS NULL
+                  AND before_price_damage IS NULL THEN 'NOT_COMPUTED'::text
+             WHEN before_price_damage_quality='OBSERVED'
+                  AND before_price_damage IS NOT NULL
+               THEN CASE WHEN before_price_damage THEN 'TRUE'::text ELSE 'FALSE'::text END
+             ELSE 'UNKNOWN'::text
+           END AS before_price_damage_state,
+           CASE
+             WHEN NOT after_present THEN 'ABSENT'::text
+             WHEN after_price_damage_quality IS NULL
+                  AND after_price_damage IS NULL THEN 'NOT_COMPUTED'::text
+             WHEN after_price_damage_quality='OBSERVED'
+                  AND after_price_damage IS NOT NULL
+               THEN CASE WHEN after_price_damage THEN 'TRUE'::text ELSE 'FALSE'::text END
+             ELSE 'UNKNOWN'::text
+           END AS after_price_damage_state,
+           CASE
+             WHEN NOT before_present THEN 'NO_BEFORE_PROFILE'::text
+             WHEN before_price_damage_quality IS NULL AND before_price_damage IS NULL
+               THEN 'NOT_COMPUTED_FOR_REVISION'::text
+             WHEN before_price_damage_quality IS DISTINCT FROM 'OBSERVED'
+               THEN COALESCE(before_price_damage_reason, 'QUALITY_NOT_OBSERVED')
+             WHEN before_price_damage IS NULL THEN 'OBSERVED_VALUE_MISSING'::text
+             ELSE NULL::text
+           END AS before_price_damage_state_reason,
+           CASE
+             WHEN NOT after_present THEN 'NO_AFTER_PROFILE'::text
+             WHEN after_price_damage_quality IS NULL AND after_price_damage IS NULL
+               THEN 'NOT_COMPUTED_FOR_REVISION'::text
+             WHEN after_price_damage_quality IS DISTINCT FROM 'OBSERVED'
+               THEN COALESCE(after_price_damage_reason, 'QUALITY_NOT_OBSERVED')
+             WHEN after_price_damage IS NULL THEN 'OBSERVED_VALUE_MISSING'::text
+             ELSE NULL::text
+           END AS after_price_damage_state_reason,
+           CASE
+             WHEN NOT before_present OR NOT after_present THEN 'PAIR_INCOMPARABLE'::text
+             WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
+               OR before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+               OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+               OR NOT core_compatible THEN 'PAIR_INCOMPARABLE'::text
+             WHEN NOT before_raw_record_present OR NOT after_raw_record_present
+               OR before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+               OR after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+               OR before_raw_close IS NULL OR after_raw_close IS NULL
+               OR before_price_damage_quality IS DISTINCT FROM 'OBSERVED'
+               OR after_price_damage_quality IS DISTINCT FROM 'OBSERVED'
+               OR before_price_damage IS NULL OR after_price_damage IS NULL
+               THEN 'PAIR_UNKNOWN'::text
+             ELSE 'PAIR_COMPARABLE'::text
+           END AS price_damage_pair_compatibility,
+           CASE
+             WHEN NOT before_present THEN 'NO_BEFORE_PROFILE'::text
+             WHEN NOT after_present THEN 'NO_AFTER_PROFILE'::text
+             WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
+               THEN 'PRICE_COORDINATE_MISMATCH'::text
+             WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+               OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+               THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'::text
+             WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'::text
+             WHEN NOT before_raw_record_present THEN 'BEFORE_RAW_ROW_MISSING'::text
+             WHEN NOT after_raw_record_present THEN 'AFTER_RAW_ROW_MISSING'::text
+             WHEN before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'BEFORE_RAW_PRICE_UNKNOWN:' || COALESCE(before_raw_price_reason, 'NO_REASON')
+             WHEN after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'AFTER_RAW_PRICE_UNKNOWN:' || COALESCE(after_raw_price_reason, 'NO_REASON')
+             WHEN before_price_damage_quality IS NULL AND before_price_damage IS NULL
+               THEN 'BEFORE_NOT_COMPUTED_FOR_REVISION'::text
+             WHEN after_price_damage_quality IS NULL AND after_price_damage IS NULL
+               THEN 'AFTER_NOT_COMPUTED_FOR_REVISION'::text
+             WHEN before_price_damage_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'BEFORE_PRICE_DAMAGE_UNKNOWN:' || COALESCE(before_price_damage_reason, 'QUALITY_NOT_OBSERVED')
+             WHEN after_price_damage_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'AFTER_PRICE_DAMAGE_UNKNOWN:' || COALESCE(after_price_damage_reason, 'QUALITY_NOT_OBSERVED')
+             WHEN before_price_damage IS NULL THEN 'BEFORE_PRICE_DAMAGE_VALUE_MISSING'::text
+             WHEN after_price_damage IS NULL THEN 'AFTER_PRICE_DAMAGE_VALUE_MISSING'::text
+             ELSE NULL::text
+           END AS price_damage_pair_reason,
+           CASE
+             WHEN NOT before_present THEN 'ABSENT'::text
+             WHEN before_ma_slope20_atr_quality IS NULL
+                  AND before_ma_slope20_atr_exact_numerator IS NULL
+                  AND before_ma_slope20_atr_exact_denominator IS NULL
+               THEN 'NOT_COMPUTED'::text
+             WHEN before_ma_slope20_atr_quality='OBSERVED'
+                  AND before_ma_slope20_atr IS NOT NULL
+                  AND before_ma_slope20_atr_exact_numerator IS NOT NULL
+                  AND before_ma_slope20_atr_exact_denominator > 0
+                  AND before_ma_slope20_atr::text NOT IN ('NaN', 'Infinity', '-Infinity')
+                  AND before_ma_slope20_atr_exact_numerator::text NOT IN ('NaN', 'Infinity', '-Infinity')
+                  AND before_ma_slope20_atr_exact_denominator::text NOT IN ('NaN', 'Infinity', '-Infinity')
+               THEN CASE
+                 WHEN before_ma_slope20_atr_exact_numerator < 0 THEN 'NEGATIVE'::text
+                 WHEN before_ma_slope20_atr_exact_numerator = 0 THEN 'ZERO'::text
+                 ELSE 'POSITIVE'::text
+               END
+             ELSE 'UNKNOWN'::text
+           END AS before_ma_slope20_atr_sign,
+           CASE
+             WHEN NOT after_present THEN 'ABSENT'::text
+             WHEN after_ma_slope20_atr_quality IS NULL
+                  AND after_ma_slope20_atr_exact_numerator IS NULL
+                  AND after_ma_slope20_atr_exact_denominator IS NULL
+               THEN 'NOT_COMPUTED'::text
+             WHEN after_ma_slope20_atr_quality='OBSERVED'
+                  AND after_ma_slope20_atr IS NOT NULL
+                  AND after_ma_slope20_atr_exact_numerator IS NOT NULL
+                  AND after_ma_slope20_atr_exact_denominator > 0
+                  AND after_ma_slope20_atr::text NOT IN ('NaN', 'Infinity', '-Infinity')
+                  AND after_ma_slope20_atr_exact_numerator::text NOT IN ('NaN', 'Infinity', '-Infinity')
+                  AND after_ma_slope20_atr_exact_denominator::text NOT IN ('NaN', 'Infinity', '-Infinity')
+               THEN CASE
+                 WHEN after_ma_slope20_atr_exact_numerator < 0 THEN 'NEGATIVE'::text
+                 WHEN after_ma_slope20_atr_exact_numerator = 0 THEN 'ZERO'::text
+                 ELSE 'POSITIVE'::text
+               END
+             ELSE 'UNKNOWN'::text
+           END AS after_ma_slope20_atr_sign,
+           CASE
+             WHEN NOT before_present THEN 'NO_BEFORE_PROFILE'::text
+             WHEN before_ma_slope20_atr_quality IS NULL
+                  AND before_ma_slope20_atr_exact_numerator IS NULL
+                  AND before_ma_slope20_atr_exact_denominator IS NULL
+               THEN 'NOT_COMPUTED_FOR_REVISION'::text
+             WHEN before_ma_slope20_atr_quality IS DISTINCT FROM 'OBSERVED'
+               THEN COALESCE(before_ma_slope20_atr_reason, 'QUALITY_NOT_OBSERVED')
+             WHEN before_ma_slope20_atr_exact_denominator IS NULL
+               OR before_ma_slope20_atr_exact_denominator <= 0
+               THEN 'EXACT_DENOMINATOR_INVALID'::text
+             WHEN before_ma_slope20_atr_exact_numerator IS NULL
+               THEN 'EXACT_NUMERATOR_MISSING'::text
+             WHEN before_ma_slope20_atr IS NULL
+               OR before_ma_slope20_atr::text IN ('NaN', 'Infinity', '-Infinity')
+               OR before_ma_slope20_atr_exact_numerator::text IN ('NaN', 'Infinity', '-Infinity')
+               OR before_ma_slope20_atr_exact_denominator::text IN ('NaN', 'Infinity', '-Infinity')
+               THEN 'EXACT_VALUE_INVALID'::text
+             ELSE NULL::text
+           END AS before_ma_slope20_atr_state_reason,
+           CASE
+             WHEN NOT after_present THEN 'NO_AFTER_PROFILE'::text
+             WHEN after_ma_slope20_atr_quality IS NULL
+                  AND after_ma_slope20_atr_exact_numerator IS NULL
+                  AND after_ma_slope20_atr_exact_denominator IS NULL
+               THEN 'NOT_COMPUTED_FOR_REVISION'::text
+             WHEN after_ma_slope20_atr_quality IS DISTINCT FROM 'OBSERVED'
+               THEN COALESCE(after_ma_slope20_atr_reason, 'QUALITY_NOT_OBSERVED')
+             WHEN after_ma_slope20_atr_exact_denominator IS NULL
+               OR after_ma_slope20_atr_exact_denominator <= 0
+               THEN 'EXACT_DENOMINATOR_INVALID'::text
+             WHEN after_ma_slope20_atr_exact_numerator IS NULL
+               THEN 'EXACT_NUMERATOR_MISSING'::text
+             WHEN after_ma_slope20_atr IS NULL
+               OR after_ma_slope20_atr::text IN ('NaN', 'Infinity', '-Infinity')
+               OR after_ma_slope20_atr_exact_numerator::text IN ('NaN', 'Infinity', '-Infinity')
+               OR after_ma_slope20_atr_exact_denominator::text IN ('NaN', 'Infinity', '-Infinity')
+               THEN 'EXACT_VALUE_INVALID'::text
+             ELSE NULL::text
+           END AS after_ma_slope20_atr_state_reason,
+           CASE
+             WHEN NOT before_present OR NOT after_present THEN 'PAIR_INCOMPARABLE'::text
+             WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
+               OR before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+               OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+               OR NOT core_compatible THEN 'PAIR_INCOMPARABLE'::text
+             WHEN NOT before_raw_record_present OR NOT after_raw_record_present
+               OR before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+               OR after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+               OR before_raw_close IS NULL OR after_raw_close IS NULL
+               OR before_ma_slope20_atr_quality IS DISTINCT FROM 'OBSERVED'
+               OR after_ma_slope20_atr_quality IS DISTINCT FROM 'OBSERVED'
+               OR before_ma_slope20_atr IS NULL OR after_ma_slope20_atr IS NULL
+               OR before_ma_slope20_atr_exact_numerator IS NULL
+               OR after_ma_slope20_atr_exact_numerator IS NULL
+               OR before_ma_slope20_atr_exact_denominator IS NULL
+               OR after_ma_slope20_atr_exact_denominator IS NULL
+               OR before_ma_slope20_atr_exact_denominator <= 0
+               OR after_ma_slope20_atr_exact_denominator <= 0
+               OR before_ma_slope20_atr::text IN ('NaN', 'Infinity', '-Infinity')
+               OR after_ma_slope20_atr::text IN ('NaN', 'Infinity', '-Infinity')
+               OR before_ma_slope20_atr_exact_numerator::text IN ('NaN', 'Infinity', '-Infinity')
+               OR after_ma_slope20_atr_exact_numerator::text IN ('NaN', 'Infinity', '-Infinity')
+               OR before_ma_slope20_atr_exact_denominator::text IN ('NaN', 'Infinity', '-Infinity')
+               OR after_ma_slope20_atr_exact_denominator::text IN ('NaN', 'Infinity', '-Infinity')
+               THEN 'PAIR_UNKNOWN'::text
+             ELSE 'PAIR_COMPARABLE'::text
+           END AS ma_slope20_pair_compatibility,
+           CASE
+             WHEN NOT before_present THEN 'NO_BEFORE_PROFILE'::text
+             WHEN NOT after_present THEN 'NO_AFTER_PROFILE'::text
+             WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
+               THEN 'PRICE_COORDINATE_MISMATCH'::text
+             WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+               OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
+               THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'::text
+             WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'::text
+             WHEN NOT before_raw_record_present THEN 'BEFORE_RAW_ROW_MISSING'::text
+             WHEN NOT after_raw_record_present THEN 'AFTER_RAW_ROW_MISSING'::text
+             WHEN before_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'BEFORE_RAW_PRICE_UNKNOWN:' || COALESCE(before_raw_price_reason, 'NO_REASON')
+             WHEN after_raw_price_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'AFTER_RAW_PRICE_UNKNOWN:' || COALESCE(after_raw_price_reason, 'NO_REASON')
+             WHEN before_ma_slope20_atr_quality IS NULL
+                  AND before_ma_slope20_atr_exact_numerator IS NULL
+                  AND before_ma_slope20_atr_exact_denominator IS NULL
+               THEN 'BEFORE_NOT_COMPUTED_FOR_REVISION'::text
+             WHEN after_ma_slope20_atr_quality IS NULL
+                  AND after_ma_slope20_atr_exact_numerator IS NULL
+                  AND after_ma_slope20_atr_exact_denominator IS NULL
+               THEN 'AFTER_NOT_COMPUTED_FOR_REVISION'::text
+             WHEN before_ma_slope20_atr_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'BEFORE_MA_SLOPE20_UNKNOWN:' || COALESCE(before_ma_slope20_atr_reason, 'QUALITY_NOT_OBSERVED')
+             WHEN after_ma_slope20_atr_quality IS DISTINCT FROM 'OBSERVED'
+               THEN 'AFTER_MA_SLOPE20_UNKNOWN:' || COALESCE(after_ma_slope20_atr_reason, 'QUALITY_NOT_OBSERVED')
+             WHEN before_ma_slope20_atr_exact_denominator IS NULL
+               OR before_ma_slope20_atr_exact_denominator <= 0
+               THEN 'BEFORE_MA_SLOPE20_DENOMINATOR_INVALID'::text
+             WHEN after_ma_slope20_atr_exact_denominator IS NULL
+               OR after_ma_slope20_atr_exact_denominator <= 0
+               THEN 'AFTER_MA_SLOPE20_DENOMINATOR_INVALID'::text
+             WHEN before_ma_slope20_atr_exact_numerator IS NULL
+               THEN 'BEFORE_MA_SLOPE20_NUMERATOR_MISSING'::text
+             WHEN after_ma_slope20_atr_exact_numerator IS NULL
+               THEN 'AFTER_MA_SLOPE20_NUMERATOR_MISSING'::text
+             WHEN before_ma_slope20_atr IS NULL
+               OR before_ma_slope20_atr::text IN ('NaN', 'Infinity', '-Infinity')
+               OR after_ma_slope20_atr IS NULL
+               OR after_ma_slope20_atr::text IN ('NaN', 'Infinity', '-Infinity')
+               OR before_ma_slope20_atr_exact_numerator::text IN ('NaN', 'Infinity', '-Infinity')
+               OR after_ma_slope20_atr_exact_numerator::text IN ('NaN', 'Infinity', '-Infinity')
+               OR before_ma_slope20_atr_exact_denominator::text IN ('NaN', 'Infinity', '-Infinity')
+               OR after_ma_slope20_atr_exact_denominator::text IN ('NaN', 'Infinity', '-Infinity')
+               THEN 'MA_SLOPE20_EXACT_VALUE_INVALID'::text
+             ELSE NULL::text
+           END AS ma_slope20_pair_reason
+    FROM bias20_atr_classified
+), classified AS (
+    SELECT *,
+           CASE
+             WHEN price_damage_pair_compatibility='PAIR_UNKNOWN' THEN 'UNKNOWN'::text
+             WHEN price_damage_pair_compatibility='PAIR_INCOMPARABLE' THEN 'NOT_COMPARABLE'::text
+             WHEN before_price_damage AND after_price_damage THEN 'UNCHANGED_TRUE'::text
+             WHEN NOT before_price_damage AND after_price_damage THEN 'FALSE_TO_TRUE'::text
+             WHEN before_price_damage AND NOT after_price_damage THEN 'TRUE_TO_FALSE'::text
+             ELSE 'UNCHANGED_FALSE'::text
+           END AS price_damage_transition,
+           CASE
+             WHEN ma_slope20_pair_compatibility='PAIR_UNKNOWN' THEN 'UNKNOWN'::text
+             WHEN ma_slope20_pair_compatibility='PAIR_INCOMPARABLE' THEN 'NOT_COMPARABLE'::text
+             ELSE before_ma_slope20_atr_sign || '_TO_' || after_ma_slope20_atr_sign
+           END AS ma_slope20_transition_status
+    FROM core_transition_states
 )
 """
 
@@ -1988,6 +2258,8 @@ def read_profile_change_page(
     limit: int,
     source_symbol: str | None = None,
     change_type: str = "ALL",
+    price_damage_transition: str = "ALL",
+    ma_slope20_transition: str = "ALL",
     profile_field_id: str | None = None,
     profile_change_kind: str | None = None,
     before_bias20_atr_state: str = "ALL",
@@ -2032,6 +2304,21 @@ def read_profile_change_page(
         )
     if change_type not in change_types:
         raise PriceProfilePgError("PROFILE_CHANGE_FILTER_INVALID", "变化类型筛选值无效")
+    if price_damage_transition not in {"ALL", "FALSE_TO_TRUE", "TRUE_TO_FALSE"}:
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_PRICE_DAMAGE_TRANSITION_INVALID",
+            "价格损伤变化只接受ALL、FALSE_TO_TRUE或TRUE_TO_FALSE",
+        )
+    if ma_slope20_transition not in {
+        "ALL",
+        "NEGATIVE_TO_POSITIVE",
+        "POSITIVE_TO_NEGATIVE",
+        "ANY_SIGN_CHANGED",
+    }:
+        raise PriceProfilePgError(
+            "PROFILE_CHANGE_MA_SLOPE20_TRANSITION_INVALID",
+            "MA20/ATR斜率变化只接受ALL、NEGATIVE_TO_POSITIVE、POSITIVE_TO_NEGATIVE或ANY_SIGN_CHANGED",
+        )
     if (
         not isinstance(before_bias20_atr_state, str)
         or before_bias20_atr_state not in _BIAS20_ATR_STATE_VALUES
@@ -2144,6 +2431,38 @@ def read_profile_change_page(
            OR array_position(after_profile_qualities, 'OBSERVED') IS NULL))::bigint AS profile_unobserved_pair_count,
        count(*) FILTER (WHERE cardinality(change_types)>0)::bigint AS changed_source_symbol_count,
        count(*) FILTER (WHERE cardinality(change_types)=0)::bigint AS unchanged_source_symbol_count,
+       count(*)::bigint AS core_source_symbol_union_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND price_damage_pair_compatibility='PAIR_COMPARABLE')::bigint AS core_damage_comparable_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND price_damage_pair_compatibility<>'PAIR_COMPARABLE')::bigint AS core_damage_not_comparable_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND price_damage_pair_compatibility='PAIR_UNKNOWN')::bigint AS core_damage_unknown_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND (before_price_damage_state_reason='NOT_COMPUTED_FOR_REVISION'
+                OR after_price_damage_state_reason='NOT_COMPUTED_FOR_REVISION'))::bigint AS core_damage_not_computed_count,
+       count(*) FILTER (WHERE price_damage_transition='FALSE_TO_TRUE')::bigint AS core_damage_false_to_true_count,
+       count(*) FILTER (WHERE price_damage_transition='TRUE_TO_FALSE')::bigint AS core_damage_true_to_false_count,
+       count(*) FILTER (WHERE price_damage_transition='UNCHANGED_TRUE')::bigint AS core_damage_unchanged_true_count,
+       count(*) FILTER (WHERE price_damage_transition='UNCHANGED_FALSE')::bigint AS core_damage_unchanged_false_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND ma_slope20_pair_compatibility='PAIR_COMPARABLE')::bigint AS core_slope_comparable_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND ma_slope20_pair_compatibility<>'PAIR_COMPARABLE')::bigint AS core_slope_not_comparable_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND ma_slope20_pair_compatibility='PAIR_UNKNOWN')::bigint AS core_slope_unknown_count,
+       count(*) FILTER (WHERE before_present AND after_present
+           AND (before_ma_slope20_atr_state_reason='NOT_COMPUTED_FOR_REVISION'
+                OR after_ma_slope20_atr_state_reason='NOT_COMPUTED_FOR_REVISION'))::bigint AS core_slope_not_computed_count,
+       count(*) FILTER (WHERE ma_slope20_transition_status='NEGATIVE_TO_NEGATIVE')::bigint AS core_slope_negative_to_negative_count,
+       count(*) FILTER (WHERE ma_slope20_transition_status='NEGATIVE_TO_ZERO')::bigint AS core_slope_negative_to_zero_count,
+       count(*) FILTER (WHERE ma_slope20_transition_status='NEGATIVE_TO_POSITIVE')::bigint AS core_slope_negative_to_positive_count,
+       count(*) FILTER (WHERE ma_slope20_transition_status='ZERO_TO_NEGATIVE')::bigint AS core_slope_zero_to_negative_count,
+       count(*) FILTER (WHERE ma_slope20_transition_status='ZERO_TO_ZERO')::bigint AS core_slope_zero_to_zero_count,
+       count(*) FILTER (WHERE ma_slope20_transition_status='ZERO_TO_POSITIVE')::bigint AS core_slope_zero_to_positive_count,
+       count(*) FILTER (WHERE ma_slope20_transition_status='POSITIVE_TO_NEGATIVE')::bigint AS core_slope_positive_to_negative_count,
+       count(*) FILTER (WHERE ma_slope20_transition_status='POSITIVE_TO_ZERO')::bigint AS core_slope_positive_to_zero_count,
+       count(*) FILTER (WHERE ma_slope20_transition_status='POSITIVE_TO_POSITIVE')::bigint AS core_slope_positive_to_positive_count,
        (SELECT count(*)::bigint FROM highlight_candidates) AS highlight_eligible_count
 FROM classified""",
             base_parameters,
@@ -2205,9 +2524,15 @@ LIMIT %s""",
         has_bias20_atr_state_filter = (
             before_bias20_atr_state != "ALL" or after_bias20_atr_state != "ALL"
         )
+        has_core_transition_filter = (
+            price_damage_transition != "ALL" or ma_slope20_transition != "ALL"
+        )
+        has_full_source_union_filter = (
+            has_bias20_atr_state_filter or has_core_transition_filter
+        )
         page_conditions = []
         page_filter_parameters: list[Any] = []
-        if not has_bias20_atr_state_filter:
+        if not has_full_source_union_filter:
             page_conditions.append("cardinality(change_types)>0")
             page_conditions.append("(%s='ALL' OR %s=ANY(change_types))")
             page_filter_parameters.extend((change_type, change_type))
@@ -2222,6 +2547,22 @@ LIMIT %s""",
         if after_bias20_atr_state != "ALL":
             page_conditions.append("after_bias20_atr_state=%s")
             page_filter_parameters.append(after_bias20_atr_state)
+        if price_damage_transition != "ALL":
+            page_conditions.append("price_damage_transition=%s")
+            page_filter_parameters.append(price_damage_transition)
+        if ma_slope20_transition == "NEGATIVE_TO_POSITIVE":
+            page_conditions.append(
+                "ma_slope20_transition_status='NEGATIVE_TO_POSITIVE'"
+            )
+        elif ma_slope20_transition == "POSITIVE_TO_NEGATIVE":
+            page_conditions.append(
+                "ma_slope20_transition_status='POSITIVE_TO_NEGATIVE'"
+            )
+        elif ma_slope20_transition == "ANY_SIGN_CHANGED":
+            page_conditions.append(
+                "ma_slope20_pair_compatibility='PAIR_COMPARABLE' "
+                "AND before_ma_slope20_atr_sign IS DISTINCT FROM after_ma_slope20_atr_sign"
+            )
         if profile_field_id is not None and profile_change_kind is not None:
             page_conditions.append(
                 """profile_compatible
@@ -2279,6 +2620,22 @@ LIMIT %s""",
        before_raw_price_reason, after_raw_price_reason,
        before_ma20, after_ma20, before_ma20_quality, after_ma20_quality,
        before_ma20_reason, after_ma20_reason,
+       before_price_damage, after_price_damage,
+       before_price_damage_quality, after_price_damage_quality,
+       before_price_damage_reason, after_price_damage_reason,
+       before_price_damage_state, after_price_damage_state,
+       before_price_damage_state_reason, after_price_damage_state_reason,
+       price_damage_pair_compatibility, price_damage_pair_reason,
+       price_damage_transition,
+       before_ma_slope20_atr, after_ma_slope20_atr,
+       before_ma_slope20_atr_exact_numerator, after_ma_slope20_atr_exact_numerator,
+       before_ma_slope20_atr_exact_denominator, after_ma_slope20_atr_exact_denominator,
+       before_ma_slope20_atr_quality, after_ma_slope20_atr_quality,
+       before_ma_slope20_atr_reason, after_ma_slope20_atr_reason,
+       before_ma_slope20_atr_sign, after_ma_slope20_atr_sign,
+       before_ma_slope20_atr_state_reason, after_ma_slope20_atr_state_reason,
+       ma_slope20_pair_compatibility, ma_slope20_pair_reason,
+       ma_slope20_transition_status,
        before_close_ma20_relation, after_close_ma20_relation,
        core_compatible, profile_compatible, change_types, core_quality_changed_fields,
        before_profile_field_ids, after_profile_field_ids,
@@ -2418,12 +2775,80 @@ LIMIT %s OFFSET %s""",
                 row[key] = value.isoformat()
     for row in rows:
         row.pop("filtered_total", None)
+    summary_values = {key: int(value or 0) for key, value in summary.items()}
+    core_summary_keys = {
+        "core_source_symbol_union_count",
+        "core_damage_comparable_count",
+        "core_damage_not_comparable_count",
+        "core_damage_unknown_count",
+        "core_damage_not_computed_count",
+        "core_damage_false_to_true_count",
+        "core_damage_true_to_false_count",
+        "core_damage_unchanged_true_count",
+        "core_damage_unchanged_false_count",
+        "core_slope_comparable_count",
+        "core_slope_not_comparable_count",
+        "core_slope_unknown_count",
+        "core_slope_not_computed_count",
+        "core_slope_negative_to_negative_count",
+        "core_slope_negative_to_zero_count",
+        "core_slope_negative_to_positive_count",
+        "core_slope_zero_to_negative_count",
+        "core_slope_zero_to_zero_count",
+        "core_slope_zero_to_positive_count",
+        "core_slope_positive_to_negative_count",
+        "core_slope_positive_to_zero_count",
+        "core_slope_positive_to_positive_count",
+    }
+    core_counts = {key: summary_values.pop(key) for key in core_summary_keys}
+    core_transitions = {
+        "source_symbol_union_count": core_counts["core_source_symbol_union_count"],
+        "intersection_count": summary_values["intersection_count"],
+        "before_only_count": summary_values["before_only_count"],
+        "after_only_count": summary_values["after_only_count"],
+        "price_damage": {
+            "comparable_count": core_counts["core_damage_comparable_count"],
+            "not_comparable_count": core_counts["core_damage_not_comparable_count"],
+            "unknown_count": core_counts["core_damage_unknown_count"],
+            "not_computed_for_revision_count": core_counts[
+                "core_damage_not_computed_count"
+            ],
+            "unknown_is_subset_of_not_comparable": True,
+            "false_to_true_count": core_counts["core_damage_false_to_true_count"],
+            "true_to_false_count": core_counts["core_damage_true_to_false_count"],
+            "unchanged_true_count": core_counts["core_damage_unchanged_true_count"],
+            "unchanged_false_count": core_counts["core_damage_unchanged_false_count"],
+        },
+        "ma_slope20_atr": {
+            "comparable_count": core_counts["core_slope_comparable_count"],
+            "not_comparable_count": core_counts["core_slope_not_comparable_count"],
+            "unknown_count": core_counts["core_slope_unknown_count"],
+            "not_computed_for_revision_count": core_counts[
+                "core_slope_not_computed_count"
+            ],
+            "unknown_is_subset_of_not_comparable": True,
+            "sign_transition_matrix": {
+                before_sign: {
+                    after_sign: core_counts[
+                        "core_slope_"
+                        + before_sign.lower()
+                        + "_to_"
+                        + after_sign.lower()
+                        + "_count"
+                    ]
+                    for after_sign in ("NEGATIVE", "ZERO", "POSITIVE")
+                }
+                for before_sign in ("NEGATIVE", "ZERO", "POSITIVE")
+            },
+        },
+    }
     return {
         "status": "AVAILABLE",
         "namespace_id": namespace_id,
         "before_snapshot": before,
         "after_snapshot": after,
-        "summary": {key: int(value or 0) for key, value in summary.items()},
+        "summary": summary_values,
+        "core_transitions": core_transitions,
         "highlights": {
             "status": "AVAILABLE",
             "limit": MAX_PROFILE_CHANGE_HIGHLIGHTS,
@@ -2452,6 +2877,12 @@ LIMIT %s OFFSET %s""",
             "before": before_bias20_atr_state,
             "after": after_bias20_atr_state,
             "uses_full_source_union": has_bias20_atr_state_filter,
+        },
+        "core_transition_filter": {
+            "price_damage": price_damage_transition,
+            "ma_slope20_atr": ma_slope20_transition,
+            "change_type": change_type,
+            "uses_full_source_union": has_core_transition_filter,
         },
         "rows": rows,
         "database_write": False,
