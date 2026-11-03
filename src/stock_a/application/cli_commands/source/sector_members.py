@@ -15,7 +15,13 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_history_page,
     read_raw_daily_history_stock,
     read_raw_daily_stock,
-    read_sealed_source_market_breadth_history,
+)
+from stock_a.application.source_market_context import (
+    SourceMarketContextError,
+    read_source_market_context,
+    source_market_context_payload,
+    source_market_not_evaluable_payload,
+    validate_source_market_context_binding,
 )
 from stock_a.application.source_d1_support_changes import (
     discover_source_d1_support_changes,
@@ -417,11 +423,46 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             member_offset=args.member_offset,
             member_limit=args.member_limit,
         )
+        if getattr(args, "include_source_market_context", False):
+            try:
+                market_read = read_source_market_context(
+                    config,
+                    target_session=target,
+                    research_cutoff=cutoff,
+                    source_set_id=source_set_id,
+                    package_sha256=args.package_sha256,
+                )
+            except SourceMarketContextError as error:
+                if error.category != "NOT_EVALUABLE":
+                    raise
+                d1_source = discovery["source"]
+                result["source_market_context"] = source_market_not_evaluable_payload(
+                    source_identity={
+                        **d1_source,
+                        "sealed_at": discovery.get("source_sealed_at"),
+                    },
+                    official_calendar=discovery["official_calendar"],
+                    target_session=target,
+                    research_cutoff=cutoff,
+                    reason_code=error.code,
+                    reason=str(error),
+                )
+            else:
+                validate_source_market_context_binding(
+                    market_read,
+                    strength_results=strength_results,
+                    discovery=discovery,
+                )
+                result["source_market_context"] = source_market_context_payload(
+                    market_read
+                )
     except (
         TdxSectorMembersApplicationError,
         TdxSectorMembersPgError,
         PgResearchBindingError,
         ResearchEntryError,
+        RawSourcePgError,
+        SourceMarketContextError,
     ) as error:
         code = getattr(error, "code", "SECTOR_CHANGE_DISCOVERY_FAILED")
         _emit(
