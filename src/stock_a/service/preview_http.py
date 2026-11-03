@@ -32,6 +32,7 @@ from stock_a.application.pg_research import (
 )
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
+    read_source_symbol_price_profile_observation,
     query_source_symbol_price_profile_breadth,
     query_source_symbol_price_profile_breadth_members,
     query_source_symbol_price_profile_pair,
@@ -39,6 +40,10 @@ from stock_a.application.pg_price_profiles import (
     query_source_symbol_price_profile_changes,
     query_source_symbol_price_profile_relation_screen,
     source_symbol_price_profile_snapshots,
+)
+from stock_a.application.tdx_sector_members import (
+    TdxSectorMembersApplicationError,
+    read_latest_tdx_sector_snapshot_observation,
 )
 from stock_a.application.source_ingress import (
     SourceIngressError,
@@ -1281,6 +1286,48 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_INGRESS_UNAVAILABLE",
                         f"来源准备状态无法核验：{error}",
                     ) from error
+                p04_input = source_ingress_result.get("p01_capture", {}).get(
+                    "p04_input", {}
+                )
+                try:
+                    source_profile_observation = (
+                        read_source_symbol_price_profile_observation(
+                            self.preview_server.state.config,
+                            self.preview_server.state.profile_contract,
+                            target_session=target,
+                            package_sha256=package_sha,
+                            source_set=p04_input,
+                        )
+                    )
+                except PgPriceProfileError as error:
+                    source_profile_observation = {
+                        "status": "READ_FAILED",
+                        "reason_code": error.code,
+                        "target_session": target.isoformat(),
+                        "package_sha256": package_sha,
+                        "database_write": False,
+                        "ddl_executed": False,
+                    }
+                try:
+                    tdx_sector_observation = (
+                        read_latest_tdx_sector_snapshot_observation(
+                            self.preview_server.state.config,
+                            target_session=target,
+                            package_sha256=package_sha,
+                            source_profile=source_profile_observation,
+                        )
+                    )
+                except TdxSectorMembersApplicationError as error:
+                    tdx_sector_observation = {
+                        "status": "READ_FAILED",
+                        "reason_code": error.code,
+                        "target_session": target.isoformat(),
+                        "package_sha256": package_sha,
+                        "membership_mode": ("CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"),
+                        "snapshots": [],
+                        "database_write": False,
+                        "ddl_executed": False,
+                    }
                 checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
                 payload = build_chain_readiness_payload(
                     self.preview_server.state.profile_contract,
@@ -1288,6 +1335,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     checked_at=checked_at,
                     source_set_candidate=source_candidate,
                     source_ingress_result=source_ingress_result,
+                    source_profile_observation=source_profile_observation,
+                    tdx_sector_observation=tdx_sector_observation,
                 )
                 self._send_json(200, payload)
                 return

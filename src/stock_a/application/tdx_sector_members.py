@@ -39,6 +39,7 @@ from stock_a.storage.postgres.tdx_sector_members import (
     query_sector_breadth,
     query_sector_members,
     query_sector_strength,
+    query_latest_sector_source_observation,
     verify_remote_sector_source_readback,
 )
 
@@ -497,6 +498,38 @@ def read_tdx_sector_catalog(
         offset=offset,
         limit=limit,
     )
+
+
+def read_latest_tdx_sector_snapshot_observation(
+    config: dict[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    source_profile: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """只读投影最新行业/GN快照及其与精确画像的成员交集。"""
+    try:
+        observation = query_latest_sector_source_observation(
+            config,
+            target_session=target_session,
+            package_sha256=package_sha256,
+            source_profile=source_profile,
+        )
+    except TdxSectorMembersPgError as error:
+        raise TdxSectorMembersApplicationError(error.code, str(error)) from error
+    for snapshot in observation["snapshots"]:
+        observed_at = datetime.fromisoformat(snapshot["observed_at"])
+        snapshot["observed_after_target"] = observed_at.date() > target_session
+        snapshot["source_time_role"] = (
+            "OBSERVED_AT_IS_LOCAL_OBSERVATION_NOT_SOURCE_AVAILABILITY"
+        )
+        snapshot["temporal_relationship"] = (
+            "OBSERVED_AFTER_TARGET"
+            if snapshot["observed_after_target"]
+            else "OBSERVED_ON_OR_BEFORE_TARGET"
+        )
+        snapshot["membership_mode"] = "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
+    return observation
 
 
 def read_tdx_sector_members(
@@ -1386,6 +1419,7 @@ __all__ = [
     "TdxSectorSourceError",
     "ingest_tdx_sector_members",
     "read_tdx_sector_catalog",
+    "read_latest_tdx_sector_snapshot_observation",
     "read_tdx_sector_breadth",
     "read_tdx_sector_members",
     "read_tdx_sector_strength",

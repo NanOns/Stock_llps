@@ -24,6 +24,7 @@ from stock_a.storage.postgres.price_profiles import (
     PriceProfilePgError,
     list_profile_snapshots,
     persist_profile_records,
+    read_source_profile_observability,
     read_profile_breadth,
     read_profile_breadth_members,
     read_profile_change_page,
@@ -599,6 +600,156 @@ def query_source_symbol_price_profiles(
         raise PgPriceProfileError(
             getattr(error, "code", "PROFILE_READ_FAILED"), str(error)
         ) from error
+
+
+def read_source_symbol_price_profile_observation(
+    config: Mapping[str, Any],
+    profile_contract: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    source_set: Mapping[str, Any],
+) -> dict[str, Any]:
+    """按精确P03来源身份投影已保存Core/Profile画像及质量。"""
+    source_set_id = source_set.get("source_set_id")
+    source_set_revision = source_set.get("revision_id")
+    source_capture_id = source_set.get("source_capture_id")
+    if (
+        source_set.get("status") != "AVAILABLE"
+        or source_set.get("seal_status") != "SEALED"
+        or source_set.get("durability_status") != "VERIFIED_POST_COMMIT_READBACK"
+        or source_set.get("target_session") != target_session.isoformat()
+        or source_set.get("package_sha256") != package_sha256
+        or not isinstance(source_set_id, str)
+        or type(source_set_revision) is not int
+        or not isinstance(source_capture_id, str)
+    ):
+        return {
+            "status": "NOT_COMPUTED",
+            "reason_code": "EXACT_SEALED_SOURCE_SET_UNAVAILABLE",
+            "target_session": target_session.isoformat(),
+            "package_sha256": package_sha256,
+            "profile_revision_selection": {
+                "rule": "REQUIRES_EXACT_SEALED_SOURCE_SET",
+                "selected_profile_revision": None,
+                "candidate_revision_count": 0,
+                "current_semantics_match_count": 0,
+            },
+            "database_write": False,
+            "ddl_executed": False,
+        }
+    try:
+        semantics_sha256 = _profile_semantics_sha256(profile_contract)
+        observation = read_source_profile_observability(
+            config,
+            target_session=target_session,
+            package_sha256=package_sha256,
+            source_set_id=source_set_id,
+            source_set_revision=source_set_revision,
+            source_capture_id=source_capture_id,
+            current_semantics_sha256=semantics_sha256,
+        )
+    except (RawSourcePgError, PriceProfilePgError) as error:
+        raise PgPriceProfileError(
+            getattr(error, "code", "PROFILE_OBSERVATION_READ_FAILED"), str(error)
+        ) from error
+
+    foundation = profile_contract.get("scope_bindings", {}).get("FOUNDATION_EOD", {})
+    core_registry = foundation.get("field_registry", ())
+    profile_registry = foundation.get("profile_expression_registry", {})
+    observation["contract_field_counts"] = {
+        "core43_registered_fields": sum(
+            1
+            for item in core_registry
+            if isinstance(item, Mapping)
+            and isinstance(item.get("field_id"), str)
+            and item["field_id"].startswith("core.")
+        )
+        if isinstance(core_registry, (list, tuple))
+        else 0,
+        "stored_core_quality_fields": len(_CORE_FIELDS),
+        "profile11_registered_fields": len(profile_registry)
+        if isinstance(profile_registry, Mapping)
+        else 0,
+    }
+    observation["contract_field_counts"]["core43_all_fields_persisted"] = (
+        observation["contract_field_counts"]["core43_registered_fields"]
+        == observation["contract_field_counts"]["stored_core_quality_fields"]
+    )
+    selected = observation.get("selected_revision")
+    selected_rows = (
+        int(selected.get("stored_rows", 0)) if isinstance(selected, Mapping) else 0
+    )
+    core_totals: dict[str, int] = {}
+    for row in observation.get("core_quality_rows", ()):
+        field_id = str(row["field_id"])
+        core_totals[field_id] = core_totals.get(field_id, 0) + int(row["row_count"])
+    profile_totals: dict[str, int] = {}
+    for row in observation.get("profile_quality_rows", ()):
+        field_id = str(row["field_id"])
+        profile_totals[field_id] = profile_totals.get(field_id, 0) + int(
+            row["row_count"]
+        )
+    expected_profile_ids = (
+        {
+            item["field_id"]
+            for item in profile_registry.values()
+            if isinstance(item, Mapping) and isinstance(item.get("field_id"), str)
+        }
+        if isinstance(profile_registry, Mapping)
+        else set()
+    )
+    observation["quality_field_denominators"] = {
+        "core_field_rows": core_totals,
+        "profile_field_rows": profile_totals,
+        "all_stored_fields_closed": bool(
+            selected_rows
+            and all(
+                core_totals.get(field_id) == selected_rows for field_id in _CORE_FIELDS
+            )
+            and expected_profile_ids == set(profile_totals)
+            and all(
+                profile_totals.get(field_id) == selected_rows
+                for field_id in expected_profile_ids
+            )
+        ),
+    }
+    observation["profile_revision_selection"]["current_semantics_sha256"] = (
+        semantics_sha256
+    )
+    if isinstance(selected, Mapping):
+        observation["profile_revision_selection"]["selected_producer_contract"] = (
+            selected.get("producer_contract")
+        )
+        observation["profile_revision_selection"]["selected_producer_version"] = (
+            selected.get("producer_version")
+        )
+        observation["profile_revision_selection"]["selected_semantics_match"] = (
+            selected.get("producer_contract_sha256") == semantics_sha256
+        )
+        observation["history_window"] = {
+            "records_complete_rows": selected["history_records_complete_rows"],
+            "eligible_24_session_rows": selected["history_24_session_eligible_rows"],
+            "requested_24_plus_rows": selected["history_requested_24_plus_rows"],
+            "requested_sessions_min": selected["min_history_requested_sessions"],
+            "requested_sessions_max": selected["max_history_requested_sessions"],
+            "stored_sessions_min": selected["min_history_stored_sessions"],
+            "stored_sessions_max": selected["max_history_stored_sessions"],
+            "price_window_usable_rows": selected["price_window_usable_rows"],
+        }
+    else:
+        observation["profile_revision_selection"]["selected_semantics_match"] = False
+        observation["history_window"] = {
+            "records_complete_rows": 0,
+            "eligible_24_session_rows": 0,
+            "requested_24_plus_rows": 0,
+            "requested_sessions_min": None,
+            "requested_sessions_max": None,
+            "stored_sessions_min": None,
+            "stored_sessions_max": None,
+            "price_window_usable_rows": 0,
+        }
+    return observation
 
 
 def _profile_session_relation(

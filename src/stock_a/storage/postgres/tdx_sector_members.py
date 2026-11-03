@@ -7,7 +7,7 @@ from datetime import date
 from decimal import Decimal
 from fractions import Fraction
 import re
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Mapping, Sequence
 import uuid
 
 from stock_a.sources.tdx.sector_members import (
@@ -657,6 +657,166 @@ def _source_quality_counts(value: str) -> dict[str, int | str]:
         if raw_count.isdecimal():
             result[name.lower()] = int(raw_count)
     return result
+
+
+def query_latest_sector_source_observation(
+    config: dict[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    source_profile: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """读取最新TDX行业/GN快照摘要，并可选核对其与精确画像的交集。"""
+    if (
+        type(target_session) is not date
+        or not isinstance(package_sha256, str)
+        or _SHA256.fullmatch(package_sha256) is None
+    ):
+        raise TdxSectorMembersPgError(
+            "SECTOR_OBSERVATION_TARGET_INVALID", "板块观察必须绑定目标日和完整来源包SHA"
+        )
+    profile = source_profile if isinstance(source_profile, Mapping) else {}
+    selected_profile = profile.get("selected_revision")
+    set_comparison = profile.get("set_comparison")
+    has_exact_profile = bool(
+        profile.get("status") == "PG_SOURCE_PROFILE_STORED"
+        and isinstance(selected_profile, Mapping)
+        and isinstance(set_comparison, Mapping)
+        and set_comparison.get("symbol_sets_match") is True
+        and profile.get("target_session") == target_session.isoformat()
+        and profile.get("package_sha256") == package_sha256
+    )
+    source_set_id = profile.get("source_set_id") if has_exact_profile else None
+    source_set_revision = (
+        profile.get("source_set_revision") if has_exact_profile else None
+    )
+    source_capture_id = profile.get("source_capture_id") if has_exact_profile else None
+    profile_revision = (
+        selected_profile.get("profile_revision") if has_exact_profile else None
+    )
+    try:
+        if has_exact_profile:
+            source_set_id = str(uuid.UUID(source_set_id))
+            source_capture_id = str(uuid.UUID(source_capture_id))
+        with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+            cursor.execute(
+                """WITH latest AS (
+    SELECT DISTINCT ON (source_kind)
+           snapshot_id,source_kind,source_file_sha256,observed_at,source_valid_on,
+           source_known_at,source_available_at,clock_quality,research_mode,
+           parse_contract_version,rows_declared,source_quality
+    FROM stock.tdx_sector_source_snapshots
+    WHERE source_kind IN ('TDX_TDXHY_CFG','TDX_INFOHARBOR_BLOCK_DAT')
+    ORDER BY source_kind,observed_at DESC,snapshot_id DESC
+)
+SELECT s.snapshot_id::text AS snapshot_id,s.source_kind,
+       s.source_file_sha256,s.observed_at,s.source_valid_on,
+       s.source_known_at,s.source_available_at,s.clock_quality,s.research_mode,
+       s.parse_contract_version,s.rows_declared,s.source_quality,
+       c.catalog_rows,c.industry_catalog_rows,c.concept_catalog_rows,
+       c.excluded_catalog_rows,m.member_rows,m.industry_member_rows,
+       m.concept_member_rows,m.distinct_member_symbols,
+       m.invalid_membership_quality_rows,
+       o.profile_overlap_symbols,o.history_24_session_overlap_symbols,
+       o.history_75_session_overlap_symbols
+FROM latest s
+LEFT JOIN LATERAL (
+    SELECT count(*)::bigint AS catalog_rows,
+           count(*) FILTER (WHERE board_kind='INDUSTRY')::bigint
+               AS industry_catalog_rows,
+           count(*) FILTER (WHERE board_kind='CONCEPT')::bigint
+               AS concept_catalog_rows,
+           count(*) FILTER (WHERE board_kind NOT IN ('INDUSTRY','CONCEPT'))::bigint
+               AS excluded_catalog_rows
+    FROM stock.tdx_sector_catalog
+    WHERE snapshot_id=s.snapshot_id
+) c ON TRUE
+LEFT JOIN LATERAL (
+    SELECT count(*)::bigint AS member_rows,
+           count(*) FILTER (WHERE board_kind='INDUSTRY')::bigint
+               AS industry_member_rows,
+           count(*) FILTER (WHERE board_kind='CONCEPT')::bigint
+               AS concept_member_rows,
+           count(DISTINCT source_symbol)::bigint AS distinct_member_symbols,
+           count(*) FILTER (WHERE membership_quality<>'OBSERVED_SOURCE_RELATION')::bigint
+               AS invalid_membership_quality_rows
+    FROM stock.tdx_sector_members
+    WHERE snapshot_id=s.snapshot_id
+) m ON TRUE
+LEFT JOIN LATERAL (
+    SELECT count(DISTINCT m.source_symbol)::bigint AS profile_overlap_symbols,
+           count(DISTINCT m.source_symbol) FILTER (
+               WHERE p.history_stored_session_count>=24
+                 AND p.history_requested_session_count>=24
+           )::bigint AS history_24_session_overlap_symbols,
+           count(DISTINCT m.source_symbol) FILTER (
+               WHERE p.history_stored_session_count>=75
+                 AND p.history_requested_session_count>=75
+           )::bigint AS history_75_session_overlap_symbols
+    FROM stock.tdx_sector_members m
+    JOIN stock.source_symbol_price_profiles p
+      ON p.namespace_id=%s::uuid AND p.source_set_id=%s::uuid
+     AND p.target_session=%s::date AND p.package_sha256=%s
+     AND p.source_set_revision=%s AND p.source_capture_id=%s::uuid
+     AND p.profile_revision=%s
+     AND p.source_symbol=m.source_symbol
+    WHERE m.snapshot_id=s.snapshot_id
+) o ON TRUE
+ORDER BY s.source_kind""",
+                (
+                    namespace_id,
+                    source_set_id,
+                    target_session,
+                    package_sha256,
+                    source_set_revision,
+                    source_capture_id,
+                    profile_revision,
+                ),
+            )
+            columns = [column.name for column in cursor.description]
+            snapshots = [
+                dict(zip(columns, row, strict=True)) for row in cursor.fetchall()
+            ]
+    except TdxSectorMembersPgError:
+        raise
+    except (RawSourcePgError, PriceProfilePgError) as error:
+        raise TdxSectorMembersPgError(error.code, str(error)) from error
+    except Exception as error:
+        raise TdxSectorMembersPgError(
+            "SECTOR_OBSERVATION_READ_FAILED",
+            f"最新TDX板块快照只读摘要失败（{type(error).__name__}）",
+        ) from error
+
+    for snapshot in snapshots:
+        snapshot["source_file_sha256"] = str(snapshot["source_file_sha256"]).strip()
+        snapshot["snapshot_id"] = str(snapshot["snapshot_id"])
+        snapshot["observed_at"] = snapshot["observed_at"].isoformat()
+        for name in ("source_valid_on",):
+            if snapshot[name] is not None:
+                snapshot[name] = snapshot[name].isoformat()
+        for name in ("source_known_at", "source_available_at"):
+            if snapshot[name] is not None:
+                snapshot[name] = snapshot[name].isoformat()
+        for name, value in tuple(snapshot.items()):
+            if name.endswith("_rows") or name.endswith("_symbols"):
+                snapshot[name] = int(value or 0)
+        snapshot["source_quality_counts"] = _source_quality_counts(
+            snapshot["source_quality"]
+        )
+        snapshot["profile_overlap_checked"] = has_exact_profile
+
+    return {
+        "status": "AVAILABLE" if snapshots else "NO_MATCH",
+        "namespace_id": namespace_id,
+        "target_session": target_session.isoformat(),
+        "package_sha256": package_sha256,
+        "source_profile_revision": profile_revision,
+        "selection_rule": "MAX_OBSERVED_AT_PER_EXACT_TDX_SOURCE_KIND",
+        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+        "snapshots": snapshots,
+        "database_write": False,
+        "ddl_executed": False,
+    }
 
 
 def query_sector_catalog(

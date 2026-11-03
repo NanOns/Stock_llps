@@ -300,6 +300,191 @@ function renderFormalSourceSet(data) {
   details.append(evidence);
   root.append(details);
 }
+function renderObservationDetails(parent, title, entries) {
+  if (!Array.isArray(entries) || entries.length === 0) return;
+  const details = document.createElement("details");
+  details.className = "chain-stage chain-observation";
+  appendText(details, "summary", title);
+  const list = document.createElement("dl");
+  list.className = "chain-detail";
+  for (const [label, value] of entries)
+    readinessDetail(list, label, value == null ? "—" : String(value));
+  details.append(list);
+  parent.append(details);
+}
+function renderSourceProfileObservation(parent, data) {
+  const observation = data.source_profile_observation || {};
+  const selection = observation.profile_revision_selection || {};
+  const comparison = observation.set_comparison || {};
+  const counts = observation.contract_field_counts || {};
+  const window = observation.history_window || {};
+  const selected = observation.selected_revision || {};
+  const entries = [
+    ["读取状态", observation.status || "NOT_RUN"],
+    [
+      "精确目标日 / 来源包SHA",
+      `${observation.target_session || data.source_date} · ${observation.package_sha256 || data.package_sha256}`,
+    ],
+    [
+      "P03来源集合 / 修订 / 捕获",
+      `${observation.source_set_id || "—"} · ${observation.source_set_revision ?? "—"} · ${observation.source_capture_id || "—"}`,
+    ],
+    [
+      "画像版本选择规则",
+      `${selection.rule || "—"} · 候选 ${selection.candidate_revision_count ?? 0} · 当前语义匹配 ${selection.current_semantics_match_count ?? 0}`,
+    ],
+    [
+      "已选画像修订 / 生产合同",
+      `${selection.selected_profile_revision || "—"} · ${selection.selected_producer_contract || "—"} ${selection.selected_producer_version || ""}`,
+    ],
+    [
+      "画像语义摘要 / 当前匹配",
+      `${selection.current_semantics_sha256 || "—"} · ${selection.selected_semantics_match === true ? "是" : "否/未选"}`,
+    ],
+    [
+      "Core合同 / 已存Core质量列 / Profile合同",
+      `Core ${counts.core43_registered_fields ?? 0}个 / 已存 ${counts.stored_core_quality_fields ?? 0}列 / Core43全存 ${counts.core43_all_fields_persisted === true ? "是" : "否"}；Profile ${counts.profile11_registered_fields ?? 0}个`,
+    ],
+    [
+      "Raw与画像来源代码集合",
+      `Raw ${comparison.raw_row_count ?? 0}行/${comparison.raw_symbol_count ?? 0}代码；画像 ${comparison.profile_row_count ?? 0}行/${comparison.profile_symbol_count ?? 0}代码；交集 ${comparison.matched_symbol_count ?? 0}；仅Raw ${comparison.raw_only_symbol_count ?? 0}；仅画像 ${comparison.profile_only_symbol_count ?? 0}；完全一致 ${comparison.symbol_sets_match === true ? "是" : "否"}`,
+    ],
+    [
+      "来源代码集合独立摘要",
+      `${comparison.raw_symbol_set_sha256 || "—"} / ${comparison.profile_symbol_set_sha256 || "—"}；SHA一致 ${comparison.symbol_sets_sha256_match === true ? "是" : "否"}`,
+    ],
+    [
+      "历史覆盖",
+      `完整记录 ${window.records_complete_rows ?? 0}；24会话可用 ${window.eligible_24_session_rows ?? 0}；请求≥24 ${window.requested_24_plus_rows ?? 0}；请求 ${window.requested_sessions_min ?? "—"}–${window.requested_sessions_max ?? "—"}；已存 ${window.stored_sessions_min ?? "—"}–${window.stored_sessions_max ?? "—"}；价格窗可用 ${window.price_window_usable_rows ?? 0}`,
+    ],
+    [
+      "已存字段质量分母闭合",
+      observation.quality_field_denominators?.all_stored_fields_closed === true
+        ? "是"
+        : "否/未确认",
+    ],
+    [
+      "质量只读约束",
+      `数据库写入 ${observation.database_write === false ? "否" : "未知"}；DDL ${observation.ddl_executed === false ? "否" : "未知"}`,
+    ],
+  ];
+  const statuses = selected.target_bar_statuses || [];
+  entries.push([
+    "目标Bar状态 / 质量 / 价格窗",
+    `${statuses.join(", ") || "—"} · ${(selected.target_price_qualities || []).join(", ") || "—"} · ${(selected.price_window_statuses || []).join(", ") || "—"}`,
+  ]);
+  renderObservationDetails(
+    parent,
+    `已保存Core/Profile画像 · ${observation.status || "NOT_RUN"}`,
+    entries,
+  );
+
+  const coreRows = observation.core_quality_rows || [];
+  const profileRows = observation.profile_quality_rows || [];
+  const qualityItems = [
+    ...coreRows.map(
+      (row) =>
+        `Core ${row.field_id} · ${row.quality} · ${row.reason_code || "无原因"} · ${row.row_count}/${selected.stored_rows ?? 0}`,
+    ),
+    ...profileRows.map(
+      (row) =>
+        `Profile ${row.field_id} · ${row.status} · ${row.quality} · ${row.reason_code || "无原因"} · ${row.row_count}/${selected.stored_rows ?? 0}`,
+    ),
+  ];
+  if (qualityItems.length) {
+    const details = document.createElement("details");
+    details.className = "chain-stage chain-observation";
+    appendText(
+      details,
+      "summary",
+      `字段质量分布 · ${qualityItems.length}个质量组`,
+    );
+    const list = document.createElement("ul");
+    for (const item of qualityItems) appendText(list, "li", item);
+    details.append(list);
+    parent.append(details);
+  }
+}
+function renderTdxSectorObservation(parent, data) {
+  const observation = data.tdx_sector_observation || {};
+  const snapshots = observation.snapshots || [];
+  const entries = [
+    [
+      "读取状态 / 选择规则",
+      `${observation.status || "NOT_RUN"} · ${observation.selection_rule || "—"}`,
+    ],
+    [
+      "精确目标日 / 包SHA",
+      `${observation.target_session || data.source_date} · ${observation.package_sha256 || data.package_sha256}`,
+    ],
+    [
+      "成员回溯语义",
+      observation.membership_mode || "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+    ],
+    [
+      "快照数量 / 画像交集核对",
+      `${snapshots.length} · ${snapshots.some((item) => item.profile_overlap_checked) ? "已核对精确画像" : "无精确画像修订可交集核对"}`,
+    ],
+  ];
+  for (const snapshot of snapshots) {
+    const kind =
+      snapshot.source_kind === "TDX_TDXHY_CFG"
+        ? "TDX行业"
+        : snapshot.source_kind === "TDX_INFOHARBOR_BLOCK_DAT"
+          ? "TDX GN概念"
+          : snapshot.source_kind;
+    const quality = snapshot.source_quality_counts || {};
+    const qualityText =
+      Object.entries(quality)
+        .map(([name, value]) => `${name}=${value}`)
+        .join("；") || "无质量计数";
+    entries.push([
+      `${kind} · 快照/原件SHA`,
+      `${snapshot.snapshot_id} · ${snapshot.source_file_sha256}`,
+    ]);
+    entries.push([
+      `${kind} · 原生类型 / 解析合同`,
+      `${snapshot.source_kind} · ${snapshot.parse_contract_version}`,
+    ]);
+    entries.push([
+      `${kind} · 观察时钟 / 时间关系`,
+      `${snapshot.observed_at} · ${snapshot.clock_quality} · ${snapshot.temporal_relationship}；source_valid_on=${snapshot.source_valid_on || "未知"}；source_known_at=${snapshot.source_known_at || "未知"}；source_available_at=${snapshot.source_available_at || "未知"}`,
+    ]);
+    entries.push([
+      `${kind} · 声明/目录/成员/唯一代码`,
+      `${snapshot.rows_declared} / ${snapshot.catalog_rows} / ${snapshot.member_rows} / ${snapshot.distinct_member_symbols}`,
+    ]);
+    entries.push([
+      `${kind} · 行业/GN目录及成员`,
+      `行业 ${snapshot.industry_catalog_rows}/${snapshot.industry_member_rows}；GN ${snapshot.concept_catalog_rows}/${snapshot.concept_member_rows}；排除目录 ${snapshot.excluded_catalog_rows}；质量异常成员 ${snapshot.invalid_membership_quality_rows}`,
+    ]);
+    entries.push([`${kind} · 来源质量计数`, qualityText]);
+    entries.push([
+      `${kind} · 精确画像交集`,
+      `画像 ${snapshot.profile_overlap_symbols ?? "未核对"}；24会话 ${snapshot.history_24_session_overlap_symbols ?? "未核对"}；75会话 ${snapshot.history_75_session_overlap_symbols ?? "未核对"}`,
+    ]);
+  }
+  renderObservationDetails(
+    parent,
+    `最新TDX行业/GN快照 · ${observation.status || "NOT_RUN"}`,
+    entries,
+  );
+}
+function renderOnDemandResearch(parent, data) {
+  const entries = (data.on_demand_research?.entries || []).map((item) => [
+    item.capability_id,
+    `入口 ${item.entry_available ? "可用" : "不可用"} · 当前输入 ${item.input_ready ? "就绪" : "未齐"} · 结果已计算/保存 ${item.computed_or_stored ? "是" : "否"} · ${item.result_status || "未知"} · ${item.reason_code || "无原因"}`,
+  ]);
+  entries.push([
+    "跨域与PIT边界",
+    `缺少板块快照不阻断来源D1=${data.on_demand_research?.domain_independence?.missing_sector_snapshot_blocks_source_d1 === false ? "是" : "未确认"}；成员关系=${data.on_demand_research?.domain_independence?.current_membership_mode || "未知"}；GET全市场D1重算=${data.on_demand_research?.full_market_d1_recalculated === false ? "否" : "未确认"}`,
+  ]);
+  renderObservationDetails(
+    parent,
+    "R03/R04按需研究入口与结果物化状态",
+    entries,
+  );
+}
 function renderReadiness(data) {
   const v = data.source_version,
     c = v.bar_status_counts,
@@ -389,6 +574,12 @@ function renderReadiness(data) {
     );
     details.append(summary);
     appendText(details, "p", group.summary);
+    if (group.group_id === "base_profile")
+      renderSourceProfileObservation(details, data);
+    if (group.group_id === "research") {
+      renderTdxSectorObservation(details, data);
+      renderOnDemandResearch(details, data);
+    }
     for (const stageId of group.stage_ids) {
       const stage = stageById.get(stageId);
       if (!stage) continue;

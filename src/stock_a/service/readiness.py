@@ -195,6 +195,127 @@ def _formal_source_set_readback_matches(
     )
 
 
+def _on_demand_research_observation(
+    *,
+    source_profile: Mapping[str, Any],
+    sector_observation: Mapping[str, Any],
+    formal_source_set_readback: bool,
+) -> dict[str, Any]:
+    """说明现有按需入口、其当前输入边界及本GET未物化的结果。"""
+    selected_profile = source_profile.get("selected_revision")
+    profile_selection = source_profile.get("profile_revision_selection", {})
+    profile_selection = (
+        profile_selection if isinstance(profile_selection, Mapping) else {}
+    )
+    profile_window = source_profile.get("history_window", {})
+    eligible_rows = (
+        int(profile_window.get("eligible_24_session_rows", 0))
+        if isinstance(profile_window, Mapping)
+        else 0
+    )
+    snapshots = sector_observation.get("snapshots", ())
+    sector_by_kind = {
+        row.get("source_kind"): row for row in snapshots if isinstance(row, Mapping)
+    }
+    has_industry = "TDX_TDXHY_CFG" in sector_by_kind
+    has_gn = "TDX_INFOHARBOR_BLOCK_DAT" in sector_by_kind
+    sector_available = has_industry or has_gn
+    exact_profile_available = source_profile.get(
+        "status"
+    ) == "PG_SOURCE_PROFILE_STORED" and isinstance(selected_profile, Mapping)
+    profile_semantics_match = profile_selection.get("selected_semantics_match") is True
+    strength_overlap = sum(
+        int(row.get("history_24_session_overlap_symbols", 0))
+        for row in sector_by_kind.values()
+    )
+    return {
+        "status": "OBSERVABILITY_ONLY_NO_RESEARCH_EXECUTED",
+        "entries": [
+            {
+                "capability_id": "R03_TDX_SECTOR_STRENGTH",
+                "entry_available": True,
+                "entry": "stock_a.application.tdx_sector_members.read_tdx_sector_strength / source-tdx-sector-members strength CLI",
+                "input_ready": bool(
+                    sector_available
+                    and exact_profile_available
+                    and profile_semantics_match
+                    and strength_overlap
+                ),
+                "input_readiness_scope": "EXACT_DAY_PROFILE_AND_LATEST_CURRENT_TDX_MEMBER_OVERLAP",
+                "materialized_profile_revision": profile_selection.get(
+                    "selected_profile_revision"
+                ),
+                "selected_profile_semantics_match": profile_semantics_match,
+                "eligible_24_session_member_symbols": strength_overlap,
+                "computed_or_stored": False,
+                "result_status": "NOT_RUN_IN_THIS_GET",
+                "reason_code": (
+                    "READY_FOR_EXPLICIT_BOARD_QUERY"
+                    if (
+                        sector_available
+                        and exact_profile_available
+                        and profile_semantics_match
+                        and strength_overlap
+                    )
+                    else "REQUIRES_CURRENT_TDX_SNAPSHOT_EXACT_PROFILE_AND_ELIGIBLE_HISTORY"
+                ),
+            },
+            {
+                "capability_id": "R03_TDX_SECTOR_BREADTH",
+                "entry_available": True,
+                "entry": "stock_a.application.tdx_sector_members.read_tdx_sector_breadth / source-tdx-sector-members breadth CLI",
+                "input_ready": False,
+                "input_readiness_scope": "EXPLICIT_BEFORE_AFTER_SESSION_AND_PROFILE_REVISIONS_REQUIRED",
+                "available_current_tdx_snapshots": {
+                    "industry": has_industry,
+                    "gn_concept": has_gn,
+                },
+                "computed_or_stored": False,
+                "result_status": "NOT_RUN_IN_THIS_GET",
+                "reason_code": "BEFORE_AFTER_PAIR_NOT_SELECTED",
+            },
+            {
+                "capability_id": "R04_SOURCE_D1_BREAKOUT_PREVIEW",
+                "entry_available": True,
+                "entry": "stock_a.application.cli_commands.research.d1_preview._run_source_d1_breakout_preview",
+                "input_ready": formal_source_set_readback,
+                "input_readiness_scope": "EXACT_SEALED_DAY_PACKAGE_AVAILABLE; SYMBOL_AND_RAW_WINDOW_RECHECKED_AT_INVOCATION; PROFILE_MATERIALIZATION_IS_OBSERVATION_ONLY",
+                "exact_source_set_available": formal_source_set_readback,
+                "exact_profile_stored": exact_profile_available,
+                "eligible_24_session_profile_rows": eligible_rows,
+                "computed_or_stored": False,
+                "result_status": "NOT_RUN_IN_THIS_GET",
+                "reason_code": (
+                    "READY_FOR_EXPLICIT_SINGLE_SYMBOL_OR_PAGED_INVOCATION"
+                    if formal_source_set_readback
+                    else "EXACT_SOURCE_SET_UNAVAILABLE"
+                ),
+                "sector_snapshot_dependency": False,
+            },
+            {
+                "capability_id": "R04_TDX_SECTOR_CHANGE_STOCKS",
+                "entry_available": True,
+                "entry": "stock_a.application.cli_commands.source.sector_members._run_source_tdx_sector_change_stocks / source-tdx-sector-members change-stocks CLI",
+                "input_ready": False,
+                "input_readiness_scope": "EXPLICIT_BEFORE_AFTER_TDX_SNAPSHOTS_AND_PROFILE_REVISIONS_REQUIRED",
+                "available_current_tdx_snapshots": {
+                    "industry": has_industry,
+                    "gn_concept": has_gn,
+                },
+                "computed_or_stored": False,
+                "result_status": "NOT_RUN_IN_THIS_GET",
+                "reason_code": "BEFORE_AFTER_SNAPSHOT_PAIR_NOT_SELECTED",
+            },
+        ],
+        "domain_independence": {
+            "missing_sector_snapshot_blocks_source_d1": False,
+            "current_membership_mode": "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT",
+            "historical_pit_membership_required": False,
+        },
+        "full_market_d1_recalculated": False,
+    }
+
+
 def build_chain_readiness_payload(
     contract: Mapping[str, Any],
     source_version: Mapping[str, Any],
@@ -202,6 +323,8 @@ def build_chain_readiness_payload(
     checked_at: str,
     source_set_candidate: Mapping[str, Any] | None = None,
     source_ingress_result: Mapping[str, Any] | None = None,
+    source_profile_observation: Mapping[str, Any] | None = None,
+    tdx_sector_observation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """将唯一机器合同和本次精确PG证据组合为只读准备状态。"""
     stages = contract.get("stages")
@@ -267,6 +390,13 @@ def build_chain_readiness_payload(
     )
     formal_source_set_readback = _formal_source_set_readback_matches(
         source_ingress_result
+    )
+    profile_observation = dict(source_profile_observation or {"status": "NOT_RUN"})
+    sector_observation = dict(tdx_sector_observation or {"status": "NOT_RUN"})
+    on_demand_research = _on_demand_research_observation(
+        source_profile=profile_observation,
+        sector_observation=sector_observation,
+        formal_source_set_readback=formal_source_set_readback,
     )
 
     stage_rows: list[dict[str, Any]] = []
@@ -571,6 +701,9 @@ def build_chain_readiness_payload(
             or {"status": "NOT_RUN", "candidate_fallback": False}
         ),
         "source_ingress": dict(source_ingress_result or {"status": "NOT_RUN"}),
+        "source_profile_observation": profile_observation,
+        "tdx_sector_observation": sector_observation,
+        "on_demand_research": on_demand_research,
         "source_observations": {
             "status": source_data_status,
             "version_status": source_version["version_status"],

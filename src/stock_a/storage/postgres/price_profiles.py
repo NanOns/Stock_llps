@@ -14,6 +14,8 @@ from .source_raw import RawSourcePgError, _transaction
 
 
 MAX_PROFILE_ROWS_PER_BATCH = 5000
+MAX_PROFILE_OBSERVATION_REVISIONS = 16
+MAX_PROFILE_OBSERVATION_QUALITY_ROWS = 800
 INSERT_CHUNK_SIZE = 50
 _CORE_COLUMN_NAMES = (
     "ma5",
@@ -794,6 +796,379 @@ ORDER BY p.target_session DESC, p.source_set_id""",
         "status": "AVAILABLE" if snapshots else "EMPTY",
         "namespace_id": namespace_id,
         "snapshots": snapshots,
+    }
+
+
+def read_source_profile_observability(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    source_set_id: str,
+    source_set_revision: int,
+    source_capture_id: str,
+    current_semantics_sha256: str,
+) -> dict[str, Any]:
+    """按精确SEALED来源集合读取画像版本、符号集合和字段质量摘要。"""
+    if (
+        type(target_session) is not date
+        or not isinstance(package_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
+        or not isinstance(current_semantics_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", current_semantics_sha256) is None
+        or type(source_set_revision) is not int
+        or source_set_revision < 1
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_OBSERVATION_KEY_INVALID", "画像观察必须绑定精确日期、SHA与修订"
+        )
+    try:
+        canonical_set_id = str(UUID(source_set_id))
+        canonical_capture_id = str(UUID(source_capture_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise PriceProfilePgError(
+            "PROFILE_OBSERVATION_KEY_INVALID", "画像观察的来源集合或捕获UUID无效"
+        ) from error
+    if canonical_set_id != source_set_id or canonical_capture_id != source_capture_id:
+        raise PriceProfilePgError(
+            "PROFILE_OBSERVATION_KEY_INVALID", "来源集合与捕获UUID必须使用规范格式"
+        )
+
+    core_values = ", ".join(
+        f"('core.{name}',p.{name}_quality,p.{name}_reason)"
+        for name in _CORE_COLUMN_NAMES
+    )
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        cursor.execute(
+            """SELECT raw_row_count,seal_status,durability_status
+FROM stock.source_sets
+WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
+  AND target_session=%s::date AND package_sha256=%s
+  AND revision_id=%s AND source_capture_id=%s::uuid""",
+            (
+                namespace_id,
+                canonical_set_id,
+                target_session,
+                package_sha256,
+                source_set_revision,
+                canonical_capture_id,
+            ),
+        )
+        source_set = cursor.fetchone()
+        if source_set is None or source_set[1:] != (
+            "SEALED",
+            "VERIFIED_POST_COMMIT_READBACK",
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_OBSERVATION_SOURCE_SET_MISMATCH",
+                "画像观察未找到精确SEALED来源集合与捕获修订",
+            )
+        raw_row_count = int(source_set[0])
+        if not 1 <= raw_row_count <= MAX_PROFILE_ROWS_PER_BATCH:
+            raise PriceProfilePgError(
+                "PROFILE_OBSERVATION_ROW_BUDGET_EXCEEDED",
+                "精确来源集合超过画像观察的固定行数上限",
+            )
+
+        cursor.execute(
+            """SELECT count(*)::bigint AS raw_rows,
+       count(DISTINCT source_symbol)::bigint AS raw_symbols
+FROM stock.source_raw_daily
+WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
+  AND session_date=%s::date AND package_sha256=%s""",
+            (namespace_id, canonical_capture_id, target_session, package_sha256),
+        )
+        raw_row, raw_symbol_row = cursor.fetchone()
+        raw_rows = int(raw_row)
+        raw_symbols = int(raw_symbol_row)
+        if (
+            raw_rows > MAX_PROFILE_ROWS_PER_BATCH
+            or raw_symbols > MAX_PROFILE_ROWS_PER_BATCH
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_OBSERVATION_ROW_BUDGET_EXCEEDED",
+                "精确Raw来源集合超过画像观察的固定行数上限",
+            )
+
+        cursor.execute(
+            """SELECT profile_revision::text AS profile_revision,
+       producer_contract,producer_version,producer_contract_sha256,
+       count(*)::bigint AS stored_rows,
+       count(DISTINCT source_symbol)::bigint AS distinct_source_symbols,
+       count(*) FILTER (WHERE history_records_complete)::bigint
+           AS history_records_complete_rows,
+       count(*) FILTER (WHERE history_stored_session_count>=24
+                         AND history_requested_session_count>=24)::bigint
+           AS history_24_session_eligible_rows,
+       count(*) FILTER (WHERE history_requested_session_count>=24)::bigint
+           AS history_requested_24_plus_rows,
+       min(history_requested_session_count) AS min_history_requested_sessions,
+       max(history_requested_session_count) AS max_history_requested_sessions,
+       min(history_stored_session_count) AS min_history_stored_sessions,
+       max(history_stored_session_count) AS max_history_stored_sessions,
+       count(*) FILTER (WHERE price_window_usable)::bigint
+           AS price_window_usable_rows,
+       array_agg(DISTINCT target_bar_status ORDER BY target_bar_status)
+           AS target_bar_statuses,
+       array_agg(DISTINCT target_price_quality ORDER BY target_price_quality)
+           AS target_price_qualities,
+       array_agg(DISTINCT price_window_status ORDER BY price_window_status)
+           AS price_window_statuses
+FROM stock.source_symbol_price_profiles
+WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
+  AND target_session=%s::date AND package_sha256=%s
+  AND source_set_revision=%s AND source_capture_id=%s::uuid
+GROUP BY profile_revision,producer_contract,producer_version,producer_contract_sha256
+ORDER BY profile_revision
+LIMIT %s""",
+            (
+                namespace_id,
+                canonical_set_id,
+                target_session,
+                package_sha256,
+                source_set_revision,
+                canonical_capture_id,
+                MAX_PROFILE_OBSERVATION_REVISIONS + 1,
+            ),
+        )
+        revision_columns = [column.name for column in cursor.description]
+        revisions = [
+            dict(zip(revision_columns, row, strict=True)) for row in cursor.fetchall()
+        ]
+        if len(revisions) > MAX_PROFILE_OBSERVATION_REVISIONS:
+            raise PriceProfilePgError(
+                "PROFILE_OBSERVATION_REVISION_BUDGET_EXCEEDED",
+                "精确来源集合画像修订数超过固定上限",
+            )
+        for revision in revisions:
+            revision["profile_revision"] = str(revision["profile_revision"]).strip()
+            revision["producer_contract_sha256"] = str(
+                revision["producer_contract_sha256"]
+            ).strip()
+            for name in (
+                "history_records_complete_rows",
+                "history_24_session_eligible_rows",
+                "history_requested_24_plus_rows",
+                "price_window_usable_rows",
+            ):
+                revision[name] = int(revision[name])
+            revision["stored_rows"] = int(revision["stored_rows"])
+            revision["distinct_source_symbols"] = int(
+                revision["distinct_source_symbols"]
+            )
+            for name in (
+                "target_bar_statuses",
+                "target_price_qualities",
+                "price_window_statuses",
+            ):
+                revision[name] = revision[name] or []
+
+        matching_current = [
+            item
+            for item in revisions
+            if item["producer_contract_sha256"] == current_semantics_sha256
+        ]
+        selected = None
+        if len(matching_current) == 1:
+            selected = matching_current[0]
+            selection_rule = "UNIQUE_CURRENT_SEMANTICS_SHA256"
+        elif len(revisions) == 1:
+            selected = revisions[0]
+            selection_rule = "UNIQUE_EXACT_SOURCE_SET_REVISION"
+        elif revisions:
+            selection_rule = "AMBIGUOUS_NO_UNIQUE_SEMANTICS_MATCH"
+        else:
+            selection_rule = "NO_STORED_PROFILE_REVISION"
+
+        set_comparison = {
+            "raw_row_count": raw_rows,
+            "raw_symbol_count": raw_symbols,
+            "profile_row_count": 0,
+            "profile_symbol_count": 0,
+            "matched_symbol_count": 0,
+            "raw_only_symbol_count": raw_symbols,
+            "profile_only_symbol_count": 0,
+            "symbol_sets_match": False,
+        }
+        core_quality_rows: list[dict[str, Any]] = []
+        profile_quality_rows: list[dict[str, Any]] = []
+        if selected is not None:
+            profile_revision = selected["profile_revision"]
+            cursor.execute(
+                """WITH raw_symbols AS (
+    SELECT DISTINCT source_symbol
+    FROM stock.source_raw_daily
+    WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
+      AND session_date=%s::date AND package_sha256=%s
+), profile_symbols AS (
+    SELECT DISTINCT source_symbol
+    FROM stock.source_symbol_price_profiles
+    WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
+      AND target_session=%s::date AND package_sha256=%s
+      AND source_set_revision=%s AND source_capture_id=%s::uuid
+      AND profile_revision=%s
+)
+SELECT count(r.source_symbol)::bigint AS raw_symbol_count,
+       count(p.source_symbol)::bigint AS profile_symbol_count,
+       count(*) FILTER (WHERE r.source_symbol IS NOT NULL
+                         AND p.source_symbol IS NOT NULL)::bigint
+           AS matched_symbol_count,
+       count(*) FILTER (WHERE r.source_symbol IS NOT NULL
+                         AND p.source_symbol IS NULL)::bigint
+           AS raw_only_symbol_count,
+       count(*) FILTER (WHERE r.source_symbol IS NULL
+                         AND p.source_symbol IS NOT NULL)::bigint
+           AS profile_only_symbol_count,
+       array_agg(r.source_symbol ORDER BY r.source_symbol)
+           FILTER (WHERE r.source_symbol IS NOT NULL) AS raw_symbol_set,
+       array_agg(p.source_symbol ORDER BY p.source_symbol)
+           FILTER (WHERE p.source_symbol IS NOT NULL) AS profile_symbol_set
+FROM raw_symbols r FULL OUTER JOIN profile_symbols p USING (source_symbol)""",
+                (
+                    namespace_id,
+                    canonical_capture_id,
+                    target_session,
+                    package_sha256,
+                    namespace_id,
+                    canonical_set_id,
+                    target_session,
+                    package_sha256,
+                    source_set_revision,
+                    canonical_capture_id,
+                    profile_revision,
+                ),
+            )
+            comparison = cursor.fetchone()
+            raw_symbol_set = comparison[5] or []
+            profile_symbol_set = comparison[6] or []
+            raw_symbol_set_sha256 = sha256(
+                "\n".join(raw_symbol_set).encode("utf-8")
+            ).hexdigest()
+            profile_symbol_set_sha256 = sha256(
+                "\n".join(profile_symbol_set).encode("utf-8")
+            ).hexdigest()
+            set_comparison.update(
+                {
+                    "raw_symbol_count": int(comparison[0]),
+                    "profile_row_count": int(selected["stored_rows"]),
+                    "profile_symbol_count": int(comparison[1]),
+                    "matched_symbol_count": int(comparison[2]),
+                    "raw_only_symbol_count": int(comparison[3]),
+                    "profile_only_symbol_count": int(comparison[4]),
+                    "raw_symbol_set_sha256": raw_symbol_set_sha256,
+                    "profile_symbol_set_sha256": profile_symbol_set_sha256,
+                    "symbol_sets_sha256_match": (
+                        raw_symbol_set_sha256 == profile_symbol_set_sha256
+                    ),
+                    "symbol_sets_match": (
+                        comparison[3] == 0
+                        and comparison[4] == 0
+                        and int(selected["stored_rows"]) == int(comparison[0])
+                        and raw_symbol_set_sha256 == profile_symbol_set_sha256
+                    ),
+                }
+            )
+            cursor.execute(
+                f"""SELECT f.field_id,f.quality,f.reason_code,count(*)::bigint AS row_count
+FROM stock.source_symbol_price_profiles p
+CROSS JOIN LATERAL (VALUES {core_values})
+     AS f(field_id,quality,reason_code)
+WHERE p.namespace_id=%s::uuid AND p.source_set_id=%s::uuid
+  AND p.target_session=%s::date AND p.package_sha256=%s
+  AND p.source_set_revision=%s AND p.source_capture_id=%s::uuid
+  AND p.profile_revision=%s
+GROUP BY f.field_id,f.quality,f.reason_code
+ORDER BY f.field_id,f.quality,f.reason_code
+LIMIT %s""",
+                (
+                    namespace_id,
+                    canonical_set_id,
+                    target_session,
+                    package_sha256,
+                    source_set_revision,
+                    canonical_capture_id,
+                    profile_revision,
+                    MAX_PROFILE_OBSERVATION_QUALITY_ROWS + 1,
+                ),
+            )
+            quality_columns = [column.name for column in cursor.description]
+            core_quality_rows = [
+                dict(zip(quality_columns, row, strict=True))
+                for row in cursor.fetchall()
+            ]
+            if len(core_quality_rows) > MAX_PROFILE_OBSERVATION_QUALITY_ROWS:
+                raise PriceProfilePgError(
+                    "PROFILE_OBSERVATION_QUALITY_BUDGET_EXCEEDED",
+                    "Core画像字段质量分组超过固定上限",
+                )
+            cursor.execute(
+                """SELECT f.field_id,f.status,f.quality,f.reason_code,
+       count(*)::bigint AS row_count
+FROM stock.source_symbol_price_profiles p
+CROSS JOIN LATERAL unnest(
+    p.profile_field_ids,p.profile_statuses,p.profile_qualities,p.profile_reasons
+) AS f(field_id,status,quality,reason_code)
+WHERE p.namespace_id=%s::uuid AND p.source_set_id=%s::uuid
+  AND p.target_session=%s::date AND p.package_sha256=%s
+  AND p.source_set_revision=%s AND p.source_capture_id=%s::uuid
+  AND p.profile_revision=%s
+GROUP BY f.field_id,f.status,f.quality,f.reason_code
+ORDER BY f.field_id,f.status,f.quality,f.reason_code
+LIMIT %s""",
+                (
+                    namespace_id,
+                    canonical_set_id,
+                    target_session,
+                    package_sha256,
+                    source_set_revision,
+                    canonical_capture_id,
+                    profile_revision,
+                    MAX_PROFILE_OBSERVATION_QUALITY_ROWS + 1,
+                ),
+            )
+            quality_columns = [column.name for column in cursor.description]
+            profile_quality_rows = [
+                dict(zip(quality_columns, row, strict=True))
+                for row in cursor.fetchall()
+            ]
+            if len(profile_quality_rows) > MAX_PROFILE_OBSERVATION_QUALITY_ROWS:
+                raise PriceProfilePgError(
+                    "PROFILE_OBSERVATION_QUALITY_BUDGET_EXCEEDED",
+                    "Profile字段质量分组超过固定上限",
+                )
+
+    if selected is None:
+        status = "AMBIGUOUS_STORED_REVISIONS" if revisions else "NOT_COMPUTED"
+    else:
+        status = (
+            "PG_SOURCE_PROFILE_STORED"
+            if set_comparison["symbol_sets_match"]
+            else "SOURCE_PROFILE_SYMBOL_SET_MISMATCH"
+        )
+    return {
+        "status": status,
+        "namespace_id": namespace_id,
+        "target_session": target_session.isoformat(),
+        "source_set_id": canonical_set_id,
+        "source_set_revision": source_set_revision,
+        "source_capture_id": canonical_capture_id,
+        "package_sha256": package_sha256,
+        "current_semantics_sha256": current_semantics_sha256,
+        "profile_revision_selection": {
+            "rule": selection_rule,
+            "selected_profile_revision": (
+                selected["profile_revision"] if selected is not None else None
+            ),
+            "candidate_revision_count": len(revisions),
+            "current_semantics_match_count": len(matching_current),
+        },
+        "revision_candidates": revisions,
+        "selected_revision": selected,
+        "set_comparison": set_comparison,
+        "core_quality_rows": core_quality_rows,
+        "profile_quality_rows": profile_quality_rows,
+        "database_write": False,
+        "ddl_executed": False,
     }
 
 
