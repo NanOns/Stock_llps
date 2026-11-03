@@ -228,6 +228,9 @@ def _on_demand_research_observation(
         int(row.get("history_24_session_overlap_symbols", 0))
         for row in sector_by_kind.values()
     )
+    precheck_input_ready = bool(
+        sector_available and exact_profile_available and strength_overlap
+    )
     return {
         "status": "OBSERVABILITY_ONLY_NO_RESEARCH_EXECUTED",
         "entries": [
@@ -235,28 +238,31 @@ def _on_demand_research_observation(
                 "capability_id": "R03_TDX_SECTOR_STRENGTH",
                 "entry_available": True,
                 "entry": "stock_a.application.tdx_sector_members.read_tdx_sector_strength / source-tdx-sector-members strength CLI",
-                "input_ready": bool(
-                    sector_available
-                    and exact_profile_available
-                    and profile_semantics_match
-                    and strength_overlap
+                "input_ready": precheck_input_ready,
+                "precheck_input_ready": precheck_input_ready,
+                "precheck_status": (
+                    "PRECHECK_ELIGIBLE_VERIFY_ON_INVOCATION"
+                    if precheck_input_ready
+                    else "PRECHECK_INPUTS_NOT_READY"
                 ),
-                "input_readiness_scope": "EXACT_DAY_PROFILE_AND_LATEST_CURRENT_TDX_MEMBER_OVERLAP",
+                "input_readiness_scope": "EXACT_DAY_PROFILE_REVISION_AND_LATEST_CURRENT_TDX_MEMBER_OVERLAP;PROFILE_SEMANTICS_SHA_DIFFERENCE_IS_WARNING_ONLY;RAW_RET20_EXACT_FRACTION_RECHECKED_PER_STRENGTH_INVOCATION",
                 "materialized_profile_revision": profile_selection.get(
                     "selected_profile_revision"
                 ),
                 "selected_profile_semantics_match": profile_semantics_match,
+                "profile_semantics_warning_code": (
+                    "PROFILE_CONTRACT_SHA_DIFFERS_FROM_CURRENT_SEMANTICS"
+                    if exact_profile_available and not profile_semantics_match
+                    else None
+                ),
                 "eligible_24_session_member_symbols": strength_overlap,
+                "numeric_verified_at_invocation": False,
+                "numeric_verification_policy": "SAME_PACKAGE_RAW_RET20_EXACT_FRACTION_RECHECKED_PER_STRENGTH_CLI_INVOCATION",
                 "computed_or_stored": False,
                 "result_status": "NOT_RUN_IN_THIS_GET",
                 "reason_code": (
-                    "READY_FOR_EXPLICIT_BOARD_QUERY"
-                    if (
-                        sector_available
-                        and exact_profile_available
-                        and profile_semantics_match
-                        and strength_overlap
-                    )
+                    "PRECHECK_ELIGIBLE_VERIFY_ON_INVOCATION"
+                    if precheck_input_ready
                     else "REQUIRES_CURRENT_TDX_SNAPSHOT_EXACT_PROFILE_AND_ELIGIBLE_HISTORY"
                 ),
             },

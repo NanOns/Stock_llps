@@ -471,10 +471,23 @@ function renderTdxSectorObservation(parent, data) {
   );
 }
 function renderOnDemandResearch(parent, data) {
-  const entries = (data.on_demand_research?.entries || []).map((item) => [
-    item.capability_id,
-    `入口 ${item.entry_available ? "可用" : "不可用"} · 当前输入 ${item.input_ready ? "就绪" : "未齐"} · 结果已计算/保存 ${item.computed_or_stored ? "是" : "否"} · ${item.result_status || "未知"} · ${item.reason_code || "无原因"}`,
-  ]);
+  const entries = (data.on_demand_research?.entries || []).map((item) => {
+    if (item.capability_id === "R03_TDX_SECTOR_STRENGTH") {
+      const profileSemantics = item.profile_semantics_warning_code
+        ? "不一致（保留语义SHA差异警示）"
+        : item.selected_profile_semantics_match === true
+          ? "一致"
+          : "未核对";
+      return [
+        item.capability_id,
+        `入口 ${item.entry_available ? "可用" : "不可用"} · 强弱查询前预检 ${item.precheck_input_ready ? "具备调用条件" : "输入未齐"}（${item.precheck_status || item.reason_code || "状态未知"}）· Profile语义SHA ${profileSemantics} · 每次strength CLI调用仍逐成员按同包RAW精确Fraction核对目标ret20 · 本次GET未运行数值计算/未逐成员核验 · 结果已计算/保存 ${item.computed_or_stored ? "是" : "否"} · ${item.result_status || "未知"}`,
+      ];
+    }
+    return [
+      item.capability_id,
+      `入口 ${item.entry_available ? "可用" : "不可用"} · 当前输入 ${item.input_ready ? "就绪" : "未齐"} · 结果已计算/保存 ${item.computed_or_stored ? "是" : "否"} · ${item.result_status || "未知"} · ${item.reason_code || "无原因"}`,
+    ];
+  });
   entries.push([
     "跨域与PIT边界",
     `缺少板块快照不阻断来源D1=${data.on_demand_research?.domain_independence?.missing_sector_snapshot_blocks_source_d1 === false ? "是" : "未确认"}；成员关系=${data.on_demand_research?.domain_independence?.current_membership_mode || "未知"}；GET全市场D1重算=${data.on_demand_research?.full_market_d1_recalculated === false ? "否" : "未确认"}`,
