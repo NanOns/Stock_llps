@@ -23,6 +23,10 @@ from stock_a.application.source_market_context import (
     source_market_not_evaluable_payload,
     validate_source_market_context_binding,
 )
+from stock_a.application.source_d1_price_safety import (
+    PriceSafetyFactError,
+    attach_source_d1_price_safety_facts,
+)
 from stock_a.application.source_d1_support_changes import (
     discover_source_d1_support_changes,
 )
@@ -456,6 +460,14 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 result["source_market_context"] = source_market_context_payload(
                     market_read
                 )
+        if getattr(args, "include_price_safety_facts", False):
+            attach_source_d1_price_safety_facts(
+                result,
+                config=config,
+                discovery=discovery,
+                target_session=target,
+                research_cutoff=cutoff,
+            )
     except (
         TdxSectorMembersApplicationError,
         TdxSectorMembersPgError,
@@ -463,6 +475,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
         ResearchEntryError,
         RawSourcePgError,
         SourceMarketContextError,
+        PriceSafetyFactError,
     ) as error:
         code = getattr(error, "code", "SECTOR_CHANGE_DISCOVERY_FAILED")
         _emit(

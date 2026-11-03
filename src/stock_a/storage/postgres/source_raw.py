@@ -43,6 +43,7 @@ _PARSER_CONTRACT = "stock_a.sources.tdx.vipdata.scan_vipdata_target_quality|TDX_
 _CLOCK_ROLE = "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
+_PRICE_FACT_SYMBOL = re.compile(r"^(SH|SZ|BJ)\.[0-9]{6}$")
 _BAR_STATUSES = {"TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED"}
 _QUALITY = {"OBSERVED", "UNKNOWN", "NOT_APPLICABLE", "BAD_VALUE"}
 _RAW_QUALITY = {"RAW_SOURCE_VALUE_OBSERVED", "UNKNOWN", "BAD_VALUE", "NOT_APPLICABLE"}
@@ -1716,6 +1717,142 @@ def read_raw_daily_history_stock(
         "database_write": False,
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "pit_status": "NON_PIT_RETROSPECTIVE",
+    }
+
+
+def read_raw_daily_history_batch(
+    config: Mapping[str, Any],
+    *,
+    source_symbols: Sequence[str],
+    target_session: date,
+    research_cutoff: date,
+    package_sha256: str,
+    sessions: Sequence[date],
+    expected_namespace_id: str,
+    expected_source_content_id: str,
+    expected_target_capture_id: str,
+) -> dict[str, Any]:
+    """在单个只读事务中读取已展示来源代码的有界RAW会话窗口。"""
+    selected_symbols = tuple(source_symbols)
+    selected_sessions = _validate_history_query(
+        source_symbol=None,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        sessions=sessions,
+    )
+    if (
+        type(research_cutoff) is not date
+        or target_session > research_cutoff
+        or not selected_symbols
+        or len(selected_symbols) > 100
+        or tuple(sorted(set(selected_symbols))) != selected_symbols
+        or any(
+            _PRICE_FACT_SYMBOL.fullmatch(symbol) is None for symbol in selected_symbols
+        )
+        or not isinstance(expected_namespace_id, str)
+        or not isinstance(expected_source_content_id, str)
+        or not isinstance(expected_target_capture_id, str)
+    ):
+        raise RawSourcePgError(
+            "PRICE_SAFETY_BATCH_SCOPE_INVALID",
+            "价格事实RAW批量读取必须绑定截止日、命名空间和最多100个去重来源代码",
+        )
+
+    with _transaction(config, write=False) as (
+        _connection,
+        cursor,
+        namespace_id,
+    ):
+        if namespace_id != expected_namespace_id:
+            raise RawSourcePgError(
+                "SOURCE_NAMESPACE_MISMATCH",
+                "价格事实RAW读取命名空间与SEALED目标来源不一致",
+            )
+        cursor.execute(
+            """SELECT r.namespace_id, r.source_symbol, r.session_date,
+       r.package_sha256, r.source_content_id, r.source_capture_id,
+       r.source_entry_sha256, r.source_record_count, r.bar_status, r.bar_reason,
+       r.raw_open, r.raw_high, r.raw_low, r.raw_close, r.price_quality,
+       r.price_reason, c.normalized_count AS capture_normalized_count,
+       c.content_id AS capture_content_id, s.dataset_id, s.byte_sha
+FROM stock.source_raw_daily r
+JOIN stock.source_captures c
+  ON c.namespace_id=r.namespace_id AND c.capture_id=r.source_capture_id
+JOIN stock.source_contents s
+  ON s.namespace_id=r.namespace_id AND s.content_id=r.source_content_id
+WHERE r.namespace_id=%s::uuid AND r.source_symbol=ANY(%s)
+  AND r.session_date=ANY(%s::date[]) AND r.package_sha256=%s
+ORDER BY r.source_symbol, r.session_date""",
+            (
+                namespace_id,
+                list(selected_symbols),
+                list(selected_sessions),
+                package_sha256,
+            ),
+        )
+        names = [item.name for item in cursor.description]
+        rows = [dict(zip(names, values, strict=True)) for values in cursor.fetchall()]
+        for row in rows:
+            if (
+                row["byte_sha"] != package_sha256
+                or row["dataset_id"] != _DATASET_ID
+                or row["source_symbol"] not in selected_symbols
+                or row["session_date"] not in selected_sessions
+                or row["capture_normalized_count"] <= 0
+                or row["capture_content_id"] != row["source_content_id"]
+                or row["source_entry_sha256"] is not None
+                and _SHA256.fullmatch(row["source_entry_sha256"]) is None
+                or row["bar_status"] not in _BAR_STATUSES
+                or row["price_quality"] not in _QUALITY
+            ):
+                raise RawSourcePgError(
+                    "SOURCE_REFERENCE_MISMATCH",
+                    "价格事实历史行与包、来源捕获或内容元数据不匹配",
+                )
+            row["namespace_id"] = str(row["namespace_id"])
+            row["source_capture_id"] = str(row["source_capture_id"])
+            row["price_coordinate"] = "RAW_UNADJUSTED"
+
+    rows_by_symbol = {symbol: [] for symbol in selected_symbols}
+    for row in rows:
+        if row["source_content_id"] != expected_source_content_id:
+            raise RawSourcePgError(
+                "SOURCE_CONTENT_MISMATCH",
+                "价格事实RAW历史行与SEALED来源内容摘要不一致",
+            )
+        if row["session_date"] == target_session and (
+            row["source_capture_id"] != expected_target_capture_id
+        ):
+            raise RawSourcePgError(
+                "TARGET_CAPTURE_MISMATCH",
+                "价格事实RAW目标行与SEALED来源捕获身份不一致",
+            )
+        rows_by_symbol[row["source_symbol"]].append(row)
+
+    missing_by_symbol = {
+        symbol: [
+            session.isoformat()
+            for session in selected_sessions
+            if session not in {row["session_date"] for row in symbol_rows}
+        ]
+        for symbol, symbol_rows in rows_by_symbol.items()
+    }
+    return {
+        "namespace_id": namespace_id,
+        "source_symbols": list(selected_symbols),
+        "session_dates": [session.isoformat() for session in selected_sessions],
+        "target_session": target_session.isoformat(),
+        "research_cutoff": research_cutoff.isoformat(),
+        "package_sha256": package_sha256,
+        "history_rows_by_symbol": rows_by_symbol,
+        "missing_sessions_by_symbol": missing_by_symbol,
+        "raw_history_rows_read": len(rows),
+        "raw_history_batch_reads": 1,
+        "transaction": "REPEATABLE READ READ ONLY",
+        "database_write_attempted": False,
+        "ddl_executed": False,
+        "dml_executed": False,
+        "source_zip_opened": False,
     }
 
 

@@ -294,6 +294,11 @@ def register_commands(commands):
         action="store_true",
         help="可选附加同一SEALED来源池的市场宽度摘要，不改变板块或D1结果",
     )
+    sector_change_stocks.add_argument(
+        "--include-price-safety-facts",
+        action="store_true",
+        help="仅为实际显示的板块成员附加Core与D0首日RAW价格损伤事实",
+    )
     source_set = commands.add_parser(
         "source-set-candidate",
         help="按精确日期与TDX包SHA预检或读取P03来源集合候选",
