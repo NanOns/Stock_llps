@@ -194,6 +194,8 @@ def register_commands(commands):
             "core.ret20",
             "core.pos60",
             "core.bias20_atr",
+            "core.ma_slope20_atr",
+            "core.price_damage",
         ),
         help="可选Core价格字段质量筛选",
     )
@@ -201,6 +203,18 @@ def register_commands(commands):
         "--core-quality",
         choices=("OBSERVED", "UNKNOWN", "NOT_APPLICABLE"),
         help="配合Core字段的质量值",
+    )
+    price_profile.add_argument(
+        "--price-damage-state",
+        choices=("ALL", "TRUE", "FALSE", "UNKNOWN"),
+        default="ALL",
+        help="按完整来源池中的Core价格损伤事实筛选",
+    )
+    price_profile.add_argument(
+        "--ma-slope20-sign",
+        choices=("ALL", "POSITIVE", "ZERO", "NEGATIVE", "UNKNOWN"),
+        default="ALL",
+        help="按Core MA20/ATR斜率的精确符号筛选",
     )
     price_profile.add_argument("--offset", type=int, default=0, help="查询偏移，默认0")
     price_profile.add_argument(

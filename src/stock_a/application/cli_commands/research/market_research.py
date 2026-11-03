@@ -216,6 +216,8 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 source_symbol=args.symbol,
                 core_field=args.core_field,
                 core_quality=args.core_quality,
+                price_damage_state=args.price_damage_state,
+                ma_slope20_sign=args.ma_slope20_sign,
             )
         else:
             if not all(

@@ -39,7 +39,7 @@ from stock_a.storage.postgres.source_raw import (
 
 
 SOURCE_SYMBOL_PROFILE_SCOPE = "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE"
-_PRODUCER_CONTRACT = "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R2"
+_PRODUCER_CONTRACT = "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1"
 _PRODUCER_SEMANTICS_VERSION = "CORE43_PROFILE11_SOURCE_SYMBOL_R2"
 _FIELD_SEMANTIC_KEYS = (
     "field_id",
@@ -73,7 +73,9 @@ _CORE_FIELDS = {
     "core.ret20": "ret20",
     "core.pos60": "pos60",
     "core.bias20_atr": "bias20_atr",
+    "core.ma_slope20_atr": "ma_slope20_atr",
 }
+_CORE_BOOLEAN_FIELDS = {"core.price_damage": "price_damage"}
 _HISTORY_HASH_FIELDS = (
     "session_date",
     "bar_status",
@@ -203,6 +205,9 @@ def _profile_semantics_sha256(profile_contract: Mapping[str, Any]) -> str:
         )
     payload = {
         "producer_semantics_version": _PRODUCER_SEMANTICS_VERSION,
+        "persisted_core_field_ids": sorted(
+            (*_CORE_FIELDS.keys(), *_CORE_BOOLEAN_FIELDS.keys())
+        ),
         "profile_rules": rule_semantics,
         "consumed_field_definitions": fields,
         "unregistered_consumed_field_ids": missing_fields,
@@ -236,7 +241,7 @@ def _profile_revision(
         "calendar_id": calendar_id,
         "calendar_revision": calendar_revision,
         "history_session_count": history_session_count,
-        "core_fields": sorted(_CORE_FIELDS),
+        "core_fields": sorted((*_CORE_FIELDS.keys(), *_CORE_BOOLEAN_FIELDS.keys())),
     }
     return sha256(
         json.dumps(
@@ -392,6 +397,40 @@ def _records_for_page(
                 quality = "UNKNOWN"
             record[f"{column}_quality"] = quality
             record[f"{column}_reason"] = field.get("reason")
+        for field_id, column in _CORE_BOOLEAN_FIELDS.items():
+            field = core_fields.get(field_id)
+            if not isinstance(field, Mapping):
+                field = {
+                    "value": None,
+                    "quality": "UNKNOWN",
+                    "reason": result.get("consumer_error_code") or "CORE_FIELD_OMITTED",
+                }
+            value = field.get("value")
+            quality = field.get("quality") or "UNKNOWN"
+            if quality == "UNKNOWN_DATA":
+                quality = "UNKNOWN"
+            if quality == "OBSERVED":
+                if type(value) is not bool or field.get("reason") is not None:
+                    raise PgPriceProfileError(
+                        "PROFILE_CORE_VALUE_INVALID",
+                        f"{field_id}必须保存原生布尔值且不含未知原因",
+                    )
+                record[column] = value
+                record[f"{column}_reason"] = None
+            elif quality == "UNKNOWN":
+                if value is not None:
+                    raise PgPriceProfileError(
+                        "PROFILE_CORE_VALUE_INVALID",
+                        f"{field_id}未知时不得保存布尔值",
+                    )
+                record[column] = None
+                record[f"{column}_reason"] = field.get("reason") or "CORE_FIELD_UNKNOWN"
+            else:
+                raise PgPriceProfileError(
+                    "PROFILE_CORE_QUALITY_INVALID",
+                    f"{field_id}质量必须为OBSERVED或UNKNOWN",
+                )
+            record[f"{column}_quality"] = quality
         record["profile_field_ids"] = [item["field_id"] for item in profile_components]
         record["profile_statuses"] = [
             item.get("status") or "UNKNOWN" for item in profile_components
@@ -667,7 +706,7 @@ def read_source_symbol_price_profile_observation(
         )
         if isinstance(core_registry, (list, tuple))
         else 0,
-        "stored_core_quality_fields": len(_CORE_FIELDS),
+        "stored_core_quality_fields": len(_CORE_FIELDS) + len(_CORE_BOOLEAN_FIELDS),
         "profile11_registered_fields": len(profile_registry)
         if isinstance(profile_registry, Mapping)
         else 0,
@@ -683,7 +722,8 @@ def read_source_symbol_price_profile_observation(
     core_totals: dict[str, int] = {}
     for row in observation.get("core_quality_rows", ()):
         field_id = str(row["field_id"])
-        core_totals[field_id] = core_totals.get(field_id, 0) + int(row["row_count"])
+        if row.get("quality") in {"OBSERVED", "UNKNOWN", "NOT_APPLICABLE"}:
+            core_totals[field_id] = core_totals.get(field_id, 0) + int(row["row_count"])
     profile_totals: dict[str, int] = {}
     for row in observation.get("profile_quality_rows", ()):
         field_id = str(row["field_id"])
@@ -705,7 +745,8 @@ def read_source_symbol_price_profile_observation(
         "all_stored_fields_closed": bool(
             selected_rows
             and all(
-                core_totals.get(field_id) == selected_rows for field_id in _CORE_FIELDS
+                core_totals.get(field_id) == selected_rows
+                for field_id in (*_CORE_FIELDS, *_CORE_BOOLEAN_FIELDS)
             )
             and expected_profile_ids == set(profile_totals)
             and all(

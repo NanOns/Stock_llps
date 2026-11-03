@@ -11,6 +11,7 @@ import re
 import stat
 import sys
 from typing import Any
+from stock_a import __version__
 from stock_a.application.runtime_config import (
     DiagnosticError,
     _CONFIG_ROOT,

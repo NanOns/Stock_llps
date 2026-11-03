@@ -106,6 +106,8 @@ def research_universe_pg_history_preview(
                 "core.ret20",
                 "core.pos60",
                 "core.bias20_atr",
+                "core.ma_slope20_atr",
+                "core.price_damage",
             )
             row_dates = {
                 row.get("session_date"): row for row in candidate["history_rows"]
@@ -254,6 +256,8 @@ def research_universe_pg_history_preview(
                 "core.ret20",
                 "core.pos60",
                 "core.bias20_atr",
+                "core.ma_slope20_atr",
+                "core.price_damage",
             )
             if name in fields
         }

@@ -28,6 +28,7 @@ _CORE_COLUMN_NAMES = (
     "ret20",
     "pos60",
     "bias20_atr",
+    "ma_slope20_atr",
 )
 _PROFILE_COLUMNS = (
     "namespace_id",
@@ -89,6 +90,9 @@ _PROFILE_COLUMNS = (
     "profile_statuses",
     "profile_qualities",
     "profile_reasons",
+    "price_damage",
+    "price_damage_quality",
+    "price_damage_reason",
 )
 _CORE_QUALITY_FIELDS = frozenset(_CORE_COLUMN_NAMES)
 _PROFILE_QUERY_FIELD_IDS = frozenset(
@@ -109,6 +113,7 @@ _PROFILE_QUERY_FIELD_IDS = frozenset(
 _CORE_FIELD_QUERY_COLUMNS = {
     f"core.{field}": f"{field}_quality" for field in _CORE_COLUMN_NAMES
 }
+_CORE_FIELD_QUERY_COLUMNS["core.price_damage"] = "price_damage_quality"
 _PRICE_POSITION_QUERY_FIELDS = {
     "c_vs_ma20": {
         "left_field": "raw_close",
@@ -529,6 +534,38 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
             raise PriceProfilePgError(
                 "PROFILE_CORE_VALUE_INVALID", "未知Core值必须保留原因且不存数值"
             )
+        if (
+            quality == "OBSERVED"
+            and max(len(str(abs(numerator))), len(str(denominator))) > 100
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_CORE_EXACT_VALUE_TOO_LARGE",
+                "Core精确分子或分母超过NUMERIC(100,0)",
+            )
+    damage_quality = normalized.get("price_damage_quality")
+    damage_value = normalized.get("price_damage")
+    damage_reason = normalized.get("price_damage_reason")
+    if damage_quality == "OBSERVED":
+        if type(damage_value) is not bool or damage_reason is not None:
+            raise PriceProfilePgError(
+                "PROFILE_PRICE_DAMAGE_INVALID",
+                "已观察价格损伤必须保存原生布尔值且无未知原因",
+            )
+    elif damage_quality == "UNKNOWN":
+        if (
+            damage_value is not None
+            or not isinstance(damage_reason, str)
+            or not damage_reason.strip()
+            or len(damage_reason.encode("utf-8")) > 128
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_PRICE_DAMAGE_INVALID", "未知价格损伤必须为空并保留有效原因"
+            )
+    else:
+        raise PriceProfilePgError(
+            "PROFILE_PRICE_DAMAGE_QUALITY_INVALID",
+            "价格损伤质量必须为OBSERVED或UNKNOWN",
+        )
     normalized["record_content_sha256"] = _content_sha(normalized)
     return normalized
 
@@ -837,6 +874,9 @@ def read_source_profile_observability(
     core_values = ", ".join(
         f"('core.{name}',p.{name}_quality,p.{name}_reason)"
         for name in _CORE_COLUMN_NAMES
+    )
+    core_values += (
+        ", ('core.price_damage',p.price_damage_quality,p.price_damage_reason)"
     )
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
         cursor.execute(
@@ -3825,6 +3865,8 @@ def read_profile_page(
     source_symbol: str | None = None,
     core_field: str | None = None,
     core_quality: str | None = None,
+    price_damage_state: str = "ALL",
+    ma_slope20_sign: str = "ALL",
     profile_field_id: str | None = None,
     profile_quality: str | None = None,
     profile_status: str | None = None,
@@ -3883,6 +3925,21 @@ def read_profile_page(
         "PRICE_FIELDS_UNKNOWN",
     }:
         raise PriceProfilePgError("PROFILE_FILTER_INVALID", "价格窗口状态筛选值无效")
+    if price_damage_state not in {"ALL", "TRUE", "FALSE", "UNKNOWN"}:
+        raise PriceProfilePgError(
+            "PROFILE_FILTER_INVALID", "价格损伤筛选值必须为ALL、TRUE、FALSE或UNKNOWN"
+        )
+    if ma_slope20_sign not in {
+        "ALL",
+        "POSITIVE",
+        "ZERO",
+        "NEGATIVE",
+        "UNKNOWN",
+    }:
+        raise PriceProfilePgError(
+            "PROFILE_FILTER_INVALID",
+            "MA20斜率筛选值必须为ALL、POSITIVE、ZERO、NEGATIVE或UNKNOWN",
+        )
     if (core_field is None) != (core_quality is None):
         raise PriceProfilePgError(
             "PROFILE_FILTER_INVALID", "Core质量筛选必须同时指定字段和质量"
@@ -3981,6 +4038,24 @@ def read_profile_page(
     if core_quality_column is not None:
         conditions.append(f"p.{core_quality_column}=%s")
         parameters.append(core_quality)
+    if price_damage_state in {"TRUE", "FALSE"}:
+        conditions.extend(["p.price_damage_quality='OBSERVED'", "p.price_damage=%s"])
+        parameters.append(price_damage_state == "TRUE")
+    elif price_damage_state == "UNKNOWN":
+        conditions.append("p.price_damage_quality='UNKNOWN'")
+    if ma_slope20_sign == "UNKNOWN":
+        conditions.append("p.ma_slope20_atr_quality='UNKNOWN'")
+    elif ma_slope20_sign != "ALL":
+        conditions.extend(
+            [
+                "p.ma_slope20_atr_quality='OBSERVED'",
+                "p.ma_slope20_atr_exact_numerator IS NOT NULL",
+            ]
+        )
+        sign_operator = {"POSITIVE": "> 0", "ZERO": "= 0", "NEGATIVE": "< 0"}[
+            ma_slope20_sign
+        ]
+        conditions.append(f"p.ma_slope20_atr_exact_numerator {sign_operator}")
     if profile_quality is not None:
         conditions.append(
             "p.profile_qualities[array_position(p.profile_field_ids,%s)]=%s"
@@ -4209,6 +4284,33 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
             for column in ("namespace_id", "source_set_id", "source_capture_id"):
                 if isinstance(row.get(column), UUID):
                     row[column] = str(row[column])
+            slope_columns = (
+                "ma_slope20_atr",
+                "ma_slope20_atr_exact_numerator",
+                "ma_slope20_atr_exact_denominator",
+                "ma_slope20_atr_quality",
+                "ma_slope20_atr_reason",
+            )
+            damage_columns = (
+                "price_damage",
+                "price_damage_quality",
+                "price_damage_reason",
+            )
+            slope_uncomputed = all(row.get(column) is None for column in slope_columns)
+            damage_uncomputed = all(
+                row.get(column) is None for column in damage_columns
+            )
+            if slope_uncomputed != damage_uncomputed:
+                raise PriceProfilePgError(
+                    "PROFILE_NEW_CORE_FIELDS_INCOMPLETE",
+                    "画像修订只包含部分价格损伤/斜率字段",
+                )
+            row["ma_slope20_atr_computation_status"] = (
+                "NOT_COMPUTED_FOR_REVISION" if slope_uncomputed else "COMPUTED"
+            )
+            row["price_damage_computation_status"] = (
+                "NOT_COMPUTED_FOR_REVISION" if damage_uncomputed else "COMPUTED"
+            )
             positions: dict[str, Any] = {}
             for field, definition in _PRICE_POSITION_QUERY_FIELDS.items():
                 left_field = definition["left_field"]
