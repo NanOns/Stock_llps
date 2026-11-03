@@ -70,7 +70,7 @@ from stock_a.research.raw_periods import (
 
 from stock_a.service.readiness import build_chain_readiness_payload
 from stock_a.service.serialization import _json_value, canonical_sha
-from stock_a.service.static_assets import read_static_asset
+from stock_a.service.static_assets import read_static_asset, static_asset_routes
 
 _HOST = "127.0.0.1"
 _PORT = 28766
@@ -409,9 +409,7 @@ class _PreviewState:
         self.core_source_sha256 = hashlib.sha256(
             Path(research_core.__file__).read_bytes()
         ).hexdigest()
-        self.entry_source_sha256 = hashlib.sha256(
-            Path(research_entry.__file__).read_bytes()
-        ).hexdigest()
+        self.entry_source_sha256 = research_entry.implementation_source_sha256()
         self.raw_period_source_sha256 = hashlib.sha256(
             Path(research_raw_periods.__file__).read_bytes()
         ).hexdigest()
@@ -681,28 +679,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             return
         try:
             parsed = urlsplit(self.path)
-            if parsed.path == "/":
+            asset_name = static_asset_routes().get(parsed.path)
+            if asset_name is not None:
                 if parsed.query:
-                    raise PreviewHttpError(
-                        400, "PREVIEW_QUERY_INVALID", "首页不接受查询参数"
+                    message = (
+                        "首页不接受查询参数"
+                        if asset_name == "index.html"
+                        else "静态资源不接受查询参数"
                     )
-                body, content_type = read_static_asset("index.html")
-                self._send(200, body, content_type)
-                return
-            if parsed.path == "/app.css":
-                if parsed.query:
-                    raise PreviewHttpError(
-                        400, "PREVIEW_QUERY_INVALID", "静态资源不接受查询参数"
-                    )
-                body, content_type = read_static_asset("app.css")
-                self._send(200, body, content_type)
-                return
-            if parsed.path == "/app.js":
-                if parsed.query:
-                    raise PreviewHttpError(
-                        400, "PREVIEW_QUERY_INVALID", "静态资源不接受查询参数"
-                    )
-                body, content_type = read_static_asset("app.js")
+                    raise PreviewHttpError(400, "PREVIEW_QUERY_INVALID", message)
+                body, content_type = read_static_asset(asset_name)
                 self._send(200, body, content_type)
                 return
             if parsed.path == "/api/preview/catalog":
