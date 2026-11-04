@@ -32,6 +32,17 @@ _MEMBER_STATE_ORDER = {
     "NOT_EVALUABLE": 3,
     "UNCHANGED": 4,
 }
+_D0_CHANGE_TRANSITIONS = {
+    "FALSE_TO_TRUE",
+    "FALSE_TO_FALSE",
+    "FALSE_TO_UNKNOWN",
+    "TRUE_TO_TRUE",
+    "TRUE_TO_FALSE",
+    "TRUE_TO_UNKNOWN",
+    "UNKNOWN_TO_TRUE",
+    "UNKNOWN_TO_FALSE",
+    "UNKNOWN_TO_UNKNOWN",
+}
 _SOURCE_SYMBOL_PATTERN = re.compile(r"(?:SH|SZ|BJ)\.[0-9]{6}")
 
 
@@ -387,6 +398,286 @@ def _changed_stock_page(
     }
 
 
+def _d0_launch_new_linkage(
+    *,
+    changes: Mapping[str, Any],
+    all_board_rows: Sequence[dict[str, Any]],
+) -> tuple[
+    dict[str, Any],
+    dict[tuple[str, str], dict[str, Any]],
+    dict[tuple[str, str, str], list[dict[str, Any]]],
+]:
+    """把完整D0变化池与一次读取的完整板块成员集合按来源代码联接。"""
+    if (
+        changes.get("ok") is not True
+        or changes.get("action") != "changes"
+        or changes.get("scenario") != "LAUNCH_CONFIRM"
+        or changes.get("pair_status") != "COMPARABLE"
+        or changes.get("transition_semantics") != "THREE_VALUED_KLEENE_CROSS_SESSION"
+        or changes.get("pit_status") != "NON_PIT_RETROSPECTIVE"
+        or changes.get("scenario_role") != "DIAGNOSTIC_ONLY"
+        or changes.get("formal_admission_status")
+        != "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC"
+    ):
+        raise TdxSectorMembersApplicationError(
+            "D0_CHANGE_RESULT_INVALID", "D0新增启动要求现役完整相邻变化读者的诊断结果"
+        )
+
+    source_keys = changes.get("source_key_set")
+    selection = changes.get("selection")
+    transition_counts = changes.get("transition_counts")
+    change_rows = changes.get("results")
+    before = changes.get("before")
+    after = changes.get("after")
+    if (
+        not isinstance(source_keys, Mapping)
+        or source_keys.get("key") != "market+source_symbol"
+        or source_keys.get("union_partition_closed") is not True
+        or not isinstance(selection, Mapping)
+        or selection.get("transition") != "ALL"
+        or selection.get("symbol") is not None
+        or selection.get("offset") != 0
+        or selection.get("matched_count") != source_keys.get("source_union_count")
+        or selection.get("page_count") != source_keys.get("source_union_count")
+        or not isinstance(transition_counts, Mapping)
+        or not isinstance(change_rows, list)
+        or not isinstance(before, Mapping)
+        or not isinstance(after, Mapping)
+        or not isinstance(before.get("source_pool"), Mapping)
+        or not isinstance(after.get("source_pool"), Mapping)
+        or set(transition_counts) != _D0_CHANGE_TRANSITIONS
+        or len(change_rows) != source_keys.get("source_union_count")
+        or not isinstance(before.get("source_set"), Mapping)
+        or not isinstance(after.get("source_set"), Mapping)
+        or before["source_set"].get("seal_status") != "SEALED"
+        or after["source_set"].get("seal_status") != "SEALED"
+        or before.get("namespace_id") != after.get("namespace_id")
+        or before["source_set"].get("package_sha256")
+        != after["source_set"].get("package_sha256")
+        or before["source_set"].get("source_content_id")
+        != after["source_set"].get("source_content_id")
+        or before.get("official_calendar") != after.get("official_calendar")
+        or before.get("session_contract") != after.get("session_contract")
+        or before.get("algorithm_contract") != after.get("algorithm_contract")
+    ):
+        raise TdxSectorMembersApplicationError(
+            "D0_CHANGE_PARTITION_NOT_CLOSED", "D0相邻变化没有完整一致的双端来源池"
+        )
+
+    expected_comparable = source_keys.get("comparable_intersection_count")
+    if (
+        type(expected_comparable) is not int
+        or type(source_keys.get("before_count")) is not int
+        or type(source_keys.get("after_count")) is not int
+        or type(source_keys.get("source_union_count")) is not int
+        or source_keys["before_count"] != before["source_pool"].get("source_count")
+        or source_keys["after_count"] != after["source_pool"].get("source_count")
+        or source_keys["before_count"]
+        + source_keys["after_count"]
+        - expected_comparable
+        != source_keys["source_union_count"]
+        or sum(transition_counts.values()) != expected_comparable
+    ):
+        raise TdxSectorMembersApplicationError(
+            "D0_CHANGE_PARTITION_NOT_CLOSED", "D0九态分母与双端来源池不守恒"
+        )
+
+    observed_counts: Counter[str] = Counter()
+    new_by_key: dict[tuple[str, str], dict[str, Any]] = {}
+    for item in change_rows:
+        if not isinstance(item, Mapping):
+            raise TdxSectorMembersApplicationError(
+                "D0_CHANGE_ROW_INVALID", "D0完整变化池包含无效记录"
+            )
+        market = item.get("market")
+        symbol = item.get("source_symbol")
+        transition = item.get("transition")
+        if (
+            market not in {"SH", "SZ"}
+            or not isinstance(symbol, str)
+            or _SOURCE_SYMBOL_PATTERN.fullmatch(symbol) is None
+            or symbol[:2] != market
+            or transition not in transition_counts
+        ):
+            raise TdxSectorMembersApplicationError(
+                "D0_CHANGE_ROW_INVALID", "D0来源键或三态转移值无效"
+            )
+        observed_counts[transition] += 1
+        if transition == "FALSE_TO_TRUE":
+            if (
+                item.get("identity_status") != "SOURCE_SYMBOL_ONLY"
+                or item.get("price_coordinate") != "RAW_UNADJUSTED"
+                or item.get("pit_status") != "NON_PIT_RETROSPECTIVE"
+                or item.get("scenario_role") != "DIAGNOSTIC_ONLY"
+                or not isinstance(item.get("before"), Mapping)
+                or not isinstance(item.get("after"), Mapping)
+                or item["before"].get("scenario_raw") != "FALSE"
+                or item["after"].get("scenario_raw") != "TRUE"
+            ):
+                raise TdxSectorMembersApplicationError(
+                    "D0_NEW_LAUNCH_ROW_INVALID", "FALSE_TO_TRUE端点或诊断语义无效"
+                )
+            key = (market, symbol)
+            if key in new_by_key:
+                raise TdxSectorMembersApplicationError(
+                    "D0_SOURCE_KEY_DUPLICATED", "D0新增启动来源键重复"
+                )
+            new_by_key[key] = dict(item)
+    if any(
+        observed_counts.get(name, 0) != expected
+        for name, expected in transition_counts.items()
+    ):
+        raise TdxSectorMembersApplicationError(
+            "D0_CHANGE_PARTITION_NOT_CLOSED", "完整D0变化行与九态计数不一致"
+        )
+
+    sectors_by_key: dict[
+        tuple[str, str], dict[tuple[str, str, str], dict[str, Any]]
+    ] = {key: {} for key in new_by_key}
+    d0_members_by_board: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    for board in all_board_rows:
+        kind = board["board_kind"]
+        snapshot = board["_board_snapshot"]
+        snapshot_id = snapshot["snapshot_id"]
+        board_id = board["board_native_id"]
+        board_members = board["_member_symbols"]
+        membership_key = (kind, snapshot_id, board_id)
+        matched = []
+        for symbol in board_members:
+            source_key = (symbol[:2], symbol)
+            if source_key not in new_by_key:
+                continue
+            membership = {
+                "board_kind": kind,
+                "snapshot_id": snapshot_id,
+                "board_native_id": board_id,
+                "board_name": board.get("board_name"),
+                "native_category": "GN" if kind == "CONCEPT" else "INDUSTRY",
+                "source_kind": snapshot["source_kind"],
+                "source_file_sha256": snapshot["source_file_sha256"],
+                "source_observed_at": snapshot.get("source_observed_at"),
+                "source_valid_on": snapshot.get("source_valid_on"),
+                "source_known_at": snapshot.get("source_known_at"),
+                "source_available_at": snapshot.get("source_available_at"),
+                "source_clock_quality": snapshot.get("source_clock_quality"),
+                "source_quality": snapshot.get("source_quality"),
+                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+            }
+            sectors_by_key[source_key][membership_key] = membership
+            matched.append(new_by_key[source_key])
+        board["d0_launch_new_member_count"] = len(matched)
+        board["d0_launch_new_membership"] = {
+            "snapshot_id": snapshot_id,
+            "source_kind": snapshot["source_kind"],
+            "source_file_sha256": snapshot["source_file_sha256"],
+            "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+        }
+        d0_members_by_board[membership_key] = sorted(
+            matched, key=lambda row: row["source_symbol"]
+        )
+
+    stock_rows: dict[tuple[str, str], dict[str, Any]] = {}
+    for key, change in new_by_key.items():
+        memberships = [
+            sectors_by_key[key][membership_key]
+            for membership_key in sorted(sectors_by_key[key])
+        ]
+        stock_rows[key] = {
+            "market": key[0],
+            "source_symbol": key[1],
+            "transition": "FALSE_TO_TRUE",
+            "before": change["before"],
+            "after": change["after"],
+            "identity_status": "SOURCE_SYMBOL_ONLY",
+            "price_coordinate": "RAW_UNADJUSTED",
+            "pit_status": "NON_PIT_RETROSPECTIVE",
+            "scenario_role": "DIAGNOSTIC_ONLY",
+            "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
+            "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+            "also_in_sectors": memberships,
+            "unmapped_reason": (
+                None if memberships else "NO_CURRENT_TDX_BOARD_MEMBERSHIP_MATCH"
+            ),
+        }
+
+    mapped_count = sum(bool(row["also_in_sectors"]) for row in stock_rows.values())
+    unmapped_count = len(stock_rows) - mapped_count
+    if len(stock_rows) != mapped_count + unmapped_count:
+        raise TdxSectorMembersApplicationError(
+            "D0_MEMBERSHIP_PARTITION_NOT_CLOSED", "全局新增股票成员映射分母未闭合"
+        )
+
+    before_source = before["source_set"]
+    after_source = after["source_set"]
+    summary = {
+        "status": "AVAILABLE" if stock_rows else "EMPTY",
+        "analysis_scope": "FULL_SEALED_SOURCE_POOL_D0_NEW_LAUNCH_JOINED_TO_CURRENT_TDX_MEMBERS",
+        "scenario": "LAUNCH_CONFIRM",
+        "transition": "FALSE_TO_TRUE",
+        "source_key": "market+source_symbol",
+        "before": {
+            "target_session": before.get("target_session"),
+            "source_set_id": before_source.get("source_set_id"),
+            "revision_id": before_source.get("revision_id"),
+            "source_capture_id": before_source.get("source_capture_id"),
+            "namespace_id": before.get("namespace_id"),
+            "package_sha256": before_source.get("package_sha256"),
+            "source_content_id": before_source.get("source_content_id"),
+            "source_digest": before_source.get("source_digest"),
+            "source_raw_digest": before_source.get("source_raw_digest"),
+            "source_available_at": before_source.get("source_available_at"),
+            "source_time_quality": before_source.get("source_time_quality"),
+            "source_clock_role": before_source.get("source_clock_role"),
+            "seal_status": before_source.get("seal_status"),
+            "sealed_at": before_source.get("sealed_at"),
+        },
+        "after": {
+            "target_session": after.get("target_session"),
+            "source_set_id": after_source.get("source_set_id"),
+            "revision_id": after_source.get("revision_id"),
+            "source_capture_id": after_source.get("source_capture_id"),
+            "namespace_id": after.get("namespace_id"),
+            "package_sha256": after_source.get("package_sha256"),
+            "source_content_id": after_source.get("source_content_id"),
+            "source_digest": after_source.get("source_digest"),
+            "source_raw_digest": after_source.get("source_raw_digest"),
+            "source_available_at": after_source.get("source_available_at"),
+            "source_time_quality": after_source.get("source_time_quality"),
+            "source_clock_role": after_source.get("source_clock_role"),
+            "seal_status": after_source.get("seal_status"),
+            "sealed_at": after_source.get("sealed_at"),
+        },
+        "source_pool_count": expected_comparable,
+        "source_union_count": source_keys["source_union_count"],
+        "pair_status": changes.get("pair_status"),
+        "transition_semantics": changes.get("transition_semantics"),
+        "contract": changes.get("contract"),
+        "producer_version": changes.get("producer_version"),
+        "session_contract": before.get("session_contract"),
+        "algorithm_contract": before.get("algorithm_contract"),
+        "official_calendar": before.get("official_calendar"),
+        "transition_counts": dict(transition_counts),
+        "unknown_endpoint_main_reason_counts": changes.get(
+            "unknown_endpoint_main_reason_counts", {}
+        ),
+        "false_to_true_count": len(stock_rows),
+        "global_new_stock_count": len(stock_rows),
+        "mapped_distinct_source_symbol_count": mapped_count,
+        "unmapped_distinct_source_symbol_count": unmapped_count,
+        "membership_counting": "PER_BOARD; COUNTS_ARE_NOT_ADDITIVE_TO_GLOBAL_UNIQUE_STOCKS",
+        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "scenario_role": "DIAGNOSTIC_ONLY",
+        "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
+        "stocks": [
+            stock_rows[key] for key in sorted(stock_rows, key=lambda item: item[1])
+        ],
+        "members_by_board": d0_members_by_board,
+    }
+    return summary, stock_rows, d0_members_by_board
+
+
 def combine_sector_strength_and_d1_changes(
     strength_results: Sequence[Mapping[str, Any]],
     discovery: Mapping[str, Any],
@@ -405,6 +696,7 @@ def combine_sector_strength_and_d1_changes(
     include_changed_stock_page: bool = False,
     stock_offset: int = 0,
     stock_limit: int = 30,
+    d0_launch_changes: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """先联接完整来源集合，再过滤、排序及分页板块和板内股票。"""
     if (
@@ -646,6 +938,28 @@ def combine_sector_strength_and_d1_changes(
             )
 
     all_board_rows = board_rows
+    d0_launch_summary = None
+    d0_members_by_board: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+    if d0_launch_changes is not None:
+        d0_launch_summary, _, d0_members_by_board = _d0_launch_new_linkage(
+            changes=d0_launch_changes,
+            all_board_rows=all_board_rows,
+        )
+        d0_after = d0_launch_changes["after"]
+        d0_after_source = d0_after["source_set"]
+        if (
+            d0_after.get("target_session") != expected_identity["target_session"]
+            or d0_after.get("research_cutoff") != expected_identity["research_cutoff"]
+            or d0_after.get("namespace_id") != expected_identity["namespace_id"]
+            or d0_after_source.get("source_set_id")
+            != expected_identity["source_set_id"]
+            or d0_after_source.get("package_sha256")
+            != expected_identity["package_sha256"]
+        ):
+            raise TdxSectorMembersApplicationError(
+                "D0_D1_SOURCE_IDENTITY_MISMATCH",
+                "D0后端与既有D1变化不是同目标、同SEALED来源包、同DEV命名空间",
+            )
     all_legal_board_count = len(all_board_rows)
     source_kind_counts = {
         kind: sum(row["board_kind"] == kind for row in all_board_rows)
@@ -784,6 +1098,33 @@ def combine_sector_strength_and_d1_changes(
                 "summaries_computed_before_pagination": True,
             },
         }
+        if d0_launch_summary is not None:
+            detail_membership_key = (
+                detail_board["board_kind"],
+                detail_board["_board_snapshot"]["snapshot_id"],
+                detail_board["board_native_id"],
+            )
+            d0_board_members = d0_members_by_board.get(detail_membership_key, [])
+            d0_member_page = d0_board_members[
+                member_offset : member_offset + member_limit
+            ]
+            detail["d0_launch_new_member_page"] = {
+                "total_count": len(d0_board_members),
+                "page": {
+                    "offset": member_offset,
+                    "limit": member_limit,
+                    "count": len(d0_member_page),
+                    "next_offset": (
+                        member_offset + len(d0_member_page)
+                        if member_offset + len(d0_member_page) < len(d0_board_members)
+                        else None
+                    ),
+                    "stable_order": "source_symbol ASC COLLATE C",
+                },
+                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                "members": d0_member_page,
+                "summaries_computed_before_pagination": True,
+            }
 
     result = {
         "status": "AVAILABLE"
@@ -883,6 +1224,24 @@ def combine_sector_strength_and_d1_changes(
             offset=stock_offset,
             limit=stock_limit,
         )
+    if d0_launch_summary is not None:
+        full_d0_stock_rows = d0_launch_summary.pop("stocks")
+        d0_launch_summary.pop("members_by_board")
+        d0_page = full_d0_stock_rows[stock_offset : stock_offset + stock_limit]
+        d0_launch_summary["pagination"] = {
+            "offset": stock_offset,
+            "limit": stock_limit,
+            "count": len(d0_page),
+            "next_offset": (
+                stock_offset + len(d0_page)
+                if stock_offset + len(d0_page) < len(full_d0_stock_rows)
+                else None
+            ),
+            "stable_order": "source_symbol ASC COLLATE C",
+            "totals_computed_before_pagination": True,
+        }
+        d0_launch_summary["stocks"] = d0_page
+        result["d0_launch_new"] = d0_launch_summary
     return result
 
 

@@ -312,13 +312,29 @@ def register_commands(commands):
         help="附加按来源代码全局去重的CHANGED个股分页，不影响板块榜单",
     )
     sector_change_stocks.add_argument(
-        "--stock-offset", type=int, default=0, help="全局变化个股分页偏移，默认0"
+        "--include-d0-launch-new",
+        action="store_true",
+        help="可选附加D0相邻会话FALSE_TO_TRUE新增启动股票及当前板块成员联动",
+    )
+    sector_change_stocks.add_argument(
+        "--d0-before-session",
+        help="启用D0新增启动联动时的前一官方会话YYYY-MM-DD",
+    )
+    sector_change_stocks.add_argument(
+        "--d0-before-source-set-id",
+        help="启用D0新增启动联动时前一会话的精确SEALED source_set UUID",
+    )
+    sector_change_stocks.add_argument(
+        "--stock-offset",
+        type=int,
+        default=0,
+        help="全局D1/D0变化个股分页偏移，默认0",
     )
     sector_change_stocks.add_argument(
         "--stock-limit",
         type=int,
         default=30,
-        help="全局变化个股页大小，1至30，默认30",
+        help="全局D1/D0变化个股页大小，1至30，默认30",
     )
     sector_change_stocks.add_argument(
         "--include-source-market-context",

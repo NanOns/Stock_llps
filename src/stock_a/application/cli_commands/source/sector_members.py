@@ -30,6 +30,10 @@ from stock_a.application.source_d1_price_safety import (
 from stock_a.application.source_d1_support_changes import (
     discover_source_d1_support_changes,
 )
+from stock_a.application.source_d0_raw import (
+    SourceD0RawError,
+    query_source_d0_raw_launch,
+)
 from stock_a.application.pg_research import (
     PgResearchBindingError,
     read_sealed_source_context,
@@ -284,6 +288,46 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
 def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
     target = _parse_source_set_date(args.target_session)
     cutoff = _parse_source_set_date(args.research_cutoff)
+    include_d0_launch_new = getattr(args, "include_d0_launch_new", False)
+    d0_before_session = None
+    d0_before_source_set_id = None
+    if include_d0_launch_new:
+        if not args.d0_before_session or not args.d0_before_source_set_id:
+            raise DiagnosticError(
+                "D0_BEFORE_IDENTITY_REQUIRED",
+                "启用D0新增启动联动时必须提供--d0-before-session与--d0-before-source-set-id",
+                _EXIT_ARGUMENT,
+            )
+        d0_before_session = _parse_source_set_date(args.d0_before_session)
+        if d0_before_session >= target or d0_before_session > cutoff:
+            raise DiagnosticError(
+                "D0_BEFORE_SESSION_INVALID",
+                "D0前一官方会话必须早于目标会话且不晚于显式研究截止",
+                _EXIT_ARGUMENT,
+            )
+        try:
+            d0_before_source_set_id = str(uuid.UUID(args.d0_before_source_set_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise DiagnosticError(
+                "D0_BEFORE_SOURCE_SET_ID_INVALID",
+                "D0前一会话source_set编号必须为规范UUID",
+                _EXIT_ARGUMENT,
+            ) from error
+        if d0_before_source_set_id != args.d0_before_source_set_id:
+            raise DiagnosticError(
+                "D0_BEFORE_SOURCE_SET_ID_INVALID",
+                "D0前一会话source_set编号必须为规范UUID",
+                _EXIT_ARGUMENT,
+            )
+    elif (
+        getattr(args, "d0_before_session", None) is not None
+        or getattr(args, "d0_before_source_set_id", None) is not None
+    ):
+        raise DiagnosticError(
+            "D0_BEFORE_IDENTITY_REQUIRES_FLAG",
+            "D0前一会话身份参数只能与--include-d0-launch-new一起使用",
+            _EXIT_ARGUMENT,
+        )
     if target > cutoff:
         _emit(
             {
@@ -376,7 +420,26 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config()
     strength_results = []
     d1_read_attempted = False
+    d0_read_attempted = False
+    d0_launch_changes = None
     try:
+        if include_d0_launch_new:
+            d0_read_attempted = True
+            d0_launch_changes = query_source_d0_raw_launch(
+                config,
+                scenario="LAUNCH_CONFIRM",
+                action="changes",
+                before_session=d0_before_session,
+                before_source_set_id=d0_before_source_set_id,
+                before_package_sha256=args.package_sha256,
+                target_session=target,
+                research_cutoff=cutoff,
+                source_set_id=source_set_id,
+                package_sha256=args.package_sha256,
+                transition="ALL",
+                offset=0,
+                limit=5000,
+            )
         for kind, snapshot_id in (
             ("INDUSTRY", industry_snapshot_id),
             ("CONCEPT", concept_snapshot_id),
@@ -435,6 +498,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             include_changed_stock_page=args.include_changed_stock_page,
             stock_offset=args.stock_offset,
             stock_limit=args.stock_limit,
+            d0_launch_changes=d0_launch_changes,
         )
         if getattr(args, "include_source_market_context", False):
             try:
@@ -482,29 +546,30 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
         TdxSectorMembersPgError,
         PgResearchBindingError,
         ResearchEntryError,
+        SourceD0RawError,
         RawSourcePgError,
         SourceMarketContextError,
         PriceSafetyFactError,
     ) as error:
         code = getattr(error, "code", "SECTOR_CHANGE_DISCOVERY_FAILED")
-        _emit(
-            {
-                "ok": False,
-                "status": "REJECTED",
-                "code": code,
-                "message": str(error),
-                "operation": "change-stocks",
-                "database_io_attempted": True,
-                "d1_discovery_attempted": d1_read_attempted,
-                "database_write_attempted": False,
-                "ddl_executed": False,
-                "dml_executed": False,
-                "dml_rows_affected": 0,
-                "source_modified": False,
-                "source_downloaded": False,
-            },
-            error=True,
-        )
+        error_payload = {
+            "ok": False,
+            "status": "REJECTED",
+            "code": code,
+            "message": str(error),
+            "operation": "change-stocks",
+            "database_io_attempted": True,
+            "d1_discovery_attempted": d1_read_attempted,
+            "database_write_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+            "dml_rows_affected": 0,
+            "source_modified": False,
+            "source_downloaded": False,
+        }
+        if d0_read_attempted:
+            error_payload["d0_discovery_attempted"] = True
+        _emit(error_payload, error=True)
         return _EXIT_UNAVAILABLE
 
     result.update(
@@ -532,5 +597,10 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             "dml_rows_affected": 0,
         }
     )
+    if d0_launch_changes is not None:
+        result["d0_execution"] = d0_launch_changes["execution"]
+        result["database_read"]["d0_transactions"] = d0_launch_changes["execution"][
+            "transaction"
+        ]
     _emit(result)
     return _EXIT_OK
