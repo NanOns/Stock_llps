@@ -1148,7 +1148,8 @@ JOIN stock.tdx_sector_catalog c
  AND c.board_native_id=m.board_native_id
 WHERE m.snapshot_id=ANY(%s::uuid[]) AND m.source_symbol=%s
   AND m.board_kind IN ('INDUSTRY','CONCEPT')
-ORDER BY m.board_kind COLLATE "C", m.board_native_id COLLATE "C""",
+ORDER BY m.board_kind COLLATE "C", m.board_native_id COLLATE "C"
+""",
                 (requested_ids, source_symbol),
             )
             membership_rows = cursor.fetchall()
