@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections import Counter
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
 import re
@@ -1039,6 +1039,217 @@ ORDER BY s.source_kind""",
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
         "snapshots": snapshots,
         "database_write": False,
+        "ddl_executed": False,
+    }
+
+
+def query_tdx_sector_symbol_membership(
+    config: dict[str, Any],
+    *,
+    exchange: str,
+    source_symbol: str,
+    target_session: date,
+    industry_snapshot_id: str,
+    concept_snapshot_id: str,
+    expected_namespace_id: str,
+) -> dict[str, Any]:
+    """按显式行业和概念快照读取单个来源代码的当前成员关系。"""
+    if exchange not in {"SH", "SZ"} or not isinstance(source_symbol, str):
+        raise TdxSectorMembersPgError(
+            "SOURCE_SYMBOL_INVALID", "来源股票代码必须绑定SH或SZ交易所前缀"
+        )
+    if re.fullmatch(r"(SH|SZ)\.[0-9]{6}", source_symbol) is None:
+        raise TdxSectorMembersPgError(
+            "SOURCE_SYMBOL_INVALID", "来源股票代码格式必须为SH.六位代码或SZ.六位代码"
+        )
+    if source_symbol.split(".", 1)[0] != exchange:
+        raise TdxSectorMembersPgError(
+            "SOURCE_SYMBOL_EXCHANGE_MISMATCH", "交易所与精确来源股票代码前缀不一致"
+        )
+    if type(target_session) is not date:
+        raise TdxSectorMembersPgError(
+            "TARGET_SESSION_INVALID", "研究目标日必须是有效交易日期"
+        )
+    try:
+        industry_snapshot_id = str(uuid.UUID(industry_snapshot_id))
+        concept_snapshot_id = str(uuid.UUID(concept_snapshot_id))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise TdxSectorMembersPgError(
+            "SNAPSHOT_ID_INVALID", "行业及概念snapshot_id必须是UUID"
+        ) from error
+    if industry_snapshot_id == concept_snapshot_id:
+        raise TdxSectorMembersPgError(
+            "SECTOR_SNAPSHOT_IDS_NOT_DISTINCT", "行业和概念必须使用两个独立快照"
+        )
+    try:
+        normalized_namespace_id = str(uuid.UUID(expected_namespace_id))
+    except (TypeError, ValueError, AttributeError) as error:
+        raise TdxSectorMembersPgError(
+            "DEV_NAMESPACE_INVALID", "必须显式绑定有效DEV namespace UUID"
+        ) from error
+
+    expected_kinds = {
+        industry_snapshot_id: "TDX_TDXHY_CFG",
+        concept_snapshot_id: "TDX_INFOHARBOR_BLOCK_DAT",
+    }
+    try:
+        with _transaction(config, write=False) as (
+            _connection,
+            cursor,
+            namespace_id,
+        ):
+            if namespace_id != normalized_namespace_id:
+                raise TdxSectorMembersPgError(
+                    "DEV_NAMESPACE_MISMATCH",
+                    "显式namespace与当前Stock A DEV部署绑定不一致",
+                )
+            requested_ids = [industry_snapshot_id, concept_snapshot_id]
+            cursor.execute(
+                """SELECT snapshot_id::text, source_kind, source_file_sha256,
+       source_path_role, source_file_size, observed_at, source_valid_on,
+       source_known_at, source_available_at, clock_quality, research_mode,
+       parse_contract_version, rows_declared, source_quality
+FROM stock.tdx_sector_source_snapshots
+WHERE snapshot_id=ANY(%s::uuid[])
+ORDER BY snapshot_id""",
+                (requested_ids,),
+            )
+            snapshot_columns = [item.name for item in cursor.description]
+            snapshot_rows = [
+                dict(zip(snapshot_columns, row, strict=True))
+                for row in cursor.fetchall()
+            ]
+            snapshots_by_id = {str(row["snapshot_id"]): row for row in snapshot_rows}
+            if set(snapshots_by_id) != set(expected_kinds):
+                raise TdxSectorMembersPgError(
+                    "SECTOR_SNAPSHOT_NOT_FOUND",
+                    "未找到显式绑定的行业及概念TDX快照",
+                )
+            for snapshot_id, expected_kind in expected_kinds.items():
+                row = snapshots_by_id[snapshot_id]
+                if row["source_kind"] != expected_kind:
+                    raise TdxSectorMembersPgError(
+                        "SECTOR_SNAPSHOT_KIND_MISMATCH",
+                        "显式快照类型与行业/概念请求角色不匹配",
+                    )
+                if row["research_mode"] != "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT":
+                    raise TdxSectorMembersPgError(
+                        "SECTOR_SNAPSHOT_MODE_REJECTED",
+                        "不接受未声明为当前后验快照的板块成员来源",
+                    )
+
+            cursor.execute(
+                """SELECT m.snapshot_id::text, m.board_kind,
+       m.board_native_id, c.board_name, m.source_symbol,
+       m.membership_quality, m.source_record_ordinal
+FROM stock.tdx_sector_members m
+JOIN stock.tdx_sector_catalog c
+  ON c.snapshot_id=m.snapshot_id AND c.board_kind=m.board_kind
+ AND c.board_native_id=m.board_native_id
+WHERE m.snapshot_id=ANY(%s::uuid[]) AND m.source_symbol=%s
+  AND m.board_kind IN ('INDUSTRY','CONCEPT')
+ORDER BY m.board_kind COLLATE "C", m.board_native_id COLLATE "C""",
+                (requested_ids, source_symbol),
+            )
+            membership_rows = cursor.fetchall()
+    except TdxSectorMembersPgError:
+        raise
+    except RawSourcePgError as error:
+        raise TdxSectorMembersPgError(error.code, str(error)) from error
+    except Exception as error:
+        raise TdxSectorMembersPgError(
+            "SECTOR_SYMBOL_MEMBERSHIP_READ_FAILED",
+            f"单股TDX成员关系只读读取失败（{type(error).__name__}）",
+        ) from error
+
+    expected_kind_by_snapshot = {
+        industry_snapshot_id: "INDUSTRY",
+        concept_snapshot_id: "CONCEPT",
+    }
+    snapshot_payloads: list[dict[str, Any]] = []
+    for snapshot_id in (industry_snapshot_id, concept_snapshot_id):
+        payload = _snapshot_payload(
+            tuple(snapshots_by_id[snapshot_id][name] for name in snapshot_columns)
+        )
+        observed_at = datetime.fromisoformat(payload["observed_at"])
+        payload["source_quality_counts"] = _source_quality_counts(
+            payload["source_quality"]
+        )
+        payload["source_observed_at"] = payload["observed_at"]
+        payload["source_clock_quality"] = payload["clock_quality"]
+        payload["source_time_role"] = (
+            "LOCAL_CAPTURE_OBSERVED_AT_NOT_SOURCE_AVAILABILITY"
+        )
+        payload["temporal_relationship"] = (
+            "OBSERVED_AFTER_TARGET"
+            if observed_at.date() > target_session
+            else "OBSERVED_ON_OR_BEFORE_TARGET"
+        )
+        payload["membership_mode"] = "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
+        payload["membership_count"] = 0
+        snapshot_payloads.append(payload)
+
+    snapshots_by_payload_id = {
+        payload["snapshot_id"]: payload for payload in snapshot_payloads
+    }
+    memberships: list[dict[str, Any]] = []
+    for row in membership_rows:
+        snapshot_id = str(row[0])
+        board_kind = str(row[1])
+        if (
+            snapshot_id not in expected_kind_by_snapshot
+            or board_kind != expected_kind_by_snapshot[snapshot_id]
+            or row[5] != "OBSERVED_SOURCE_RELATION"
+        ):
+            raise TdxSectorMembersPgError(
+                "SECTOR_MEMBERSHIP_QUALITY_INVALID",
+                "单股成员行与快照角色或OBSERVED关系质量不匹配",
+            )
+        snapshot = snapshots_by_payload_id[snapshot_id]
+        snapshot["membership_count"] += 1
+        memberships.append(
+            {
+                "snapshot_id": snapshot_id,
+                "source_kind": snapshot["source_kind"],
+                "board_kind": board_kind,
+                "board_native_id": str(row[2]),
+                "board_name": str(row[3]),
+                "source_symbol": str(row[4]),
+                "membership_quality": str(row[5]),
+                "source_record_ordinal": int(row[6]),
+                "source_file_sha256": snapshot["source_file_sha256"],
+                "observed_at": snapshot["observed_at"],
+                "source_observed_at": snapshot["source_observed_at"],
+                "source_valid_on": snapshot["source_valid_on"],
+                "source_known_at": snapshot["source_known_at"],
+                "source_available_at": snapshot["source_available_at"],
+                "clock_quality": snapshot["clock_quality"],
+                "source_clock_quality": snapshot["source_clock_quality"],
+                "source_quality": snapshot["source_quality"],
+                "research_mode": snapshot["research_mode"],
+                "source_time_role": snapshot["source_time_role"],
+                "temporal_relationship": snapshot["temporal_relationship"],
+                "membership_mode": snapshot["membership_mode"],
+            }
+        )
+
+    status = "AVAILABLE" if memberships else "AVAILABLE_EMPTY"
+    return {
+        "status": status,
+        "namespace_id": namespace_id,
+        "exchange": exchange,
+        "source_symbol": source_symbol,
+        "target_session": target_session.isoformat(),
+        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+        "snapshots": snapshot_payloads,
+        "memberships": memberships,
+        "empty_reason": (
+            "NO_OBSERVED_RELATION_IN_SELECTED_CURRENT_SNAPSHOTS"
+            if not memberships
+            else None
+        ),
+        "database_write_attempted": False,
+        "dml_executed": False,
         "ddl_executed": False,
     }
 

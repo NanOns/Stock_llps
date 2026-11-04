@@ -182,8 +182,15 @@ def _transaction(
         if getattr(error, "preserve_transaction_error", False) is True:
             raise
         sqlstate = getattr(error, "sqlstate", None)
+        failure_code = (
+            "PG_READ_PERMISSION_DENIED"
+            if not write and sqlstate == "42501"
+            else "PG_WRITE_FAILED"
+            if write
+            else "PG_READ_FAILED"
+        )
         raise RawSourcePgError(
-            "PG_WRITE_FAILED" if write else "PG_READ_FAILED",
+            failure_code,
             f"固定stock_a.stock来源Raw事务失败（{type(error).__name__}，SQLSTATE={sqlstate or 'UNKNOWN'}）",
         ) from error
 

@@ -45,6 +45,12 @@ from stock_a.application.tdx_sector_members import (
     TdxSectorMembersApplicationError,
     read_latest_tdx_sector_snapshot_observation,
 )
+from stock_a.application.source_stock_change_context import (
+    query_source_stock_change_context,
+)
+from stock_a.application.source_tdx_sector_membership import (
+    read_tdx_sector_symbol_membership,
+)
 from stock_a.application.source_ingress import (
     SourceIngressError,
     build_source_ingress_plan,
@@ -98,6 +104,47 @@ class PreviewHttpError(Exception):
         self.code = code
         self.message = message
         super().__init__(message)
+
+
+def _source_context_preview_error(error: Exception) -> PreviewHttpError | None:
+    """保留来源上下文读者的稳定错误码，并映射为可解释的HTTP状态。"""
+    code = getattr(error, "code", None)
+    if not isinstance(code, str) or not code:
+        return None
+    category = getattr(error, "category", None)
+    request_errors = {
+        "SOURCE_SYMBOL_INVALID",
+        "SECTOR_SNAPSHOT_UUID_INVALID",
+        "SECTOR_SNAPSHOT_IDS_NOT_DISTINCT",
+        "DEV_NAMESPACE_INVALID",
+    }
+    if code == "PG_READ_PERMISSION_DENIED":
+        status = 403
+    elif code.startswith("PG_"):
+        status = 503
+    elif category == "ARGUMENT" or code in request_errors:
+        status = 400
+    elif code.endswith("NOT_FOUND") or code.endswith("NOT_IN_PAIR"):
+        status = 404
+    elif any(
+        marker in code
+        for marker in (
+            "MISMATCH",
+            "NOT_DISTINCT",
+            "KIND_MISMATCH",
+            "MODE_REJECTED",
+            "QUALITY_INVALID",
+            "INCOMPLETE",
+            "RESULT_INVALID",
+            "SNAPSHOT_INVALID",
+        )
+    ):
+        status = 409
+    elif code.endswith("READ_FAILED"):
+        status = 503
+    else:
+        status = 503
+    return PreviewHttpError(status, code, str(error))
 
 
 def _require_research_cutoff(target_session: date, max_target_session: date) -> None:
@@ -1843,18 +1890,50 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 ) from error
             expected = {"symbol", "target_session", "package_sha256", "session_count"}
             allowed_timeline = expected | {"source_set_id", "namespace_id"}
+            source_change_required = {
+                "include_source_change_context",
+                "before_session",
+                "before_source_set_id",
+                "before_package_sha256",
+                "industry_snapshot_id",
+                "concept_snapshot_id",
+            }
+            source_change_optional = {
+                "before_profile_revision",
+                "after_profile_revision",
+            }
+            if (
+                post_path == "/api/preview/stock-timeline"
+                and isinstance(body, dict)
+                and bool(source_change_optional & set(body))
+                and not source_change_optional <= set(body)
+            ):
+                raise PreviewHttpError(
+                    400,
+                    "PREVIEW_PROFILE_REVISIONS_MUST_BE_PAIRED",
+                    "before_profile_revision与after_profile_revision必须同时提供",
+                )
+            source_change_body = allowed_timeline | source_change_required
+            source_change_bodies = {
+                frozenset(source_change_body),
+                frozenset(source_change_body | source_change_optional),
+            }
             valid_body = isinstance(body, dict) and (
                 set(body) == expected
                 or (
                     post_path == "/api/preview/stock-timeline"
                     and set(body) == allowed_timeline
                 )
+                or (
+                    post_path == "/api/preview/stock-timeline"
+                    and frozenset(body) in source_change_bodies
+                )
             )
             if not valid_body:
                 raise PreviewHttpError(
                     400,
                     "PREVIEW_BODY_FIELDS_INVALID",
-                    "请求体须包含symbol、target_session、package_sha256、session_count；轨迹可同时绑定source_set_id与namespace_id",
+                    "请求体须包含symbol、target_session、package_sha256、session_count；轨迹可绑定source_set_id与namespace_id，并可显式启用单股变化上下文",
                 )
             symbol = _symbol(body["symbol"])
             target_text = body["target_session"]
@@ -1862,9 +1941,54 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             _require_research_cutoff(target, self.preview_server.state.research_cutoff)
             package_sha = _sha(body["package_sha256"])
             session_count = _positive_int(body["session_count"], "session_count", 75)
+            source_change_opt_in = frozenset(body) in source_change_bodies
+            before_target: date | None = None
+            before_source_set_id: str | None = None
+            before_package_sha: str | None = None
+            industry_snapshot_id: str | None = None
+            concept_snapshot_id: str | None = None
+            before_profile_revision: str | None = None
+            after_profile_revision: str | None = None
+            if source_change_opt_in:
+                if body["include_source_change_context"] is not True:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_SOURCE_CHANGE_OPT_IN_INVALID",
+                        "include_source_change_context必须显式为true",
+                    )
+                before_target = _iso_date(body["before_session"], "before_session")
+                _require_research_cutoff(
+                    before_target, self.preview_server.state.research_cutoff
+                )
+                if before_target >= target:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_SOURCE_CHANGE_DATE_INVALID",
+                        "before_session必须早于target_session",
+                    )
+                before_package_sha = _sha(body["before_package_sha256"])
+                if before_package_sha != package_sha:
+                    raise PreviewHttpError(
+                        409,
+                        "PREVIEW_SOURCE_CHANGE_PACKAGE_MISMATCH",
+                        "前后来源包SHA必须相同",
+                    )
+                try:
+                    before_source_set_id = str(UUID(body["before_source_set_id"]))
+                    industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
+                    concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
+                except (ValueError, TypeError, AttributeError) as error:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_SOURCE_CHANGE_ID_INVALID",
+                        "前日source_set及行业/概念快照ID须为有效UUID",
+                    ) from error
+                if source_change_optional <= set(body):
+                    before_profile_revision = _sha(body["before_profile_revision"])
+                    after_profile_revision = _sha(body["after_profile_revision"])
             expected_source_set_id = None
             expected_namespace_id = None
-            if set(body) == allowed_timeline:
+            if allowed_timeline <= set(body):
                 try:
                     expected_source_set_id = str(UUID(body["source_set_id"]))
                     expected_namespace_id = str(UUID(body["namespace_id"]))
@@ -1881,6 +2005,31 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 raise PreviewHttpError(
                     400, "PREVIEW_DATE_INVALID", "目标日期未通过官方交易日历校验"
                 )
+            if source_change_opt_in:
+                resolved_before, _before_sessions, before_calendar_revision = (
+                    resolve_pg_history_window(before_target.isoformat(), 1)
+                )
+                _resolved_pair_target, adjacent_sessions, pair_calendar_revision = (
+                    resolve_pg_history_window(target.isoformat(), 2)
+                )
+                if resolved_before != before_target:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_BEFORE_DATE_INVALID",
+                        "前日日期未通过官方交易日历校验",
+                    )
+                if (
+                    len(adjacent_sessions) != 2
+                    or adjacent_sessions[0] != before_target
+                    or adjacent_sessions[1] != target
+                    or pair_calendar_revision != calendar_revision
+                    or before_calendar_revision != calendar_revision
+                ):
+                    raise PreviewHttpError(
+                        409,
+                        "PREVIEW_SOURCE_CHANGE_SESSIONS_NOT_ADJACENT",
+                        "前后日期必须是同一日历版本中的相邻官方会话",
+                    )
             history = read_raw_daily_history_stock(
                 self.preview_server.state.config,
                 source_symbol=symbol,
@@ -1919,6 +2068,39 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_IDENTITY_MISMATCH",
                         "轨迹返回的namespace或SEALED source_set与变化快照不一致",
                     )
+                if source_change_opt_in:
+                    try:
+                        membership = read_tdx_sector_symbol_membership(
+                            self.preview_server.state.config,
+                            source_symbol=symbol,
+                            target_session=target,
+                            industry_snapshot_id=industry_snapshot_id,
+                            concept_snapshot_id=concept_snapshot_id,
+                            expected_namespace_id=history["namespace_id"],
+                        )
+                        source_change = query_source_stock_change_context(
+                            self.preview_server.state.config,
+                            namespace_id=history["namespace_id"],
+                            before_session=before_target,
+                            target_session=target,
+                            research_cutoff=self.preview_server.state.research_cutoff,
+                            before_source_set_id=before_source_set_id,
+                            before_package_sha256=before_package_sha,
+                            source_set_id=source_context["source_set_id"],
+                            package_sha256=package_sha,
+                            symbol=symbol,
+                            before_profile_revision=before_profile_revision,
+                            after_profile_revision=after_profile_revision,
+                        )
+                    except Exception as error:
+                        preview_error = _source_context_preview_error(error)
+                        if preview_error is None:
+                            raise
+                        raise preview_error from error
+                    result["source_change_context"] = {
+                        **source_change,
+                        "current_tdx_membership": membership,
+                    }
                 identity = self.preview_server.state.snapshot_identity(
                     namespace_id=history["namespace_id"],
                     target_session=target.isoformat(),

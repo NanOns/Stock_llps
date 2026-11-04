@@ -52,6 +52,7 @@ class _SourceD1PreviewContext:
         ],
     ]
     core_source_sha256: str
+    execution_adapter_source_sha256: str
 
 
 def _calculate_core_d1_inputs(
@@ -157,6 +158,9 @@ def prepare_source_d1_preview_context(
     return _SourceD1PreviewContext(
         calendars_by_year=calendars_by_year,
         core_source_sha256=core_source_sha256,
+        execution_adapter_source_sha256=_profile_preview_source_digest(
+            Path(__file__).resolve(), "_calculate_core_d1_inputs"
+        ),
     )
 
 
@@ -245,6 +249,15 @@ def _source_d1_preview_for_target(
             "coordinate_id": coordinate_id,
             "core_producer_symbol": "stock_a.research.core:calculate_core",
             "core_producer_source_sha256": context.core_source_sha256,
+            "core_producer_role": "SEMANTIC_CORE_CONTRACT_SOURCE",
+            "execution_adapter_symbol": (
+                "stock_a.research.entry_history.history_preview:"
+                "_calculate_core_d1_inputs"
+            ),
+            "execution_adapter_source_sha256": (
+                context.execution_adapter_source_sha256
+            ),
+            "execution_adapter_role": "ACTUAL_D1_FAST_CALCULATION_ADAPTER",
             "core_field_ids": [
                 "core.prior_high20",
                 "core.atr20",
@@ -878,6 +891,15 @@ def research_stock_pg_history_preview(
             "core_producer_source_sha256": _profile_preview_source_digest(
                 Path(__file__).resolve().parents[1] / "core.py", "calculate_core"
             ),
+            "core_producer_role": "SEMANTIC_CORE_CONTRACT_SOURCE",
+            "execution_adapter_symbol": (
+                "stock_a.research.entry_history.history_preview:"
+                "_calculate_core_d1_inputs"
+            ),
+            "execution_adapter_source_sha256": _profile_preview_source_digest(
+                Path(__file__).resolve(), "_calculate_core_d1_inputs"
+            ),
+            "execution_adapter_role": "ACTUAL_D1_FAST_CALCULATION_ADAPTER",
             "core_field_ids": [
                 "core.prior_high20",
                 "core.atr20",
