@@ -36,6 +36,15 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
             symbol=args.symbol,
             offset=args.offset,
             limit=args.limit,
+            action=args.action,
+            before_session=(
+                _parse_source_set_date(args.before_session)
+                if args.before_session is not None
+                else None
+            ),
+            before_source_set_id=args.before_source_set_id,
+            before_package_sha256=args.before_package_sha256,
+            transition=args.transition,
         )
     except DiagnosticError as error:
         _emit(

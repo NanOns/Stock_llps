@@ -17,7 +17,13 @@ from stock_a.application.pg_price_profiles import (
 def register_commands(commands):
     d0_raw = commands.add_parser(
         "source-d0-raw",
-        help="只读计算精确SEALED来源池的D0 LAUNCH_CONFIRM原始谓词",
+        help="只读计算精确SEALED来源池的D0 LAUNCH_CONFIRM原始谓词与相邻变化",
+    )
+    d0_raw.add_argument(
+        "--action",
+        choices=("current", "changes"),
+        default="current",
+        help="current读取单日三态；changes读取相邻官方会话变化",
     )
     d0_raw.add_argument(
         "--scenario",
@@ -29,19 +35,43 @@ def register_commands(commands):
         "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
     )
     d0_raw.add_argument(
+        "--before-session", help="changes动作的前一官方交易会话YYYY-MM-DD"
+    )
+    d0_raw.add_argument(
         "--research-cutoff", required=True, help="研究数据截止官方会话YYYY-MM-DD"
     )
     d0_raw.add_argument(
         "--source-set-id", required=True, help="目标日SEALED P03 source_set UUID"
     )
+    d0_raw.add_argument("--before-source-set-id", help="前日SEALED P03 source_set UUID")
     d0_raw.add_argument(
         "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
     )
+    d0_raw.add_argument("--before-package-sha256", help="前日完整TDX来源包SHA-256")
     d0_raw.add_argument(
         "--state",
         choices=("TRUE", "FALSE", "UNKNOWN", "ALL"),
-        default="ALL",
+        default=None,
         help="在完整来源池计算后按三态筛选，默认ALL",
+    )
+    d0_raw.add_argument(
+        "--transition",
+        choices=(
+            "FALSE_TO_TRUE",
+            "FALSE_TO_FALSE",
+            "FALSE_TO_UNKNOWN",
+            "TRUE_TO_TRUE",
+            "TRUE_TO_FALSE",
+            "TRUE_TO_UNKNOWN",
+            "UNKNOWN_TO_TRUE",
+            "UNKNOWN_TO_FALSE",
+            "UNKNOWN_TO_UNKNOWN",
+            "BEFORE_ONLY",
+            "AFTER_ONLY",
+            "ALL",
+        ),
+        default=None,
+        help="changes动作的三态转移筛选；缺端类别也可单独筛选",
     )
     d0_raw.add_argument(
         "--symbol", help="可选精确来源代码SH./SZ.加六位数字；输出21会话原值详情"
