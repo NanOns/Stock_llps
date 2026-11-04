@@ -15,6 +15,42 @@ from stock_a.application.pg_price_profiles import (
 
 
 def register_commands(commands):
+    d0_raw = commands.add_parser(
+        "source-d0-raw",
+        help="只读计算精确SEALED来源池的D0 LAUNCH_CONFIRM原始谓词",
+    )
+    d0_raw.add_argument(
+        "--scenario",
+        choices=("LAUNCH_CONFIRM",),
+        required=True,
+        help="本批仅实现LAUNCH_CONFIRM诊断原始场景",
+    )
+    d0_raw.add_argument(
+        "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
+    )
+    d0_raw.add_argument(
+        "--research-cutoff", required=True, help="研究数据截止官方会话YYYY-MM-DD"
+    )
+    d0_raw.add_argument(
+        "--source-set-id", required=True, help="目标日SEALED P03 source_set UUID"
+    )
+    d0_raw.add_argument(
+        "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
+    )
+    d0_raw.add_argument(
+        "--state",
+        choices=("TRUE", "FALSE", "UNKNOWN", "ALL"),
+        default="ALL",
+        help="在完整来源池计算后按三态筛选，默认ALL",
+    )
+    d0_raw.add_argument(
+        "--symbol", help="可选精确来源代码SH./SZ.加六位数字；输出21会话原值详情"
+    )
+    d0_raw.add_argument("--offset", type=int, default=0, help="稳定分页偏移，默认0")
+    d0_raw.add_argument(
+        "--limit", type=int, default=30, help="稳定分页条数，默认30，最多5000"
+    )
+
     source_market_breadth = commands.add_parser(
         "source-market-breadth",
         help="只读计算固定P03来源代码集合的RAW正收益状态差宽度",
