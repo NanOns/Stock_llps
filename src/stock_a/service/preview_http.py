@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
 import json
@@ -167,6 +167,26 @@ def _nonnegative_int(value: str | None, field: str, maximum: int = _MAX_OFFSET) 
     parsed = int(value)
     if parsed > maximum:
         raise PreviewHttpError(400, "PREVIEW_PARAMETER_INVALID", f"{field}超过允许上限")
+    return parsed
+
+
+def _ratio_decimal(value: str | None, field: str) -> Decimal | None:
+    if value is None:
+        return None
+    if not value or len(value) > 128:
+        raise PreviewHttpError(
+            400, "PREVIEW_RATIO_INVALID", f"{field}必须是非负有限Decimal"
+        )
+    try:
+        parsed = Decimal(value)
+    except InvalidOperation as error:
+        raise PreviewHttpError(
+            400, "PREVIEW_RATIO_INVALID", f"{field}必须是非负有限Decimal"
+        ) from error
+    if not parsed.is_finite() or parsed < 0:
+        raise PreviewHttpError(
+            400, "PREVIEW_RATIO_INVALID", f"{field}必须是非负有限Decimal"
+        )
     return parsed
 
 
@@ -1179,6 +1199,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "core_quality",
                         "price_damage_state",
                         "ma_slope20_sign",
+                        "amount_ratio20_min",
+                        "amount_ratio20_max",
+                        "volume_ratio20_min",
+                        "volume_ratio20_max",
                         "profile_field_id",
                         "profile_quality",
                         "profile_status",
@@ -1231,6 +1255,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     core_quality=values.get("core_quality"),
                     price_damage_state=values.get("price_damage_state", "ALL"),
                     ma_slope20_sign=values.get("ma_slope20_sign", "ALL"),
+                    amount_ratio20_min=_ratio_decimal(
+                        values.get("amount_ratio20_min"), "amount_ratio20_min"
+                    ),
+                    amount_ratio20_max=_ratio_decimal(
+                        values.get("amount_ratio20_max"), "amount_ratio20_max"
+                    ),
+                    volume_ratio20_min=_ratio_decimal(
+                        values.get("volume_ratio20_min"), "volume_ratio20_min"
+                    ),
+                    volume_ratio20_max=_ratio_decimal(
+                        values.get("volume_ratio20_max"), "volume_ratio20_max"
+                    ),
                     profile_field_id=values.get("profile_field_id"),
                     profile_quality=values.get("profile_quality"),
                     profile_status=values.get("profile_status"),

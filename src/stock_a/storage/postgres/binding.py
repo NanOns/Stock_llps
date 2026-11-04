@@ -72,6 +72,12 @@ _MIGRATIONS = (
         ("migrations", "0010_r02_source_profile_price_damage_slope.sql"),
         "2a75996ddfada890a6ff3830d10e4b5bfcdc25e5bc77b32918d2f2a0c3447eca",
     ),
+    (
+        11,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0011_r02_source_native_amount_volume_ratios.sql"),
+        "43e8ef668ea896775f9c6c83e4fee7fdf8198d17299732633649e54342ca04dd",
+    ),
 )
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
@@ -82,6 +88,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R02_FROZEN_75D_ALGORITHMS_CHANGE_R2": frozenset({8}),
     "R03_TDX_REAL_SECTOR_MEMBERS_TO_PG_R1": frozenset({9}),
     "R02_R04_CORE_DAMAGE_SLOPE_POOL_QUERY_R1": frozenset({10}),
+    "R02_SOURCE_NATIVE_AMOUNT_VOLUME_RATIO_PROFILE_R1": frozenset({11}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -147,6 +154,7 @@ _RELATIONS_BY_MIGRATION_COUNT = {
     },
 }
 _RELATIONS_BY_MIGRATION_COUNT[10] = _RELATIONS_BY_MIGRATION_COUNT[9]
+_RELATIONS_BY_MIGRATION_COUNT[11] = _RELATIONS_BY_MIGRATION_COUNT[10]
 
 
 class BindingRefused(Exception):

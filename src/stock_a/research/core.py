@@ -25,6 +25,8 @@ class CoreObservation:
     close: FieldValue | None = None
     amount: FieldValue | None = None
     volume: FieldValue | None = None
+    native_amount: FieldValue | None = None
+    native_volume: FieldValue | None = None
 
 
 @dataclass(frozen=True)
@@ -82,6 +84,17 @@ def _validate_history(
                 for name in (*_PRICE_FIELDS, "amount", "volume")
             ):
                 raise ContractError("actual bar的价格、金额和数量必须显式携带质量")
+            if any(
+                value is not None and not isinstance(value, FieldValue)
+                for value in (row.native_amount, row.native_volume)
+            ):
+                raise ContractError("原生金额和数量必须显式携带质量")
+    for name in ("native_amount", "native_volume"):
+        supplied = [
+            getattr(row, name) is not None for row in history if row.state == "ACTUAL"
+        ]
+        if any(supplied) and not all(supplied):
+            raise ContractError("原生量额字段必须覆盖全部actual输入或全部缺省")
     if any(left.session >= right.session for left, right in zip(history, history[1:])):
         raise ContractError("Core会话必须唯一且按日期严格递增")
     supplied = tuple(row.session for row in history)
@@ -409,15 +422,21 @@ def calculate_core(
 
     # Ratios use current raw value over the strict prior-N actual-bar mean.
     for name in ("amount", "volume"):
+        native_name = f"native_{name}"
+        ratio_input = (
+            native_name
+            if any(getattr(row, native_name) is not None for row in history)
+            else name
+        )
         for period in (5, 20):
             prior, reason = _actual_window(history, period, exclude_current=True)
             prior_values, value_reason = (
-                _numeric_column(prior, name, nonnegative=True)
+                _numeric_column(prior, ratio_input, nonnegative=True)
                 if not reason
                 else (None, reason)
             )
             current, current_reason = _number(
-                getattr(latest, name), f"DATA_INVALID_{name.upper()}"
+                getattr(latest, ratio_input), f"DATA_INVALID_{name.upper()}"
             )
             reason = reason or value_reason or current_reason
             if not reason and current < 0:

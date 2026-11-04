@@ -158,6 +158,20 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
 def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config()
     try:
+        if args.action != "query" and any(
+            value is not None
+            for value in (
+                args.amount_ratio20_min,
+                args.amount_ratio20_max,
+                args.volume_ratio20_min,
+                args.volume_ratio20_max,
+            )
+        ):
+            raise DiagnosticError(
+                "PROFILE_RATIO_FILTER_ACTION_INVALID",
+                "原生量额比值上下界仅适用于画像query",
+                _EXIT_ARGUMENT,
+            )
         max_target_session = _parse_source_set_date(args.research_cutoff)
         if args.action == "snapshots":
             result = source_symbol_price_profile_snapshots(
@@ -226,6 +240,10 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 core_quality=args.core_quality,
                 price_damage_state=args.price_damage_state,
                 ma_slope20_sign=args.ma_slope20_sign,
+                amount_ratio20_min=args.amount_ratio20_min,
+                amount_ratio20_max=args.amount_ratio20_max,
+                volume_ratio20_min=args.volume_ratio20_min,
+                volume_ratio20_max=args.volume_ratio20_max,
             )
         else:
             if not all(

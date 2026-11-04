@@ -40,7 +40,7 @@ from stock_a.storage.postgres.source_raw import (
 
 SOURCE_SYMBOL_PROFILE_SCOPE = "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE"
 _PRODUCER_CONTRACT = "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1"
-_PRODUCER_SEMANTICS_VERSION = "CORE43_PROFILE11_SOURCE_SYMBOL_R2"
+_PRODUCER_SEMANTICS_VERSION = "CORE43_PROFILE11_SOURCE_SYMBOL_R4_NATIVE_RATIO_WIRED"
 _FIELD_SEMANTIC_KEYS = (
     "field_id",
     "producer_stage",
@@ -74,6 +74,10 @@ _CORE_FIELDS = {
     "core.pos60": "pos60",
     "core.bias20_atr": "bias20_atr",
     "core.ma_slope20_atr": "ma_slope20_atr",
+    "core.amount_ratio5": "amount_ratio5",
+    "core.amount_ratio20": "amount_ratio20",
+    "core.volume_ratio5": "volume_ratio5",
+    "core.volume_ratio20": "volume_ratio20",
 }
 _CORE_BOOLEAN_FIELDS = {"core.price_damage": "price_damage"}
 _HISTORY_HASH_FIELDS = (

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from decimal import Decimal
+
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
     SOURCE_SYMBOL_PROFILE_SCOPE,
@@ -232,6 +234,10 @@ def register_commands(commands):
             "core.bias20_atr",
             "core.ma_slope20_atr",
             "core.price_damage",
+            "core.amount_ratio5",
+            "core.amount_ratio20",
+            "core.volume_ratio5",
+            "core.volume_ratio20",
         ),
         help="可选Core价格字段质量筛选",
     )
@@ -252,6 +258,13 @@ def register_commands(commands):
         default="ALL",
         help="按Core MA20/ATR斜率的精确符号筛选",
     )
+    for argument, help_text in (
+        ("--amount-ratio20-min", "原生金额比值下界，含边界，非负有限Decimal"),
+        ("--amount-ratio20-max", "原生金额比值上界，含边界，非负有限Decimal"),
+        ("--volume-ratio20-min", "原生数量比值下界，含边界，非负有限Decimal"),
+        ("--volume-ratio20-max", "原生数量比值上界，含边界，非负有限Decimal"),
+    ):
+        price_profile.add_argument(argument, type=Decimal, help=help_text)
     price_profile.add_argument("--offset", type=int, default=0, help="查询偏移，默认0")
     price_profile.add_argument(
         "--limit", type=int, default=30, help="查询页大小，默认30；changes最多30"

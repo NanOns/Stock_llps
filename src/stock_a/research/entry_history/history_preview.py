@@ -173,6 +173,8 @@ def research_stock_pg_history_preview(
                     close=decoded.raw_close,
                     amount=decoded.amount,
                     volume=decoded.volume,
+                    native_amount=decoded.raw_amount,
+                    native_volume=decoded.raw_volume,
                 )
             )
         elif state in {"TARGET_MISSING", "READ_FAILED"}:

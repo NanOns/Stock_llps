@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
 import re
+from fractions import Fraction
 from typing import Any, Mapping, Sequence
 from uuid import UUID
 
@@ -29,6 +30,10 @@ _CORE_COLUMN_NAMES = (
     "pos60",
     "bias20_atr",
     "ma_slope20_atr",
+    "amount_ratio5",
+    "amount_ratio20",
+    "volume_ratio5",
+    "volume_ratio20",
 )
 _PROFILE_COLUMNS = (
     "namespace_id",
@@ -523,6 +528,15 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
             ):
                 raise PriceProfilePgError(
                     "PROFILE_CORE_VALUE_INVALID", "已观测Core值与原因不一致"
+                )
+            if name in {
+                "amount_ratio5",
+                "amount_ratio20",
+                "volume_ratio5",
+                "volume_ratio20",
+            } and (value < 0 or numerator < 0):
+                raise PriceProfilePgError(
+                    "PROFILE_CORE_VALUE_INVALID", "原生量额比值必须为非负精确数值"
                 )
         elif (
             value is not None
@@ -4298,6 +4312,10 @@ def read_profile_page(
     core_quality: str | None = None,
     price_damage_state: str = "ALL",
     ma_slope20_sign: str = "ALL",
+    amount_ratio20_min: Decimal | str | None = None,
+    amount_ratio20_max: Decimal | str | None = None,
+    volume_ratio20_min: Decimal | str | None = None,
+    volume_ratio20_max: Decimal | str | None = None,
     profile_field_id: str | None = None,
     profile_quality: str | None = None,
     profile_status: str | None = None,
@@ -4371,6 +4389,41 @@ def read_profile_page(
             "PROFILE_FILTER_INVALID",
             "MA20斜率筛选值必须为ALL、POSITIVE、ZERO、NEGATIVE或UNKNOWN",
         )
+
+    def ratio_bound(value: Decimal | str | None, field: str) -> Fraction | None:
+        if value is None:
+            return None
+        if isinstance(value, bool) or not isinstance(value, (Decimal, str)):
+            raise PriceProfilePgError(
+                "PROFILE_FILTER_INVALID", f"{field}必须是非负有限Decimal"
+            )
+        try:
+            decimal_value = value if isinstance(value, Decimal) else Decimal(value)
+        except (InvalidOperation, TypeError, ValueError) as error:
+            raise PriceProfilePgError(
+                "PROFILE_FILTER_INVALID", f"{field}必须是非负有限Decimal"
+            ) from error
+        if not decimal_value.is_finite() or decimal_value < 0:
+            raise PriceProfilePgError(
+                "PROFILE_FILTER_INVALID", f"{field}必须是非负有限Decimal"
+            )
+        return Fraction(decimal_value)
+
+    ratio_bounds = {
+        "amount_ratio20": (
+            ratio_bound(amount_ratio20_min, "amount_ratio20_min"),
+            ratio_bound(amount_ratio20_max, "amount_ratio20_max"),
+        ),
+        "volume_ratio20": (
+            ratio_bound(volume_ratio20_min, "volume_ratio20_min"),
+            ratio_bound(volume_ratio20_max, "volume_ratio20_max"),
+        ),
+    }
+    for field, (minimum, maximum) in ratio_bounds.items():
+        if minimum is not None and maximum is not None and minimum > maximum:
+            raise PriceProfilePgError(
+                "PROFILE_FILTER_INVALID", f"{field}下界不得大于上界"
+            )
     if (core_field is None) != (core_quality is None):
         raise PriceProfilePgError(
             "PROFILE_FILTER_INVALID", "Core质量筛选必须同时指定字段和质量"
@@ -4487,6 +4540,21 @@ def read_profile_page(
             ma_slope20_sign
         ]
         conditions.append(f"p.ma_slope20_atr_exact_numerator {sign_operator}")
+    for field, (minimum, maximum) in ratio_bounds.items():
+        for bound, operator in ((minimum, ">="), (maximum, "<=")):
+            if bound is None:
+                continue
+            conditions.extend(
+                [
+                    f"p.{field}_quality='OBSERVED'",
+                    f"p.{field}_exact_numerator IS NOT NULL",
+                    f"p.{field}_exact_denominator > 0",
+                    f"p.{field}_exact_numerator * %s::numeric {operator} "
+                    "%s::numeric * p."
+                    f"{field}_exact_denominator",
+                ]
+            )
+            parameters.extend((bound.denominator, bound.numerator))
     if profile_quality is not None:
         conditions.append(
             "p.profile_qualities[array_position(p.profile_field_ids,%s)]=%s"
@@ -4742,6 +4810,25 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
             row["price_damage_computation_status"] = (
                 "NOT_COMPUTED_FOR_REVISION" if damage_uncomputed else "COMPUTED"
             )
+            for field in (
+                "amount_ratio5",
+                "amount_ratio20",
+                "volume_ratio5",
+                "volume_ratio20",
+            ):
+                ratio_uncomputed = all(
+                    row.get(column) is None
+                    for column in (
+                        field,
+                        f"{field}_exact_numerator",
+                        f"{field}_exact_denominator",
+                        f"{field}_quality",
+                        f"{field}_reason",
+                    )
+                )
+                row[f"{field}_computation_status"] = (
+                    "NOT_COMPUTED_FOR_REVISION" if ratio_uncomputed else "COMPUTED"
+                )
             positions: dict[str, Any] = {}
             for field, definition in _PRICE_POSITION_QUERY_FIELDS.items():
                 left_field = definition["left_field"]
@@ -4799,6 +4886,18 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         "profile_revision": profile_revision,
         "source_set_revision": int(source_set[1]),
         "source_pool_total": snapshot_total,
+        "ratio_metadata": {
+            "basis": "TDX_NATIVE_SAME_PACKAGE_SCALE_INVARIANT",
+            "absolute_amount_unit_status": "UNIT_UNVERIFIED",
+            "absolute_volume_unit_status": "UNIT_UNVERIFIED",
+        },
+        "ratio_filters": {
+            field: {
+                "minimum": str(minimum) if minimum is not None else None,
+                "maximum": str(maximum) if maximum is not None else None,
+            }
+            for field, (minimum, maximum) in ratio_bounds.items()
+        },
         "bias20_atr_band": bias20_atr_band,
         "bias20_atr_band_definition": _BIAS20_ATR_BAND_DEFINITIONS[bias20_atr_band],
         "history_window": {
@@ -4828,6 +4927,7 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         "rows": rows,
         "execution": {
             "sql_pagination": True,
+            "ratio_filter": "POSTGRES_EXACT_FRACTION_CROSS_MULTIPLICATION",
             "price_position_filter": "POSTGRES_NUMERIC",
             "bias20_atr_filter": "POSTGRES_EXACT_NUMERIC_CROSS_MULTIPLICATION",
             "bias20_atr_filter_scope": "COMPLETE_SEALED_SOURCE_PROFILE_SET",

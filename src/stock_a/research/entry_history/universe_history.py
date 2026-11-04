@@ -107,6 +107,10 @@ def research_universe_pg_history_preview(
                 "core.pos60",
                 "core.bias20_atr",
                 "core.ma_slope20_atr",
+                "core.amount_ratio5",
+                "core.amount_ratio20",
+                "core.volume_ratio5",
+                "core.volume_ratio20",
                 "core.price_damage",
             )
             row_dates = {
@@ -257,6 +261,10 @@ def research_universe_pg_history_preview(
                 "core.pos60",
                 "core.bias20_atr",
                 "core.ma_slope20_atr",
+                "core.amount_ratio5",
+                "core.amount_ratio20",
+                "core.volume_ratio5",
+                "core.volume_ratio20",
                 "core.price_damage",
             )
             if name in fields
