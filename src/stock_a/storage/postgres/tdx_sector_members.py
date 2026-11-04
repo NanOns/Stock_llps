@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 from collections import Counter
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from fractions import Fraction
 import re
-from typing import Any, Iterable, Mapping, Sequence
+from typing import Any, Iterable, Iterator, Mapping, Sequence
 import uuid
 
 from stock_a.sources.tdx.sector_members import (
@@ -65,6 +67,212 @@ class TdxSectorMembersPgError(ValueError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+@dataclass
+class TdxSectorStrengthReadContext:
+    """单次请求内共享只读快照及精确来源价格读取结果。"""
+
+    connection: Any
+    cursor: Any
+    namespace_id: str
+    active: bool = True
+    validated_source_sets: dict[tuple[Any, ...], dict[str, Any]] = field(
+        default_factory=dict
+    )
+    validated_profile_snapshots: dict[tuple[Any, ...], dict[str, Any]] = field(
+        default_factory=dict
+    )
+    strength_input_cache: dict[tuple[Any, ...], dict[str, Any]] = field(
+        default_factory=dict
+    )
+
+
+@contextmanager
+def tdx_sector_strength_read_context(
+    config: dict[str, Any],
+) -> Iterator[TdxSectorStrengthReadContext]:
+    """为一次多板块查询持有同一个REPEATABLE READ READ ONLY事务。"""
+    with _transaction(config, write=False) as (connection, cursor, namespace_id):
+        context = TdxSectorStrengthReadContext(
+            connection=connection,
+            cursor=cursor,
+            namespace_id=namespace_id,
+        )
+        try:
+            yield context
+        finally:
+            context.active = False
+
+
+def _read_strength_inputs(
+    cursor: Any,
+    *,
+    namespace_id: str,
+    source_set_id: str,
+    source_capture_id: str,
+    package_sha256: str,
+    target_session: date,
+    profile_revision: str,
+    official_calendar_id: str,
+    official_calendar_revision: str,
+    window_sessions: Sequence[date],
+    symbols: Sequence[str],
+    read_context: TdxSectorStrengthReadContext | None,
+) -> tuple[
+    list[dict[str, Any]],
+    dict[tuple[str, date], dict[str, int]],
+    list[dict[str, Any]],
+    dict[str, int],
+]:
+    """读取或在同一事务内复用精确来源键的成员历史。"""
+    ordered_symbols = tuple(sorted(set(symbols)))
+    cache_key = (
+        namespace_id,
+        source_set_id,
+        source_capture_id,
+        package_sha256,
+        target_session,
+        profile_revision,
+        official_calendar_id,
+        official_calendar_revision,
+        tuple(window_sessions),
+    )
+    cache = (
+        read_context.strength_input_cache.setdefault(
+            cache_key,
+            {
+                "profile_loaded_symbols": set(),
+                "profiles_by_symbol": {},
+                "revision_loaded_symbols": set(),
+                "revision_counts_by_symbol": {},
+                "raw_loaded_symbols": set(),
+                "raw_rows_by_symbol": {},
+            },
+        )
+        if read_context is not None
+        else {
+            "profile_loaded_symbols": set(),
+            "profiles_by_symbol": {},
+            "revision_loaded_symbols": set(),
+            "revision_counts_by_symbol": {},
+            "raw_loaded_symbols": set(),
+            "raw_rows_by_symbol": {},
+        }
+    )
+    fetched = {
+        "profile_rows": 0,
+        "revision_groups": 0,
+        "raw_rows": 0,
+        "profile_queries": 0,
+        "revision_queries": 0,
+        "raw_queries": 0,
+    }
+
+    missing_profile_symbols = [
+        symbol
+        for symbol in ordered_symbols
+        if symbol not in cache["profile_loaded_symbols"]
+    ]
+    if missing_profile_symbols:
+        fetched["profile_queries"] = 1
+        cursor.execute(
+            """SELECT p.source_symbol, p.source_capture_id::text,
+       p.price_coordinate, p.calculation_scope, p.producer_contract,
+       p.producer_version, p.producer_contract_sha256::text,
+       p.ret20::text, p.ret20_exact_numerator::text,
+       p.ret20_exact_denominator::text, p.ret20_quality, p.ret20_reason
+FROM stock.source_symbol_price_profiles p
+WHERE p.namespace_id=%s::uuid AND p.source_set_id=%s::uuid
+  AND p.target_session=%s::date AND p.package_sha256=%s
+  AND p.profile_revision=%s AND p.source_symbol=ANY(%s)
+ORDER BY p.source_symbol COLLATE "C" """,
+            (
+                namespace_id,
+                source_set_id,
+                target_session,
+                package_sha256,
+                profile_revision,
+                list(missing_profile_symbols),
+            ),
+        )
+        profile_columns = [item.name for item in cursor.description]
+        profile_records = [
+            dict(zip(profile_columns, row, strict=True)) for row in cursor.fetchall()
+        ]
+        fetched["profile_rows"] = len(profile_records)
+        for row in profile_records:
+            cache["profiles_by_symbol"].setdefault(
+                str(row["source_symbol"]), []
+            ).append(row)
+        cache["profile_loaded_symbols"].update(missing_profile_symbols)
+    profile_rows = [
+        dict(row)
+        for symbol in ordered_symbols
+        for row in cache["profiles_by_symbol"].get(symbol, ())
+    ]
+
+    missing_revision_symbols = [
+        symbol
+        for symbol in ordered_symbols
+        if symbol not in cache["revision_loaded_symbols"]
+    ]
+    if missing_revision_symbols:
+        fetched["revision_queries"] = 1
+        cursor.execute(
+            """SELECT source_symbol, session_date,
+       count(*)::bigint, count(DISTINCT package_sha256)::bigint,
+       count(DISTINCT source_capture_id)::bigint
+FROM stock.source_raw_daily
+WHERE namespace_id=%s::uuid AND source_symbol=ANY(%s)
+  AND session_date=ANY(%s::date[])
+GROUP BY source_symbol, session_date""",
+            (namespace_id, list(missing_revision_symbols), list(window_sessions)),
+        )
+        revision_rows = cursor.fetchall()
+        fetched["revision_groups"] = len(revision_rows)
+        for row in revision_rows:
+            symbol = str(row[0])
+            cache["revision_counts_by_symbol"].setdefault(symbol, {})[row[1]] = {
+                "row_count": int(row[2]),
+                "package_count": int(row[3]),
+                "capture_count": int(row[4]),
+            }
+        cache["revision_loaded_symbols"].update(missing_revision_symbols)
+    revision_counts = {
+        (symbol, session): dict(counts)
+        for symbol in ordered_symbols
+        for session, counts in cache["revision_counts_by_symbol"]
+        .get(symbol, {})
+        .items()
+    }
+
+    missing_raw_symbols = [
+        symbol
+        for symbol in ordered_symbols
+        if symbol not in cache["raw_loaded_symbols"]
+    ]
+    if missing_raw_symbols:
+        fetched["raw_queries"] = 1
+        fetched_rows = _read_history_rows(
+            cursor,
+            namespace_id=namespace_id,
+            source_symbols=missing_raw_symbols,
+            sessions=window_sessions,
+            package_sha256=package_sha256,
+        )
+        fetched["raw_rows"] = len(fetched_rows)
+        for row in fetched_rows:
+            cache["raw_rows_by_symbol"].setdefault(
+                str(row["source_symbol"]), []
+            ).append(row)
+        cache["raw_loaded_symbols"].update(missing_raw_symbols)
+    raw_rows = [
+        dict(row)
+        for symbol in ordered_symbols
+        for row in cache["raw_rows_by_symbol"].get(symbol, ())
+    ]
+    return profile_rows, revision_counts, raw_rows, fetched
 
 
 def _snapshot_key(snapshot: SectorSourceSnapshot) -> str:
@@ -2353,6 +2561,7 @@ def query_sector_strength(
     official_calendar_id: str,
     official_calendar_revision: str,
     window_sessions: Sequence[date],
+    read_context: TdxSectorStrengthReadContext | None = None,
 ) -> dict[str, Any]:
     """在一个只读快照中读取精确板块、目标P03与同包Raw历史。"""
     _validate_snapshot_uuid(snapshot_id)
@@ -2400,8 +2609,27 @@ def query_sector_strength(
             "必须绑定有序官方会话窗、日历身份及研究截止日",
         )
 
+    if read_context is not None and (
+        not isinstance(read_context, TdxSectorStrengthReadContext)
+        or not read_context.active
+    ):
+        raise TdxSectorMembersPgError(
+            "STRENGTH_READ_CONTEXT_INVALID",
+            "共享板块读取上下文必须来自仍开启的只读事务",
+        )
+    transaction_context = (
+        nullcontext(
+            (
+                read_context.connection,
+                read_context.cursor,
+                read_context.namespace_id,
+            )
+        )
+        if read_context is not None
+        else _transaction(config, write=False)
+    )
     try:
-        with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        with transaction_context as (_connection, cursor, namespace_id):
             cursor.execute(
                 """SELECT snapshot_id::text, source_kind, source_file_sha256,
        source_path_role, source_file_size, observed_at, source_valid_on,
@@ -2453,18 +2681,39 @@ ORDER BY profile_revision""",
                     "精确目标P03来源集合中不存在指定画像修订",
                 )
 
-            try:
-                profile_snapshot = _snapshot_for_session(
-                    cursor,
-                    namespace_id=namespace_id,
-                    target_session=target_session,
-                    max_target_session=research_cutoff,
-                    source_set_id=source_set_id,
-                    package_sha256=package_sha256,
-                    profile_revision=selected_profile,
-                )
-            except PriceProfilePgError as error:
-                raise TdxSectorMembersPgError(error.code, str(error)) from error
+            validation_key = (
+                namespace_id,
+                source_set_id,
+                package_sha256,
+                target_session,
+                research_cutoff,
+                selected_profile,
+                official_calendar_id,
+                official_calendar_revision,
+                tuple(window_sessions),
+            )
+            profile_snapshot = (
+                read_context.validated_profile_snapshots.get(validation_key)
+                if read_context is not None
+                else None
+            )
+            if profile_snapshot is None:
+                try:
+                    profile_snapshot = _snapshot_for_session(
+                        cursor,
+                        namespace_id=namespace_id,
+                        target_session=target_session,
+                        max_target_session=research_cutoff,
+                        source_set_id=source_set_id,
+                        package_sha256=package_sha256,
+                        profile_revision=selected_profile,
+                    )
+                except PriceProfilePgError as error:
+                    raise TdxSectorMembersPgError(error.code, str(error)) from error
+                if read_context is not None:
+                    read_context.validated_profile_snapshots[validation_key] = (
+                        profile_snapshot
+                    )
             if (
                 profile_snapshot["history_calendar_id"] != official_calendar_id
                 or profile_snapshot["history_calendar_revision"]
@@ -2474,14 +2723,22 @@ ORDER BY profile_revision""",
                     "PROFILE_CALENDAR_IDENTITY_MISMATCH",
                     "目标Core画像绑定的官方日历身份或修订与现行官方日历不一致",
                 )
-            source_set = _breadth_source_set(
-                cursor,
-                namespace_id=namespace_id,
-                target_session=target_session,
-                source_set_id=source_set_id,
-                package_sha256=package_sha256,
-                profile_revision=selected_profile,
+            source_set = (
+                read_context.validated_source_sets.get(validation_key)
+                if read_context is not None
+                else None
             )
+            if source_set is None:
+                source_set = _breadth_source_set(
+                    cursor,
+                    namespace_id=namespace_id,
+                    target_session=target_session,
+                    source_set_id=source_set_id,
+                    package_sha256=package_sha256,
+                    profile_revision=selected_profile,
+                )
+                if read_context is not None:
+                    read_context.validated_source_sets[validation_key] = source_set
 
             board_filter_sql = ""
             board_filter_params: tuple[Any, ...] = ()
@@ -2556,68 +2813,46 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
                     "STRENGTH_HISTORY_BUDGET_EXCEEDED",
                     "板块成员乘官方会话窗超过固定Raw历史读取预算",
                 )
-            profile_rows: list[dict[str, Any]] = []
-            raw_rows: list[dict[str, Any]] = []
-            revision_counts: dict[tuple[str, date], dict[str, int]] = {}
             if symbols:
-                ordered_symbols = sorted(symbols)
-                cursor.execute(
-                    """SELECT p.source_symbol, p.source_capture_id::text,
-       p.price_coordinate, p.calculation_scope, p.producer_contract,
-       p.producer_version, p.producer_contract_sha256::text,
-       p.ret20::text, p.ret20_exact_numerator::text,
-       p.ret20_exact_denominator::text, p.ret20_quality, p.ret20_reason
-FROM stock.source_symbol_price_profiles p
-WHERE p.namespace_id=%s::uuid AND p.source_set_id=%s::uuid
-  AND p.target_session=%s::date AND p.package_sha256=%s
-  AND p.profile_revision=%s AND p.source_symbol=ANY(%s)
-ORDER BY p.source_symbol COLLATE "C" """,
-                    (
-                        namespace_id,
-                        source_set_id,
-                        target_session,
-                        package_sha256,
-                        selected_profile,
-                        ordered_symbols,
-                    ),
+                (
+                    profile_rows,
+                    revision_counts,
+                    raw_rows,
+                    input_read_counts,
+                ) = _read_strength_inputs(
+                    cursor,
+                    namespace_id=namespace_id,
+                    source_set_id=source_set_id,
+                    source_capture_id=source_set["source_capture_id"],
+                    package_sha256=package_sha256,
+                    target_session=target_session,
+                    profile_revision=selected_profile,
+                    official_calendar_id=official_calendar_id,
+                    official_calendar_revision=official_calendar_revision,
+                    window_sessions=window_sessions,
+                    symbols=tuple(sorted(symbols)),
+                    read_context=read_context,
                 )
-                profile_columns = [item.name for item in cursor.description]
-                profile_rows = [
-                    dict(zip(profile_columns, row, strict=True))
-                    for row in cursor.fetchall()
-                ]
-                cursor.execute(
-                    """SELECT source_symbol, session_date,
-       count(*)::bigint, count(DISTINCT package_sha256)::bigint,
-       count(DISTINCT source_capture_id)::bigint
-FROM stock.source_raw_daily
-WHERE namespace_id=%s::uuid AND source_symbol=ANY(%s)
-  AND session_date=ANY(%s::date[])
-GROUP BY source_symbol, session_date""",
-                    (namespace_id, ordered_symbols, list(window_sessions)),
+                revision_total = sum(
+                    counts["row_count"] for counts in revision_counts.values()
                 )
-                revision_rows = cursor.fetchall()
-                revision_total = sum(int(row[2]) for row in revision_rows)
                 if revision_total > MAX_STRENGTH_HISTORY_ROWS:
                     raise TdxSectorMembersPgError(
                         "STRENGTH_HISTORY_BUDGET_EXCEEDED",
                         "所选成员官方会话窗的Raw修订总行数超过固定只读预算",
                     )
-                revision_counts = {
-                    (str(row[0]), row[1]): {
-                        "row_count": int(row[2]),
-                        "package_count": int(row[3]),
-                        "capture_count": int(row[4]),
-                    }
-                    for row in revision_rows
+            else:
+                profile_rows = []
+                raw_rows = []
+                revision_counts = {}
+                input_read_counts = {
+                    "profile_rows": 0,
+                    "revision_groups": 0,
+                    "raw_rows": 0,
+                    "profile_queries": 0,
+                    "revision_queries": 0,
+                    "raw_queries": 0,
                 }
-                raw_rows = _read_history_rows(
-                    cursor,
-                    namespace_id=namespace_id,
-                    source_symbols=ordered_symbols,
-                    sessions=window_sessions,
-                    package_sha256=package_sha256,
-                )
             profile_capture_ids = {
                 str(row["source_capture_id"]) for row in profile_rows
             }
@@ -2684,6 +2919,19 @@ GROUP BY source_symbol, session_date""",
             "source_raw_rows_read": len(raw_rows),
             "raw_revision_groups_read": len(revision_counts),
             "profile_rows_read": len(profile_rows),
+            "source_raw_rows_fetched_this_call": input_read_counts["raw_rows"],
+            "source_raw_rows_reused_within_request": (
+                len(raw_rows) - input_read_counts["raw_rows"]
+            ),
+            "raw_revision_groups_fetched_this_call": input_read_counts[
+                "revision_groups"
+            ],
+            "profile_rows_fetched_this_call": input_read_counts["profile_rows"],
+            "strength_input_queries_executed": {
+                "profile": input_read_counts["profile_queries"],
+                "raw_revision_groups": input_read_counts["revision_queries"],
+                "raw_history": input_read_counts["raw_queries"],
+            },
             "database_write_attempted": False,
             "dml_executed": False,
             "dml_rows_affected": 0,

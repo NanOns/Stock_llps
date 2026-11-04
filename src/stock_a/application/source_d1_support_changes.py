@@ -9,14 +9,15 @@ from stock_a.application.pg_research import (
     PgResearchBindingError,
     read_sealed_source_context,
 )
-from stock_a.application.runtime_config import _CONFIG_ROOT
 from stock_a.application.source_set_candidate import _official_calendar
-from stock_a.contracts import load_day_chain_contract
 from stock_a.research.entry import (
     classify_source_support_change,
-    research_stock_pg_history_preview,
     research_stock_pg_support_followup_preview,
     select_source_support_change_page,
+)
+from stock_a.research.entry_history.history_preview import (
+    prepare_source_d1_preview_context,
+    research_stock_pg_d1_history_previews,
 )
 from stock_a.storage.postgres.source_raw import read_raw_daily_history_page
 
@@ -56,6 +57,7 @@ def discover_source_d1_support_changes(
         day for day in sessions if event_window_start <= day < target
     )
     analysis_sessions = tuple(day for day in sessions if day >= event_window_start)
+    preview_context = prepare_source_d1_preview_context(analysis_sessions)
     previous_session = sessions[sessions.index(target) - 1]
     official_calendar = _official_calendar(target)
     calendar_component = f"{target.year}:{official_calendar.get('calendar_revision')}"
@@ -65,7 +67,6 @@ def discover_source_d1_support_changes(
             "历史窗口与SEALED来源绑定的官方日历修订不一致",
         )
 
-    profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
     per_session_counts = {
         day.isoformat(): {
             "TRUE": 0,
@@ -94,6 +95,8 @@ def discover_source_d1_support_changes(
     source_offset = 0
     source_page_count = 0
     history_preview_count = 0
+    history_preview_batch_count = 0
+    history_row_decode_count = 0
     raw_d1_event_count = 0
     support_requested_sessions = 0
     symbol_details: dict[str, dict[str, Any]] = {}
@@ -229,28 +232,23 @@ def discover_source_d1_support_changes(
             symbol = candidate["source_symbol"]
             rows = candidate["history_rows"]
             rows_by_session = {row["session_date"]: row for row in rows}
-            previews_by_session: dict[date, dict[str, Any]] = {}
-            for day in analysis_sessions:
-                bounded_rows = tuple(row for row in rows if row["session_date"] <= day)
-                present = {row["session_date"] for row in bounded_rows}
-                prefix_sessions = tuple(
-                    session for session in sessions if session <= day
-                )
-                preview = research_stock_pg_history_preview(
-                    symbol=symbol,
-                    target_session=day.isoformat(),
-                    package_sha256=package_sha256,
-                    session_dates=prefix_sessions,
-                    history_rows=bounded_rows,
-                    missing_history_sessions=tuple(
-                        session for session in prefix_sessions if session not in present
-                    ),
-                    namespace_id=source_context["namespace_id"],
-                    profile_contract=profile_contract,
-                    include_profile_preview=False,
-                    include_raw_breakout=True,
-                    allow_missing_target_row=True,
-                )
+            previews_by_session = research_stock_pg_d1_history_previews(
+                symbol=symbol,
+                event_sessions=event_sessions,
+                followup_session=target,
+                session_dates=sessions,
+                package_sha256=package_sha256,
+                history_rows=rows,
+                namespace_id=source_context["namespace_id"],
+                context=preview_context,
+            )
+            history_preview_batch_count += 1
+            history_preview_count += len(previews_by_session)
+            history_row_decode_count += sum(
+                row.get("bar_status") == "TARGET_PRESENT" for row in rows
+            )
+            for day in event_sessions:
+                preview = previews_by_session[day]
                 predicate = preview.get("raw_d1_breakout_predicate")
                 if (
                     preview.get("symbol") != symbol
@@ -270,8 +268,6 @@ def discover_source_d1_support_changes(
                         "D1_SUPPORT_DISCOVERY_PREVIEW_INVALID",
                         "历史Core/ALG-29预览缺失或身份、坐标、截止日不一致",
                     )
-                previews_by_session[day] = preview
-                history_preview_count += 1
 
             symbol_true_events = []
             for day in event_sessions:
@@ -610,6 +606,11 @@ def discover_source_d1_support_changes(
             "raw_history_batch_reads": source_page_count,
             "raw_d1_candidates_evaluated": len(seen_symbols) * len(event_sessions),
             "cached_core_previews_evaluated": history_preview_count,
+            "d1_core_preview_batches_evaluated": history_preview_batch_count,
+            "full_core_preview_calls_evaluated": 0,
+            "d1_core_input_evaluations": history_preview_count,
+            "source_history_rows_decoded_once": history_row_decode_count,
+            "preview_calendar_resources_loaded": len(preview_context.calendars_by_year),
             "support_followups_evaluated": raw_d1_event_count,
             "support_requested_sessions": support_requested_sessions,
         },

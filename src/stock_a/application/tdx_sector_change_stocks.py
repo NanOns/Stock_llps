@@ -697,14 +697,24 @@ def combine_sector_strength_and_d1_changes(
     stock_offset: int = 0,
     stock_limit: int = 30,
     d0_launch_changes: Mapping[str, Any] | None = None,
+    d0_new_only: bool = False,
 ) -> dict[str, Any]:
     """先联接完整来源集合，再过滤、排序及分页板块和板内股票。"""
     if (
         not isinstance(strength_results, (list, tuple))
         or not strength_results
         or type(changed_only) is not bool
-        or sort_by not in {"changed_stocks", "delta20", "delta5", "ret20", "ret5"}
+        or sort_by
+        not in {
+            "changed_stocks",
+            "delta20",
+            "delta5",
+            "ret20",
+            "ret5",
+            "d0_launch_new",
+        }
         or direction not in {"STRONGER", "WEAKER"}
+        or type(d0_new_only) is not bool
         or type(offset) is not int
         or offset < 0
         or type(limit) is not int
@@ -730,6 +740,16 @@ def combine_sector_strength_and_d1_changes(
     ):
         raise TdxSectorMembersApplicationError(
             "SECTOR_CHANGE_PAGE_INVALID", "行业概念联动筛选、排序或分页参数无效"
+        )
+    if sort_by == "d0_launch_new" and d0_launch_changes is None:
+        raise TdxSectorMembersApplicationError(
+            "D0_NEW_SORT_REQUIRES_LINKAGE",
+            "按D0新增启动成员数排序必须启用并提供完整D0联动",
+        )
+    if d0_new_only and d0_launch_changes is None:
+        raise TdxSectorMembersApplicationError(
+            "D0_NEW_FILTER_REQUIRES_LINKAGE",
+            "仅看D0新增启动板块必须启用并提供完整D0联动",
         )
     if board_kind_filter not in {None, "INDUSTRY", "CONCEPT"}:
         raise TdxSectorMembersApplicationError(
@@ -989,6 +1009,13 @@ def combine_sector_strength_and_d1_changes(
     def sort_key(row: Mapping[str, Any]) -> tuple[Any, ...]:
         if sort_by == "changed_stocks":
             value = row["d1_link"]["changed_member_count"]
+        elif sort_by == "d0_launch_new":
+            value = row.get("d0_launch_new_member_count")
+            if type(value) is not int or value < 0:
+                raise TdxSectorMembersApplicationError(
+                    "D0_NEW_BOARD_COUNT_INVALID",
+                    "完整D0联动缺少板内新增启动成员计数",
+                )
         else:
             value = row["_exact_strength_values"][sort_by]
         if value is None:
@@ -1001,11 +1028,13 @@ def combine_sector_strength_and_d1_changes(
         )
 
     ordered = sorted(board_rows, key=sort_key)
-    filtered = (
-        [row for row in ordered if row["d1_link"]["changed_member_count"] > 0]
-        if changed_only
-        else ordered
-    )
+    filtered = ordered
+    if changed_only:
+        filtered = [
+            row for row in filtered if row["d1_link"]["changed_member_count"] > 0
+        ]
+    if d0_new_only:
+        filtered = [row for row in filtered if row["d0_launch_new_member_count"] > 0]
     board_page = filtered[offset : offset + limit]
     board_page_payload = [
         {key: value for key, value in row.items() if not key.startswith("_")}
@@ -1129,7 +1158,7 @@ def combine_sector_strength_and_d1_changes(
     result = {
         "status": "AVAILABLE"
         if board_page
-        else ("NO_MATCH" if changed_only else "EMPTY"),
+        else ("NO_MATCH" if changed_only or d0_new_only else "EMPTY"),
         "analysis_scope": "NON_PIT_RETROSPECTIVE_CURRENT_TDX_MEMBER_CORE_RETURN_WITH_D1_SUPPORT_CHANGE",
         "target_session": expected_identity["target_session"],
         "research_cutoff": expected_identity["research_cutoff"],
@@ -1187,6 +1216,7 @@ def combine_sector_strength_and_d1_changes(
             "changed_stocks_only": changed_only,
             "sort_by": sort_by,
             "direction": direction,
+            **({"d0_new_only": True} if d0_new_only else {}),
         },
         "page": {
             "offset": offset,

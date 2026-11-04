@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 import re
+from statistics import mean
 from typing import Any, Iterable, Mapping, Sequence
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 from stock_a.research.core import (
-    CORE_MAX_ACTUAL_LOOKBACK,
     CoreObservation,
     MarketSessionCalendar,
+    _actual_window,
+    _column,
+    _coordinate_error,
+    _extreme_column,
+    _known,
+    _known_ohlc_error,
+    _validate_history,
     calculate_core,
 )
 from stock_a.research.breakout import evaluate_raw_breakout_predicate
@@ -30,6 +38,391 @@ from stock_a.research.entry_core.profile_preview import (
 from stock_a.research.entry_context.sessions import _load_calendar, _parse_target
 from stock_a.research.entry_context.source_discovery import _normalize_symbol
 from stock_a.research.entry_history.support import _decoded_day_from_pg_raw
+
+
+@dataclass(frozen=True)
+class _SourceD1PreviewContext:
+    calendars_by_year: Mapping[
+        int,
+        tuple[
+            dict[str, Any],
+            tuple[dict[str, Any], ...],
+            str,
+            tuple[date, ...],
+        ],
+    ]
+    core_source_sha256: str
+
+
+def _calculate_core_d1_inputs(
+    history: Sequence[CoreObservation],
+    *,
+    official_calendar: MarketSessionCalendar,
+) -> dict[str, FieldValue]:
+    """复用现役Core原语，只生成ALG-29消费的三字段。"""
+    if not isinstance(official_calendar, MarketSessionCalendar):
+        raise ContractError("Core计算必须传入版本化官方市场会话日历")
+    _validate_history(history, official_calendar)
+    latest = history[-1]
+    if latest.state != "ACTUAL":
+        reason = {
+            "UNKNOWN": "CURRENT_SESSION_UNKNOWN",
+            "CONFIRMED_SUSPENSION": "CURRENT_SESSION_SUSPENDED",
+            "PRE_LISTING": "CURRENT_SESSION_PRE_LISTING",
+            "ADJUSTMENT_UNKNOWN": "PRICE_IDENTITY_UNKNOWN",
+            "IDENTITY_UNKNOWN": "SECURITY_IDENTITY_UNKNOWN",
+        }[latest.state]
+        return {
+            name: unknown(reason)
+            for name in ("core.prior_high20", "core.atr20", "core.clv")
+        }
+
+    prior_rows, prior_reason = _actual_window(history, 20, exclude_current=True)
+    prior_highs, high_reason = (
+        _extreme_column(prior_rows, "high")
+        if not prior_reason
+        else (None, prior_reason)
+    )
+    prior_high20 = _known(
+        max(prior_highs, default=None) if prior_highs else None,
+        prior_reason or high_reason,
+    )
+
+    rows, atr_reason = _actual_window(history, 21)
+    if not atr_reason:
+        atr_reason = _coordinate_error(rows)
+    if not atr_reason:
+        atr_reason = next(
+            (error for row in rows if (error := _known_ohlc_error(row))), None
+        )
+    if not atr_reason:
+        true_ranges = []
+        for previous, current in zip(rows, rows[1:]):
+            highs, high_reason = _extreme_column([current], "high")
+            lows, low_reason = _extreme_column([current], "low")
+            closes, close_reason = _column([previous], "close")
+            dependency_error = high_reason or low_reason or close_reason
+            if dependency_error:
+                atr_reason = dependency_error
+                break
+            cur_high, cur_low, prev_close = highs[0], lows[0], closes[0]
+            true_ranges.append(
+                max(
+                    cur_high - cur_low,
+                    abs(cur_high - prev_close),
+                    abs(cur_low - prev_close),
+                )
+            )
+    atr20 = _known(mean(true_ranges), None) if not atr_reason else unknown(atr_reason)
+
+    closes, close_reason = _column([latest], "close")
+    highs, high_reason = _extreme_column([latest], "high")
+    lows, low_reason = _extreme_column([latest], "low")
+    if closes and highs and lows:
+        high, low = highs[0], lows[0]
+        clv = (
+            unknown("ZERO_PRICE_RANGE")
+            if high == low
+            else FieldValue((closes[0] - low) / (high - low))
+        )
+    else:
+        clv = unknown(close_reason or high_reason or low_reason)
+    return {
+        "core.prior_high20": prior_high20,
+        "core.atr20": atr20,
+        "core.clv": clv,
+    }
+
+
+def prepare_source_d1_preview_context(
+    target_sessions: Sequence[date],
+) -> _SourceD1PreviewContext:
+    """为一次D1请求准备精确日历和Core来源身份，不跨请求缓存。"""
+    targets = tuple(target_sessions)
+    if (
+        not targets
+        or any(type(day) is not date for day in targets)
+        or tuple(sorted(set(targets))) != targets
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_CALENDAR_INVALID", "D1批量预览目标会话必须唯一且递增"
+        )
+    calendars_by_year = {
+        year: _load_calendar(next(day for day in targets if day.year == year))
+        for year in sorted({day.year for day in targets})
+    }
+    core_source_sha256 = _profile_preview_source_digest(
+        Path(__file__).resolve().parents[1] / "core.py", "calculate_core"
+    )
+    return _SourceD1PreviewContext(
+        calendars_by_year=calendars_by_year,
+        core_source_sha256=core_source_sha256,
+    )
+
+
+def _source_d1_preview_for_target(
+    *,
+    target: date,
+    sessions: tuple[date, ...],
+    normalized: str,
+    coordinate_id: str,
+    rows_by_session: Mapping[date, Mapping[str, Any]],
+    decoded_by_session: Mapping[date, DecodedDay],
+    observations_by_session: Mapping[date, CoreObservation],
+    context: _SourceD1PreviewContext,
+) -> dict[str, Any]:
+    expected_sessions = tuple(day for day in sessions if day <= target)
+    calendar_data = context.calendars_by_year.get(target.year)
+    if calendar_data is None:
+        raise ResearchEntryError(
+            "PG_HISTORY_CALENDAR_INVALID", "D1预览上下文缺少目标年度日历"
+        )
+    calendar_payload, calendar_metadata, calendar_revision, all_calendar_sessions = (
+        calendar_data
+    )
+    if (
+        not expected_sessions
+        or len(expected_sessions) > 75
+        or expected_sessions[-1] != target
+        or any(day not in all_calendar_sessions for day in expected_sessions)
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_CALENDAR_INVALID", "PG历史窗口未与版本化官方日历严格绑定"
+        )
+    official_window = tuple(
+        day for day in all_calendar_sessions if expected_sessions[0] <= day <= target
+    )
+    if expected_sessions != official_window:
+        raise ResearchEntryError(
+            "CALENDAR_SESSION_GAP", "PG历史窗口遗漏版本化官方日历中的交易会话"
+        )
+    history = tuple(observations_by_session[day] for day in expected_sessions)
+    bounded_calendar = MarketSessionCalendar(
+        calendar_id=calendar_payload["calendar_id"],
+        revision=calendar_revision,
+        sessions=expected_sessions,
+    )
+    core = _calculate_core_d1_inputs(history, official_calendar=bounded_calendar)
+    _apply_calendar_coverage_to_core(
+        core, history, calendar_metadata[-1]["coverage_context"]
+    )
+    target_row = rows_by_session.get(target)
+    target_bar = decoded_by_session.get(target)
+    close_field = (
+        target_bar.raw_close
+        if target_bar is not None
+        else unknown(
+            "UNKNOWN_HISTORY_SESSION_NOT_STORED"
+            if target_row is None
+            else "TARGET_BAR_MISSING"
+        )
+    )
+    evaluation = evaluate_raw_breakout_predicate(
+        close_field,
+        core["core.prior_high20"],
+        core["core.atr20"],
+        core["core.clv"],
+    )
+    for predicate in (evaluation["p1"], evaluation["p2"]):
+        predicate["evidence"] = {
+            key: _render_value(value) for key, value in predicate["evidence"].items()
+        }
+    return {
+        "symbol": normalized,
+        "target_session": target.isoformat(),
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "target_bar_status": {
+            "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
+            "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",
+            "READ_FAILED": "TDX_READ_FAILED",
+            "HISTORY_ROW_NOT_STORED": "HISTORY_ROW_NOT_STORED",
+        }[target_row["bar_status"] if target_row else "HISTORY_ROW_NOT_STORED"],
+        "raw_d1_breakout_predicate": {
+            "scope": "SOURCE_SYMBOL_ONLY_RAW_UNADJUSTED_NON_PIT_RETROSPECTIVE",
+            "target_session": target.isoformat(),
+            "price_coordinate": "RAW_UNADJUSTED",
+            "coordinate_id": coordinate_id,
+            "core_producer_symbol": "stock_a.research.core:calculate_core",
+            "core_producer_source_sha256": context.core_source_sha256,
+            "core_field_ids": [
+                "core.prior_high20",
+                "core.atr20",
+                "core.clv",
+            ],
+            "inputs": {
+                "C": _render_field(close_field),
+                "core.prior_high20": _render_field(core["core.prior_high20"]),
+                "core.atr20": _render_field(core["core.atr20"]),
+                "core.clv": _render_field(core["core.clv"]),
+            },
+            "official_dependency_window": {
+                "calendar_id": calendar_payload["calendar_id"],
+                "calendar_revision": calendar_revision,
+                "start_session": expected_sessions[0].isoformat(),
+                "end_session": expected_sessions[-1].isoformat(),
+                "official_session_count": len(expected_sessions),
+                "prior_high20_actual_bars": 20,
+                "prior_high20_excludes_target": True,
+                "atr20_true_ranges": 20,
+                "atr20_dependency_actual_bars": 21,
+                "clv_target_bar_only": True,
+            },
+            "predicates": evaluation,
+        },
+    }
+
+
+def research_stock_pg_d1_history_previews(
+    *,
+    symbol: str,
+    event_sessions: Sequence[date],
+    followup_session: date,
+    session_dates: Sequence[date],
+    package_sha256: str,
+    history_rows: Sequence[Mapping[str, Any]],
+    namespace_id: str,
+    context: _SourceD1PreviewContext,
+) -> dict[date, dict[str, Any]]:
+    """一次解码同源历史，只计算D1会话及真实D1事件所需的目标后继。"""
+    events = tuple(event_sessions)
+    sessions = tuple(session_dates)
+    normalized = _normalize_symbol(symbol)[0]
+    if (
+        not isinstance(package_sha256, str)
+        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
+        or not isinstance(namespace_id, str)
+        or not namespace_id
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_BINDING_INVALID", "PG历史预览缺少包SHA或namespace身份"
+        )
+    if (
+        not events
+        or tuple(sorted(set(events))) != events
+        or any(type(day) is not date for day in events)
+        or type(followup_session) is not date
+        or not sessions
+        or len(sessions) > 75
+        or any(type(day) is not date for day in sessions)
+        or tuple(sorted(set(sessions))) != sessions
+        or followup_session != sessions[-1]
+        or any(day not in sessions or day >= followup_session for day in events)
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_CALENDAR_INVALID", "D1批量预览会话范围无效"
+        )
+
+    rows = tuple(history_rows)
+    row_dates = tuple(row.get("session_date") for row in rows)
+    if (
+        len(set(row_dates)) != len(row_dates)
+        or any(day not in sessions for day in row_dates)
+        or row_dates != tuple(sorted(row_dates))
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_SESSION_ORDER_INVALID", "PG历史Raw行重复、越界或未按会话递增"
+        )
+    if any(
+        row.get("source_symbol") != normalized
+        or row.get("package_sha256") != package_sha256
+        or row.get("namespace_id") != namespace_id
+        for row in rows
+    ):
+        raise ResearchEntryError(
+            "PG_HISTORY_REVISION_MISMATCH",
+            "PG历史行混入不同来源代码、包SHA或namespace",
+        )
+
+    rows_by_session = {row["session_date"]: row for row in rows}
+    decoded_by_session = {
+        row["session_date"]: decoded
+        for row in rows
+        if (decoded := _decoded_day_from_pg_raw(row)) is not None
+    }
+    coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
+    observations_by_session: dict[date, CoreObservation] = {}
+    for day in sessions:
+        row = rows_by_session.get(day)
+        if row is None:
+            observations_by_session[day] = CoreObservation(
+                session=day,
+                state="UNKNOWN",
+                coordinate_id=coordinate_id,
+                open=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
+                high=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
+                low=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
+                close=unknown("UNKNOWN_HISTORY_SESSION_NOT_STORED"),
+                amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+                volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+            )
+            continue
+        state = row.get("bar_status")
+        if state == "TARGET_PRESENT":
+            decoded = decoded_by_session[day]
+            observations_by_session[day] = CoreObservation(
+                session=day,
+                state="ACTUAL",
+                coordinate_id=coordinate_id,
+                open=decoded.raw_open,
+                high=decoded.raw_high,
+                low=decoded.raw_low,
+                close=decoded.raw_close,
+                amount=decoded.amount,
+                volume=decoded.volume,
+                native_amount=decoded.raw_amount,
+                native_volume=decoded.raw_volume,
+            )
+        elif state in {"TARGET_MISSING", "READ_FAILED"}:
+            reason = row.get("bar_reason") or (
+                "TARGET_SESSION_BAR_MISSING"
+                if state == "TARGET_MISSING"
+                else "SOURCE_ENTRY_READ_FAILED"
+            )
+            observations_by_session[day] = CoreObservation(
+                session=day,
+                state="UNKNOWN",
+                coordinate_id=coordinate_id,
+                open=unknown(reason),
+                high=unknown(reason),
+                low=unknown(reason),
+                close=unknown(reason),
+                amount=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+                volume=unknown("UNIT_AUTHORITY_NOT_VERIFIED"),
+            )
+        else:
+            raise ResearchEntryError(
+                "PG_HISTORY_STATUS_INVALID", "PG历史行含未登记的Raw来源状态"
+            )
+
+    result = {
+        day: _source_d1_preview_for_target(
+            target=day,
+            sessions=sessions,
+            normalized=normalized,
+            coordinate_id=coordinate_id,
+            rows_by_session=rows_by_session,
+            decoded_by_session=decoded_by_session,
+            observations_by_session=observations_by_session,
+            context=context,
+        )
+        for day in events
+    }
+    if any(
+        preview["raw_d1_breakout_predicate"]["predicates"]["result"]["state"] == "TRUE"
+        for preview in result.values()
+    ):
+        result[followup_session] = _source_d1_preview_for_target(
+            target=followup_session,
+            sessions=sessions,
+            normalized=normalized,
+            coordinate_id=coordinate_id,
+            rows_by_session=rows_by_session,
+            decoded_by_session=decoded_by_session,
+            observations_by_session=observations_by_session,
+            context=context,
+        )
+    return result
 
 
 def research_stock_pg_history_preview(

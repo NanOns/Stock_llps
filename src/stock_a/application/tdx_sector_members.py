@@ -33,6 +33,7 @@ from stock_a.research.core import (
 from stock_a.research.entry import ResearchEntryError, _load_calendar
 from stock_a.storage.postgres.tdx_sector_members import (
     TdxSectorMembersPgError,
+    TdxSectorStrengthReadContext,
     inspect_remote_sector_source_revisions,
     persist_sector_source_snapshots,
     query_sector_catalog,
@@ -40,6 +41,7 @@ from stock_a.storage.postgres.tdx_sector_members import (
     query_sector_members,
     query_sector_strength,
     query_latest_sector_source_observation,
+    tdx_sector_strength_read_context,
     verify_remote_sector_source_readback,
 )
 
@@ -1075,6 +1077,7 @@ def read_tdx_sector_strength(
     member_limit: int,
     include_all_boards: bool = False,
     include_all_member_symbols: bool = False,
+    read_context: TdxSectorStrengthReadContext | None = None,
 ) -> dict[str, Any]:
     """按完整TDX成员集合计算来源级Core收益中位数及三会话变化。"""
     if sort_by not in {"ret5", "ret20", "delta5", "delta20"}:
@@ -1142,6 +1145,7 @@ def read_tdx_sector_strength(
         official_calendar_id=str(calendar["calendar_id"]),
         official_calendar_revision=str(calendar_revision),
         window_sessions=window_sessions,
+        read_context=read_context,
     )
     expected_source_kind = (
         "TDX_TDXHY_CFG" if board_kind == "INDUSTRY" else "TDX_INFOHARBOR_BLOCK_DAT"
@@ -1427,4 +1431,6 @@ __all__ = [
     "read_tdx_sector_breadth",
     "read_tdx_sector_members",
     "read_tdx_sector_strength",
+    "TdxSectorStrengthReadContext",
+    "tdx_sector_strength_read_context",
 ]

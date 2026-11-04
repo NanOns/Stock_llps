@@ -278,11 +278,22 @@ def register_commands(commands):
     )
     sector_change_stocks.add_argument(
         "--sort-by",
-        choices=("changed_stocks", "delta20", "delta5", "ret20", "ret5"),
+        choices=(
+            "changed_stocks",
+            "delta20",
+            "delta5",
+            "ret20",
+            "ret5",
+            "d0_launch_new",
+        ),
         default="changed_stocks",
+        help="排序字段；d0_launch_new为板内D0 FALSE_TO_TRUE新增来源成员数",
     )
     sector_change_stocks.add_argument(
-        "--direction", choices=("STRONGER", "WEAKER"), default="STRONGER"
+        "--direction",
+        choices=("STRONGER", "WEAKER"),
+        default="STRONGER",
+        help="STRONGER按数值从多到少，WEAKER按数值从少到多",
     )
     sector_change_stocks.add_argument(
         "--changed-only",
@@ -315,6 +326,11 @@ def register_commands(commands):
         "--include-d0-launch-new",
         action="store_true",
         help="可选附加D0相邻会话FALSE_TO_TRUE新增启动股票及当前板块成员联动",
+    )
+    sector_change_stocks.add_argument(
+        "--d0-new-only",
+        action="store_true",
+        help="配合--include-d0-launch-new，仅显示有D0新增启动成员的板块",
     )
     sector_change_stocks.add_argument(
         "--d0-before-session",

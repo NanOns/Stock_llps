@@ -79,6 +79,7 @@ from stock_a.application.tdx_sector_members import (
     read_tdx_sector_catalog,
     read_tdx_sector_members,
     read_tdx_sector_strength,
+    tdx_sector_strength_read_context,
 )
 from stock_a.application.tdx_sector_change_stocks import (
     combine_sector_strength_and_d1_changes,
@@ -289,6 +290,13 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
     target = _parse_source_set_date(args.target_session)
     cutoff = _parse_source_set_date(args.research_cutoff)
     include_d0_launch_new = getattr(args, "include_d0_launch_new", False)
+    d0_new_only = getattr(args, "d0_new_only", False)
+    if not include_d0_launch_new and (args.sort_by == "d0_launch_new" or d0_new_only):
+        raise DiagnosticError(
+            "D0_NEW_OPTIONS_REQUIRE_FLAG",
+            "D0新增启动排序或筛选必须与--include-d0-launch-new一起使用",
+            _EXIT_ARGUMENT,
+        )
     d0_before_session = None
     d0_before_source_set_id = None
     if include_d0_launch_new:
@@ -440,31 +448,33 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 offset=0,
                 limit=5000,
             )
-        for kind, snapshot_id in (
-            ("INDUSTRY", industry_snapshot_id),
-            ("CONCEPT", concept_snapshot_id),
-        ):
-            strength = read_tdx_sector_strength(
-                config,
-                snapshot_id=snapshot_id,
-                board_kind=kind,
-                board_native_id=None,
-                target_session=target,
-                research_cutoff=cutoff,
-                source_set_id=source_set_id,
-                package_sha256=args.package_sha256,
-                profile_revision=args.profile_revision,
-                changed_only=False,
-                sort_by="delta20",
-                direction="STRONGER",
-                offset=0,
-                limit=1,
-                member_offset=0,
-                member_limit=0,
-                include_all_boards=True,
-                include_all_member_symbols=True,
-            )
-            strength_results.append(strength)
+        with tdx_sector_strength_read_context(config) as strength_read_context:
+            for kind, snapshot_id in (
+                ("INDUSTRY", industry_snapshot_id),
+                ("CONCEPT", concept_snapshot_id),
+            ):
+                strength = read_tdx_sector_strength(
+                    config,
+                    snapshot_id=snapshot_id,
+                    board_kind=kind,
+                    board_native_id=None,
+                    target_session=target,
+                    research_cutoff=cutoff,
+                    source_set_id=source_set_id,
+                    package_sha256=args.package_sha256,
+                    profile_revision=args.profile_revision,
+                    changed_only=False,
+                    sort_by="delta20",
+                    direction="STRONGER",
+                    offset=0,
+                    limit=1,
+                    member_offset=0,
+                    member_limit=0,
+                    include_all_boards=True,
+                    include_all_member_symbols=True,
+                    read_context=strength_read_context,
+                )
+                strength_results.append(strength)
 
         d1_read_attempted = True
         discovery = discover_source_d1_support_changes(
@@ -499,6 +509,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             stock_offset=args.stock_offset,
             stock_limit=args.stock_limit,
             d0_launch_changes=d0_launch_changes,
+            d0_new_only=d0_new_only,
         )
         if getattr(args, "include_source_market_context", False):
             try:
