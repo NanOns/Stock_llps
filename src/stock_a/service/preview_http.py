@@ -11,6 +11,7 @@ import re
 import socket
 import sys
 import threading
+import time
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
@@ -28,6 +29,7 @@ from stock_a.application.runtime_config import (
 from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.application.pg_research import (
     PgResearchBindingError,
+    bind_source_context_to_raw_rows,
     read_sealed_source_context,
 )
 from stock_a.application.pg_price_profiles import (
@@ -47,6 +49,10 @@ from stock_a.application.tdx_sector_members import (
 )
 from stock_a.application.source_stock_change_context import (
     query_source_stock_change_context,
+)
+from stock_a.application.source_d0_raw import (
+    SourceD0RawError,
+    query_source_d0_raw_launch,
 )
 from stock_a.application.source_tdx_sector_membership import (
     read_tdx_sector_symbol_membership,
@@ -732,6 +738,411 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 500, "PREVIEW_INTERNAL_ERROR", "预览请求未完成；请检查本机服务输出"
             )
         )
+
+    def _source_launch_watch(self, body: Any) -> dict[str, Any]:
+        """读取完整D0新增集合和板块归属后，再按请求分页。"""
+        request_started = time.perf_counter()
+        request_cpu_started = time.process_time()
+        required = {
+            "before_session",
+            "target_session",
+            "research_cutoff",
+            "before_source_set_id",
+            "source_set_id",
+            "package_sha256",
+            "namespace_id",
+            "industry_snapshot_id",
+            "concept_snapshot_id",
+            "offset",
+            "limit",
+        }
+        board_fields = {"board_kind", "board_native_id"}
+        if not isinstance(body, dict) or not required.issubset(body):
+            raise PreviewHttpError(
+                400,
+                "SOURCE_LAUNCH_WATCH_FIELDS_INVALID",
+                "请求必须显式绑定双日期、研究截止、来源版本、DEV命名空间、双板块快照和分页",
+            )
+        body_fields = frozenset(body)
+        if body_fields not in {
+            frozenset(required),
+            frozenset(required | board_fields),
+        }:
+            raise PreviewHttpError(
+                400,
+                "SOURCE_LAUNCH_WATCH_FIELDS_INVALID",
+                "请求含未登记字段，或板块筛选字段未成对提供",
+            )
+
+        before_session = _iso_date(body["before_session"], "before_session")
+        target_session = _iso_date(body["target_session"], "target_session")
+        research_cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
+        if research_cutoff > self.preview_server.state.research_cutoff:
+            raise PreviewHttpError(
+                400,
+                "RESEARCH_CUTOFF_EXCEEDED",
+                "请求研究截止日不能晚于服务已绑定的研究截止日",
+            )
+        _require_research_cutoff(target_session, research_cutoff)
+        _require_research_cutoff(before_session, research_cutoff)
+        if before_session >= target_session:
+            raise PreviewHttpError(
+                400,
+                "SOURCE_LAUNCH_WATCH_DATE_INVALID",
+                "before_session必须早于target_session",
+            )
+
+        try:
+            source_set_before = str(UUID(body["before_source_set_id"]))
+            source_set_after = str(UUID(body["source_set_id"]))
+            namespace_id = str(UUID(body["namespace_id"]))
+            industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
+            concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise PreviewHttpError(
+                400,
+                "SOURCE_LAUNCH_WATCH_ID_INVALID",
+                "source_set、namespace和板块快照须使用有效UUID",
+            ) from error
+        if source_set_before == source_set_after:
+            raise PreviewHttpError(
+                400,
+                "SOURCE_LAUNCH_WATCH_SOURCE_SETS_NOT_DISTINCT",
+                "前后会话必须绑定不同source_set",
+            )
+        if industry_snapshot_id == concept_snapshot_id:
+            raise PreviewHttpError(
+                400,
+                "SOURCE_LAUNCH_WATCH_SNAPSHOTS_NOT_DISTINCT",
+                "行业和GN概念必须绑定各自不同的TDX快照",
+            )
+        package_sha256 = _sha(body["package_sha256"])
+        offset = body["offset"]
+        if type(offset) is not int or not 0 <= offset <= _MAX_OFFSET:
+            raise PreviewHttpError(
+                400,
+                "PREVIEW_PARAMETER_INVALID",
+                "offset必须为0至允许上限之间的整数",
+            )
+        limit = _positive_int(body["limit"], "limit", 30)
+
+        board_kind: str | None = None
+        board_native_id: str | None = None
+        if board_fields <= set(body):
+            board_kind = body["board_kind"]
+            board_native_id = body["board_native_id"]
+            if not isinstance(board_kind, str) or board_kind not in {
+                "INDUSTRY",
+                "CONCEPT",
+            }:
+                raise PreviewHttpError(
+                    400,
+                    "SOURCE_LAUNCH_WATCH_BOARD_KIND_INVALID",
+                    "board_kind只允许INDUSTRY或CONCEPT",
+                )
+            if (
+                not isinstance(board_native_id, str)
+                or not board_native_id.strip()
+                or len(board_native_id) > 64
+                or board_native_id != board_native_id.strip()
+            ):
+                raise PreviewHttpError(
+                    400,
+                    "SOURCE_LAUNCH_WATCH_BOARD_ID_INVALID",
+                    "board_native_id必须是非空且不含首尾空格的精确板块原生ID",
+                )
+
+        # 交易日相邻性由本地正式日历先验验证，未来/错日请求不会触达PG行情读者。
+        resolved_target, pair_sessions, calendar_revision = resolve_pg_history_window(
+            target_session.isoformat(), 2
+        )
+        if (
+            resolved_target != target_session
+            or len(pair_sessions) != 2
+            or pair_sessions[0] != before_session
+            or pair_sessions[1] != target_session
+        ):
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_SESSIONS_NOT_ADJACENT",
+                "前后日期必须是同一现役日历版本中的严格相邻官方会话",
+            )
+
+        from stock_a.application.source_d0_tdx_membership import (
+            build_d0_launch_watch_membership_result,
+            read_tdx_sector_memberships_for_symbols,
+        )
+
+        try:
+            d0_started = time.perf_counter()
+            changes = query_source_d0_raw_launch(
+                self.preview_server.state.config,
+                scenario="LAUNCH_CONFIRM",
+                action="changes",
+                before_session=before_session,
+                before_source_set_id=source_set_before,
+                before_package_sha256=package_sha256,
+                target_session=target_session,
+                research_cutoff=research_cutoff,
+                source_set_id=source_set_after,
+                package_sha256=package_sha256,
+                transition="ALL",
+                offset=0,
+                limit=10000,
+                expected_namespace_id=namespace_id,
+            )
+            d0_reader_wall_seconds = time.perf_counter() - d0_started
+        except SourceD0RawError as error:
+            mapped = _source_context_preview_error(error)
+            if mapped is None:
+                raise
+            raise mapped from error
+
+        all_change_rows = changes.get("results")
+        selection = changes.get("selection")
+        transition_counts = changes.get("transition_counts")
+        source_key_set = changes.get("source_key_set")
+        if (
+            not isinstance(all_change_rows, list)
+            or not isinstance(selection, Mapping)
+            or not isinstance(transition_counts, Mapping)
+            or not isinstance(source_key_set, Mapping)
+            or selection.get("transition") != "ALL"
+            or len(all_change_rows) != source_key_set.get("source_union_count")
+            or selection.get("matched_count") != len(all_change_rows)
+            or selection.get("next_offset") is not None
+            or selection.get("evaluated_before_filter_and_pagination") is not True
+            or source_key_set.get("union_partition_closed") is not True
+            or sum(transition_counts.values())
+            != source_key_set.get("comparable_intersection_count")
+        ):
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_D0_RESULT_INCOMPLETE",
+                "D0完整来源并集、九态转移及动态分母未闭合，已拒绝返回部分名单",
+            )
+        ft_rows = [
+            row
+            for row in all_change_rows
+            if isinstance(row, Mapping) and row.get("transition") == "FALSE_TO_TRUE"
+        ]
+        if len(ft_rows) != transition_counts.get("FALSE_TO_TRUE"):
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_FT_PARTITION_OPEN",
+                "FALSE_TO_TRUE集合未闭合到完整九态转移计数",
+            )
+        if (
+            changes.get("before", {}).get("source_set", {}).get("source_set_id")
+            != source_set_before
+            or changes.get("after", {}).get("source_set", {}).get("source_set_id")
+            != source_set_after
+            or changes.get("before", {}).get("source_set", {}).get("package_sha256")
+            != package_sha256
+            or changes.get("after", {}).get("source_set", {}).get("package_sha256")
+            != package_sha256
+        ):
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_SOURCE_IDENTITY_MISMATCH",
+                "D0实际source_set或package与请求不一致",
+            )
+        if (
+            changes.get("before", {}).get("namespace_id") != namespace_id
+            or changes.get("after", {}).get("namespace_id") != namespace_id
+        ):
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_NAMESPACE_MISMATCH",
+                "D0读者绑定的DEV namespace与请求不一致",
+            )
+
+        source_symbols = [row["source_symbol"] for row in ft_rows]
+        try:
+            membership_started = time.perf_counter()
+            membership_read = read_tdx_sector_memberships_for_symbols(
+                self.preview_server.state.config,
+                source_symbols=source_symbols,
+                target_session=target_session,
+                industry_snapshot_id=industry_snapshot_id,
+                concept_snapshot_id=concept_snapshot_id,
+                expected_namespace_id=namespace_id,
+            )
+            membership_read_wall_seconds = time.perf_counter() - membership_started
+            aggregation_started = time.perf_counter()
+            complete = build_d0_launch_watch_membership_result(changes, membership_read)
+            aggregation_wall_seconds = time.perf_counter() - aggregation_started
+        except Exception as error:
+            mapped = _source_context_preview_error(error)
+            if mapped is None:
+                raise
+            raise mapped from error
+
+        stocks = complete.get("stocks")
+        boards = complete.get("boards")
+        if (
+            not isinstance(stocks, list)
+            or not isinstance(boards, list)
+            or complete.get("global_new_stock_count") != len(stocks)
+            or len(stocks) != len(ft_rows)
+            or complete.get("namespace_id") != namespace_id
+            or complete.get("package_sha256") != package_sha256
+            or complete.get("target_session") != target_session.isoformat()
+        ):
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_MEMBERSHIP_RESULT_INCOMPLETE",
+                "板块关系联结没有闭合到完整D0新增来源股票集合",
+            )
+        ordered_symbols = [stock.get("source_symbol") for stock in stocks]
+        if (
+            any(not isinstance(symbol, str) for symbol in ordered_symbols)
+            or ordered_symbols != sorted(ordered_symbols)
+            or len(set(ordered_symbols)) != len(ordered_symbols)
+        ):
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_STOCK_ORDER_INVALID",
+                "完整D0新增来源股票列表必须按唯一source_symbol升序闭合",
+            )
+        membership_snapshots = complete.get("membership_snapshots")
+        if not isinstance(membership_snapshots, list) or {
+            item.get("snapshot_id")
+            for item in membership_snapshots
+            if isinstance(item, Mapping)
+        } != {industry_snapshot_id, concept_snapshot_id}:
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_SNAPSHOT_PAIR_INVALID",
+                "板块归属必须返回请求绑定的行业与GN概念双快照",
+            )
+        filtered = stocks
+        if board_kind is not None and board_native_id is not None:
+            filtered = [
+                stock
+                for stock in stocks
+                if any(
+                    membership.get("board_kind") == board_kind
+                    and membership.get("board_native_id") == board_native_id
+                    and membership.get("snapshot_id")
+                    == (
+                        industry_snapshot_id
+                        if board_kind == "INDUSTRY"
+                        else concept_snapshot_id
+                    )
+                    for membership in stock.get("also_in_sectors", ())
+                )
+            ]
+        filtered_total = len(filtered)
+        page = filtered[offset : offset + limit]
+        for stock in page:
+            stock["detail_request"] = {
+                "method": "POST",
+                "path": "/api/preview/stock-timeline",
+                "body": {
+                    "symbol": stock["source_symbol"],
+                    "target_session": target_session.isoformat(),
+                    "package_sha256": package_sha256,
+                    "session_count": 75,
+                    "source_set_id": source_set_after,
+                    "namespace_id": namespace_id,
+                    "include_source_change_context": True,
+                    "before_session": before_session.isoformat(),
+                    "before_source_set_id": source_set_before,
+                    "before_package_sha256": package_sha256,
+                    "industry_snapshot_id": industry_snapshot_id,
+                    "concept_snapshot_id": concept_snapshot_id,
+                },
+            }
+
+        return {
+            "ok": True,
+            "contract": "STOCK_A_SOURCE_LAUNCH_WATCH_API_R1",
+            "request_identity": {
+                "before_session": before_session.isoformat(),
+                "target_session": target_session.isoformat(),
+                "research_cutoff": research_cutoff.isoformat(),
+                "before_source_set_id": source_set_before,
+                "source_set_id": source_set_after,
+                "package_sha256": package_sha256,
+                "namespace_id": namespace_id,
+                "industry_snapshot_id": industry_snapshot_id,
+                "concept_snapshot_id": concept_snapshot_id,
+                "calendar_revision": calendar_revision,
+            },
+            "source_change_status": {
+                "identity_status": "SOURCE_SYMBOL_ONLY",
+                "scenario": "LAUNCH_CONFIRM",
+                "transition": "FALSE_TO_TRUE",
+                "scenario_role": "DIAGNOSTIC_ONLY",
+                "price_coordinate": "RAW_UNADJUSTED",
+                "pit_status": "NON_PIT_RETROSPECTIVE",
+                "formal_admission_status": changes.get("formal_admission_status"),
+                "formal_status": "FORMAL_NOT_EVALUATED",
+                "formal_evaluation_status": "NOT_EVALUATED",
+                "seed_status": "NOT_EVALUATED",
+                "research_universe_status": "UNKNOWN",
+                "official_listing_universe_status": "UNKNOWN_NOT_CONNECTED",
+                "priority_status": "NOT_EVALUATED",
+                "d0_contract": changes.get("contract"),
+                "d0_producer_version": changes.get("producer_version"),
+                "endpoints": {
+                    "before": changes.get("before"),
+                    "after": changes.get("after"),
+                },
+                "transition_counts": transition_counts,
+                "source_key_set": changes.get("source_key_set"),
+            },
+            "membership_status": {
+                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                "snapshots": complete.get("membership_snapshots"),
+                "global_new_stock_count": complete["global_new_stock_count"],
+                "mapped_distinct_source_symbol_count": complete[
+                    "mapped_distinct_source_symbol_count"
+                ],
+                "unmapped_distinct_source_symbol_count": complete[
+                    "unmapped_distinct_source_symbol_count"
+                ],
+                "board_membership_relation_count": complete[
+                    "board_membership_relation_count"
+                ],
+            },
+            "filter": {
+                "board_kind": board_kind,
+                "board_native_id": board_native_id,
+                "global_total": complete["global_new_stock_count"],
+                "filtered_total": filtered_total,
+            },
+            "pagination": {
+                "offset": offset,
+                "limit": limit,
+                "page_count": len(page),
+                "next_offset": offset + len(page)
+                if offset + len(page) < filtered_total
+                else None,
+            },
+            "boards": boards,
+            "results": page,
+            "execution": {
+                "d0_full_pool_computed_before_selection": True,
+                "board_membership_read": "BATCHED_TWO_SNAPSHOT_READ_ONLY",
+                "d0_reader_wall_seconds": d0_reader_wall_seconds,
+                "d0_reader_execution": changes.get("execution"),
+                "membership_read_wall_seconds": membership_read_wall_seconds,
+                "membership_read_execution": complete.get("membership_read_execution"),
+                "membership_aggregation_wall_seconds": aggregation_wall_seconds,
+                "api_server_processing_wall_seconds": (
+                    time.perf_counter() - request_started
+                ),
+                "api_server_process_cpu_seconds": (
+                    time.process_time() - request_cpu_started
+                ),
+                "d1_full_universe_scan": False,
+                "database_write": False,
+                "ddl_executed": False,
+                "dml_executed": False,
+            },
+        }
 
     def do_HEAD(self) -> None:
         self.do_GET()
@@ -1824,12 +2235,22 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         if post_path not in {
             "/api/preview/stock",
             "/api/preview/stock-timeline",
+            "/api/preview/source-launch-watch",
         }:
             self._error(
                 PreviewHttpError(
                     404,
                     "PREVIEW_ROUTE_NOT_FOUND",
-                    "POST仅用于用户明确触发的单股只读研究预览",
+                    "POST仅用于用户明确触发的有界来源级或单股只读研究预览",
+                )
+            )
+            return
+        if post_path == "/api/preview/source-launch-watch" and self.path != post_path:
+            self._error(
+                PreviewHttpError(
+                    400,
+                    "SOURCE_LAUNCH_WATCH_QUERY_REJECTED",
+                    "来源级变化观察POST只接受JSON请求体，不接受查询参数",
                 )
             )
             return
@@ -1888,6 +2309,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 raise PreviewHttpError(
                     400, "PREVIEW_JSON_INVALID", "请求体不是有效UTF-8 JSON或含重复字段"
                 ) from error
+            if post_path == "/api/preview/source-launch-watch":
+                self._send_json(200, self._source_launch_watch(body))
+                return
             expected = {"symbol", "target_session", "package_sha256", "session_count"}
             allowed_timeline = expected | {"source_set_id", "namespace_id"}
             source_change_required = {
@@ -2030,12 +2454,38 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_CHANGE_SESSIONS_NOT_ADJACENT",
                         "前后日期必须是同一日历版本中的相邻官方会话",
                     )
+            prevalidated_source_context = None
+            if (
+                post_path == "/api/preview/stock-timeline"
+                and expected_source_set_id is not None
+                and expected_namespace_id is not None
+            ):
+                try:
+                    prevalidated_source_context = read_sealed_source_context(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        package_sha256=package_sha,
+                        namespace_id=expected_namespace_id,
+                        expected_source_set_id=expected_source_set_id,
+                    )
+                except PgResearchBindingError as error:
+                    if error.code == "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE":
+                        raise PreviewHttpError(
+                            409,
+                            "PREVIEW_SOURCE_IDENTITY_MISMATCH",
+                            "请求的source_set未通过精确P04封口核验；未读取单股行情",
+                        ) from error
+                    mapped = _source_context_preview_error(error)
+                    if mapped is None:
+                        raise
+                    raise mapped from error
             history = read_raw_daily_history_stock(
                 self.preview_server.state.config,
                 source_symbol=symbol,
                 target_session=target,
                 package_sha256=package_sha,
                 sessions=sessions,
+                expected_namespace_id=expected_namespace_id,
             )
             if post_path == "/api/preview/stock-timeline":
                 result = research_entry.research_stock_pg_history_timeline(
@@ -2051,13 +2501,23 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     namespace_id=history["namespace_id"],
                     profile_contract=self.preview_server.state.profile_contract,
                 )
-                source_context = _preview_source_context(
-                    self.preview_server.state.config,
-                    target_session=target,
-                    package_sha256=package_sha,
-                    namespace_id=history["namespace_id"],
-                    target_raw_rows=history["history_rows"],
-                )
+                if prevalidated_source_context is not None:
+                    source_context = bind_source_context_to_raw_rows(
+                        prevalidated_source_context,
+                        target_session=target,
+                        package_sha256=package_sha,
+                        namespace_id=history["namespace_id"],
+                        source_set_id=expected_source_set_id,
+                        target_raw_rows=history["history_rows"],
+                    )
+                else:
+                    source_context = _preview_source_context(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        package_sha256=package_sha,
+                        namespace_id=history["namespace_id"],
+                        target_raw_rows=history["history_rows"],
+                    )
                 if expected_namespace_id is not None and (
                     expected_namespace_id != history["namespace_id"]
                     or expected_source_set_id != source_context["source_set_id"]

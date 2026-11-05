@@ -22,12 +22,63 @@ def _is_target_session(value: Any, target_session: date) -> bool:
     return value == target_session.isoformat()
 
 
+def bind_source_context_to_raw_rows(
+    source_context: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    namespace_id: str,
+    source_set_id: str,
+    target_raw_rows: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """将已精确预检的P04来源上下文与单股Raw目标日行闭合。"""
+    if (
+        source_context.get("status") != "AVAILABLE"
+        or source_context.get("target_session") != target_session.isoformat()
+        or source_context.get("package_sha256") != package_sha256
+        or source_context.get("namespace_id") != namespace_id
+        or source_context.get("source_set_id") != source_set_id
+    ):
+        raise PgResearchBindingError(
+            "PG_RESEARCH_P04_SOURCE_CONTEXT_MISMATCH",
+            "预检P04来源上下文与请求的日期、包SHA、namespace或source_set不一致。",
+        )
+    target_rows = [
+        row
+        for row in target_raw_rows
+        if _is_target_session(row.get("session_date"), target_session)
+    ]
+    if len(target_rows) != 1:
+        raise PgResearchBindingError(
+            "PG_RESEARCH_TARGET_RAW_AMBIGUOUS",
+            "单股Raw查询必须返回恰好一条精确目标日行。",
+        )
+    source_content_id = source_context.get("source_content_id")
+    source_capture_id = source_context.get("source_capture_id")
+    target_row = target_rows[0]
+    if (
+        target_row.get("package_sha256") != package_sha256
+        or target_row.get("namespace_id") != namespace_id
+        or target_row.get("source_content_id") != source_content_id
+        or target_row.get("source_capture_id") != source_capture_id
+    ):
+        raise PgResearchBindingError(
+            "PG_RESEARCH_P04_RAW_REFERENCE_MISMATCH",
+            "单股目标日Raw行与预检P04 source_content/capture绑定不一致。",
+        )
+    bound_context = dict(source_context)
+    bound_context["target_raw_binding_count"] = 1
+    bound_context["target_raw_binding_verified"] = True
+    return bound_context
+
+
 def read_sealed_source_context(
     config: Mapping[str, Any],
     *,
     target_session: date,
     package_sha256: str,
     namespace_id: str | None,
+    expected_source_set_id: str | None = None,
     target_raw_rows: Sequence[Mapping[str, Any]] = (),
     expected_raw_row_count: int | None = None,
 ) -> dict[str, Any]:
@@ -37,6 +88,8 @@ def read_sealed_source_context(
             config,
             target_session=target_session,
             package_sha256=package_sha256,
+            expected_namespace_id=namespace_id,
+            expected_source_set_id=expected_source_set_id,
         )
     except Exception as error:
         raise PgResearchBindingError(
@@ -52,6 +105,10 @@ def read_sealed_source_context(
         source_set.get("target_session") != target_session.isoformat()
         or source_set.get("package_sha256") != package_sha256
         or (namespace_id is not None and source_set.get("namespace_id") != namespace_id)
+        or (
+            expected_source_set_id is not None
+            and source_set.get("source_set_id") != expected_source_set_id
+        )
         or source_set.get("seal_status") != "SEALED"
         or source_set.get("durability_status") != "VERIFIED_POST_COMMIT_READBACK"
         or source_set.get("candidate_fallback") is not False

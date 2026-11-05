@@ -8,6 +8,7 @@ from fractions import Fraction
 import re
 import time
 from typing import Any, Mapping
+from uuid import UUID
 
 from stock_a.application.source_set_candidate import (
     SourceSetCandidateApplicationError,
@@ -17,7 +18,11 @@ from stock_a.research.d0_launch_raw import (
     calculate_d0_launch_confirm_raw,
     fraction_payload,
 )
-from stock_a.storage.postgres.d0_raw import D0RawPgError, read_source_d0_raw_window
+from stock_a.storage.postgres.d0_raw import (
+    MAX_SOURCE_SYMBOLS,
+    D0RawPgError,
+    read_source_d0_raw_window,
+)
 
 
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
@@ -34,7 +39,8 @@ _TRANSITIONS = (
     "UNKNOWN_TO_UNKNOWN",
 )
 _CHANGE_SELECTIONS = {*_TRANSITIONS, "BEFORE_ONLY", "AFTER_ONLY", "ALL"}
-_MAX_LIMIT = 5000
+_MAX_LIMIT = MAX_SOURCE_SYMBOLS
+_MAX_CHANGE_LIMIT = 2 * MAX_SOURCE_SYMBOLS
 
 
 class SourceD0RawError(ValueError):
@@ -119,6 +125,26 @@ def _classify_transition(before_state: str | None, after_state: str | None) -> s
     return f"{before_state}_TO_{after_state}"
 
 
+def _canonical_expected_namespace(value: str | None) -> str | None:
+    if value is None:
+        return None
+    try:
+        canonical = str(UUID(value))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise SourceD0RawError(
+            "D0_NAMESPACE_ID_INVALID",
+            "expected_namespace_id必须是规范小写UUID。",
+            category="ARGUMENT",
+        ) from error
+    if canonical != value:
+        raise SourceD0RawError(
+            "D0_NAMESPACE_ID_INVALID",
+            "expected_namespace_id必须是规范小写UUID。",
+            category="ARGUMENT",
+        )
+    return canonical
+
+
 def query_source_d0_raw_launch(
     config: Mapping[str, Any],
     *,
@@ -136,8 +162,10 @@ def query_source_d0_raw_launch(
     before_source_set_id: str | None = None,
     before_package_sha256: str | None = None,
     transition: str | None = None,
+    expected_namespace_id: str | None = None,
 ) -> dict[str, Any]:
     """读取LAUNCH原始状态，或联结相邻官方会话的三态变化。"""
+    expected_namespace_id = _canonical_expected_namespace(expected_namespace_id)
     if action == "changes":
         return _query_source_d0_raw_launch_changes(
             config,
@@ -154,6 +182,7 @@ def query_source_d0_raw_launch(
             offset=offset,
             limit=limit,
             transition=transition,
+            expected_namespace_id=expected_namespace_id,
         )
     if action != "current":
         raise SourceD0RawError(
@@ -238,6 +267,7 @@ def query_source_d0_raw_launch(
             package_sha256=package_sha256,
             sessions=sessions,
             expected_calendar=calendar_identity,
+            expected_namespace_id=expected_namespace_id,
         )
     except D0RawPgError as error:
         raise SourceD0RawError(error.code, str(error)) from error
@@ -409,6 +439,7 @@ def _query_source_d0_raw_launch_changes(
     offset: int,
     limit: int,
     transition: str | None,
+    expected_namespace_id: str | None,
 ) -> dict[str, Any]:
     if scenario != "LAUNCH_CONFIRM":
         raise SourceD0RawError(
@@ -465,10 +496,10 @@ def _query_source_d0_raw_launch_changes(
         raise SourceD0RawError(
             "D0_OFFSET_INVALID", "分页offset必须为非负整数。", category="ARGUMENT"
         )
-    if type(limit) is not int or not 1 <= limit <= _MAX_LIMIT:
+    if type(limit) is not int or not 1 <= limit <= _MAX_CHANGE_LIMIT:
         raise SourceD0RawError(
             "D0_LIMIT_INVALID",
-            f"分页limit必须为1至{_MAX_LIMIT}之间的整数。",
+            f"相邻变化分页limit必须为1至{_MAX_CHANGE_LIMIT}之间的整数。",
             category="ARGUMENT",
         )
 
@@ -526,6 +557,7 @@ def _query_source_d0_raw_launch_changes(
             state="ALL",
             offset=0,
             limit=_MAX_LIMIT,
+            expected_namespace_id=expected_namespace_id,
         )
         after_result = query_source_d0_raw_launch(
             config,
@@ -537,6 +569,7 @@ def _query_source_d0_raw_launch_changes(
             state="ALL",
             offset=0,
             limit=_MAX_LIMIT,
+            expected_namespace_id=expected_namespace_id,
         )
     except SourceD0RawError:
         raise

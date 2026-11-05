@@ -124,6 +124,7 @@ def query_source_stock_change_context(
         transition="ALL",
         offset=0,
         limit=1,
+        expected_namespace_id=namespace_id,
     )
     for endpoint_name in ("before", "after"):
         endpoint = d0.get(endpoint_name)
@@ -172,6 +173,7 @@ def query_source_stock_change_context(
                 after_source_set_id=source_set_id,
                 after_package_sha256=package_sha256,
                 after_profile_revision=after_profile_revision,
+                expected_namespace_id=namespace_id,
             )
         except PgPriceProfileError as error:
             if getattr(error, "code", None) == "PROFILE_CHANGE_SNAPSHOT_MISSING":

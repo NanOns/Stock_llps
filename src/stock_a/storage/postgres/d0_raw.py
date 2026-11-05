@@ -13,7 +13,8 @@ from . import source_raw
 
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
-_MAX_SOURCE_SYMBOLS = 5000
+MAX_SOURCE_SYMBOLS = 5000
+_MAX_SOURCE_SYMBOLS = MAX_SOURCE_SYMBOLS
 _MAX_HISTORY_CELLS = _MAX_SOURCE_SYMBOLS * 21
 
 
@@ -263,10 +264,24 @@ def read_source_d0_raw_window(
     package_sha256: str,
     sessions: Sequence[date],
     expected_calendar: Mapping[str, str],
+    expected_namespace_id: str | None = None,
 ) -> dict[str, Any]:
     """一次一致只读事务核验SEALED分母并读取完整来源池的21会话RAW网格。"""
     selected_sessions = tuple(sessions)
     canonical_id = _canonical_source_set_id(source_set_id)
+    if expected_namespace_id is not None:
+        try:
+            canonical_namespace_id = str(uuid.UUID(expected_namespace_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise D0RawPgError(
+                "D0_NAMESPACE_ID_INVALID",
+                "expected_namespace_id必须是规范小写UUID。",
+            ) from error
+        if canonical_namespace_id != expected_namespace_id:
+            raise D0RawPgError(
+                "D0_NAMESPACE_ID_INVALID",
+                "expected_namespace_id必须是规范小写UUID。",
+            )
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
@@ -293,6 +308,11 @@ def read_source_d0_raw_window(
         cursor,
         namespace_id,
     ):
+        if expected_namespace_id is not None and namespace_id != expected_namespace_id:
+            raise D0RawPgError(
+                "D0_NAMESPACE_MISMATCH",
+                "当前部署DEV命名空间与请求绑定不一致，未读取来源行情表。",
+            )
         source_set_started = time.perf_counter()
         source_set = _read_source_set(
             cursor,
@@ -361,4 +381,4 @@ def read_source_d0_raw_window(
     }
 
 
-__all__ = ["D0RawPgError", "read_source_d0_raw_window"]
+__all__ = ["D0RawPgError", "MAX_SOURCE_SYMBOLS", "read_source_d0_raw_window"]

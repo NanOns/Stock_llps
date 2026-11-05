@@ -398,7 +398,7 @@ def _read_capability(
         f"SELECT {', '.join(_CAPABILITY_SELECT)} "
         "FROM stock.source_set_capabilities "
         "WHERE namespace_id=%s::uuid AND ingress_attempt_id=%s::uuid "
-        "ORDER BY capability_id",
+        "ORDER BY capability_id LIMIT 3",
         (namespace_id, row["ingress_attempt_id"]),
     )
     raw_rows = cursor.fetchall()
@@ -666,7 +666,8 @@ def _validate_source_references(
              ON cap.namespace_id=c.namespace_id AND cap.capture_id=c.source_capture_id
            JOIN stock.source_contents content
              ON content.namespace_id=c.namespace_id AND content.content_id=c.source_content_id
-           WHERE c.namespace_id=%s::uuid AND c.target_session=%s AND c.package_sha256=%s""",
+           WHERE c.namespace_id=%s::uuid AND c.target_session=%s AND c.package_sha256=%s
+           LIMIT 2""",
         (row["namespace_id"], row["target_session"], row["package_sha256"]),
     )
     source_rows = cursor.fetchall()
@@ -1134,19 +1135,52 @@ def read_p04_source_input(
     target_session: date,
     package_sha256: str,
     audit_mode: bool = False,
+    expected_namespace_id: str | None = None,
+    expected_source_set_id: str | None = None,
 ) -> dict[str, Any]:
-    """按namespace、目标日和包SHA读取已封口P03 typed来源集合。"""
+    """按namespace、目标日、包SHA及可选source_set读取封口P03 typed集合。"""
     if type(target_session) is not date:
         raise ValueError("P04来源输入必须绑定显式目标会话")
     if not isinstance(package_sha256, str) or _SHA256.fullmatch(package_sha256) is None:
         raise ValueError("P04来源输入必须绑定完整小写SHA-256")
     if type(audit_mode) is not bool:
         raise ValueError("P04 audit_mode必须是明确布尔值")
+    if expected_source_set_id is not None:
+        try:
+            canonical_source_set_id = str(uuid.UUID(expected_source_set_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise SourceSetIngressError(
+                "P04_SOURCE_SET_ID_INVALID",
+                "expected_source_set_id必须是UUID",
+            ) from error
+        if canonical_source_set_id != expected_source_set_id:
+            raise SourceSetIngressError(
+                "P04_SOURCE_SET_ID_INVALID",
+                "expected_source_set_id必须为规范小写UUID",
+            )
     with source_raw._transaction(config, write=False) as (
         _connection,
         cursor,
         namespace_id,
     ):
+        if expected_namespace_id is not None:
+            try:
+                canonical_namespace_id = str(uuid.UUID(expected_namespace_id))
+            except (ValueError, TypeError, AttributeError) as error:
+                raise SourceSetIngressError(
+                    "P04_NAMESPACE_ID_INVALID",
+                    "expected_namespace_id必须是UUID",
+                ) from error
+            if canonical_namespace_id != expected_namespace_id:
+                raise SourceSetIngressError(
+                    "P04_NAMESPACE_ID_INVALID",
+                    "expected_namespace_id必须为规范小写UUID",
+                )
+            if namespace_id != expected_namespace_id:
+                raise SourceSetIngressError(
+                    "P04_NAMESPACE_MISMATCH",
+                    "P04来源读取namespace与请求绑定不一致；未读取业务表",
+                )
         source_sets, capabilities = _tables_status(cursor)
         if source_sets is None or capabilities is None:
             return {
@@ -1160,21 +1194,39 @@ def read_p04_source_input(
                 "reason_code": "FORMAL_SOURCE_SET_RELATIONS_NOT_PRESENT",
             }
         columns = ", ".join(_SOURCE_SET_SELECT)
-        cursor.execute(
+        source_set_sql = (
             f"SELECT {columns} FROM stock.source_sets "
             "WHERE namespace_id=%s::uuid AND target_session=%s "
-            "AND package_sha256=%s AND seal_status='SEALED' "
-            "ORDER BY revision_id DESC, source_set_id DESC LIMIT 2",
-            (namespace_id, target_session, package_sha256),
+            "AND package_sha256=%s AND seal_status='SEALED'"
+        )
+        source_set_params: tuple[Any, ...] = (
+            namespace_id,
+            target_session,
+            package_sha256,
+        )
+        if expected_source_set_id is not None:
+            source_set_sql += " AND source_set_id=%s::uuid"
+            source_set_params += (expected_source_set_id,)
+        cursor.execute(
+            source_set_sql + " ORDER BY revision_id DESC, source_set_id DESC LIMIT 2",
+            source_set_params,
         )
         raw_rows = cursor.fetchall()
         if not raw_rows:
-            cursor.execute(
+            fallback_sql = (
                 "SELECT EXISTS (SELECT 1 FROM stock.source_sets "
                 "WHERE namespace_id=%s::uuid AND target_session=%s "
-                "AND package_sha256=%s)",
-                (namespace_id, target_session, package_sha256),
+                "AND package_sha256=%s"
             )
+            fallback_params: tuple[Any, ...] = (
+                namespace_id,
+                target_session,
+                package_sha256,
+            )
+            if expected_source_set_id is not None:
+                fallback_sql += " AND source_set_id=%s::uuid"
+                fallback_params += (expected_source_set_id,)
+            cursor.execute(fallback_sql + ")", fallback_params)
             has_unsealed_match = bool(cursor.fetchone()[0])
             if has_unsealed_match:
                 return {
@@ -1204,6 +1256,10 @@ def read_p04_source_input(
         if (
             row["target_session"] != target_session
             or row["package_sha256"] != package_sha256
+            or (
+                expected_source_set_id is not None
+                and row["source_set_id"] != expected_source_set_id
+            )
         ):
             raise SourceSetIngressError(
                 "P04_SOURCE_SET_KEY_MISMATCH", "P04读回关系与显式日期或包SHA不一致"

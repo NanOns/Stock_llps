@@ -276,7 +276,8 @@ def _validate_raw_migration_prefix(
             (migration_id, sha, lineage) for migration_id, lineage, _raw, sha in sources
         ]
         cursor.execute(
-            "SELECT migration_id, source_sha, lineage FROM stock.migration_ledger ORDER BY migration_id"
+            "SELECT migration_id, source_sha, lineage FROM stock.migration_ledger ORDER BY migration_id LIMIT %s",
+            (len(expected_rows) + 1,),
         )
         existing = cursor.fetchall()
         applied_count = postgres_binding._validate_migration_history(
@@ -1662,6 +1663,7 @@ def read_raw_daily_history_stock(
     target_session: date,
     package_sha256: str,
     sessions: Sequence[date],
+    expected_namespace_id: str | None = None,
 ) -> dict[str, Any]:
     """从固定PG namespace读取单证券的精确包版本与官方会话窗口。"""
     selected_sessions = _validate_history_query(
@@ -1670,7 +1672,24 @@ def read_raw_daily_history_stock(
         package_sha256=package_sha256,
         sessions=sessions,
     )
+    if expected_namespace_id is not None:
+        try:
+            canonical_namespace_id = str(uuid.UUID(expected_namespace_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise RawSourcePgError(
+                "PG_NAMESPACE_ID_INVALID", "expected_namespace_id必须是UUID"
+            ) from error
+        if canonical_namespace_id != expected_namespace_id:
+            raise RawSourcePgError(
+                "PG_NAMESPACE_ID_INVALID",
+                "expected_namespace_id必须为规范小写UUID",
+            )
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        if expected_namespace_id is not None and namespace_id != expected_namespace_id:
+            raise RawSourcePgError(
+                "SOURCE_NAMESPACE_MISMATCH",
+                "PG Raw历史读取namespace与请求绑定不一致；未读取行情表",
+            )
         cursor.execute(
             "SELECT count(*) FROM stock.source_raw_daily WHERE namespace_id=%s::uuid "
             "AND source_symbol=%s AND session_date=%s AND package_sha256=%s",

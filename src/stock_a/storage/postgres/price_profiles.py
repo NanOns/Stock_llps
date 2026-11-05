@@ -2284,6 +2284,7 @@ def read_profile_change_page(
     after_source_set_id: str | None = None,
     after_package_sha256: str | None = None,
     after_profile_revision: str | None = None,
+    expected_namespace_id: str | None = None,
 ) -> dict[str, Any]:
     """只比较两组精确PG画像；使用稳定SQL分页，不重算Core。"""
     change_types = {
@@ -2307,6 +2308,19 @@ def read_profile_change_page(
             "PROFILE_CHANGE_DATE_INVALID",
             "变化比较日期必须递增，且不晚于显式研究截止日",
         )
+    if expected_namespace_id is not None:
+        try:
+            canonical_namespace_id = str(UUID(expected_namespace_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise PriceProfilePgError(
+                "PROFILE_NAMESPACE_ID_INVALID",
+                "expected_namespace_id必须是UUID",
+            ) from error
+        if canonical_namespace_id != expected_namespace_id:
+            raise PriceProfilePgError(
+                "PROFILE_NAMESPACE_ID_INVALID",
+                "expected_namespace_id必须为规范小写UUID",
+            )
     if (
         type(offset) is not int
         or not 0 <= offset <= 2**31 - 1
@@ -2404,6 +2418,11 @@ def read_profile_change_page(
         )
     symbol_search = source_symbol.upper() if source_symbol else None
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        if expected_namespace_id is not None and namespace_id != expected_namespace_id:
+            raise PriceProfilePgError(
+                "PROFILE_NAMESPACE_MISMATCH",
+                "Profile变化读取namespace与请求绑定不一致；未读取画像表",
+            )
         before = _snapshot_for_session(
             cursor,
             namespace_id=namespace_id,
