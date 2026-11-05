@@ -18,6 +18,12 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
+from stock_a.application.snapshot_reuse import (
+    SnapshotChanged,
+    SnapshotReuse,
+    SnapshotWitnessUnavailable,
+)
+
 from stock_a.contracts import DayChainContractError, load_day_chain_contract
 from stock_a.application.runtime_config import (
     DiagnosticError,
@@ -62,7 +68,10 @@ from stock_a.application.source_ingress import (
     SourceIngressError,
     build_source_ingress_plan,
 )
-from stock_a.application.source_set_candidate import SourceSetCandidateApplicationError
+from stock_a.application.source_set_candidate import (
+    SourceSetCandidateApplicationError,
+    _official_calendar,
+)
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
     read_raw_daily_catalog,
@@ -475,6 +484,7 @@ class _PreviewState:
             raise DiagnosticError("RESEARCH_CUTOFF_REQUIRED", "必须显式绑定研究截止日")
         self.research_cutoff = research_cutoff
         self.config, self.config_path = load_runtime_config()
+        self.source_watch_reuse = SnapshotReuse(self.config)
         services = self.config.get("services")
         development = (
             services.get("development") if isinstance(services, Mapping) else None
@@ -556,6 +566,14 @@ class _BoundedHTTPServer(ThreadingHTTPServer):
         self.state = state
         self._request_slots = threading.BoundedSemaphore(4)
         super().__init__(server_address, _PreviewHandler)
+
+    def server_close(self) -> None:
+        try:
+            super().server_close()
+        finally:
+            reuse = getattr(self.state, "source_watch_reuse", None)
+            if reuse is not None:
+                reuse.close()
 
     def process_request(self, request: socket.socket, client_address: Any) -> None:
         if not self._request_slots.acquire(blocking=False):
@@ -919,149 +937,284 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             read_tdx_sector_memberships_for_symbols,
         )
 
+        def build_full_watch():
+            try:
+                d0_started = time.perf_counter()
+                changes = query_source_d0_raw_launch(
+                    self.preview_server.state.config,
+                    scenario="LAUNCH_CONFIRM",
+                    action="changes",
+                    before_session=before_session,
+                    before_source_set_id=source_set_before,
+                    before_package_sha256=package_sha256,
+                    target_session=target_session,
+                    research_cutoff=research_cutoff,
+                    source_set_id=source_set_after,
+                    package_sha256=package_sha256,
+                    transition="ALL",
+                    offset=0,
+                    limit=10000,
+                    expected_namespace_id=namespace_id,
+                )
+                d0_reader_wall_seconds = time.perf_counter() - d0_started
+            except SourceD0RawError as error:
+                mapped = _source_context_preview_error(error)
+                if mapped is None:
+                    raise
+                raise mapped from error
+
+            all_change_rows = changes.get("results")
+            selection = changes.get("selection")
+            transition_counts = changes.get("transition_counts")
+            source_key_set = changes.get("source_key_set")
+            if (
+                not isinstance(all_change_rows, list)
+                or not isinstance(selection, Mapping)
+                or not isinstance(transition_counts, Mapping)
+                or not isinstance(source_key_set, Mapping)
+                or selection.get("transition") != "ALL"
+                or len(all_change_rows) != source_key_set.get("source_union_count")
+                or selection.get("matched_count") != len(all_change_rows)
+                or selection.get("next_offset") is not None
+                or selection.get("evaluated_before_filter_and_pagination") is not True
+                or source_key_set.get("union_partition_closed") is not True
+                or sum(transition_counts.values())
+                != source_key_set.get("comparable_intersection_count")
+            ):
+                raise PreviewHttpError(
+                    409,
+                    "SOURCE_LAUNCH_WATCH_D0_RESULT_INCOMPLETE",
+                    "D0完整来源并集、九态转移及动态分母未闭合，已拒绝返回部分名单",
+                )
+            ft_rows = [
+                row
+                for row in all_change_rows
+                if isinstance(row, Mapping) and row.get("transition") == "FALSE_TO_TRUE"
+            ]
+            if len(ft_rows) != transition_counts.get("FALSE_TO_TRUE"):
+                raise PreviewHttpError(
+                    409,
+                    "SOURCE_LAUNCH_WATCH_FT_PARTITION_OPEN",
+                    "FALSE_TO_TRUE集合未闭合到完整九态转移计数",
+                )
+            if (
+                changes.get("before", {}).get("source_set", {}).get("source_set_id")
+                != source_set_before
+                or changes.get("after", {}).get("source_set", {}).get("source_set_id")
+                != source_set_after
+                or changes.get("before", {}).get("source_set", {}).get("package_sha256")
+                != package_sha256
+                or changes.get("after", {}).get("source_set", {}).get("package_sha256")
+                != package_sha256
+            ):
+                raise PreviewHttpError(
+                    409,
+                    "SOURCE_LAUNCH_WATCH_SOURCE_IDENTITY_MISMATCH",
+                    "D0实际source_set或package与请求不一致",
+                )
+            if (
+                changes.get("before", {}).get("namespace_id") != namespace_id
+                or changes.get("after", {}).get("namespace_id") != namespace_id
+            ):
+                raise PreviewHttpError(
+                    409,
+                    "SOURCE_LAUNCH_WATCH_NAMESPACE_MISMATCH",
+                    "D0读者绑定的DEV namespace与请求不一致",
+                )
+
+            source_symbols = [row["source_symbol"] for row in ft_rows]
+            try:
+                membership_started = time.perf_counter()
+                membership_read = read_tdx_sector_memberships_for_symbols(
+                    self.preview_server.state.config,
+                    source_symbols=source_symbols,
+                    target_session=target_session,
+                    industry_snapshot_id=industry_snapshot_id,
+                    concept_snapshot_id=concept_snapshot_id,
+                    expected_namespace_id=namespace_id,
+                )
+                membership_read_wall_seconds = time.perf_counter() - membership_started
+                aggregation_started = time.perf_counter()
+                complete = build_d0_launch_watch_membership_result(
+                    changes, membership_read
+                )
+                aggregation_wall_seconds = time.perf_counter() - aggregation_started
+            except Exception as error:
+                mapped = _source_context_preview_error(error)
+                if mapped is None:
+                    raise
+                raise mapped from error
+
+            stocks = complete.get("stocks")
+            boards = complete.get("boards")
+            if (
+                not isinstance(stocks, list)
+                or not isinstance(boards, list)
+                or complete.get("global_new_stock_count") != len(stocks)
+                or len(stocks) != len(ft_rows)
+                or complete.get("namespace_id") != namespace_id
+                or complete.get("package_sha256") != package_sha256
+                or complete.get("target_session") != target_session.isoformat()
+            ):
+                raise PreviewHttpError(
+                    409,
+                    "SOURCE_LAUNCH_WATCH_MEMBERSHIP_RESULT_INCOMPLETE",
+                    "板块关系联结没有闭合到完整D0新增来源股票集合",
+                )
+            ordered_symbols = [stock.get("source_symbol") for stock in stocks]
+            if (
+                any(not isinstance(symbol, str) for symbol in ordered_symbols)
+                or ordered_symbols != sorted(ordered_symbols)
+                or len(set(ordered_symbols)) != len(ordered_symbols)
+            ):
+                raise PreviewHttpError(
+                    409,
+                    "SOURCE_LAUNCH_WATCH_STOCK_ORDER_INVALID",
+                    "完整D0新增来源股票列表必须按唯一source_symbol升序闭合",
+                )
+            membership_snapshots = complete.get("membership_snapshots")
+            if not isinstance(membership_snapshots, list) or {
+                item.get("snapshot_id")
+                for item in membership_snapshots
+                if isinstance(item, Mapping)
+            } != {industry_snapshot_id, concept_snapshot_id}:
+                raise PreviewHttpError(
+                    409,
+                    "SOURCE_LAUNCH_WATCH_SNAPSHOT_PAIR_INVALID",
+                    "板块归属必须返回请求绑定的行业与GN概念双快照",
+                )
+            return (
+                {key: value for key, value in changes.items() if key != "results"},
+                complete,
+                d0_reader_wall_seconds,
+                membership_read_wall_seconds,
+                aggregation_wall_seconds,
+            )
+
+        actual_calendar = _official_calendar(target_session)
+        calendar_identity = {
+            key: actual_calendar[key]
+            for key in ("calendar_id", "calendar_revision", "calendar_sha256")
+        }
+        reuse_key = (
+            namespace_id,
+            before_session,
+            target_session,
+            research_cutoff,
+            source_set_before,
+            source_set_after,
+            package_sha256,
+            industry_snapshot_id,
+            concept_snapshot_id,
+            calendar_revision,
+            tuple(sorted(calendar_identity.items())),
+        )
+
+        def resolved_watch_identity(result: Any) -> str:
+            changes, complete = result[:2]
+            endpoints = []
+            expected = (
+                ("before", before_session, source_set_before),
+                ("after", target_session, source_set_after),
+            )
+            for side, session, expected_set in expected:
+                endpoint = changes[side]
+                source = endpoint["source_set"]
+                calendar = endpoint["official_calendar"]
+                if (
+                    endpoint.get("target_session") != session.isoformat()
+                    or endpoint.get("namespace_id") != namespace_id
+                    or source.get("source_set_id") != expected_set
+                    or source.get("package_sha256") != package_sha256
+                    or type(source.get("revision_id")) is not int
+                    or source["revision_id"] < 1
+                    or source.get("seal_status") != "SEALED"
+                    or endpoint.get("session_contract") != "D0_SESSION_R2"
+                    or not endpoint.get("algorithm_contract")
+                    or calendar != calendar_identity
+                    or not re.fullmatch(
+                        r"[0-9a-f]{64}", str(calendar.get("calendar_sha256", ""))
+                    )
+                    or source.get("calendar_id") != calendar.get("calendar_id")
+                    or source.get("calendar_revision")
+                    != calendar.get("calendar_revision")
+                    or source.get("calendar_sha256") != calendar.get("calendar_sha256")
+                    or not source.get("source_content_id")
+                    or not source.get("source_capture_id")
+                    or not source.get("parser_contract")
+                    or not re.fullmatch(
+                        r"[0-9a-f]{64}", str(source.get("source_raw_digest", ""))
+                    )
+                    or not re.fullmatch(
+                        r"[0-9a-f]{64}", str(source.get("source_digest", ""))
+                    )
+                ):
+                    raise ValueError("来源观察缓存缺少完整的端点版本身份")
+                endpoints.append(
+                    {
+                        "source": source,
+                        "calendar": calendar,
+                        "session_contract": endpoint["session_contract"],
+                        "algorithm_contract": endpoint["algorithm_contract"],
+                    }
+                )
+            snapshots = complete["membership_snapshots"]
+            if len(snapshots) != 2 or {
+                (item.get("snapshot_id"), item.get("board_kind")) for item in snapshots
+            } != {(industry_snapshot_id, "INDUSTRY"), (concept_snapshot_id, "CONCEPT")}:
+                raise ValueError("来源观察缓存缺少两类精确板块快照")
+            if any(
+                not re.fullmatch(
+                    r"[0-9a-f]{64}", str(item.get("source_file_sha256", ""))
+                )
+                for item in snapshots
+            ):
+                raise ValueError("来源观察缓存缺少板块来源摘要")
+            if not changes.get("contract") or not changes.get("producer_version"):
+                raise ValueError("来源观察缓存缺少D0合同或生产版本")
+            return canonical_sha(
+                {
+                    "endpoints": endpoints,
+                    "snapshots": snapshots,
+                    "contract": changes["contract"],
+                    "producer_version": changes["producer_version"],
+                }
+            )
+
         try:
-            d0_started = time.perf_counter()
-            changes = query_source_d0_raw_launch(
-                self.preview_server.state.config,
-                scenario="LAUNCH_CONFIRM",
-                action="changes",
-                before_session=before_session,
-                before_source_set_id=source_set_before,
-                before_package_sha256=package_sha256,
-                target_session=target_session,
-                research_cutoff=research_cutoff,
-                source_set_id=source_set_after,
-                package_sha256=package_sha256,
-                transition="ALL",
-                offset=0,
-                limit=10000,
-                expected_namespace_id=namespace_id,
+            (
+                (
+                    changes,
+                    complete,
+                    d0_reader_wall_seconds,
+                    membership_read_wall_seconds,
+                    aggregation_wall_seconds,
+                ),
+                cache_hit,
+            ) = self.preview_server.state.source_watch_reuse.get_or_build(
+                reuse_key, namespace_id, build_full_watch, resolved_watch_identity
             )
-            d0_reader_wall_seconds = time.perf_counter() - d0_started
-        except SourceD0RawError as error:
-            mapped = _source_context_preview_error(error)
-            if mapped is None:
-                raise
-            raise mapped from error
-
-        all_change_rows = changes.get("results")
-        selection = changes.get("selection")
-        transition_counts = changes.get("transition_counts")
-        source_key_set = changes.get("source_key_set")
-        if (
-            not isinstance(all_change_rows, list)
-            or not isinstance(selection, Mapping)
-            or not isinstance(transition_counts, Mapping)
-            or not isinstance(source_key_set, Mapping)
-            or selection.get("transition") != "ALL"
-            or len(all_change_rows) != source_key_set.get("source_union_count")
-            or selection.get("matched_count") != len(all_change_rows)
-            or selection.get("next_offset") is not None
-            or selection.get("evaluated_before_filter_and_pagination") is not True
-            or source_key_set.get("union_partition_closed") is not True
-            or sum(transition_counts.values())
-            != source_key_set.get("comparable_intersection_count")
-        ):
+        except SnapshotChanged as error:
             raise PreviewHttpError(
                 409,
-                "SOURCE_LAUNCH_WATCH_D0_RESULT_INCOMPLETE",
-                "D0完整来源并集、九态转移及动态分母未闭合，已拒绝返回部分名单",
-            )
-        ft_rows = [
-            row
-            for row in all_change_rows
-            if isinstance(row, Mapping) and row.get("transition") == "FALSE_TO_TRUE"
-        ]
-        if len(ft_rows) != transition_counts.get("FALSE_TO_TRUE"):
+                "SOURCE_LAUNCH_WATCH_SNAPSHOT_CHANGED",
+                "来源观察期间数据库版本发生变化，请重新请求",
+            ) from error
+        except SnapshotWitnessUnavailable as error:
             raise PreviewHttpError(
-                409,
-                "SOURCE_LAUNCH_WATCH_FT_PARTITION_OPEN",
-                "FALSE_TO_TRUE集合未闭合到完整九态转移计数",
-            )
-        if (
-            changes.get("before", {}).get("source_set", {}).get("source_set_id")
-            != source_set_before
-            or changes.get("after", {}).get("source_set", {}).get("source_set_id")
-            != source_set_after
-            or changes.get("before", {}).get("source_set", {}).get("package_sha256")
-            != package_sha256
-            or changes.get("after", {}).get("source_set", {}).get("package_sha256")
-            != package_sha256
-        ):
-            raise PreviewHttpError(
-                409,
-                "SOURCE_LAUNCH_WATCH_SOURCE_IDENTITY_MISMATCH",
-                "D0实际source_set或package与请求不一致",
-            )
-        if (
-            changes.get("before", {}).get("namespace_id") != namespace_id
-            or changes.get("after", {}).get("namespace_id") != namespace_id
-        ):
-            raise PreviewHttpError(
-                409,
-                "SOURCE_LAUNCH_WATCH_NAMESPACE_MISMATCH",
-                "D0读者绑定的DEV namespace与请求不一致",
-            )
-
-        source_symbols = [row["source_symbol"] for row in ft_rows]
-        try:
-            membership_started = time.perf_counter()
-            membership_read = read_tdx_sector_memberships_for_symbols(
-                self.preview_server.state.config,
-                source_symbols=source_symbols,
-                target_session=target_session,
-                industry_snapshot_id=industry_snapshot_id,
-                concept_snapshot_id=concept_snapshot_id,
-                expected_namespace_id=namespace_id,
-            )
-            membership_read_wall_seconds = time.perf_counter() - membership_started
-            aggregation_started = time.perf_counter()
-            complete = build_d0_launch_watch_membership_result(changes, membership_read)
-            aggregation_wall_seconds = time.perf_counter() - aggregation_started
-        except Exception as error:
-            mapped = _source_context_preview_error(error)
-            if mapped is None:
-                raise
-            raise mapped from error
-
-        stocks = complete.get("stocks")
-        boards = complete.get("boards")
-        if (
-            not isinstance(stocks, list)
-            or not isinstance(boards, list)
-            or complete.get("global_new_stock_count") != len(stocks)
-            or len(stocks) != len(ft_rows)
-            or complete.get("namespace_id") != namespace_id
-            or complete.get("package_sha256") != package_sha256
-            or complete.get("target_session") != target_session.isoformat()
-        ):
-            raise PreviewHttpError(
-                409,
-                "SOURCE_LAUNCH_WATCH_MEMBERSHIP_RESULT_INCOMPLETE",
-                "板块关系联结没有闭合到完整D0新增来源股票集合",
-            )
-        ordered_symbols = [stock.get("source_symbol") for stock in stocks]
-        if (
-            any(not isinstance(symbol, str) for symbol in ordered_symbols)
-            or ordered_symbols != sorted(ordered_symbols)
-            or len(set(ordered_symbols)) != len(ordered_symbols)
-        ):
-            raise PreviewHttpError(
-                409,
-                "SOURCE_LAUNCH_WATCH_STOCK_ORDER_INVALID",
-                "完整D0新增来源股票列表必须按唯一source_symbol升序闭合",
-            )
-        membership_snapshots = complete.get("membership_snapshots")
-        if not isinstance(membership_snapshots, list) or {
-            item.get("snapshot_id")
-            for item in membership_snapshots
-            if isinstance(item, Mapping)
-        } != {industry_snapshot_id, concept_snapshot_id}:
-            raise PreviewHttpError(
-                409,
-                "SOURCE_LAUNCH_WATCH_SNAPSHOT_PAIR_INVALID",
-                "板块归属必须返回请求绑定的行业与GN概念双快照",
-            )
+                503,
+                "SOURCE_LAUNCH_WATCH_WITNESS_UNAVAILABLE",
+                "来源观察无法校验数据库快照，请稍后重试",
+            ) from error
+        transition_counts = changes["transition_counts"]
+        stocks = complete["stocks"]
+        boards = complete["boards"]
+        if cache_hit:
+            d0_reader_wall_seconds = 0.0
+            membership_read_wall_seconds = 0.0
+            aggregation_wall_seconds = 0.0
+            for endpoint in ("before", "after"):
+                changes[endpoint]["execution"] = None
         filtered = stocks
         if board_kind is not None and board_native_id is not None:
             filtered = [
@@ -1172,11 +1325,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "results": page,
             "execution": {
                 "d0_full_pool_computed_before_selection": True,
-                "board_membership_read": "BATCHED_TWO_SNAPSHOT_READ_ONLY",
+                "board_membership_read": (
+                    "REUSED_COMPLETE_SNAPSHOT"
+                    if cache_hit
+                    else "BATCHED_TWO_SNAPSHOT_READ_ONLY"
+                ),
+                "cache_hit": cache_hit,
                 "d0_reader_wall_seconds": d0_reader_wall_seconds,
-                "d0_reader_execution": changes.get("execution"),
+                "d0_reader_execution": None if cache_hit else changes.get("execution"),
                 "membership_read_wall_seconds": membership_read_wall_seconds,
-                "membership_read_execution": complete.get("membership_read_execution"),
+                "membership_read_execution": None
+                if cache_hit
+                else complete.get("membership_read_execution"),
                 "membership_aggregation_wall_seconds": aggregation_wall_seconds,
                 "api_server_processing_wall_seconds": (
                     time.perf_counter() - request_started
