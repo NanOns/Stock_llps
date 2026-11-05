@@ -1551,6 +1551,16 @@ WITH old_rows AS (
            n.joined_raw_price_quality AS after_raw_price_quality,
            o.joined_raw_price_reason AS before_raw_price_reason,
            n.joined_raw_price_reason AS after_raw_price_reason,
+           n.amount_ratio20 AS after_amount_ratio20,
+           n.amount_ratio20_quality AS after_amount_ratio20_quality,
+           n.amount_ratio20_reason AS after_amount_ratio20_reason,
+           n.amount_ratio20_exact_numerator AS after_amount_ratio20_exact_numerator,
+           n.amount_ratio20_exact_denominator AS after_amount_ratio20_exact_denominator,
+           n.volume_ratio20 AS after_volume_ratio20,
+           n.volume_ratio20_quality AS after_volume_ratio20_quality,
+           n.volume_ratio20_reason AS after_volume_ratio20_reason,
+           n.volume_ratio20_exact_numerator AS after_volume_ratio20_exact_numerator,
+           n.volume_ratio20_exact_denominator AS after_volume_ratio20_exact_denominator,
            o.ma20 AS before_ma20,
            n.ma20 AS after_ma20,
            o.ma5 AS before_ma5,
@@ -2939,6 +2949,8 @@ def read_profile_relation_screen(
     end_position_2_field: str | None = None,
     end_position_2_status: str | None = None,
     source_symbol: str | None = None,
+    after_amount_ratio20_min: Decimal | str | None = None,
+    after_volume_ratio20_min: Decimal | str | None = None,
     before_source_set_id: str,
     before_package_sha256: str,
     before_profile_revision: str,
@@ -2989,6 +3001,46 @@ def read_profile_relation_screen(
         raise PriceProfilePgError(
             "PROFILE_RELATION_SYMBOL_INVALID", "来源代码筛选只接受字母、数字和点号"
         )
+    ratio_bounds = {}
+    ratio_bound_text = {}
+    for field, value in (
+        ("amount_ratio20", after_amount_ratio20_min),
+        ("volume_ratio20", after_volume_ratio20_min),
+    ):
+        if value is None:
+            continue
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (Decimal, str))
+            or len(str(value)) > 128
+            or (
+                isinstance(value, str)
+                and re.fullmatch(
+                    r"[+]?(?:[0-9]+(?:\.[0-9]*)?|\.[0-9]+)(?:[eE][+-]?[0-9]+)?", value
+                )
+                is None
+            )
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_FILTER_INVALID", f"{field}必须是非负有限Decimal"
+            )
+        try:
+            decimal_value = Decimal(value)
+        except (InvalidOperation, ValueError, TypeError) as error:
+            raise PriceProfilePgError(
+                "PROFILE_FILTER_INVALID", f"{field}必须是非负有限Decimal"
+            ) from error
+        if (
+            not decimal_value.is_finite()
+            or decimal_value < 0
+            or abs(decimal_value.as_tuple().exponent) > 128
+            or decimal_value.adjusted() > 128
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_FILTER_INVALID", f"{field}必须是范围内非负有限Decimal"
+            )
+        ratio_bounds[field] = Fraction(decimal_value)
+        ratio_bound_text[field] = str(decimal_value)
     end_filters: list[tuple[str, str]] = []
     for field, status in (
         (end_position_1_field, end_position_1_status),
@@ -3083,6 +3135,23 @@ def read_profile_relation_screen(
         for field, status in end_filters:
             filters.append(f"after_{field}_relation=%s")
             filter_parameters.append(status)
+        for field, bound in ratio_bounds.items():
+            prefix = f"after_{field}"
+            filters.extend(
+                (
+                    "core_compatible",
+                    "after_price_coordinate='RAW_UNADJUSTED'",
+                    f"{prefix}_quality='OBSERVED'",
+                    f"{prefix} IS NOT NULL",
+                    f"{prefix}_exact_numerator IS NOT NULL",
+                    f"{prefix}_exact_denominator > 0",
+                    f"{prefix}::text NOT IN ('NaN', 'Infinity', '-Infinity')",
+                    f"{prefix}_exact_numerator::text NOT IN ('NaN', 'Infinity', '-Infinity')",
+                    f"{prefix}_exact_denominator::text NOT IN ('NaN', 'Infinity', '-Infinity')",
+                    f"{prefix}_exact_numerator * %s::numeric >= %s::numeric * {prefix}_exact_denominator",
+                )
+            )
+            filter_parameters.extend((bound.denominator, bound.numerator))
         symbol_search = source_symbol.upper() if source_symbol else None
         if symbol_search is not None:
             filters.append("source_symbol=%s")
@@ -3307,6 +3376,7 @@ ORDER BY page_rows.source_symbol COLLATE "C" """,
         "transition_type": transition_type,
         "ma20_direction": ma20_direction,
         "source_code_presence": source_code_presence,
+        "after_ratio20_min_filters": ratio_bound_text,
         "end_position_filters": [
             {"field": field, "status": status} for field, status in end_filters
         ],

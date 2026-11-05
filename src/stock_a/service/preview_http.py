@@ -1551,6 +1551,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "offset",
                         "limit",
                         "symbol",
+                        "after_amount_ratio20_min",
+                        "after_volume_ratio20_min",
                     },
                 )
                 required = {
@@ -1596,6 +1598,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     relation_field=values["relation_field"],
                     transition_type=values["transition_type"],
                     ma20_direction=values.get("ma20_direction", "ALL"),
+                    after_amount_ratio20_min=values.get("after_amount_ratio20_min"),
+                    after_volume_ratio20_min=values.get("after_volume_ratio20_min"),
                     end_position_1_field=values.get("end_position_1_field"),
                     end_position_1_status=values.get("end_position_1_status"),
                     end_position_2_field=values.get("end_position_2_field"),
