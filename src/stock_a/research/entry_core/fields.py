@@ -115,6 +115,8 @@ def _core_history_from_selection(
             close=row.close,
             amount=row.amount,
             volume=row.volume,
+            native_amount=row.native_amount,
+            native_volume=row.native_volume,
         )
         for row in selection.rows
     )
@@ -522,7 +524,11 @@ def _basic_fact_dimensions(
             "core.liquidity_mean20",
         }:
             fact["unit_trust"] = {
-                "status": "CALLER_DECLARED_ASSUMPTION",
+                "status": (
+                    "SAME_CAPTURE_NATIVE_DIMENSIONLESS"
+                    if field_id != "core.liquidity_mean20"
+                    else "CALLER_DECLARED_ASSUMPTION"
+                ),
                 "interpretation": (
                     "金额比率要求窗口内金额倍率一致"
                     if field_id == "core.amount_ratio20"

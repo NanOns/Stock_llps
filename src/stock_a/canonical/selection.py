@@ -28,6 +28,8 @@ class CanonicalSelectedRow:
     close: FieldValue
     amount: FieldValue
     volume: FieldValue
+    native_amount: FieldValue | None = None
+    native_volume: FieldValue | None = None
 
 
 @dataclass(frozen=True)
@@ -158,11 +160,29 @@ def build_tdx_read_selection(
     for session in official_sessions:
         decoded = selected_rows.get(session)
         values = _row_fields(decoded)
+        native_compatible = (
+            decoded is not None
+            and decoded.unit_version == units.version == capture.unit_version
+        )
         rows.append(
             CanonicalSelectedRow(
                 session=session,
                 state="ACTUAL" if decoded is not None else "UNKNOWN",
                 coordinate_id=coordinate_id if decoded is not None else None,
+                native_amount=(
+                    (decoded.raw_amount or unknown("RAW_AMOUNT_NOT_RETAINED"))
+                    if native_compatible
+                    else unknown("NATIVE_UNIT_VERSION_MISMATCH")
+                )
+                if decoded is not None
+                else None,
+                native_volume=(
+                    (decoded.raw_volume or unknown("RAW_VOLUME_NOT_RETAINED"))
+                    if native_compatible
+                    else unknown("NATIVE_UNIT_VERSION_MISMATCH")
+                )
+                if decoded is not None
+                else None,
                 **values,
             )
         )

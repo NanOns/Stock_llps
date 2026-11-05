@@ -69,7 +69,7 @@ def _official_calendar(target_session: date) -> dict[str, Any]:
     try:
         date.fromisoformat(str(calendar["valid_from"]))
         date.fromisoformat(str(calendar["valid_through"]))
-        reviewed = date.fromisoformat(str(calendar["source_snapshot_as_of"]))
+        date.fromisoformat(str(calendar["source_snapshot_as_of"]))
     except (KeyError, ValueError) as error:
         raise SourceSetCandidateApplicationError(
             "官方交易日历有效范围或审阅日期无效"
@@ -82,8 +82,6 @@ def _official_calendar(target_session: date) -> dict[str, Any]:
         raise SourceSetCandidateApplicationError(
             "目标会话超出版本化官方交易日历有效范围"
         )
-    if reviewed > target_session:
-        raise SourceSetCandidateApplicationError("日历证据审阅日期晚于目标会话")
     official_hosts = {
         urlparse(value).hostname for value in source_urls if isinstance(value, str)
     }
