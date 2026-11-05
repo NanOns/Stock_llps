@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import hashlib
@@ -12,10 +12,11 @@ import socket
 import sys
 import threading
 import time
+import traceback
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from stock_a.contracts import DayChainContractError, load_day_chain_contract
 from stock_a.application.runtime_config import (
@@ -123,9 +124,14 @@ def _source_context_preview_error(error: Exception) -> PreviewHttpError | None:
         "SECTOR_SNAPSHOT_UUID_INVALID",
         "SECTOR_SNAPSHOT_IDS_NOT_DISTINCT",
         "DEV_NAMESPACE_INVALID",
+        "P04_NAMESPACE_ID_INVALID",
+        "P04_SOURCE_SET_ID_INVALID",
     }
-    if code == "PG_READ_PERMISSION_DENIED":
-        status = 403
+    if code in {
+        "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE",
+        "PG_RESEARCH_P04_SOURCE_SET_INVALID",
+    }:
+        status = 409
     elif code.startswith("PG_"):
         status = 503
     elif category == "ARGUMENT" or code in request_errors:
@@ -664,9 +670,20 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             self._error(error)
             return
         if isinstance(error, PgResearchBindingError):
-            status = (
-                409 if error.code == "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE" else 503
-            )
+            if error.code in {
+                "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE",
+                "PG_RESEARCH_P04_SOURCE_SET_INVALID",
+                "P04_NAMESPACE_MISMATCH",
+                "P04_SOURCE_SET_KEY_MISMATCH",
+            }:
+                status = 409
+            elif error.code in {
+                "P04_NAMESPACE_ID_INVALID",
+                "P04_SOURCE_SET_ID_INVALID",
+            }:
+                status = 400
+            else:
+                status = 503
             self._error(PreviewHttpError(status, error.code, str(error)))
             return
         if isinstance(error, PgPriceProfileError):
@@ -733,6 +750,35 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             )
             self._error(PreviewHttpError(status, code, str(error)))
             return
+        # 仅记录调用位置，不记录异常文本、局部变量、SQL或请求体。
+        frames = traceback.extract_tb(error.__traceback__)
+        route = str(getattr(self, "path", "")).split("?", 1)[0]
+        known_routes = {
+            "/api/preview/catalog",
+            "/api/preview/chain-readiness",
+            "/api/preview/raw",
+            "/api/preview/source-launch-watch",
+            "/api/preview/source-page",
+            "/api/preview/stock-timeline",
+            "/api/preview/stock",
+        }
+        method = getattr(self, "command", "")
+        diagnostic = {
+            "time": datetime.now(timezone.utc).isoformat(),
+            "request_id": uuid4().hex,
+            "method": method if method in {"GET", "HEAD", "POST"} else "UNKNOWN",
+            "route": route if route in known_routes else "UNKNOWN_ROUTE",
+            "exception_type": type(error).__name__,
+            "stack": [
+                {
+                    "file": Path(frame.filename).name,
+                    "line": frame.lineno,
+                    "function": frame.name,
+                }
+                for frame in frames
+            ],
+        }
+        print(json.dumps(diagnostic, ensure_ascii=True), file=sys.stderr, flush=True)
         self._error(
             PreviewHttpError(
                 500, "PREVIEW_INTERNAL_ERROR", "预览请求未完成；请检查本机服务输出"
@@ -1047,6 +1093,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "source_set_id": source_set_after,
                     "namespace_id": namespace_id,
                     "include_source_change_context": True,
+                    "research_cutoff": research_cutoff.isoformat(),
                     "before_session": before_session.isoformat(),
                     "before_source_set_id": source_set_before,
                     "before_package_sha256": package_sha256,
@@ -2341,6 +2388,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             source_change_bodies = {
                 frozenset(source_change_body),
                 frozenset(source_change_body | source_change_optional),
+                frozenset(source_change_body | {"research_cutoff"}),
+                frozenset(
+                    source_change_body | source_change_optional | {"research_cutoff"}
+                ),
             }
             valid_body = isinstance(body, dict) and (
                 set(body) == expected
@@ -2366,6 +2417,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             package_sha = _sha(body["package_sha256"])
             session_count = _positive_int(body["session_count"], "session_count", 75)
             source_change_opt_in = frozenset(body) in source_change_bodies
+            research_cutoff = self.preview_server.state.research_cutoff
+            if source_change_opt_in and "research_cutoff" in body:
+                research_cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
+                if research_cutoff > self.preview_server.state.research_cutoff:
+                    raise PreviewHttpError(
+                        400,
+                        "RESEARCH_CUTOFF_EXCEEDED",
+                        "请求研究截止日不能晚于服务已绑定的研究截止日",
+                    )
+                _require_research_cutoff(target, research_cutoff)
             before_target: date | None = None
             before_source_set_id: str | None = None
             before_package_sha: str | None = None
@@ -2381,9 +2442,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "include_source_change_context必须显式为true",
                     )
                 before_target = _iso_date(body["before_session"], "before_session")
-                _require_research_cutoff(
-                    before_target, self.preview_server.state.research_cutoff
-                )
+                _require_research_cutoff(before_target, research_cutoff)
                 if before_target >= target:
                     raise PreviewHttpError(
                         400,
@@ -2543,7 +2602,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             namespace_id=history["namespace_id"],
                             before_session=before_target,
                             target_session=target,
-                            research_cutoff=self.preview_server.state.research_cutoff,
+                            research_cutoff=research_cutoff,
                             before_source_set_id=before_source_set_id,
                             before_package_sha256=before_package_sha,
                             source_set_id=source_context["source_set_id"],

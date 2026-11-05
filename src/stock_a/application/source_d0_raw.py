@@ -163,9 +163,18 @@ def query_source_d0_raw_launch(
     before_package_sha256: str | None = None,
     transition: str | None = None,
     expected_namespace_id: str | None = None,
+    _history_symbol: str | None = None,
 ) -> dict[str, Any]:
     """读取LAUNCH原始状态，或联结相邻官方会话的三态变化。"""
     expected_namespace_id = _canonical_expected_namespace(expected_namespace_id)
+    if _history_symbol is not None and (
+        action != "current"
+        or not isinstance(_history_symbol, str)
+        or _SYMBOL.fullmatch(_history_symbol) is None
+    ):
+        raise SourceD0RawError(
+            "D0_SOURCE_SYMBOL_INVALID", "内部历史窗口代码无效。", category="ARGUMENT"
+        )
     if action == "changes":
         return _query_source_d0_raw_launch_changes(
             config,
@@ -291,7 +300,7 @@ def query_source_d0_raw_launch(
             source_content_id=source_set["source_content_id"],
             target_capture_id=source_set["source_capture_id"],
             parser_contract=source_set["parser_contract"],
-            include_history_window=symbol == source_symbol,
+            include_history_window=source_symbol in (symbol, _history_symbol),
         )
         target_row = pg_result["target_rows"][source_symbol]
         item.update(
@@ -558,6 +567,7 @@ def _query_source_d0_raw_launch_changes(
             offset=0,
             limit=_MAX_LIMIT,
             expected_namespace_id=expected_namespace_id,
+            _history_symbol=symbol,
         )
         after_result = query_source_d0_raw_launch(
             config,
@@ -570,6 +580,7 @@ def _query_source_d0_raw_launch_changes(
             offset=0,
             limit=_MAX_LIMIT,
             expected_namespace_id=expected_namespace_id,
+            _history_symbol=symbol,
         )
     except SourceD0RawError:
         raise
@@ -668,49 +679,6 @@ def _query_source_d0_raw_launch_changes(
             "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
         }
         changes.append(item)
-
-    if symbol is not None:
-        for result, source_date_key, source_set_key, output_side in (
-            (
-                before_result,
-                before_session,
-                before_source_set_id,
-                "before",
-            ),
-            (
-                after_result,
-                target_session,
-                source_set_id,
-                "after",
-            ),
-        ):
-            endpoint_rows = [
-                row for row in result["results"] if row["source_symbol"] == symbol
-            ]
-            if not endpoint_rows:
-                continue
-            detail = query_source_d0_raw_launch(
-                config,
-                scenario=scenario,
-                target_session=source_date_key,
-                research_cutoff=research_cutoff,
-                source_set_id=source_set_key,
-                package_sha256=package_sha256,
-                state="ALL",
-                symbol=symbol,
-                offset=0,
-                limit=1,
-            )
-            detail_by_symbol = {row["source_symbol"]: row for row in detail["results"]}
-            for change in changes:
-                endpoint_item = change[output_side]
-                if (
-                    endpoint_item is not None
-                    and endpoint_item["source_symbol"] == symbol
-                ):
-                    endpoint_item["history_window"] = detail_by_symbol[symbol].get(
-                        "history_window", []
-                    )
 
     selected = [
         item

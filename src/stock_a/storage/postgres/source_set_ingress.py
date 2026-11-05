@@ -134,6 +134,8 @@ _ACK_CAPABILITY_ID = "P03_COMMIT_ACK"
 class SourceSetIngressError(ValueError):
     """正式来源集合读回或提交证据不符合typed合同。"""
 
+    preserve_transaction_error = True
+
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
