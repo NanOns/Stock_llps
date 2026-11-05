@@ -79,9 +79,9 @@ def query_source_stock_change_context(
     before_session: date,
     target_session: date,
     research_cutoff: date,
-    before_source_set_id: str,
+    before_source_set_id: str | None,
     before_package_sha256: str,
-    source_set_id: str,
+    source_set_id: str | None,
     package_sha256: str,
     symbol: str,
     before_profile_revision: str | None = None,
@@ -114,11 +114,9 @@ def query_source_stock_change_context(
         scenario="LAUNCH_CONFIRM",
         action="changes",
         before_session=before_session,
-        before_source_set_id=before_source_set_id,
         before_package_sha256=before_package_sha256,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_set_id=source_set_id,
         package_sha256=package_sha256,
         symbol=symbol,
         transition="ALL",
@@ -140,7 +138,7 @@ def query_source_stock_change_context(
     if not isinstance(rows, list) or len(rows) != 1:
         raise SourceStockChangeContextError(
             "D0_SOURCE_SYMBOL_NOT_IN_PAIR",
-            "来源股票代码未出现在前后任一封存来源池，无法构造单股变化上下文。",
+            "来源股票代码未出现在前后任一Raw来源池，无法构造单股变化上下文。",
             category="NOT_FOUND",
         )
     change = rows[0]
@@ -224,6 +222,7 @@ def query_source_stock_change_context(
                         ("package_sha256", package_sha),
                         ("profile_revision", revision),
                     )
+                    if expected is not None
                 ):
                     raise SourceStockChangeContextError(
                         "PROFILE_CHANGE_SNAPSHOT_IDENTITY_MISMATCH",

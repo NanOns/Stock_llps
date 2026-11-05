@@ -29,7 +29,6 @@ def research_compare(
     limits: ReadLimits,
     budget: CompareBudget | None = None,
     profile_contract: dict[str, Any] | None = None,
-    foundation_contract: dict[str, Any] | None = None,
     source_captures: Mapping[str, VipdataEntryCapture] | None = None,
 ) -> dict[str, Any]:
     """同一日期逐代码只读计算，并对整批请求共享字节、记录和耗时预算。"""
@@ -129,7 +128,6 @@ def research_compare(
                 units=units,
                 limits=per_symbol_limits,
                 profile_contract=profile_contract,
-                foundation_contract=foundation_contract,
                 vipdata_capture=source_captures.get(item)
                 if source_captures is not None
                 else None,

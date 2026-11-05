@@ -12,7 +12,6 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_history_page,
     read_raw_daily_history_stock,
     read_raw_daily_stock,
-    read_sealed_source_market_breadth_history,
 )
 
 from stock_a.application.cli_commands.parser import ChineseParser
@@ -143,7 +142,7 @@ def register_commands(commands):
     sector_catalog.add_argument("--offset", type=int, default=0)
     sector_catalog.add_argument("--limit", type=int, default=100)
     sector_query = sector_actions.add_parser(
-        "members", help="读取精确板块成员与SEALED B_t、Core/Profile状态"
+        "members", help="读取精确板块成员与Core/Profile状态"
     )
     sector_query.add_argument("--snapshot-id", required=True)
     sector_query.add_argument(
@@ -241,7 +240,7 @@ def register_commands(commands):
     )
     sector_change_stocks = sector_actions.add_parser(
         "change-stocks",
-        help="全量联接行业概念强弱变化与同一SEALED来源包D1支撑变化股票",
+        help="全量联接行业概念强弱变化与同一来源包D1支撑变化股票",
     )
     sector_change_stocks.add_argument("--industry-snapshot-id", required=True)
     sector_change_stocks.add_argument("--concept-snapshot-id", required=True)
@@ -338,7 +337,7 @@ def register_commands(commands):
     )
     sector_change_stocks.add_argument(
         "--d0-before-source-set-id",
-        help="启用D0新增启动联动时前一会话的精确SEALED source_set UUID",
+        help="启用D0新增启动联动时，提供前一会话存量Profile来源UUID",
     )
     sector_change_stocks.add_argument(
         "--stock-offset",
@@ -355,70 +354,10 @@ def register_commands(commands):
     sector_change_stocks.add_argument(
         "--include-source-market-context",
         action="store_true",
-        help="可选附加同一SEALED来源池的市场宽度摘要，不改变板块或D1结果",
+        help="可选附加同一来源池的市场宽度摘要，不改变板块或D1结果",
     )
     sector_change_stocks.add_argument(
         "--include-price-safety-facts",
         action="store_true",
         help="仅为实际显示的板块成员附加Core与D0首日RAW价格损伤事实",
-    )
-    source_set = commands.add_parser(
-        "source-set-candidate",
-        help="按精确日期与TDX包SHA预检或读取P03来源集合候选",
-    )
-    source_set.add_argument(
-        "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
-    )
-    source_set.add_argument(
-        "--package-sha256", required=True, help="完整TDX来源包SHA-256"
-    )
-    source_set.add_argument(
-        "--persist",
-        action="store_true",
-        help="经P00/P02真实核算后事务幂等插入候选，最多一条主行和七条输入",
-    )
-    source_ingress = commands.add_parser(
-        "source-ingress-plan",
-        help="按精确PG来源版本运行P00 SOURCE_INGRESS计划及P02能力核算",
-    )
-    source_ingress.add_argument(
-        "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
-    )
-    source_ingress.add_argument(
-        "--package-sha256", required=True, help="完整TDX来源包SHA-256"
-    )
-    source_ingress.add_argument(
-        "--skip-phase0-scan",
-        action="store_true",
-        help="不重复扫描TDX根；仅按PG捕获事实核验SOURCE_INGRESS范围，不改变阶段0总体结论",
-    )
-    source_ingress.add_argument("--max-entries", type=int, default=50000)
-    source_ingress.add_argument("--max-file-bytes", type=int, default=16777216)
-    source_ingress.add_argument("--max-total-bytes", type=int, default=33554432)
-    source_ingress.add_argument("--max-records", type=int, default=200000)
-    source_ingress.add_argument("--max-seconds", default="30")
-    source_p03_write = commands.add_parser(
-        "source-p03-write",
-        help="基于真实Phase0和精确PG候选提交正式P03来源集合",
-        description="仅执行有界候选写入及PENDING、ACK、独立读回和最终封口；不切换Head。",
-    )
-    source_p03_write.add_argument(
-        "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
-    )
-    source_p03_write.add_argument(
-        "--package-sha256", required=True, help="完整TDX来源包SHA-256"
-    )
-    source_p03_write.add_argument("--max-entries", type=int, default=50000)
-    source_p03_write.add_argument("--max-file-bytes", type=int, default=16777216)
-    source_p03_write.add_argument("--max-total-bytes", type=int, default=33554432)
-    source_p03_write.add_argument("--max-records", type=int, default=200000)
-    source_p03_write.add_argument("--max-seconds", default="30")
-    source_set_catalog = commands.add_parser(
-        "source-set-catalog", help="按精确日期与TDX包SHA只读查询P03来源集合候选"
-    )
-    source_set_catalog.add_argument(
-        "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
-    )
-    source_set_catalog.add_argument(
-        "--package-sha256", required=True, help="完整TDX来源包SHA-256"
     )

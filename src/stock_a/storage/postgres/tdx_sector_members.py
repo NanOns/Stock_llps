@@ -25,6 +25,7 @@ from stock_a.storage.postgres.source_raw import (
     _transaction,
 )
 
+from . import source_raw
 from .d0_raw import MAX_SOURCE_SYMBOLS
 from .price_profiles import (
     PriceProfilePgError,
@@ -79,7 +80,7 @@ class TdxSectorStrengthReadContext:
     cursor: Any
     namespace_id: str
     active: bool = True
-    validated_source_sets: dict[tuple[Any, ...], dict[str, Any]] = field(
+    validated_source_versions: dict[tuple[Any, ...], dict[str, Any]] = field(
         default_factory=dict
     )
     validated_profile_snapshots: dict[tuple[Any, ...], dict[str, Any]] = field(
@@ -1748,20 +1749,48 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                     "SECTOR_SNAPSHOT_MODE_REJECTED", "不接受未经声明的历史PIT成员快照"
                 )
             cursor.execute(
-                """SELECT source_set_id::text, revision_id, target_session,
-       package_sha256, source_capture_id::text, raw_row_count, seal_status,
-       durability_status, source_time_quality, source_available_at
-FROM stock.source_sets WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
-  AND target_session=%s::date AND package_sha256=%s""",
-                (namespace_id, source_set_id, target_session, package_sha256),
+                """SELECT DISTINCT r.source_content_id, r.source_capture_id::text,
+       c.read_started_at, c.validated_at, c.source_available_at,
+       c.source_time_quality, c.source_clock_role, c.parser_contract,
+       c.canonical_digest, c.normalized_count, s.dataset_id, s.byte_sha, s.byte_count
+FROM stock.source_raw_daily r
+JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
+  AND c.capture_id=r.source_capture_id
+JOIN stock.source_contents s ON s.namespace_id=r.namespace_id
+  AND s.content_id=r.source_content_id
+WHERE r.namespace_id=%s::uuid AND r.session_date=%s::date AND r.package_sha256=%s
+ORDER BY r.source_capture_id, r.source_content_id LIMIT 2""",
+                (namespace_id, target_session, package_sha256),
             )
-            source_set = cursor.fetchone()
-            if source_set is None or source_set[6:8] != (
-                "SEALED",
-                "VERIFIED_POST_COMMIT_READBACK",
+            source_version = cursor.fetchall()
+            if len(source_version) != 1:
+                raise TdxSectorMembersPgError(
+                    "SOURCE_VERSION_NOT_UNIQUE",
+                    "目标日与包SHA没有唯一Raw捕获和内容引用",
+                )
+            (
+                source_content_id,
+                source_capture_id,
+                _capture_started_at,
+                _capture_validated_at,
+                source_available_at,
+                source_time_quality,
+                source_clock_role,
+                parser_contract,
+                source_digest,
+                expected_row_count,
+                source_dataset_id,
+                content_sha,
+                source_byte_count,
+            ) = source_version[0]
+            if (
+                source_dataset_id != source_raw._DATASET_ID
+                or str(content_sha).strip() != package_sha256
+                or type(expected_row_count) is not int
+                or expected_row_count <= 0
             ):
                 raise TdxSectorMembersPgError(
-                    "SEALED_SOURCE_SET_NOT_FOUND", "未找到完全匹配的SEALED P03来源集合"
+                    "SOURCE_VERSION_INVALID", "Raw来源捕获或内容元数据不合法"
                 )
             cursor.execute(
                 """SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint,
@@ -1770,23 +1799,30 @@ FROM stock.source_sets WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
        count(*) FILTER (WHERE bar_status='READ_FAILED')::bigint
 FROM stock.source_raw_daily WHERE namespace_id=%s::uuid
   AND source_capture_id=%s::uuid AND session_date=%s::date AND package_sha256=%s""",
-                (namespace_id, source_set[4], target_session, package_sha256),
+                (namespace_id, source_capture_id, target_session, package_sha256),
             )
             raw_counts = cursor.fetchone()
-            if int(raw_counts[0]) != int(source_set[5]) or int(raw_counts[1]) != int(
-                source_set[5]
+            if (
+                int(raw_counts[0]) != expected_row_count
+                or int(raw_counts[1]) != expected_row_count
             ):
                 raise TdxSectorMembersPgError(
-                    "SEALED_SOURCE_RAW_COUNT_MISMATCH",
-                    "精确P03来源集合与Raw代码分母不一致",
+                    "SOURCE_RAW_COUNT_MISMATCH",
+                    "目标日Raw行数与capture记录的来源代码数不一致",
                 )
             cursor.execute(
                 """SELECT DISTINCT profile_revision COLLATE "C" AS profile_revision
 FROM stock.source_symbol_price_profiles
 WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
-  AND target_session=%s::date AND package_sha256=%s
+  AND source_capture_id=%s::uuid AND target_session=%s::date AND package_sha256=%s
 ORDER BY profile_revision""",
-                (namespace_id, source_set_id, target_session, package_sha256),
+                (
+                    namespace_id,
+                    source_set_id,
+                    source_capture_id,
+                    target_session,
+                    package_sha256,
+                ),
             )
             profile_revisions = [str(row[0]).strip() for row in cursor.fetchall()]
             selected_profile = profile_revision
@@ -1822,12 +1858,12 @@ LEFT JOIN stock.source_symbol_price_profiles p ON p.namespace_id=%s::uuid
 WHERE m.snapshot_id=%s::uuid AND m.board_kind=%s AND m.board_native_id=%s""",
                 (
                     namespace_id,
-                    source_set[4],
+                    source_capture_id,
                     target_session,
                     package_sha256,
                     namespace_id,
                     source_set_id,
-                    source_set[4],
+                    source_capture_id,
                     target_session,
                     package_sha256,
                     selected_profile,
@@ -1881,12 +1917,12 @@ WHERE m.snapshot_id=%s::uuid AND m.board_kind=%s AND m.board_native_id=%s
 ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
                 (
                     namespace_id,
-                    source_set[4],
+                    source_capture_id,
                     target_session,
                     package_sha256,
                     namespace_id,
                     source_set_id,
-                    source_set[4],
+                    source_capture_id,
                     target_session,
                     package_sha256,
                     selected_profile,
@@ -1924,17 +1960,21 @@ ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         "status": "AVAILABLE" if total_member_count else "NO_MATCH",
         "namespace_id": namespace_id,
         "snapshot": snapshot,
-        "source_set": {
-            "source_set_id": str(source_set[0]),
-            "revision_id": int(source_set[1]),
-            "target_session": source_set[2].isoformat(),
-            "package_sha256": str(source_set[3]).strip(),
-            "source_capture_id": str(source_set[4]),
-            "raw_row_count": int(source_set[5]),
-            "seal_status": source_set[6],
-            "durability_status": source_set[7],
-            "source_time_quality": source_set[8],
-            "source_available_at": source_set[9].isoformat() if source_set[9] else None,
+        "source_version": {
+            "profile_storage_key": source_set_id,
+            "target_session": target_session.isoformat(),
+            "package_sha256": package_sha256,
+            "source_content_id": str(source_content_id).strip(),
+            "source_capture_id": str(source_capture_id),
+            "parser_contract": parser_contract,
+            "source_digest": str(source_digest).strip(),
+            "raw_row_count": expected_row_count,
+            "source_byte_count": int(source_byte_count),
+            "source_time_quality": source_time_quality,
+            "source_clock_role": source_clock_role,
+            "source_available_at": source_available_at.isoformat()
+            if source_available_at
+            else None,
         },
         "profile_revision": selected_profile,
         "profile_revision_selection": (
@@ -1950,7 +1990,7 @@ ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         "source_member_count": total_member_count,
         "matched_b_t": matched_count,
         "unmatched_b_t": unmatched_count,
-        "unmatched_b_t_reason": "NOT_IN_EXACT_SEALED_B_T;不推断停牌、上市或退市",
+        "unmatched_b_t_reason": "NOT_IN_SELECTED_B_T;不推断停牌、上市或退市",
         "target_bar_counts_within_matched_b_t": {
             "TARGET_PRESENT": present_count,
             "TARGET_MISSING": missing_count,
@@ -1974,7 +2014,7 @@ ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
     }
 
 
-def _breadth_source_set(
+def _breadth_source_version(
     cursor: Any,
     *,
     namespace_id: str,
@@ -1984,28 +2024,51 @@ def _breadth_source_set(
     profile_revision: str,
 ) -> dict[str, Any]:
     cursor.execute(
-        """SELECT source_set_id::text, target_session, package_sha256,
-       revision_id, source_capture_id::text, raw_row_count, seal_status,
-       durability_status, source_time_quality, source_available_at
-FROM stock.source_sets
-WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
-  AND target_session=%s::date AND package_sha256=%s""",
-        (namespace_id, source_set_id, target_session, package_sha256),
+        """SELECT DISTINCT r.source_content_id, r.source_capture_id::text,
+       c.source_available_at, c.source_time_quality, c.source_clock_role,
+       c.parser_contract, c.canonical_digest, c.normalized_count,
+       s.dataset_id, s.byte_sha, s.byte_count
+FROM stock.source_raw_daily r
+JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
+  AND c.capture_id=r.source_capture_id
+JOIN stock.source_contents s ON s.namespace_id=r.namespace_id
+  AND s.content_id=r.source_content_id
+WHERE r.namespace_id=%s::uuid AND r.session_date=%s::date AND r.package_sha256=%s
+ORDER BY r.source_capture_id, r.source_content_id LIMIT 2""",
+        (namespace_id, target_session, package_sha256),
     )
-    row = cursor.fetchone()
-    if row is None or row[6:8] != (
-        "SEALED",
-        "VERIFIED_POST_COMMIT_READBACK",
+    rows = cursor.fetchall()
+    if len(rows) != 1:
+        raise TdxSectorMembersPgError(
+            "SOURCE_VERSION_NOT_UNIQUE",
+            "目标日与包SHA没有唯一Raw捕获和内容引用",
+        )
+    (
+        source_content_id,
+        source_capture_id,
+        source_available_at,
+        source_time_quality,
+        source_clock_role,
+        parser_contract,
+        source_digest,
+        raw_count,
+        dataset_id,
+        content_sha,
+        source_byte_count,
+    ) = rows[0]
+    if (
+        dataset_id != source_raw._DATASET_ID
+        or str(content_sha).strip() != package_sha256
+        or type(raw_count) is not int
+        or raw_count <= 0
     ):
         raise TdxSectorMembersPgError(
-            "SEALED_SOURCE_SET_NOT_FOUND",
-            "未找到完全匹配且已验证耐久性的SEALED P03来源集合",
+            "SOURCE_VERSION_INVALID", "Raw来源捕获或内容元数据不合法"
         )
-    raw_count = int(row[5])
     if raw_count > MAX_MEMBER_INSERTS:
         raise TdxSectorMembersPgError(
             "BREADTH_SOURCE_ROW_BUDGET_EXCEEDED",
-            "精确SEALED来源集合超过广度读取行数上限",
+            "目标日Raw来源超过广度读取行数上限",
         )
     cursor.execute(
         """SELECT count(*)::bigint,
@@ -2016,13 +2079,38 @@ WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
 FROM stock.source_raw_daily
 WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
   AND session_date=%s::date AND package_sha256=%s""",
-        (namespace_id, row[4], target_session, package_sha256),
+        (namespace_id, source_capture_id, target_session, package_sha256),
     )
     raw_counts = cursor.fetchone()
     if int(raw_counts[0]) != raw_count or int(raw_counts[1]) != raw_count:
         raise TdxSectorMembersPgError(
-            "SEALED_SOURCE_RAW_COUNT_MISMATCH",
-            "精确P03来源集合与Raw代码集合分母不一致",
+            "SOURCE_RAW_COUNT_MISMATCH",
+            "capture记录与Raw代码集合分母不一致",
+        )
+    cursor.execute(
+        """SELECT DISTINCT source_set_revision
+FROM stock.source_symbol_price_profiles
+WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
+  AND source_capture_id=%s::uuid AND target_session=%s::date
+  AND package_sha256=%s AND profile_revision=%s
+ORDER BY source_set_revision LIMIT 2""",
+        (
+            namespace_id,
+            source_set_id,
+            source_capture_id,
+            target_session,
+            package_sha256,
+            profile_revision,
+        ),
+    )
+    profile_storage_revisions = cursor.fetchall()
+    if (
+        len(profile_storage_revisions) != 1
+        or type(profile_storage_revisions[0][0]) is not int
+    ):
+        raise TdxSectorMembersPgError(
+            "PROFILE_STORAGE_REVISION_UNAVAILABLE",
+            "画像没有唯一的现存存储版本键",
         )
     cursor.execute(
         """SELECT count(*)::bigint,
@@ -2033,8 +2121,8 @@ WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
   AND target_session=%s::date AND package_sha256=%s
   AND profile_revision=%s""",
         (
-            row[3],
-            row[4],
+            profile_storage_revisions[0][0],
+            source_capture_id,
             namespace_id,
             source_set_id,
             target_session,
@@ -2046,19 +2134,24 @@ WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
     if any(int(value) != raw_count for value in profile_counts):
         raise TdxSectorMembersPgError(
             "PROFILE_SOURCE_IDENTITY_MISMATCH",
-            "画像行分母、P03修订或source_capture_id与精确SEALED来源集合不一致",
+            "画像行分母、存储版本或capture与Raw来源版本不一致",
         )
     return {
-        "source_set_id": str(row[0]),
-        "target_session": row[1],
-        "package_sha256": str(row[2]).strip(),
-        "revision_id": int(row[3]),
-        "source_capture_id": str(row[4]),
+        "profile_storage_key": source_set_id,
+        "target_session": target_session,
+        "package_sha256": package_sha256,
+        "source_content_id": str(source_content_id).strip(),
+        "source_capture_id": str(source_capture_id),
         "source_symbol_count": raw_count,
-        "seal_status": str(row[6]),
-        "durability_status": str(row[7]),
-        "source_time_quality": str(row[8]),
-        "source_available_at": row[9].isoformat() if row[9] else None,
+        "source_digest": str(source_digest).strip(),
+        "parser_contract": parser_contract,
+        "source_time_quality": str(source_time_quality),
+        "source_clock_role": str(source_clock_role),
+        "source_available_at": source_available_at.isoformat()
+        if source_available_at
+        else None,
+        "source_byte_count": int(source_byte_count),
+        "profile_storage_revision": int(profile_storage_revisions[0][0]),
         "profile_revision": profile_revision,
     }
 
@@ -2510,7 +2603,7 @@ def _summarize_sector_breadth_rows(
                 relation = row[f"{field_prefix}_relation"]
                 if not matched:
                     relation = "UNKNOWN"
-                    reason = "NOT_IN_EXACT_SEALED_B_T"
+                    reason = "NOT_IN_EXACT_B_T"
                 elif not present:
                     relation = "UNKNOWN"
                     reason = "PROFILE_NOT_STORED"
@@ -2708,7 +2801,7 @@ def _summarize_sector_breadth_rows(
                     "board_native_id": board["board_native_id"],
                     "target_session": after_source["target_session"].isoformat(),
                     "research_cutoff": after_source["research_cutoff"].isoformat(),
-                    "source_set_id": after_source["source_set_id"],
+                    "profile_storage_key": after_source["profile_storage_key"],
                     "package_sha256": after_source["package_sha256"],
                     "profile_revision": after_source["profile_revision"],
                     "offset": 0,
@@ -2834,7 +2927,7 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                         "画像快照官方日历身份或修订与现行官方日历不一致",
                     )
 
-            before_source = _breadth_source_set(
+            before_source = _breadth_source_version(
                 cursor,
                 namespace_id=namespace_id,
                 target_session=before_session,
@@ -2842,7 +2935,7 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                 package_sha256=before_package_sha256,
                 profile_revision=before_profile_revision,
             )
-            after_source = _breadth_source_set(
+            after_source = _breadth_source_version(
                 cursor,
                 namespace_id=namespace_id,
                 target_session=after_session,
@@ -3034,8 +3127,8 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
         },
         "before_snapshot": before_profile,
         "after_snapshot": after_profile,
-        "before_source_set": before_source,
-        "after_source_set": after_source,
+        "before_source_version": before_source,
+        "after_source_version": after_source,
         "filter": {"board_kind": board_kind, "board_native_id": board_native_id},
         "board_total_count": catalog_count,
         "offset": offset,
@@ -3084,7 +3177,7 @@ def query_sector_strength(
     window_sessions: Sequence[date],
     read_context: TdxSectorStrengthReadContext | None = None,
 ) -> dict[str, Any]:
-    """在一个只读快照中读取精确板块、目标P03与同包Raw历史。"""
+    """在一个只读快照中读取精确板块、目标价格画像与同包Raw历史。"""
     _validate_snapshot_uuid(snapshot_id)
     _validate_source_set_uuid(source_set_id)
     if board_kind not in {"INDUSTRY", "CONCEPT"}:
@@ -3189,17 +3282,17 @@ ORDER BY profile_revision""",
             elif selected_profile is None and len(profile_revisions) > 1:
                 raise TdxSectorMembersPgError(
                     "PROFILE_REVISION_REQUIRED",
-                    "目标P03来源集合有多个画像修订，必须显式选择profile revision",
+                    "目标日画像有多个修订，必须显式选择profile revision",
                 )
             elif selected_profile is None:
                 raise TdxSectorMembersPgError(
                     "PROFILE_REVISION_NOT_FOUND",
-                    "目标P03来源集合没有已保存的Core画像修订",
+                    "目标日画像没有已保存的Core修订",
                 )
             elif selected_profile not in profile_revisions:
                 raise TdxSectorMembersPgError(
                     "PROFILE_REVISION_NOT_FOUND",
-                    "精确目标P03来源集合中不存在指定画像修订",
+                    "目标日精确来源版本中不存在指定画像修订",
                 )
 
             validation_key = (
@@ -3244,13 +3337,13 @@ ORDER BY profile_revision""",
                     "PROFILE_CALENDAR_IDENTITY_MISMATCH",
                     "目标Core画像绑定的官方日历身份或修订与现行官方日历不一致",
                 )
-            source_set = (
-                read_context.validated_source_sets.get(validation_key)
+            source_version = (
+                read_context.validated_source_versions.get(validation_key)
                 if read_context is not None
                 else None
             )
-            if source_set is None:
-                source_set = _breadth_source_set(
+            if source_version is None:
+                source_version = _breadth_source_version(
                     cursor,
                     namespace_id=namespace_id,
                     target_session=target_session,
@@ -3259,7 +3352,9 @@ ORDER BY profile_revision""",
                     profile_revision=selected_profile,
                 )
                 if read_context is not None:
-                    read_context.validated_source_sets[validation_key] = source_set
+                    read_context.validated_source_versions[validation_key] = (
+                        source_version
+                    )
 
             board_filter_sql = ""
             board_filter_params: tuple[Any, ...] = ()
@@ -3344,7 +3439,7 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
                     cursor,
                     namespace_id=namespace_id,
                     source_set_id=source_set_id,
-                    source_capture_id=source_set["source_capture_id"],
+                    source_capture_id=source_version["source_capture_id"],
                     package_sha256=package_sha256,
                     target_session=target_session,
                     profile_revision=selected_profile,
@@ -3378,11 +3473,11 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
                 str(row["source_capture_id"]) for row in profile_rows
             }
             if profile_capture_ids and profile_capture_ids != {
-                source_set["source_capture_id"]
+                source_version["source_capture_id"]
             }:
                 raise TdxSectorMembersPgError(
                     "PROFILE_SOURCE_IDENTITY_MISMATCH",
-                    "TDX板块成员命中的Core画像source_capture_id与SEALED P03不一致",
+                    "TDX板块成员命中的Core画像source_capture_id与Raw捕获不一致",
                 )
             supported_profile_producers = {
                 "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1",
@@ -3418,7 +3513,7 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
     return {
         "namespace_id": namespace_id,
         "snapshot": source_snapshot,
-        "source_set": source_set,
+        "source_version": source_version,
         "profile_snapshot": profile_snapshot,
         "official_calendar": {
             "calendar_id": official_calendar_id,
@@ -3553,7 +3648,7 @@ def _member_payload(row: Sequence[Any]) -> dict[str, Any]:
         "membership_quality": membership_quality,
         "source_record_ordinal": int(source_record_ordinal),
         "b_t_membership_status": "MATCHED_B_T" if matched_b_t else "UNMATCHED_B_T",
-        "b_t_unmatched_reason": None if matched_b_t else "NOT_IN_EXACT_SEALED_B_T",
+        "b_t_unmatched_reason": None if matched_b_t else "NOT_IN_EXACT_B_T",
         "raw": {
             "bar_status": raw_bar_status if matched_b_t else "NOT_IN_B_T",
             "bar_reason": raw_bar_reason,

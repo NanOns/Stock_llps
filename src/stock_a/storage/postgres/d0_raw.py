@@ -28,111 +28,118 @@ class D0RawPgError(ValueError):
         super().__init__(message)
 
 
-def _canonical_source_set_id(value: str) -> str:
-    try:
-        result = str(uuid.UUID(value))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise D0RawPgError(
-            "D0_SOURCE_SET_ID_INVALID", "source_set_id必须是UUID"
-        ) from error
-    if result != value:
-        raise D0RawPgError(
-            "D0_SOURCE_SET_ID_INVALID", "source_set_id必须为规范小写UUID"
-        )
-    return result
-
-
-def _read_source_set(
+def _read_source_version(
     cursor: Any,
     *,
     namespace_id: str,
     target_session: date,
-    source_set_id: str,
     package_sha256: str,
 ) -> dict[str, Any]:
     cursor.execute(
-        """SELECT namespace_id::text AS namespace_id,
-       target_session, package_sha256, source_set_id::text AS source_set_id,
-       revision_id, source_content_id, source_capture_id::text AS source_capture_id,
-       source_digest, source_raw_digest, source_dataset_id, source_byte_count,
-       parser_contract, capture_expected_row_count, raw_row_count,
-       target_present_count, target_missing_count, read_failed_count,
-       source_available_at, source_time_quality, source_clock_role,
-       price_unit_status, amount_unit_status, volume_unit_status,
-       calendar_id, calendar_revision, calendar_sha256,
-       durability_status, commit_ack_observed_at, durable_at,
-       durability_source_capture_id::text AS durability_source_capture_id,
-       durability_source_digest, seal_digest_sha256, seal_status, sealed_at
-FROM stock.source_sets
-WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
-  AND target_session=%s AND package_sha256=%s""",
-        (namespace_id, source_set_id, target_session, package_sha256),
+        """SELECT DISTINCT r.source_content_id, r.source_capture_id::text,
+       c.read_started_at, c.validated_at, c.source_available_at,
+       c.source_time_quality, c.source_clock_role, c.parser_contract,
+       c.canonical_digest, c.normalized_count, s.dataset_id, s.byte_sha, s.byte_count
+FROM stock.source_raw_daily r
+JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
+  AND c.capture_id=r.source_capture_id
+JOIN stock.source_contents s ON s.namespace_id=r.namespace_id
+  AND s.content_id=r.source_content_id
+WHERE r.namespace_id=%s::uuid AND r.session_date=%s AND r.package_sha256=%s
+ORDER BY r.source_capture_id, r.source_content_id
+LIMIT 2""",
+        (namespace_id, target_session, package_sha256),
     )
-    rows = [
-        dict(zip((column.name for column in cursor.description), values, strict=True))
-        for values in cursor.fetchall()
-    ]
+    rows = cursor.fetchall()
     if len(rows) != 1:
         raise D0RawPgError(
-            "D0_SEALED_SOURCE_SET_NOT_UNIQUE",
-            "固定命名空间中没有唯一匹配目标日、source_set与完整包SHA的SEALED来源。",
+            "D0_SOURCE_VERSION_NOT_UNIQUE",
+            "指定日期与完整包SHA没有唯一Raw捕获和内容引用。",
         )
-    return rows[0]
+    (
+        source_content_id,
+        source_capture_id,
+        capture_read_started_at,
+        capture_validated_at,
+        source_available_at,
+        source_time_quality,
+        source_clock_role,
+        parser_contract,
+        source_digest,
+        capture_expected_row_count,
+        source_dataset_id,
+        content_sha,
+        source_byte_count,
+    ) = rows[0]
+    if (
+        source_dataset_id != source_raw._DATASET_ID
+        or str(content_sha).strip() != package_sha256
+        or type(capture_expected_row_count) is not int
+        or capture_expected_row_count <= 0
+        or (
+            source_available_at is not None
+            and source_time_quality != "VERIFIED_SOURCE_TIME"
+        )
+    ):
+        raise D0RawPgError(
+            "D0_SOURCE_VERSION_INVALID",
+            "Raw来源版本的包身份、捕获数量或时钟元数据不合法。",
+        )
+    return {
+        "namespace_id": namespace_id,
+        "target_session": target_session,
+        "package_sha256": package_sha256,
+        "source_content_id": str(source_content_id).strip(),
+        "source_capture_id": source_capture_id,
+        "source_dataset_id": source_dataset_id,
+        "source_byte_count": int(source_byte_count),
+        "parser_contract": parser_contract,
+        "capture_expected_row_count": capture_expected_row_count,
+        "capture_read_started_at": capture_read_started_at,
+        "capture_validated_at": capture_validated_at,
+        "source_available_at": source_available_at,
+        "source_time_quality": source_time_quality,
+        "source_clock_role": source_clock_role,
+        "source_digest": str(source_digest).strip(),
+    }
 
 
-def _validate_source_set(
-    source_set: Mapping[str, Any],
+def _validate_source_version(
+    source_version: Mapping[str, Any],
     *,
     namespace_id: str,
     target_session: date,
-    source_set_id: str,
     package_sha256: str,
     calendar: Mapping[str, str],
 ) -> None:
     if (
-        source_set["namespace_id"] != namespace_id
-        or source_set["source_set_id"] != source_set_id
-        or source_set["target_session"] != target_session
-        or str(source_set["package_sha256"]).strip() != package_sha256
-    ):
-        raise D0RawPgError("D0_SOURCE_SET_IDENTITY_MISMATCH", "SEALED来源身份不匹配。")
-    if (
-        source_set["seal_status"] != "SEALED"
-        or source_set["durability_status"] != "VERIFIED_POST_COMMIT_READBACK"
-        or source_set["source_set_id"] is None
-        or source_set["seal_digest_sha256"] is None
-        or source_set["durable_at"] is None
-        or source_set["sealed_at"] is None
-        or source_set["sealed_at"] < source_set["durable_at"]
-        or source_set["commit_ack_observed_at"] is None
-        or source_set["commit_ack_observed_at"] > source_set["durable_at"]
-        or source_set["durability_source_capture_id"] != source_set["source_capture_id"]
-        or source_set["durability_source_digest"] != source_set["source_digest"]
-        or source_set["source_dataset_id"] != source_raw._DATASET_ID
-        or source_set["source_time_quality"]
-        not in {"UNKNOWN", "NON_PIT_OBSERVED", "VERIFIED_SOURCE_TIME"}
-        or source_set["read_failed_count"] != 0
-        or source_set["raw_row_count"] != source_set["capture_expected_row_count"]
-        or source_set["raw_row_count"]
-        != source_set["target_present_count"]
-        + source_set["target_missing_count"]
-        + source_set["read_failed_count"]
-        or not 1 <= source_set["raw_row_count"] <= _MAX_SOURCE_SYMBOLS
+        source_version["namespace_id"] != namespace_id
+        or source_version["target_session"] != target_session
+        or source_version["package_sha256"] != package_sha256
     ):
         raise D0RawPgError(
-            "D0_SEALED_SOURCE_SET_INVALID",
-            "SEALED来源封口、行数、来源捕获或质量分母不闭合。",
+            "D0_SOURCE_VERSION_IDENTITY_MISMATCH", "Raw来源版本身份不匹配。"
         )
-    if any(source_set.get(key) != value for key, value in calendar.items()):
+    if (
+        source_version["source_dataset_id"] != source_raw._DATASET_ID
+        or source_version["source_time_quality"]
+        not in {"UNKNOWN", "NON_PIT_OBSERVED", "VERIFIED_SOURCE_TIME"}
+        or not 1 <= source_version["capture_expected_row_count"] <= _MAX_SOURCE_SYMBOLS
+    ):
         raise D0RawPgError(
-            "D0_SOURCE_CALENDAR_MISMATCH",
-            "SEALED来源绑定的官方日历身份、修订或摘要与版本化沪深日历不一致。",
+            "D0_SOURCE_VERSION_INVALID",
+            "Raw来源捕获、代码分母或来源质量状态不合法。",
+        )
+    if any(calendar.get(key) is None for key in calendar):
+        raise D0RawPgError(
+            "D0_SOURCE_CALENDAR_INVALID",
+            "官方日历身份、修订或摘要不完整。",
         )
 
 
 def _validate_target_rows(
     target_rows: Sequence[Mapping[str, Any]],
-    source_set: Mapping[str, Any],
+    source_version: Mapping[str, Any],
     *,
     namespace_id: str,
     target_session: date,
@@ -144,36 +151,34 @@ def _validate_target_rows(
         for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED")
     }
     if (
-        len(target_rows) != source_set["raw_row_count"]
+        len(target_rows) != source_version["capture_expected_row_count"]
         or len(symbols) != len(set(symbols))
         or tuple(sorted(symbols)) != symbols
         or any(_SYMBOL.fullmatch(symbol) is None for symbol in symbols)
-        or counts["TARGET_PRESENT"] != source_set["target_present_count"]
-        or counts["TARGET_MISSING"] != source_set["target_missing_count"]
-        or counts["READ_FAILED"] != source_set["read_failed_count"]
+        or sum(counts.values()) != len(target_rows)
     ):
         raise D0RawPgError(
             "D0_TARGET_RAW_PARTITION_MISMATCH",
-            "目标日完整来源池与SEALED分母或Bar质量分区不一致。",
+            "目标日Raw来源池与捕获代码数或Bar质量分区不一致。",
         )
     for row in target_rows:
         if (
             str(row["namespace_id"]) != namespace_id
             or row["session_date"] != target_session
             or str(row["package_sha256"]).strip() != package_sha256
-            or str(row["source_capture_id"]) != source_set["source_capture_id"]
-            or row["source_content_id"] != source_set["source_content_id"]
+            or str(row["source_capture_id"]) != source_version["source_capture_id"]
+            or row["source_content_id"] != source_version["source_content_id"]
         ):
             raise D0RawPgError(
                 "D0_TARGET_RAW_REFERENCE_MISMATCH",
-                "目标日RAW行与SEALED source_set的命名空间、捕获、内容或包SHA不一致。",
+                "目标日Raw行与捕获、内容或包SHA不一致。",
             )
     if (
         source_raw._row_digest(target_rows)
-        != str(source_set["source_raw_digest"]).strip()
+        != str(source_version["source_digest"]).strip()
     ):
         raise D0RawPgError(
-            "D0_TARGET_RAW_DIGEST_MISMATCH", "目标日完整RAW行摘要与SEALED来源不一致。"
+            "D0_TARGET_RAW_DIGEST_MISMATCH", "目标日Raw行摘要与捕获记录不一致。"
         )
     return symbols
 
@@ -185,7 +190,7 @@ def _read_history_grid(
     source_symbols: Sequence[str],
     sessions: Sequence[date],
     package_sha256: str,
-    source_set: Mapping[str, Any],
+    source_version: Mapping[str, Any],
 ) -> tuple[dict[str, dict[date, dict[str, Any] | None]], int, int]:
     cells = len(source_symbols) * len(sessions)
     if not 1 <= cells <= _MAX_HISTORY_CELLS:
@@ -230,14 +235,14 @@ ORDER BY p.source_symbol COLLATE "C", d.session_date""",
         present_rows += 1
         reference_quality = (
             str(row["package_sha256"]).strip() == package_sha256
-            and row["source_content_id"] == source_set["source_content_id"]
+            and row["source_content_id"] == source_version["source_content_id"]
             and row["capture_normalized_count"] is not None
             and row["capture_normalized_count"] > 0
             and row["joined_capture_id"] == row["source_capture_id"]
             and row["capture_content_id"] == row["source_content_id"]
             and row["dataset_id"] == source_raw._DATASET_ID
             and str(row["byte_sha"]).strip() == package_sha256
-            and row["parser_contract"] == source_set["parser_contract"]
+            and row["parser_contract"] == source_version["parser_contract"]
             and row["bar_status"] in source_raw._BAR_STATUSES
             and row["price_quality"] in source_raw._QUALITY
             and (
@@ -260,15 +265,13 @@ def read_source_d0_raw_window(
     *,
     target_session: date,
     research_cutoff: date,
-    source_set_id: str,
     package_sha256: str,
     sessions: Sequence[date],
     expected_calendar: Mapping[str, str],
     expected_namespace_id: str | None = None,
 ) -> dict[str, Any]:
-    """一次一致只读事务核验SEALED分母并读取完整来源池的21会话RAW网格。"""
+    """一次一致只读事务核验Raw捕获分母并读取来源池历史网格。"""
     selected_sessions = tuple(sessions)
-    canonical_id = _canonical_source_set_id(source_set_id)
     if expected_namespace_id is not None:
         try:
             canonical_namespace_id = str(uuid.UUID(expected_namespace_id))
@@ -299,7 +302,7 @@ def read_source_d0_raw_window(
     ):
         raise D0RawPgError(
             "D0_QUERY_SCOPE_INVALID",
-            "D0读取必须绑定截止日内的显式目标、官方会话、source_set和完整包SHA。",
+            "D0读取必须绑定截止日内的显式目标、官方会话和完整包SHA。",
         )
 
     started = time.perf_counter()
@@ -313,23 +316,21 @@ def read_source_d0_raw_window(
                 "D0_NAMESPACE_MISMATCH",
                 "当前部署DEV命名空间与请求绑定不一致，未读取来源行情表。",
             )
-        source_set_started = time.perf_counter()
-        source_set = _read_source_set(
+        source_version_started = time.perf_counter()
+        source_version = _read_source_version(
             cursor,
             namespace_id=namespace_id,
             target_session=target_session,
-            source_set_id=canonical_id,
             package_sha256=package_sha256,
         )
-        _validate_source_set(
-            source_set,
+        _validate_source_version(
+            source_version,
             namespace_id=namespace_id,
             target_session=target_session,
-            source_set_id=canonical_id,
             package_sha256=package_sha256,
             calendar=expected_calendar,
         )
-        source_set_seconds = time.perf_counter() - source_set_started
+        source_version_seconds = time.perf_counter() - source_version_started
 
         target_scan_started = time.perf_counter()
         target_rows = source_raw._read_raw_rows(
@@ -337,10 +338,22 @@ def read_source_d0_raw_window(
         )
         symbols = _validate_target_rows(
             target_rows,
-            source_set,
+            source_version,
             namespace_id=namespace_id,
             target_session=target_session,
             package_sha256=package_sha256,
+        )
+        target_status_counts = {
+            status: sum(row["bar_status"] == status for row in target_rows)
+            for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED")
+        }
+        source_version.update(
+            {
+                "target_present_count": target_status_counts["TARGET_PRESENT"],
+                "target_missing_count": target_status_counts["TARGET_MISSING"],
+                "read_failed_count": target_status_counts["READ_FAILED"],
+                "bar_status_counts": target_status_counts,
+            }
         )
         target_scan_seconds = time.perf_counter() - target_scan_started
 
@@ -351,24 +364,24 @@ def read_source_d0_raw_window(
             source_symbols=symbols,
             sessions=selected_sessions,
             package_sha256=package_sha256,
-            source_set=source_set,
+            source_version=source_version,
         )
         history_scan_seconds = time.perf_counter() - history_scan_started
 
     return {
         "namespace_id": namespace_id,
-        "source_set": source_set,
+        "source_version": source_version,
         "source_symbols": symbols,
         "target_rows": {row["source_symbol"]: row for row in target_rows},
         "history_rows_by_symbol": rows_by_symbol,
-        "target_raw_digest": str(source_set["source_raw_digest"]).strip(),
+        "target_raw_digest": source_raw._row_digest(target_rows),
         "source_count": len(symbols),
         "history_sessions": [session.isoformat() for session in selected_sessions],
         "raw_history_rows_read": present_rows,
         "history_grid_cells": len(symbols) * len(selected_sessions),
         "missing_history_cells": missing_cells,
         "raw_history_batch_reads": 1,
-        "pg_source_set_read_seconds": source_set_seconds,
+        "pg_source_version_read_seconds": source_version_seconds,
         "pg_target_scan_seconds": target_scan_seconds,
         "pg_history_scan_seconds": history_scan_seconds,
         "pg_read_total_seconds": time.perf_counter() - started,

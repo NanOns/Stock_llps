@@ -107,7 +107,7 @@ function openChangeTimeline(item, side) {
   $("resultMode").textContent =
     "变化快照关联历史轨迹 · SOURCE_SYMBOL_ONLY · NON_PIT · RAW_UNADJUSTED";
   $("snapshotId").textContent =
-    `source_set_id ${snapshot.source_set_id} · namespace ${state.changeBinding.namespace_id} · 包SHA ${snapshot.package_sha256}`;
+    `研究版本 ${snapshot.target_session} · namespace ${state.changeBinding.namespace_id} · 包SHA ${snapshot.package_sha256} · 画像修订 ${snapshot.profile_revision}`;
   $("windowText").textContent =
     "此视图只读取该快照绑定的官方会话轨迹；每日Core/周月详情须从存在Raw行的轨迹点进入。";
   state.timeline = null;
@@ -138,7 +138,7 @@ function openChangeTimeline(item, side) {
   });
 }
 function appendChangeTimelineLinks(root, item) {
-  appendText(root, "h3", "前后封口快照 · 单股75日Core轨迹");
+  appendText(root, "h3", "前后研究快照 · 单股75日Core轨迹");
   const actions = document.createElement("div");
   actions.className = "timeline-change-actions";
   for (const [side, label] of [
@@ -172,7 +172,7 @@ function appendChangeTimelineLinks(root, item) {
   appendText(
     root,
     "p",
-    "轨迹按变化快照的日期、完整包SHA、source_set与namespace绑定；缺Bar保留解释，未保存Raw会话不可展开。结果为SOURCE_SYMBOL_ONLY、NON_PIT研究，不表示选股资格。",
+    "轨迹按变化快照的日期、完整包SHA、namespace和画像修订绑定；缺Bar保留解释，未保存Raw会话不可展开。结果为SOURCE_SYMBOL_ONLY、NON_PIT研究，不表示选股资格。",
     "muted",
   );
 }
@@ -339,12 +339,11 @@ function showChangeDetail(item) {
     const candidate = exactPairComparisonCandidate(item);
     const add = makeComparisonAddButton(candidate);
     if (!candidate) {
-      add.title =
-        "结束快照没有该代码的完整SEALED画像身份，无法加入来源版对照。";
+      add.title = "结束快照没有该代码的完整画像版本身份，无法加入来源版对照。";
       appendText(
         root,
         "p",
-        "该代码不在结束快照或缺少完整SEALED身份；原有临时对照篮与筛选保持不变。",
+        "该代码不在结束快照或缺少完整画像版本身份；原有临时对照篮与筛选保持不变。",
         "muted",
       );
     }
@@ -601,7 +600,7 @@ async function compareSourceProfilePair(notice = null) {
       appendText(
         root,
         "p",
-        `${before.target_session} · source_set ${before.source_set_id} · SHA ${before.package_sha256} · revision ${before.profile_revision} → ${after.target_session} · source_set ${after.source_set_id} · SHA ${after.package_sha256} · revision ${after.profile_revision}`,
+        `${before.target_session} · SHA ${before.package_sha256} · revision ${before.profile_revision} → ${after.target_session} · SHA ${after.package_sha256} · revision ${after.profile_revision}`,
         "muted",
       );
       if (notice) appendText(root, "p", notice, "muted");
@@ -652,10 +651,10 @@ function populateChangeSnapshots(snapshots) {
     select.replaceChildren(new Option("— 选择完整PG画像快照 —", ""));
     for (const item of complete) {
       const option = new Option(
-        `${item.target_session} · ${item.source_set_id.slice(0, 8)} · SHA ${item.package_sha256.slice(0, 8)} · rev ${item.profile_revision.slice(0, 12)} · ${item.source_symbol_count}/${item.expected_source_symbol_count}`,
+        `${item.target_session} · SHA ${item.package_sha256.slice(0, 8)} · rev ${item.profile_revision.slice(0, 12)} · ${item.source_symbol_count}/${item.expected_source_symbol_count}`,
         profileSnapshotKey(item),
       );
-      option.title = `${item.target_session} · source_set ${item.source_set_id} · package SHA ${item.package_sha256} · profile revision ${item.profile_revision}`;
+      option.title = `${item.target_session} · package SHA ${item.package_sha256} · profile revision ${item.profile_revision}`;
       select.append(option);
     }
     select.disabled = complete.length < 2;
@@ -728,7 +727,6 @@ function populateChangeProfileFields() {
 function profileSnapshotKey(snapshot) {
   return [
     snapshot.target_session,
-    snapshot.source_set_id,
     snapshot.package_sha256,
     snapshot.profile_revision,
   ].join("|");

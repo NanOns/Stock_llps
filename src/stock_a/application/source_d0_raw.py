@@ -10,10 +10,8 @@ import time
 from typing import Any, Mapping
 from uuid import UUID
 
-from stock_a.application.source_set_candidate import (
-    SourceSetCandidateApplicationError,
-    _official_calendar,
-)
+from stock_a.research.entry_context.errors import ResearchEntryError
+from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.d0_launch_raw import (
     calculate_d0_launch_confirm_raw,
     fraction_payload,
@@ -145,13 +143,24 @@ def _canonical_expected_namespace(value: str | None) -> str | None:
     return canonical
 
 
+def _official_calendar(target: date) -> dict[str, Any]:
+    payload, metadata, revision_chain, sessions = _load_calendar(target)
+    year_metadata = next(item for item in metadata if item["year"] == target.year)
+    return {
+        "calendar_id": payload["calendar_id"],
+        "calendar_revision": payload["revision"],
+        "calendar_revision_chain": revision_chain,
+        "calendar_sha256": year_metadata["resource_sha256"],
+        "sessions": sessions,
+    }
+
+
 def query_source_d0_raw_launch(
     config: Mapping[str, Any],
     *,
     scenario: str,
     target_session: date,
     research_cutoff: date,
-    source_set_id: str,
     package_sha256: str,
     state: str | None = None,
     symbol: str | None = None,
@@ -159,7 +168,6 @@ def query_source_d0_raw_launch(
     limit: int = 30,
     action: str = "current",
     before_session: date | None = None,
-    before_source_set_id: str | None = None,
     before_package_sha256: str | None = None,
     transition: str | None = None,
     expected_namespace_id: str | None = None,
@@ -180,11 +188,9 @@ def query_source_d0_raw_launch(
             config,
             scenario=scenario,
             before_session=before_session,
-            before_source_set_id=before_source_set_id,
             before_package_sha256=before_package_sha256,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_set_id=source_set_id,
             package_sha256=package_sha256,
             state=state,
             symbol=symbol,
@@ -203,7 +209,6 @@ def query_source_d0_raw_launch(
         value is not None
         for value in (
             before_session,
-            before_source_set_id,
             before_package_sha256,
             transition,
         )
@@ -256,7 +261,7 @@ def query_source_d0_raw_launch(
     try:
         calendar = _official_calendar(target_session)
         target_index = calendar["sessions"].index(target_session)
-    except (SourceSetCandidateApplicationError, ValueError) as error:
+    except (ResearchEntryError, ValueError) as error:
         raise SourceD0RawError("D0_OFFICIAL_CALENDAR_INVALID", str(error)) from error
     sessions = calendar["sessions"][max(0, target_index - 20) : target_index + 1]
     calendar_identity = {
@@ -272,7 +277,6 @@ def query_source_d0_raw_launch(
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_set_id=source_set_id,
             package_sha256=package_sha256,
             sessions=sessions,
             expected_calendar=calendar_identity,
@@ -282,7 +286,7 @@ def query_source_d0_raw_launch(
         raise SourceD0RawError(error.code, str(error)) from error
     read_cpu_seconds = time.process_time() - cpu_started
 
-    source_set = pg_result["source_set"]
+    source_version = pg_result["source_version"]
     calculate_started = time.perf_counter()
     calculate_cpu_started = time.process_time()
     results = []
@@ -297,9 +301,9 @@ def query_source_d0_raw_launch(
             source_symbol=source_symbol,
             package_sha256=package_sha256,
             namespace_id=pg_result["namespace_id"],
-            source_content_id=source_set["source_content_id"],
-            target_capture_id=source_set["source_capture_id"],
-            parser_contract=source_set["parser_contract"],
+            source_content_id=source_version["source_content_id"],
+            target_capture_id=source_version["source_capture_id"],
+            parser_contract=source_version["parser_contract"],
             include_history_window=source_symbol in (symbol, _history_symbol),
         )
         target_row = pg_result["target_rows"][source_symbol]
@@ -360,31 +364,24 @@ def query_source_d0_raw_launch(
         "strict_official_sessions": [session.isoformat() for session in sessions],
         "official_calendar": calendar_identity,
         "namespace_id": pg_result["namespace_id"],
-        "source_set": {
-            "source_set_id": source_set["source_set_id"],
-            "revision_id": source_set["revision_id"],
-            "package_sha256": str(source_set["package_sha256"]).strip(),
-            "source_content_id": source_set["source_content_id"],
-            "source_capture_id": source_set["source_capture_id"],
-            "parser_contract": source_set["parser_contract"],
+        "source_version": {
+            "package_sha256": str(source_version["package_sha256"]).strip(),
+            "source_content_id": source_version["source_content_id"],
+            "source_capture_id": source_version["source_capture_id"],
+            "parser_contract": source_version["parser_contract"],
             "source_raw_digest": pg_result["target_raw_digest"],
-            "source_digest": source_set["source_digest"],
-            "seal_status": source_set["seal_status"],
-            "sealed_at": _iso(source_set["sealed_at"]),
-            "source_time_quality": source_set["source_time_quality"],
-            "source_available_at": _iso(source_set["source_available_at"]),
-            "source_clock_role": source_set["source_clock_role"],
-            "price_unit_status": source_set["price_unit_status"],
-            "amount_unit_status": source_set["amount_unit_status"],
-            "calendar_id": source_set["calendar_id"],
-            "calendar_revision": source_set["calendar_revision"],
-            "calendar_sha256": source_set["calendar_sha256"],
+            "source_time_quality": source_version["source_time_quality"],
+            "source_available_at": _iso(source_version["source_available_at"]),
+            "source_clock_role": source_version["source_clock_role"],
+            "source_byte_count": source_version["source_byte_count"],
+            "capture_expected_row_count": source_version["capture_expected_row_count"],
+            **calendar_identity,
         },
         "source_pool": {
             "source_count": source_count,
-            "target_present_count": source_set["target_present_count"],
-            "target_missing_count": source_set["target_missing_count"],
-            "read_failed_count": source_set["read_failed_count"],
+            "target_present_count": source_version["target_present_count"],
+            "target_missing_count": source_version["target_missing_count"],
+            "read_failed_count": source_version["read_failed_count"],
             "scenario_state_counts": {
                 key: state_counts.get(key, 0) for key in ("TRUE", "FALSE", "UNKNOWN")
             },
@@ -415,7 +412,9 @@ def query_source_d0_raw_launch(
             "raw_history_rows_read": pg_result["raw_history_rows_read"],
             "history_grid_cells": pg_result["history_grid_cells"],
             "missing_history_cells": pg_result["missing_history_cells"],
-            "pg_source_set_read_seconds": pg_result["pg_source_set_read_seconds"],
+            "pg_source_version_read_seconds": pg_result[
+                "pg_source_version_read_seconds"
+            ],
             "pg_target_scan_seconds": pg_result["pg_target_scan_seconds"],
             "pg_history_scan_seconds": pg_result["pg_history_scan_seconds"],
             "pg_read_total_seconds": pg_result["pg_read_total_seconds"],
@@ -437,11 +436,9 @@ def _query_source_d0_raw_launch_changes(
     *,
     scenario: str,
     before_session: date | None,
-    before_source_set_id: str | None,
     before_package_sha256: str | None,
     target_session: date,
     research_cutoff: date,
-    source_set_id: str,
     package_sha256: str,
     state: str | None,
     symbol: str | None,
@@ -476,9 +473,7 @@ def _query_source_d0_raw_launch_changes(
             category="ARGUMENT",
         )
     if (
-        not isinstance(before_source_set_id, str)
-        or not before_source_set_id
-        or not isinstance(before_package_sha256, str)
+        not isinstance(before_package_sha256, str)
         or not isinstance(package_sha256, str)
         or before_package_sha256 != package_sha256
     ):
@@ -516,7 +511,7 @@ def _query_source_d0_raw_launch_changes(
         after_calendar = _official_calendar(target_session)
         before_index = after_calendar["sessions"].index(before_session)
         after_index = after_calendar["sessions"].index(target_session)
-    except (SourceSetCandidateApplicationError, ValueError) as error:
+    except (ResearchEntryError, ValueError) as error:
         raise SourceD0RawError("D0_OFFICIAL_CALENDAR_INVALID", str(error)) from error
     if after_index != before_index + 1:
         raise SourceD0RawError(
@@ -526,7 +521,7 @@ def _query_source_d0_raw_launch_changes(
         )
     try:
         before_calendar = _official_calendar(before_session)
-    except SourceSetCandidateApplicationError as error:
+    except ResearchEntryError as error:
         raise SourceD0RawError("D0_OFFICIAL_CALENDAR_INVALID", str(error)) from error
     before_identity = {
         key: before_calendar[key]
@@ -561,7 +556,6 @@ def _query_source_d0_raw_launch_changes(
             scenario=scenario,
             target_session=before_session,
             research_cutoff=research_cutoff,
-            source_set_id=before_source_set_id,
             package_sha256=before_package_sha256,
             state="ALL",
             offset=0,
@@ -574,7 +568,6 @@ def _query_source_d0_raw_launch_changes(
             scenario=scenario,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_set_id=source_set_id,
             package_sha256=package_sha256,
             state="ALL",
             offset=0,
@@ -585,8 +578,8 @@ def _query_source_d0_raw_launch_changes(
     except SourceD0RawError:
         raise
 
-    before_source = before_result["source_set"]
-    after_source = after_result["source_set"]
+    before_source = before_result["source_version"]
+    after_source = after_result["source_version"]
     compatible_identity = (
         before_result["namespace_id"] == after_result["namespace_id"]
         and before_source["package_sha256"] == after_source["package_sha256"]
@@ -707,7 +700,7 @@ def _query_source_d0_raw_launch_changes(
             "strict_official_sessions": result["strict_official_sessions"],
             "official_calendar": result["official_calendar"],
             "namespace_id": result["namespace_id"],
-            "source_set": result["source_set"],
+            "source_version": result["source_version"],
             "source_pool": result["source_pool"],
             "session_contract": result["session_contract"],
             "algorithm_contract": result["algorithm_contract"],

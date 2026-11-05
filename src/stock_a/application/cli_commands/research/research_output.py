@@ -66,7 +66,7 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
         (
             f"身份 {result.get('identity', {}).get('status', 'SOURCE_SYMBOL_ONLY')}；"
             f"价格坐标 {result.get('adjustment', {}).get('coordinate', 'RAW_UNADJUSTED')}；"
-            "来源权威/首捕时钟未绑定；这是历史研究预览，不是实时/PIT数据或正式Profile。"
+            "来源权威/首捕时钟未绑定；这是历史研究预览，不是实时或严格PIT数据。"
         ),
     ]
     reconciliation = result.get("identity_reconciliation")
@@ -87,43 +87,8 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
     lines.append(
         f"Canonical只读选择：{canonical.get('selection_status', '未生成')}；"
         f"目标字段OBSERVED={canonical_observed}/{len(canonical_fields)}；"
-        f"source SHA-256={str(canonical_source.get('raw_byte_sha256', '未知'))[:12]}…；"
-        f"准入={canonical.get('production_admission', 'UNKNOWN')}；未持久接受。"
+        f"来源SHA-256={str(canonical_source.get('raw_byte_sha256', '未知'))[:12]}…。"
     )
-    handoff = result.get("foundation_handoff", {})
-    if isinstance(handoff, dict):
-        source_version = (
-            handoff.get("source_package_sha256")
-            or handoff.get("source_byte_sha256")
-            or "未知"
-        )
-        lines.append(
-            f"Foundation typed交接：目标日={handoff.get('target_session')}；来源版本={source_version}；"
-            f"价格坐标={handoff.get('price_coordinate')}；目标Bar={handoff.get('target_bar_status')}；"
-            f"价格研究={handoff.get('research_price_status')}。"
-        )
-        for group_name, label in (
-            ("price", "价格"),
-            ("amount", "金额"),
-            ("volume", "数量"),
-        ):
-            group = handoff.get("quality_groups", {}).get(group_name, {})
-            lines.append(
-                f"Foundation {label}质量={group.get('quality', 'UNKNOWN_DATA')}；"
-                f"单位权威={group.get('unit_authority', '不适用')}；"
-                f"字段={group.get('field_quality', {})}；原因={group.get('field_reasons', {}) or '无'}。"
-            )
-        typed_reasons = handoff.get("typed_pg_admission_reason_explanations", {})
-        foundation_reasons = handoff.get("foundation_admission_reason_explanations", {})
-        lines.append(
-            f"正式PG typed准入={handoff.get('typed_pg_admission_status')}；"
-            f"原因={'；'.join(typed_reasons.values()) or '无'}。"
-        )
-        lines.append(
-            f"Foundation生产准入={handoff.get('foundation_admission_status')}；"
-            f"原因={'；'.join(foundation_reasons.values()) or '无'}；"
-            "未生成insert plan、未持久写入。"
-        )
     group_labels = (
         ("price_trend", "价格与趋势"),
         ("position_volatility", "位置与波动"),
@@ -257,7 +222,7 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
             "差值不构成来源单位权威或TDX错误判定。"
         )
         lines.append(
-            "正式profile()生产准入仍阻断；本查询不计算换手历史分位、不写来源或数据库。"
+            "本查询只解释当前可得字段；换手历史分位按实际历史分母显示，不写来源或数据库。"
         )
     return "\n".join(lines)
 
@@ -301,7 +266,7 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
         ),
         (
             "代码 | 市场/板别 | 目标Bar及逐字段质量 | 来源末日 | Raw收盘 | MA5 | MA20 | MA60 | "
-            "ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | Foundation准入 | "
+            "ATR20 | ret5 | ret20 | 收盘/MA20 | Amount | Volume | Raw/Core | "
             "未知原因/错误 | 单股回查"
         ),
     ]
@@ -372,17 +337,6 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
             f"{item.get('source_bar_status') or '页内未评价'}:{item.get('source_bar_reason') or '—'}"
             f"[{field_quality_text}]"
         )
-        foundation = item.get("foundation_handoff") or {}
-        formal_reasons = foundation.get("foundation_admission_reason_explanations", {})
-        foundation_text = (
-            (
-                f"typed={foundation.get('typed_pg_admission_status', '未评价')};"
-                f"foundation={foundation.get('foundation_admission_status', '未评价')};"
-                + "；".join(formal_reasons.values())
-            )
-            if foundation
-            else f"{item.get('status')}:{item.get('error_code') or '来源未评价'}"
-        )
         detail = item.get("detail_query", {})
         detail_command = (
             "stock-a "
@@ -408,7 +362,6 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
             _summary_field(item.get("amount")),
             _summary_field(item.get("volume")),
             f"{raw_text}/{core_text}",
-            foundation_text,
             reason_text or "—",
             detail_command,
         ]

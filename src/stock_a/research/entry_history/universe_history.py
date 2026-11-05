@@ -49,16 +49,8 @@ def research_universe_pg_history_preview(
                 include_raw_breakout=include_raw_breakout,
             )
         except ResearchEntryError as error:
-            field_registry = (
-                profile_contract.get("scope_bindings", {})
-                .get("FOUNDATION_EOD", {})
-                .get("field_registry", [])
-            )
-            profile_registry = (
-                profile_contract.get("scope_bindings", {})
-                .get("FOUNDATION_EOD", {})
-                .get("profile_expression_registry", {})
-            )
+            field_registry = profile_contract.get("field_registry", [])
+            profile_registry = profile_contract.get("profile_expression_registry", {})
             error_code = error.code
             target_row = next(
                 (

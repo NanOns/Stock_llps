@@ -15,12 +15,12 @@ A股市场结构研究系统的新项目，唯一业务开发主线。采用旧�
 | 3 | [产品需求](docs/requirements/产品需求.md) | 136项现行需求的唯一完整目录 |
 | 4 | [工程与存储规范](docs/design/工程与存储规范.md) | 单schema、typed存储、API、安装、验收与外部文件引用/材料边界 |
 | 5 | [算法合同](docs/design/算法合同与升级规则.md) | 字段口径、已知接口冲突和明确新规则选择 |
-| 6 | [完整业务链](docs/design/数据业务完整闭环.md) | P00–P25输入、产物、消费者、发布/跟踪/前端与恢复 |
-| 6.1 | [实现详细设计](docs/design/实现详细设计.md) | 目标接口、字段/类型、关键伪代码、基础窄图、D1状态转换、PG/发布/读取实现边界；明确已冻规则与实际实现的边界 |
+| 6 | [完整业务路径](docs/design/数据业务完整闭环.md) | Raw来源、Core/Profile、研究消费者和页面读取 |
+| 6.1 | [实现详细设计](docs/design/实现详细设计.md) | 现役CLI/API、画像键、研究入口与实现边界 |
 | 7 | [代码复用与模块边界](docs/design/代码复用与模块边界.md) | 具体旧代码候选、目标职责、改造要求及禁用边界 |
 | 8 | [目录与Git准入](docs/design/目录与Git准入.md)／[需求变更](docs/changes/需求变更.md) | 文件归属与正式规则变化 |
 
-机器依赖以[day-chain.contract.json入口清单](config/contracts/day-chain.contract.json)声明，并由`stock_a.contracts.load_day_chain_contract`按清单装配[day-chain模块](config/contracts/day-chain/)；子模块清单固定，不扫描目录或动态加载未知文件。唯一默认路径配置为[runtime.defaults.json](config/runtime.defaults.json)。业务文件配置只从本项目config登记目录加载，私密配置如需只在config/private并忽略Git；测试配置与测试文档不得混入正式目录。阶段实施方案和交接文档在外部交付根过程资料中，不提交Git。
+现役价格画像字段以[price-profile.contract.json入口清单](config/contracts/price-profile.contract.json)声明，并由`stock_a.contracts.load_price_profile_contract`装配来源、Core和Profile字段合同。唯一默认路径配置为[runtime.defaults.json](config/runtime.defaults.json)。业务文件配置只从本项目config登记目录加载，私密配置如需只在config/private并忽略Git；测试配置与测试文档不得混入正式目录。阶段实施方案和交接文档在外部交付根过程资料中，不提交Git。
 
 | 用途 | 路径 |
 |---|---|
@@ -32,17 +32,17 @@ A股市场结构研究系统的新项目，唯一业务开发主线。采用旧�
 
 Git只接收业务运行必需内容、需求、设计、正式需求变更和最小根控制文件。测试文件/脚本、阶段任务/报告/回执、证据、产物、数据、包、缓存和凭据全部外置，不论大小。AGENTS保留在根，保证新开发会话自动读取规则；不为归档移动它。
 
-正式业务CLI在实际实现时归入src/stock_a业务包；测试不能成为业务运行依赖。按实际移植需要创建模块，不铺空实现。前端优先抽取旧产品组件，统一六入口、中文及context语义；不引入新闻、外部事件催化或题材映射。
+正式CLI归入src/stock_a业务包；测试不能成为业务运行依赖。按实际移植需要创建模块，不铺空实现。前端保留已接通的查询和研究交互，按真实消费者扩展市场→板块→个股画像、变化识别与持续跟踪；不引入新闻、外部事件催化或题材映射。
 
-业务开发路线是先抽取成熟内核，完成真实基础数据→PG→API→页面，再按完整图扩展研究域；每批具体验收和当前进度只维护在外部实施方案/交接中。首次源码移植不能直接导入旧仓，必须验证目标模块自身依赖闭合。
+业务开发路线是先抽取成熟内核，完成来源事实→PG→画像→API→页面，再按实际研究依赖扩展市场、板块、个股、变化识别与跟踪；每批具体验收和当前进度只维护在外部过程资料。首次源码移植不能直接导入旧仓，必须验证目标模块自身依赖闭合。
 
 PG默认G盘配置尚不代表Windows服务已经应用。旧E盘数据不自动迁移、复制、覆盖或切换；新项目写库前必须实际核验G盘路径。当前具备分质量日线解码、字段/窗口摘要和基础画像纯求值入口；不提供尚不存在的服务启动命令。纯函数调用显式注入单位/规则，规则JSON数字用Decimal解码，不在导入期读配置；模块导入根为src/，不依赖旧仓。
 
 本地Git准入钩子保存在.git/hooks，不进入Git或运行包；换机须恢复准入。远端按用户指定配置，不沿用旧仓远端。
 
-正常日更业务结果、计划、恢复游标、Owner/索引/回执全部存PG必要类型字段和引用；不生成逐日业务文件，不把源包/二进制/整对象JSON塞进PG。清空隔离测试临时目录不能破坏已入库历史查询和恢复；用户原始TDX来源仍保持只读。
+来源事实、画像和实际研究结果按类型字段存PG；不生成逐日业务文件，不把源包/二进制/整对象JSON塞进PG。清空隔离测试临时目录不能破坏已入库历史查询；用户原始TDX来源仍保持只读。
 
-新项目数据库/schema设计身份为stock_a，仍使用唯一PG实例5432；物理G盘、项目/实例/迁移/角色须共同核验，本轮未初始化或切换。FOUNDATION已在现行机器合同绑定为同一执行器的具名范围；生产实现/真实PG/API/UI仍未完成。测试持久资产位于交付根过程资料/测试资产，临时根是执行副本。安装模式保留唯一config槽位，运行包不导入开发源码。
+新项目数据库/schema身份为stock_a.stock，使用现有PG实例5432；PG只按任务授权核查或迁移，不因设计文档自动切换。安装模式保留唯一config槽位，运行包不导入开发源码。
 
 ## 安装最小业务包
 
@@ -132,7 +132,7 @@ with open_day_file(source_path, (bound_source_root,), units, limits) as scan:
     summary = scan.summary  # 仅在EOF、顺序/预算和最终句柄检查全部通过后可读
 ```
 
-`iter_day_records(readonly_stream, units, limits)`复用同一扫描内核，适用于调用方管理的非seekable二进制流，不关闭调用方流。文件入口使用只读Windows句柄，并核验句柄最终路径、身份及扫描前后大小/修改时点。超限、坏日期、重复/冲突、路径越界、扫描中变化及提前退出都不能获得完整摘要；已yield前缀不能视为完整输入。摘要中的原始字节SHA仅描述本次读取字节，不代表来源捕获、PIT时钟、来源封口或业务接受版本。
+`iter_day_records(readonly_stream, units, limits)`复用同一扫描内核，适用于调用方管理的非seekable二进制流，不关闭调用方流。文件入口使用只读Windows句柄，并核验句柄最终路径、身份及扫描前后大小/修改时点。超限、坏日期、重复/冲突、路径越界、扫描中变化及提前退出都不能获得完整摘要；已yield前缀不能视为完整输入。摘要中的原始字节SHA仅描述本次读取字节，不替代来源捕获、PIT时钟或业务版本。
 
 ## TDX真实数据研究查询
 
@@ -167,7 +167,7 @@ stock-a research-universe-preview --target-session YYYY-MM-DD `
   --offset 0 --limit 20 --format summary --include-profile-preview
 ```
 
-`research-stock`和`research-compare`输出同一既有Core的盘后基础观察摘要，标记`RESEARCH_PREVIEW_NON_PIT`，包含原始收盘、MA5/20/60、ATR20、ret5/20、金额/数量质量和均线位置；每个值保留质量与未知原因。`research-stock --include-profile-preview`在同一次Raw/Core读取上追加11项基础画像组件清单，逐项给出结果或缺因、质量、输入来源/窗口和规则引用。该预览把目标日`raw.close`局部映射到规则的价格输入名，只用于`RAW_UNADJUSTED`描述；不表示已执行P06复权、身份/PIT验证或可信FOUNDATION选择。周/月闭合周期和横截面相对能力按实际缺失输入显示`NOT_IMPLEMENTED`或`CONTRACT_UNBOUND`，不会填成正常状态。正式`profile()`仍拒绝缺少可信FOUNDATION选择器的调用。画像预览不生成Seed、Priority、评分、排序或交易信号。`--amount-to-cny`和`--volume-to-shares`是调用方声明的研究单位假设，不能替代经独立来源合同验收的单位权威。`research-compare`最多接受20个不同证券，并在每只证券的读取上限外共享`--max-total-bytes`、`--max-total-records`、`--max-total-seconds`。超限后保留全部请求分母；`available`、`failed`、`partial_unknown`和`not_evaluated`构成精确分类分区，后续证券不会被静默省略。耗时上限在每个读取块和证券边界检查，文件系统调用本身无法被同步扫描中断时，单个正在执行的系统调用可能延后返回。对比不对证券做身份推断或静默去重。
+`research-stock`和`research-compare`输出同一既有Core的盘后基础观察摘要，标记`RESEARCH_PREVIEW_NON_PIT`，包含原始收盘、MA5/20/60、ATR20、ret5/20、金额/数量质量和均线位置；每个值保留质量与未知原因。`research-stock --include-profile-preview`在同一次Raw/Core读取上追加11项基础画像组件清单，逐项给出结果或缺因、质量、输入来源/窗口和规则引用。该预览把目标日`raw.close`局部映射到规则的价格输入名，只用于`RAW_UNADJUSTED`描述；不表示已执行P06复权或身份/PIT验证。周/月闭合周期和横截面相对能力按实际缺失输入显示`NOT_IMPLEMENTED`或`CONTRACT_UNBOUND`，不会填成正常状态。画像预览不生成Seed、Priority、评分、排序或交易信号。`--amount-to-cny`和`--volume-to-shares`是调用方声明的研究单位假设，不能替代经独立来源合同验收的单位权威。`research-compare`最多接受20个不同证券，并在每只证券的读取上限外共享`--max-total-bytes`、`--max-total-records`、`--max-total-seconds`。超限后保留全部请求分母；`available`、`failed`、`partial_unknown`和`not_evaluated`构成精确分类分区，后续证券不会被静默省略。耗时上限在每个读取块和证券边界检查，文件系统调用本身无法被同步扫描中断时，单个正在执行的系统调用可能延后返回。对比不对证券做身份推断或静默去重。
 
 `research-stock --include-baostock-evidence`是显式联网的单证券、单日、未复权补充查询；默认命令、`research-compare`和全市场分页均不加载BaoStock SDK、不请求该来源。需安装可选依赖`stock-a[baostock]`。请求固定使用`frequency=d`、`adjustflag=3`，包含完整OHLC字段，单socket超时5秒、最多8行、零重试，并报告实际SDK响应字段与UTC请求时钟。补充结果保留Bao原始字段及逐字段质量，并逐项对照原始未复权开、高、低、收；Bao文档中的单位展示为尚未独立验收的单位假设。金额比较保留精确差，并按调用方声明的TDX金额倍率单独模拟IEEE754 float32：只有Bao金额经该坐标编码后精确等于可还原的TDX float32值时，才标记为`FLOAT32_QUANTIZATION_EQUIVALENT_UNDER_DECLARED_UNITS`，同时报告ULP和相对差；该解释不证明单位权威，也不使用固定容差。成交量使用整数独立核对，任意差值均原样保留并标记未解释，不归因于金额float32舍入或复权。上述结果不据此替换TDX或判定TDX错误。Bao换手`turn`按百分比除以100输出fraction；历史换手分位需要已绑定身份及完整前60个有效观察，本单日查询不计算。`tradestatus`、`isST`仅为Bao来源证据；缺行、缺字段或未知枚举均不推断停牌、退市或正常状态。此输出仍为`SOURCE_SYMBOL_ONLY`、`RAW_UNADJUSTED`、`NON_PIT_RETROSPECTIVE`，且不解除正式`profile()`准入阻断。
 
@@ -175,13 +175,13 @@ stock-a research-universe-preview --target-session YYYY-MM-DD `
 
 JSON和短摘要另提供`coverage_summary`中的当前页实际目标Bar、目标缺Bar、读取失败、未评价对象、按市场/板别拆分及本页已完成读取文件的末条日期直方图/最大值。末条日期只代表本页完整读到EOF并核验句柄的来源文件，不是来源可得时钟，也不自动证明完整过滤池；多页总体只能在调用方确认计划页全部实际执行后合并。`candidate_counts_by_board`是来源文件名候选分布，主板/创业板研究候选与被研究范围排除的文件分开；均不等同官方有效证券总体。
 
-可选`--include-profile-preview`在当前请求页复用一次固定day-chain合同，并在原有Raw/Core对象计算中附加11项Profile组件；不额外扫描来源，也不逐股重载合同。分页JSON在每个已处理对象中保留完整组件输入来源、质量、原因和规则身份，并另提供紧凑`summary[].profile_preview`与`profile_preview_denominators`。页级组件分母只统计实际返回画像的对象；`evaluated`组件包含质量为`UNKNOWN_DATA`的已执行规则，分别统计`observed`、`unknown_data`、`not_implemented`和`contract_unbound`。失败和预算未评价对象没有伪造组件。中文摘要逐行显示11个组件的结果/质量或未接原因，并显示请求、已评价、失败和未评价分母。未带开关时保留现有分页JSON及摘要行为。预览仍是RAW_UNADJUSTED、NON_PIT、SOURCE_SYMBOL_ONLY，不代表正式Profile、全市场官方证券总体或RPS；正式`profile()`生产门继续阻断。
+可选`--include-profile-preview`在当前请求页复用一次价格画像字段合同，在原有Raw/Core计算上附加11项Profile组件；不额外扫描来源，也不逐股重载合同。分页JSON保留组件来源、质量、原因和规则身份，并提供紧凑页级摘要。失败和预算未评价对象不伪造组件。预览范围仍按请求日期与来源包显式披露。
 
 ## 本机PG研究预览
 
-在开发环境中，可由用户显式启动仅监听`127.0.0.1:28766`的研究预览服务，并用浏览器访问`http://127.0.0.1:28766/`。页面只从固定`stock_a.stock`读取已经保存的Raw版本和候选分页；单股预览在用户提交查询后读取精确PG历史并调用现役Core/Profile。服务不写PG、不扫描来源ZIP、不联网、不保存结果；结果为`RAW_UNADJUSTED`、`SOURCE_SYMBOL_ONLY`及`NON_PIT_RETROSPECTIVE`，不表示官方上市总体、正式选股或生产发布。
+在开发环境中，研究预览服务仅监听`127.0.0.1:28766`，页面从固定`stock_a.stock`读取Raw和画像；单股查询按日期和来源版本读取PG历史并调用现役Core/Profile。服务不写PG、不扫描来源ZIP、不联网、不保存结果；结果按实际数据范围和NON_PIT质量展示，不表示官方上市总体或正式选股。
 
-选择PG目录中的明确日期和完整来源包SHA后，页面还会读取「当前数据链准备状态」。该状态按精确日期/SHA汇总Raw和捕获元数据，并从唯一day-chain合同展示P00–P25的输入、产物与消费者；正式阶段能力依据当前代码接线登记。来源`CLOSED`只表示候选行和捕获引用闭合；Core/Profile仍是用户触发的单股研究预览，不表示正式Foundation、Owner、Publication、Head或整日链完成。
+页面按明确日期、来源包SHA和代码筛选Raw与画像结果；没有可用数据时显示对应缺失或质量信息。
 
 ```powershell
 stock-a preview-serve --host 127.0.0.1 --port 28766

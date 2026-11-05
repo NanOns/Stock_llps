@@ -82,8 +82,6 @@ _MIGRATIONS = (
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
     "R01_R02_SOURCE_RAW_PG_DAILY_READ_R1": frozenset({4}),
-    "R01_R02_P03_SOURCE_SET_BROWSER_RULE_R1": frozenset({5}),
-    "R01_R02_P03_FORMAL_TWO_DAY_WRITE_R1": frozenset({6}),
     "R02_TDX_SOURCE_SYMBOL_PRICE_PROFILE_0007_R1": frozenset({7}),
     "R02_FROZEN_75D_ALGORITHMS_CHANGE_R2": frozenset({8}),
     "R03_TDX_REAL_SECTOR_MEMBERS_TO_PG_R1": frozenset({9}),
@@ -108,45 +106,24 @@ _RELATIONS_BY_MIGRATION_COUNT = {
     2: _BASE_TABLES,
     3: _R01_TABLES,
     4: _R01_TABLES | {"source_raw_daily"},
-    5: _R01_TABLES
-    | {
-        "source_raw_daily",
-        "source_set_candidates",
-        "source_set_candidate_inputs",
-    },
-    6: _R01_TABLES
-    | {
-        "source_raw_daily",
-        "source_set_candidates",
-        "source_set_candidate_inputs",
-        "source_sets",
-        "source_set_capabilities",
-    },
+    5: _R01_TABLES | {"source_raw_daily"},
+    6: _R01_TABLES | {"source_raw_daily", "source_sets"},
     7: _R01_TABLES
     | {
         "source_raw_daily",
-        "source_set_candidates",
-        "source_set_candidate_inputs",
         "source_sets",
-        "source_set_capabilities",
         "source_symbol_price_profiles",
     },
     8: _R01_TABLES
     | {
         "source_raw_daily",
-        "source_set_candidates",
-        "source_set_candidate_inputs",
         "source_sets",
-        "source_set_capabilities",
         "source_symbol_price_profiles",
     },
     9: _R01_TABLES
     | {
         "source_raw_daily",
-        "source_set_candidates",
-        "source_set_candidate_inputs",
         "source_sets",
-        "source_set_capabilities",
         "source_symbol_price_profiles",
         "tdx_sector_source_snapshots",
         "tdx_sector_catalog",

@@ -8,7 +8,7 @@ import re
 import uuid
 from typing import Any
 
-from stock_a.contracts import DAY_CHAIN_MODULES
+from stock_a.contracts import PROFILE_SEMANTIC_MODULES
 from stock_a.sources.tdx.vipdata import VipdataError, VipdataSourceConfig
 
 _WORKSPACE = Path("G:/codex work/Stock A")
@@ -195,39 +195,29 @@ def _validate_config(config: Any) -> None:
             "CONFIG_INVALID", "独立PG部署核验连接必须按唯一安全环境变量合同登记"
         )
     registered = policy.get("public_files")
-    contract_revision = "STOCK-A-DAY-CHAIN/R11"
+    contract_revision = "STOCK-A-PRICE-PROFILE-SEMANTICS/R1"
     expected = {
         (
             "runtime.defaults.json",
             "BUSINESS_RUNTIME_CONFIGURATION",
             _CONFIG_CONTRACT,
-            "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official; SOURCE_INGRESS P00/P02 reads source_policy.baostock_supplement",
+            "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official; single-stock research reads source_policy.baostock_supplement",
         ),
         (
-            "contracts/day-chain.contract.json",
-            "BUSINESS_PIPELINE_DESIGN_CONTRACT",
+            "contracts/price-profile.contract.json",
+            "PRICE_PROFILE_SEMANTICS_CONTRACT",
             contract_revision,
-            "stock_a.contracts.load_day_chain_contract（唯一入口清单）",
+            "stock_a.contracts.load_price_profile_contract（唯一入口清单）",
         ),
-    }
-    module_labels = {
-        "pipeline": "pipeline",
-        "fields-source": "source fields",
-        "fields-core": "Core fields",
-        "fields-profile": "cross/Profile rules",
-        "fields-control": "control fields",
-        "research": "research rules",
-        "service": "service contract",
-        "policies": "policies",
     }
     expected.update(
         (
             f"contracts/{path}",
-            "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
+            "PRICE_PROFILE_SEMANTICS_MODULE",
             contract_revision,
-            f"stock_a.contracts.load_day_chain_contract（{module_labels[module]}）",
+            f"stock_a.contracts.load_price_profile_contract（{module}）",
         )
-        for module, path in DAY_CHAIN_MODULES
+        for module, path in PROFILE_SEMANTIC_MODULES
     )
     if not isinstance(registered, list):
         raise DiagnosticError(

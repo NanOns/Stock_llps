@@ -8,7 +8,6 @@ from fractions import Fraction
 from time import perf_counter
 from typing import Any, Mapping, Sequence
 
-from stock_a.application.source_set_candidate import _official_calendar
 from stock_a.domain import FieldValue, unknown
 from stock_a.research.core import (
     CoreObservation,
@@ -26,6 +25,20 @@ class PriceSafetyFactError(ValueError):
     def __init__(self, code: str, message: str) -> None:
         super().__init__(message)
         self.code = code
+
+
+def _official_calendar(target_session: date) -> dict[str, Any]:
+    payload, metadata, revision_chain, sessions = _load_calendar(target_session)
+    target_metadata = next(
+        item for item in metadata if item["year"] == target_session.year
+    )
+    return {
+        "calendar_id": payload["calendar_id"],
+        "calendar_revision": payload["revision"],
+        "calendar_revision_chain": revision_chain,
+        "calendar_sha256": target_metadata["resource_sha256"],
+        "sessions": sessions,
+    }
 
 
 def attach_source_d1_price_safety_facts(
@@ -114,7 +127,7 @@ def attach_source_d1_price_safety_facts(
     source = discovery.get("source")
     if not isinstance(source, Mapping):
         raise PriceSafetyFactError(
-            "PRICE_SAFETY_SOURCE_IDENTITY_MISSING", "D1未返回SEALED来源身份。"
+            "PRICE_SAFETY_SOURCE_IDENTITY_MISSING", "D1未返回Raw来源版本身份。"
         )
     _validate_source_binding(
         result=result,
@@ -293,7 +306,6 @@ def _validate_source_binding(
     }
     if (
         actual != expected
-        or source.get("seal_status") != "SEALED"
         or source.get("price_coordinate") != "RAW_UNADJUSTED"
         or source.get("pit_status") != "NON_PIT_RETROSPECTIVE"
         or source.get("database_write") is not False
@@ -301,15 +313,14 @@ def _validate_source_binding(
     ):
         raise PriceSafetyFactError(
             "PRICE_SAFETY_SOURCE_BINDING_MISMATCH",
-            "价格事实要求与当前目标日、SEALED包、source set、namespace及RAW坐标完全一致。",
+            "价格事实要求与当前目标日、包SHA、来源键、namespace及RAW坐标完全一致。",
         )
     if (
-        source.get("revision_id") is None
-        or source.get("source_capture_id") is None
+        source.get("source_capture_id") is None
         or source.get("source_content_id") is None
     ):
         raise PriceSafetyFactError(
-            "PRICE_SAFETY_SOURCE_IDENTITY_INCOMPLETE", "SEALED来源修订或捕获身份缺失。"
+            "PRICE_SAFETY_SOURCE_IDENTITY_INCOMPLETE", "Raw来源捕获或内容身份缺失。"
         )
 
 
@@ -336,7 +347,7 @@ def _validate_calendar_binding(
     ):
         raise PriceSafetyFactError(
             "PRICE_SAFETY_CALENDAR_MISMATCH",
-            "价格窗口官方日历与SEALED D1来源绑定不一致。",
+            "价格窗口官方日历与D1来源上下文不一致。",
         )
 
 

@@ -106,7 +106,6 @@ function clearRelationScreen(message = "请选择两个完整PG画像快照。")
   $("priceRelationLast").disabled = true;
 }
 function relationSnapshotParams(params, prefix, snapshot) {
-  params.set(prefix + "_source_set_id", snapshot.source_set_id);
   params.set(prefix + "_package_sha256", snapshot.package_sha256);
   params.set(prefix + "_profile_revision", snapshot.profile_revision);
 }
@@ -250,21 +249,17 @@ function renderRelationScreen(data, requestId) {
     data.namespace_id +
     "；起始 " +
     data.before_snapshot.target_session +
-    " / source_set " +
-    data.before_snapshot.source_set_id +
     " / SHA " +
     data.before_snapshot.package_sha256 +
     " / revision " +
     data.before_snapshot.profile_revision +
     "；结束 " +
     data.after_snapshot.target_session +
-    " / source_set " +
-    data.after_snapshot.source_set_id +
     " / SHA " +
     data.after_snapshot.package_sha256 +
     " / revision " +
     data.after_snapshot.profile_revision +
-    "。SOURCE_SYMBOL_ONLY · RAW_UNADJUSTED · NON_PIT；正式选股未评价。";
+    "。来源代码级RAW_UNADJUSTED · NON_PIT；上市总体未知。";
   const root = $("priceRelationScreenRows");
   root.replaceChildren();
   if (!data.rows.length) {
@@ -285,14 +280,10 @@ function renderRelationScreen(data, requestId) {
     const identity =
       item.source_symbol +
       " · " +
-      item.before_source_set_id +
-      " / " +
       item.before_package_sha256 +
       " / " +
       item.before_profile_revision +
       " → " +
-      item.after_source_set_id +
-      " / " +
       item.after_package_sha256 +
       " / " +
       item.after_profile_revision;

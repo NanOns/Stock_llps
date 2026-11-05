@@ -68,7 +68,7 @@ class TdxPackageEntryReference:
 
 @dataclass(frozen=True)
 class TdxCaptureEnvelope:
-    """完成扫描的审计投影，不代表PIT、覆盖通过或source_set封口。"""
+    """完成扫描的审计投影，不代表PIT或覆盖通过。"""
 
     capture_id: str
     dataset_id: str

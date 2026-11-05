@@ -7,9 +7,8 @@ from typing import Any
 
 from stock_a.application.pg_research import (
     PgResearchBindingError,
-    read_sealed_source_context,
+    read_source_version_context,
 )
-from stock_a.application.source_set_candidate import _official_calendar
 from stock_a.research.entry import (
     classify_source_support_change,
     research_stock_pg_support_followup_preview,
@@ -19,6 +18,7 @@ from stock_a.research.entry_history.history_preview import (
     prepare_source_d1_preview_context,
     research_stock_pg_d1_history_previews,
 )
+from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.storage.postgres.source_raw import read_raw_daily_history_page
 
 
@@ -29,16 +29,13 @@ def discover_source_d1_support_changes(
     cutoff,
     sessions,
     calendar_revision,
-    source_set_id,
     package_sha256,
     event_window_start,
     offset,
     limit,
     include_symbol_details=False,
 ) -> dict[str, Any]:
-    """单遍读取SEALED来源历史，发现窗口内全部D1事件的目标日支撑变化。"""
-    from stock_a.storage.postgres.source_set_ingress import read_p04_source_input
-
+    """单遍读取Raw来源历史，发现窗口内全部D1事件的目标日支撑变化。"""
     if (
         target not in sessions
         or event_window_start not in sessions
@@ -59,13 +56,21 @@ def discover_source_d1_support_changes(
     analysis_sessions = tuple(day for day in sessions if day >= event_window_start)
     preview_context = prepare_source_d1_preview_context(analysis_sessions)
     previous_session = sessions[sessions.index(target) - 1]
-    official_calendar = _official_calendar(target)
-    calendar_component = f"{target.year}:{official_calendar.get('calendar_revision')}"
+    calendar_payload, calendar_metadata, _, _ = _load_calendar(target)
+    calendar_component = f"{target.year}:{calendar_payload.get('revision')}"
     if calendar_component not in calendar_revision.split("+"):
         raise PgResearchBindingError(
             "D1_SUPPORT_DISCOVERY_CALENDAR_INVALID",
-            "历史窗口与SEALED来源绑定的官方日历修订不一致",
+            "历史窗口与请求的官方日历修订不一致",
         )
+    target_calendar_metadata = next(
+        item for item in calendar_metadata if item["year"] == target.year
+    )
+    official_calendar = {
+        "calendar_id": calendar_payload["calendar_id"],
+        "calendar_revision": calendar_payload["revision"],
+        "calendar_sha256": target_calendar_metadata["resource_sha256"],
+    }
 
     per_session_counts = {
         day.isoformat(): {
@@ -90,7 +95,6 @@ def discover_source_d1_support_changes(
     seen_event_keys: set[tuple[str, ...]] = set()
     last_symbol = None
     source_context = None
-    sealed_source = None
     source_pool_total = None
     source_offset = 0
     source_page_count = 0
@@ -152,7 +156,7 @@ def discover_source_d1_support_changes(
             seen_symbols.add(symbol)
             last_symbol = symbol
 
-        context = read_sealed_source_context(
+        context = read_source_version_context(
             config,
             target_session=target,
             package_sha256=package_sha256,
@@ -162,55 +166,18 @@ def discover_source_d1_support_changes(
         )
         if source_context is None:
             source_context = context
-            sealed_source = read_p04_source_input(
-                config, target_session=target, package_sha256=package_sha256
-            )
-            if (
-                sealed_source.get("status") != "AVAILABLE"
-                or sealed_source.get("target_session") != target.isoformat()
-                or sealed_source.get("package_sha256") != package_sha256
-                or sealed_source.get("source_set_id") != source_set_id
-                or sealed_source.get("namespace_id") != context["namespace_id"]
-                or sealed_source.get("revision_id") != context["revision_id"]
-                or sealed_source.get("source_content_id")
-                != context["source_content_id"]
-                or sealed_source.get("source_capture_id")
-                != context["source_capture_id"]
-                or sealed_source.get("source_digest") != context["source_digest"]
-                or sealed_source.get("source_raw_digest")
-                != context["source_raw_digest"]
-                or sealed_source.get("raw_row_count") != context["raw_row_count"]
-                or sealed_source.get("capture_expected_row_count")
-                != context["capture_expected_row_count"]
-                or sealed_source.get("seal_status") != "SEALED"
-                or not sealed_source.get("sealed_at")
-                or sealed_source.get("calendar_id") != official_calendar["calendar_id"]
-                or sealed_source.get("calendar_revision")
-                != official_calendar["calendar_revision"]
-                or sealed_source.get("calendar_sha256")
-                != official_calendar["calendar_sha256"]
-            ):
-                raise PgResearchBindingError(
-                    "D1_SUPPORT_DISCOVERY_SEAL_INVALID",
-                    "目标来源池封口、来源身份或官方日历版本不一致",
-                )
 
         context_keys = (
             "namespace_id",
-            "source_set_id",
-            "revision_id",
             "target_session",
             "package_sha256",
             "source_content_id",
-            "source_digest",
-            "source_raw_digest",
             "source_capture_id",
             "raw_row_count",
             "capture_expected_row_count",
         )
         if (
             context.get("status") != "AVAILABLE"
-            or context.get("source_set_id") != source_set_id
             or any(context.get(key) != source_context.get(key) for key in context_keys)
             or page["version_status"] != "CLOSED"
             or not page["partition_closed"]
@@ -224,8 +191,8 @@ def discover_source_d1_support_changes(
             or page["total_count"] != source_pool_total
         ):
             raise PgResearchBindingError(
-                "D1_SUPPORT_DISCOVERY_POOL_NOT_CLOSED",
-                "目标日来源页、封口分母或来源修订身份不闭合",
+                "D1_SUPPORT_DISCOVERY_POOL_INCOMPLETE",
+                "目标日来源页、捕获分母或来源版本身份不完整",
             )
 
         for candidate in candidates:
@@ -314,7 +281,7 @@ def discover_source_d1_support_changes(
                         )
                     event_key = (
                         source_context["namespace_id"],
-                        source_set_id,
+                        source_context["source_capture_id"],
                         package_sha256,
                         symbol,
                         day.isoformat(),
@@ -367,9 +334,8 @@ def discover_source_d1_support_changes(
                     requested_sessions=requested_sessions,
                     history_points=support_points,
                     package_sha256=package_sha256,
-                    source_set_id=source_set_id,
                     source_context=source_context,
-                    sealed_source=sealed_source,
+                    official_calendar=official_calendar,
                 )
                 comparison = classify_source_support_change(
                     support_followup,
@@ -398,7 +364,7 @@ def discover_source_d1_support_changes(
                     "reason_code": reason_code,
                     "event_key": {
                         "namespace_id": source_context["namespace_id"],
-                        "source_set_id": source_set_id,
+                        "target_source_capture_id": source_context["source_capture_id"],
                         "package_sha256": package_sha256,
                         "source_symbol": symbol,
                         "event_session": anchor_session.isoformat(),
@@ -425,8 +391,6 @@ def discover_source_d1_support_changes(
                     "support_followup_status": support_followup.get("status"),
                     "source": {
                         "namespace_id": source_context["namespace_id"],
-                        "source_set_id": source_context["source_set_id"],
-                        "revision_id": source_context["revision_id"],
                         "package_sha256": package_sha256,
                         "price_coordinate": "RAW_UNADJUSTED",
                         "anchor_capture_id": str(anchor_row["source_capture_id"]),
@@ -468,7 +432,7 @@ def discover_source_d1_support_changes(
     ):
         raise PgResearchBindingError(
             "D1_SUPPORT_DISCOVERY_POOL_INCOMPLETE",
-            "SEALED来源池分页未完整覆盖封口分母",
+            "Raw来源池分页未覆盖目标日捕获分母",
         )
 
     for day in event_sessions:
@@ -541,7 +505,7 @@ def discover_source_d1_support_changes(
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "price_coordinate": "RAW_UNADJUSTED",
-        "scope": "TARGET_SESSION_SEALED_SOURCE_POOL_EVENT_WINDOW_DISCOVERY",
+        "scope": "TARGET_SESSION_RAW_SOURCE_POOL_EVENT_WINDOW_DISCOVERY",
         "target_session": target.isoformat(),
         "event_window_start": event_window_start.isoformat(),
         "event_window_end_exclusive": target.isoformat(),
@@ -555,9 +519,8 @@ def discover_source_d1_support_changes(
             "previous_target_sessions_adjacent": True,
         },
         "source": source_context,
-        "source_capture_started_at": sealed_source.get("capture_read_started_at"),
-        "source_capture_validated_at": sealed_source.get("capture_validated_at"),
-        "source_sealed_at": sealed_source.get("sealed_at"),
+        "source_capture_started_at": source_context.get("capture_read_started_at"),
+        "source_capture_validated_at": source_context.get("capture_validated_at"),
         "source_pool_count": len(seen_symbols),
         "anchor_window_session_count": len(event_sessions),
         "raw_d1_counts_by_session": {

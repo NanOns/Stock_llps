@@ -304,16 +304,16 @@ def refresh_remote_tdx_sector_members(
                     "python -m stock_a source-tdx-sector-members members "
                     f"--snapshot-id {snapshot.snapshot_id} --board-kind <INDUSTRY|CONCEPT> "
                     "--board-native-id <原生板块ID> --target-session <YYYY-MM-DD> "
-                    "--research-cutoff <YYYY-MM-DD> --source-set-id <SEALED_SOURCE_SET_ID> "
+                    "--research-cutoff <YYYY-MM-DD> --source-set-id <SOURCE_SET_ID> "
                     "--package-sha256 <PACKAGE_SHA256> [--profile-revision <REVISION>]"
                 ),
                 "followup_breadth_command_template": (
                     "python -m stock_a source-tdx-sector-members breadth "
                     f"--snapshot-id {snapshot.snapshot_id} --board-kind <INDUSTRY|CONCEPT> "
                     "--before-session <YYYY-MM-DD> --after-session <YYYY-MM-DD> "
-                    "--research-cutoff <YYYY-MM-DD> --before-source-set-id <SEALED_SOURCE_SET_ID> "
+                    "--research-cutoff <YYYY-MM-DD> --before-source-set-id <SOURCE_SET_ID> "
                     "--before-package-sha256 <PACKAGE_SHA256> --before-profile-revision <REVISION> "
-                    "--after-source-set-id <SEALED_SOURCE_SET_ID> "
+                    "--after-source-set-id <SOURCE_SET_ID> "
                     "--after-package-sha256 <PACKAGE_SHA256> --after-profile-revision <REVISION>"
                 ),
             }
@@ -1385,7 +1385,7 @@ def read_tdx_sector_strength(
         },
         "boards": page,
         "return_provenance": {
-            "target_ret20": "Exact SEALED target P03 Core profile ret20, accepted only when its exact value matches the same-package Raw Core return kernel.",
+            "target_ret20": "目标日已存价格画像的Core ret20；仅当精确值与同包Raw Core收益内核一致时接受。",
             "ret5_and_prior_endpoint_returns": "Existing Core return kernel over exact same-package RAW official-session window; no other Core fields recalculated.",
             "comparison": "Each horizon uses its own fixed common evaluable source-symbol set; target and prior medians are both recomputed on that same set.",
             "membership_is_post_hoc": True,

@@ -379,7 +379,7 @@ function renderComparisonResults() {
   const identity = basket[0];
   if (identity) {
     $("comparisonIdentity").textContent =
-      `统一目标 ${identity.target_session} · namespace ${identity.namespace_id} · source_set ${identity.source_set_id} · 完整 package SHA ${identity.package_sha256} · profile_revision ${identity.profile_revision} · ` +
+      `统一目标 ${identity.target_session} · namespace ${identity.namespace_id} · 完整 package SHA ${identity.package_sha256} · profile_revision ${identity.profile_revision} · ` +
       `官方会话窗 ${successful[0]?.data?.calendar_id || "—"}/${successful[0]?.data?.calendar_revision || "—"} · RAW_UNADJUSTED / NON_PIT。` +
       (axis.baseSession
         ? `共同有效收盘基准 ${axis.baseSession}；只按精确有理数计算、显示时四舍五入2位。`
@@ -572,8 +572,8 @@ function renderComparisonPeriodResults() {
     `${axis.rows.length}个${kindLabel} · ${successfulCount}/${entries.length}只周期响应`;
   const identity = state.comparisonBasket[0];
   const targetText = identity
-    ? `目标 ${identity.target_session} · namespace ${identity.namespace_id} · SEALED source_set ${identity.source_set_id} · package SHA ${identity.package_sha256} · RAW_UNADJUSTED / NON_PIT_RETROSPECTIVE。`
-    : "等待同一SEALED来源快照的比较篮。";
+    ? `目标 ${identity.target_session} · namespace ${identity.namespace_id} · package SHA ${identity.package_sha256} · profile_revision ${identity.profile_revision} · RAW_UNADJUSTED / NON_PIT_RETROSPECTIVE。`
+    : "等待同一精确来源版本的比较篮。";
   if (axis.baseRow) {
     $("comparisonPeriodStatus").textContent =
       `${targetText} ${kindLabel}共同t0=${axis.baseRow.key}（${axis.baseRow.metadata.calendar_start_session}至${axis.baseRow.metadata.calendar_end_session}）；仅所有选中代码均为COMPLETE、合法RAW收盘且官方周期范围一致的行计算指数。`;

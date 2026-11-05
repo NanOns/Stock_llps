@@ -4,10 +4,8 @@ async function loadCatalog() {
   invalidateTimeline();
   const catalogRequest = ++state.catalogRequest;
   state.pageRequest++;
-  state.readinessRequest++;
   state.stockRequest++;
   clearResult();
-  clearChainReadiness("正在从PostgreSQL只读读取来源日期与版本目录…");
   state.namespace_id = null;
   $("versionSelect").disabled = true;
   $("versionSelect").replaceChildren(new Option("正在读取PG目录…", ""));
@@ -43,18 +41,12 @@ async function loadCatalog() {
     $("population").textContent = state.versions.length
       ? `已读取${data.total_version_count}个真实PG日期/版本。请选择明确版本；Raw来源候选不代表官方上市总体。`
       : "PG中没有可选的Raw来源版本。";
-    clearChainReadiness(
-      state.versions.length
-        ? "请选择一个精确日期和完整包SHA。"
-        : "PG目录没有可选来源版本。",
-    );
   } catch (error) {
     if (catalogRequest !== state.catalogRequest) return;
     $("population").textContent = `目录读取失败：${error.message}`;
     $("candidateRows").replaceChildren();
     tableRow($("candidateRows"), ["PG目录不可用", "", "", "", ""]);
     $("versionSelect").disabled = true;
-    clearChainReadiness(`PG目录不可用：${error.message}`);
   }
 }
 function describePopulation(page) {

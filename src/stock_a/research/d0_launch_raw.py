@@ -16,7 +16,7 @@ _REASON_TEXT = {
     "OFFICIAL_SESSION_ROW_MISSING": "严格官方会话窗口没有该来源代码的RAW行。",
     "OFFICIAL_SESSION_BAR_MISSING": "官方会话未取得有效实际Bar；停复牌状态未知，不能补零或跳日。",
     "RAW_SOURCE_IDENTITY_MISMATCH": "RAW行与命名空间、来源代码、日期、来源包或来源内容不一致。",
-    "RAW_TARGET_CAPTURE_MISMATCH": "目标日RAW行与SEALED来源捕获身份不一致。",
+    "RAW_TARGET_CAPTURE_MISMATCH": "目标日RAW行与来源捕获身份不一致。",
     "RAW_COORDINATE_MISMATCH": "价格坐标不是同一RAW_UNADJUSTED坐标。",
     "RAW_PARSER_CONTRACT_MISMATCH": "窗口RAW历史使用了不同的来源解析合同。",
     "RAW_PRICE_QUALITY_UNKNOWN": "严格会话价格质量未知。",

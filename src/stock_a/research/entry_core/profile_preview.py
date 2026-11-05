@@ -281,9 +281,8 @@ def _build_profile_preview(
             "PROFILE_PREVIEW_SOURCE_ID_INVALID", "Profile预览缺少本次完整TDX字节摘要"
         )
     try:
-        scope = contract["scope_bindings"]["FOUNDATION_EOD"]
-        rules = scope["profile_expression_registry"]
-        canonical_registry = scope["field_registry"]
+        rules = contract["profile_expression_registry"]
+        canonical_registry = contract["field_registry"]
     except (KeyError, TypeError) as error:
         raise ResearchEntryError(
             "PROFILE_PREVIEW_CONTRACT_INVALID",
@@ -387,7 +386,6 @@ def _build_profile_preview(
                 missing_inputs.append(
                     {
                         "field_id": missing_id,
-                        "producer_stage": field_spec.get("producer_stage"),
                         "producer_symbol": field_spec.get("producer_symbol"),
                         "reason": unavailable["reason"],
                     }
@@ -434,7 +432,6 @@ def _build_profile_preview(
                 field_registry.update(
                     {
                         "unit": "CNY",
-                        "producer_stage": "RESEARCH_PREVIEW",
                         "producer_symbol": "stock_a.research.entry:_build_profile_preview",
                         "producer_source_sha256": entry_sha,
                         "expression_ref": "TDX_RAW_CLOSE_PREVIEW_ALIAS_R1",
@@ -502,6 +499,20 @@ def _build_profile_preview(
                     "PROFILE_PREVIEW_PRODUCER_UNBOUND",
                     "画像输入缺少实际生产者：" + input_id,
                 )
+            required_contract_text: dict[str, str] = {}
+            for key in (
+                "unit",
+                "expression_ref",
+                "parameter_version",
+                "coordinate_role",
+            ):
+                value = field_registry.get(key)
+                if not isinstance(value, str) or not value:
+                    raise ResearchEntryError(
+                        "PROFILE_PREVIEW_FIELD_CONTRACT_INVALID",
+                        f"画像输入缺少有效的{key}合同：{input_id}",
+                    )
+                required_contract_text[key] = value
             field_registry["producer_source_sha256"] = source_code_sha
             used_registry.append(field_registry)
 
@@ -529,15 +540,14 @@ def _build_profile_preview(
             inputs[input_id] = ProfileInput(
                 field_id=input_id,
                 field=input_value,
-                unit=field_registry.get("unit"),
-                producer_stage=field_registry.get("producer_stage"),
+                unit=required_contract_text["unit"],
                 producer_symbol=producer_symbol,
                 producer_source_sha256=source_code_sha,
-                expression_ref=field_registry.get("expression_ref"),
+                expression_ref=required_contract_text["expression_ref"],
                 algorithm_version=field_registry.get("algorithm_version"),
-                parameter_version=field_registry.get("parameter_version"),
+                parameter_version=required_contract_text["parameter_version"],
                 window=window_identity,
-                coordinate_role=field_registry.get("coordinate_role"),
+                coordinate_role=required_contract_text["coordinate_role"],
                 coordinate_id=coordinate_id,
                 context=contexts,
             )
@@ -612,10 +622,6 @@ def _build_profile_preview(
             "source_cutoff_id": snapshot_id,
             "source_cutoff_role": source_snapshot_role,
             "local_read_clock_is_historical_availability": False,
-        },
-        "production_profile_entry": {
-            "status": "BLOCKED",
-            "reason": "profile()正式入口仍要求可信FOUNDATION选择器；本预览不放开生产准入。",
         },
         "components": components,
         "counts": {

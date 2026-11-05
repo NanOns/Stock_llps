@@ -1,17 +1,17 @@
-"""正式机器合同的稳定轻量导出。"""
+"""价格画像字段合同的稳定导出。"""
 
 from stock_a.contracts.loader import (
-    DAY_CHAIN_MODULES,
-    DayChainContractError,
-    LoadedDayChainContract,
+    PROFILE_SEMANTIC_MODULES,
+    LoadedPriceProfileContract,
+    PriceProfileContractError,
     canonical_contract_bytes,
-    load_day_chain_contract,
+    load_price_profile_contract,
 )
 
 __all__ = [
-    "DAY_CHAIN_MODULES",
-    "DayChainContractError",
-    "LoadedDayChainContract",
+    "PROFILE_SEMANTIC_MODULES",
+    "LoadedPriceProfileContract",
+    "PriceProfileContractError",
     "canonical_contract_bytes",
-    "load_day_chain_contract",
+    "load_price_profile_contract",
 ]

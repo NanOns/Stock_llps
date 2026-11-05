@@ -1786,7 +1786,6 @@
       "order": 57,
       "definition": {
         "field_id": "cross.rps5",
-        "producer_stage": "P08",
         "value_type": "number",
         "unit": "percentile_0_100",
         "expression_ref": "ALG-09",
@@ -1797,10 +1796,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
         "value_schema": {
           "type": "number",
@@ -1821,15 +1816,13 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "output_artifact": "cross_section",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        "window_identity_ref": "profile_price_history_policy"
       }
     },
     {
       "order": 58,
       "definition": {
         "field_id": "cross.rps5_delta1_pp",
-        "producer_stage": "P08",
         "value_type": "number",
         "unit": "pp",
         "expression_ref": "ALG-10",
@@ -1843,10 +1836,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
         "value_schema": {
           "type": "number",
@@ -1867,15 +1856,13 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "output_artifact": "cross_section",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        "window_identity_ref": "profile_price_history_policy"
       }
     },
     {
       "order": 59,
       "definition": {
         "field_id": "cross.rps5_delta3_pp",
-        "producer_stage": "P08",
         "value_type": "number",
         "unit": "pp",
         "expression_ref": "ALG-10",
@@ -1889,11 +1876,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
         "value_schema": {
           "type": "number",
@@ -1914,15 +1896,13 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "output_artifact": "cross_section",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        "window_identity_ref": "profile_price_history_policy"
       }
     },
     {
       "order": 60,
       "definition": {
         "field_id": "cross.rps20",
-        "producer_stage": "P08",
         "value_type": "number",
         "unit": "percentile_0_100",
         "expression_ref": "ALG-09",
@@ -1933,11 +1913,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
         "value_schema": {
           "type": "number",
@@ -1958,15 +1933,13 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "output_artifact": "cross_section",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        "window_identity_ref": "profile_price_history_policy"
       }
     },
     {
       "order": 61,
       "definition": {
         "field_id": "cross.rps20_delta1_pp",
-        "producer_stage": "P08",
         "value_type": "number",
         "unit": "pp",
         "expression_ref": "ALG-10",
@@ -1980,10 +1953,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
         "value_schema": {
           "type": "number",
@@ -2004,15 +1973,13 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "output_artifact": "cross_section",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        "window_identity_ref": "profile_price_history_policy"
       }
     },
     {
       "order": 62,
       "definition": {
         "field_id": "cross.rps20_delta3_pp",
-        "producer_stage": "P08",
         "value_type": "number",
         "unit": "pp",
         "expression_ref": "ALG-10",
@@ -2026,10 +1993,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
         "value_schema": {
           "type": "number",
@@ -2050,15 +2013,13 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "output_artifact": "cross_section",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        "window_identity_ref": "profile_price_history_policy"
       }
     },
     {
       "order": 63,
       "definition": {
         "field_id": "cross.rel_market_1",
-        "producer_stage": "P08",
         "value_type": "number",
         "unit": "fraction",
         "expression_ref": "ALG-11",
@@ -2069,11 +2030,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
         "value_schema": {
           "type": "number",
@@ -2094,15 +2050,13 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "output_artifact": "cross_section",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        "window_identity_ref": "profile_price_history_policy"
       }
     },
     {
       "order": 64,
       "definition": {
         "field_id": "cross.rel_market_3",
-        "producer_stage": "P08",
         "value_type": "number",
         "unit": "fraction",
         "expression_ref": "ALG-11",
@@ -2113,10 +2067,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
         "value_schema": {
           "type": "number",
@@ -2137,15 +2087,13 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "output_artifact": "cross_section",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        "window_identity_ref": "profile_price_history_policy"
       }
     },
     {
       "order": 65,
       "definition": {
         "field_id": "cross.rel_market_5",
-        "producer_stage": "P08",
         "value_type": "number",
         "unit": "fraction",
         "expression_ref": "ALG-11",
@@ -2156,10 +2104,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
         "value_schema": {
           "type": "number",
@@ -2180,15 +2124,13 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "output_artifact": "cross_section",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        "window_identity_ref": "profile_price_history_policy"
       }
     },
     {
       "order": 66,
       "definition": {
         "field_id": "cross.rel_market_20",
-        "producer_stage": "P08",
         "value_type": "number",
         "unit": "fraction",
         "expression_ref": "ALG-11",
@@ -2199,10 +2141,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
         "value_schema": {
           "type": "number",
@@ -2223,15 +2161,13 @@
           "context.calendar_ref",
           "context.universe_ref_with_each_exact_endpoint"
         ],
-        "output_artifact": "cross_section",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+        "window_identity_ref": "profile_price_history_policy"
       }
     },
     {
       "order": 67,
       "definition": {
         "field_id": "profile.trend",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2248,10 +2184,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2279,7 +2211,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2288,7 +2219,6 @@
       "order": 68,
       "definition": {
         "field_id": "profile.position",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2299,10 +2229,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2329,7 +2255,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2338,7 +2263,6 @@
       "order": 69,
       "definition": {
         "field_id": "profile.ma_structure",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2351,11 +2275,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2381,7 +2300,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2390,7 +2308,6 @@
       "order": 70,
       "definition": {
         "field_id": "profile.relative",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2404,10 +2321,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2436,7 +2349,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2445,7 +2357,6 @@
       "order": 71,
       "definition": {
         "field_id": "profile.compression",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2459,11 +2370,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2489,7 +2395,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2498,7 +2403,6 @@
       "order": 72,
       "definition": {
         "field_id": "profile.participation",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2510,10 +2414,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2540,7 +2440,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2549,7 +2448,6 @@
       "order": 73,
       "definition": {
         "field_id": "profile.extension",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2564,10 +2462,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2592,7 +2486,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2601,7 +2494,6 @@
       "order": 74,
       "definition": {
         "field_id": "profile.near_high20",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2613,10 +2505,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2640,7 +2528,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2649,7 +2536,6 @@
       "order": 75,
       "definition": {
         "field_id": "profile.drawdown60",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2660,10 +2546,6 @@
         ],
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2687,7 +2569,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
       }
@@ -2696,7 +2577,6 @@
       "order": 77,
       "definition": {
         "field_id": "profile.closed_week_trend",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2706,10 +2586,6 @@
         ],
         "window_contract": "CLOSED_WEEK_MA5_AND_PREVIOUS_MA5_REQUIRES_6_CLOSED_WEEKS",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2733,8 +2609,7 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+        "window_identity_ref": "profile_price_history_policy",
         "minimum_closed_period_count": 6,
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"
@@ -2744,7 +2619,6 @@
       "order": 79,
       "definition": {
         "field_id": "profile.closed_month_trend",
-        "producer_stage": "P09",
         "producer_symbol": "stock_a.research.profile:profile",
         "value_type": "enum",
         "unit": "state",
@@ -2754,10 +2628,6 @@
         ],
         "window_contract": "CLOSED_MONTH_MA3_AND_PREVIOUS_MA3_REQUIRES_4_CLOSED_MONTHS",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R3",
         "value_schema": {
           "type": "enum",
@@ -2781,8 +2651,7 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "core_profiles",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+        "window_identity_ref": "profile_price_history_policy",
         "minimum_closed_period_count": 4,
         "pure_kernel_symbol": "stock_a.research.profile:evaluate_profile_kernel",
         "production_entry_symbol": "stock_a.research.profile:profile"

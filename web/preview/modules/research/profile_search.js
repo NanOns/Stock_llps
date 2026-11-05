@@ -9,7 +9,7 @@ async function loadProfileSnapshots() {
   try {
     const data = await api("/api/source-symbol-price-profiles/snapshots");
     $("dataBoundary").textContent =
-      `研究冻结于${data.research_cutoff}。当前页面展示来源候选，不代表官方上市总体、稳定证券身份、交易状态或选股结论；自动日更、Head发布及生产切换暂停。`;
+      `研究冻结于${data.research_cutoff}。当前页面读取PG已存行情和后验研究结果，不代表官方上市总体、稳定证券身份、交易状态或选股结论。`;
     state.profileSnapshots = (data.snapshots || []).map((item) => ({
       ...item,
       namespace_id:
@@ -17,17 +17,17 @@ async function loadProfileSnapshots() {
     }));
     populateChangeSnapshots(state.profileSnapshots);
     $("profileSnapshotSelect").replaceChildren(
-      new Option("— 请选择精确画像日期 / source_set / revision —", ""),
+      new Option("— 请选择精确画像日期 / 来源包SHA / 画像修订 —", ""),
     );
     for (const item of state.profileSnapshots) {
       const key = profileSnapshotKey(item);
       const option = new Option(
-        `${item.target_session} · ${item.source_set_id.slice(0, 8)} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话 · rev ${item.profile_revision.slice(0, 10)}`,
+        `${item.target_session} · SHA ${item.package_sha256.slice(0, 8)} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话 · rev ${item.profile_revision.slice(0, 10)}`,
         key,
       );
       option.title =
         `${item.target_session} · namespace ${item.namespace_id || "未提供"} · ` +
-        `source_set_id ${item.source_set_id} · package SHA ${item.package_sha256} · ` +
+        `目标日 ${item.target_session} · package SHA ${item.package_sha256} · ` +
         `profile_revision ${item.profile_revision}`;
       option.disabled = !item.complete;
       $("profileSnapshotSelect").append(option);
@@ -37,11 +37,11 @@ async function loadProfileSnapshots() {
       ? `${state.profileSnapshots.length}个真实PG画像版本`
       : "没有已保存画像";
     $("profileMessage").textContent = state.profileSnapshots.length
-      ? "请选择精确日期、P03 source_set和窗口修订。搜索仅读取PG持久画像，不回退latest。"
+      ? "请选择精确日期、来源包SHA和画像修订。搜索仅读取PG持久画像，不回退latest。"
       : "PG画像表中没有已保存记录。";
   } catch (error) {
     $("dataBoundary").textContent =
-      "研究截止信息读取失败，无法确认当前页面的数据范围；自动日更、Head发布及生产切换暂停。";
+      "研究截止信息读取失败，无法确认当前页面的数据范围；未显示未核实的结果。";
     state.profileSnapshots = [];
     populateChangeSnapshots([]);
     $("profileCount").textContent = "PG画像目录不可用";
@@ -406,7 +406,7 @@ async function loadProfilePage() {
     );
     const binding =
       `${snapshot.target_session} · namespace ${data.namespace_id || snapshot.namespace_id || "未提供"} · ` +
-      `source_set_id ${data.source_set_id} · 包SHA ${data.package_sha256} · ` +
+      `包SHA ${data.package_sha256} · ` +
       `profile_revision ${data.profile_revision}`;
     state.profileTotal = page.total;
     $("profileCount").textContent =

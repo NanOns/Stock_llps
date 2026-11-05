@@ -11,7 +11,6 @@ $("versionSelect").addEventListener("change", () => {
   $("queryStock").disabled = false;
   clearResult();
   loadPage();
-  loadReadiness();
 });
 for (const id of ["symbolInput", "windowInput"]) {
   $(id).addEventListener("input", () => {

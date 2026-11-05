@@ -134,7 +134,6 @@ async function runChanges(requestId) {
     ["before", beforeSnapshot],
     ["after", afterSnapshot],
   ]) {
-    params.set(`${prefix}_source_set_id`, snapshot.source_set_id);
     params.set(`${prefix}_package_sha256`, snapshot.package_sha256);
     params.set(`${prefix}_profile_revision`, snapshot.profile_revision);
   }
@@ -188,17 +187,17 @@ async function runChanges(requestId) {
     const snapshotMatches = (received, expected) =>
       Boolean(
         received?.complete &&
-        profileSnapshotKey(received) === profileSnapshotKey(expected) &&
-        typeof received.history_calendar_id === "string" &&
-        received.history_calendar_id.length > 0 &&
-        typeof received.history_calendar_revision === "string" &&
-        received.history_calendar_revision.length > 0 &&
-        received.window_start === expected.window_start &&
-        received.window_end === expected.window_end &&
-        received.history_session_count === expected.history_session_count &&
-        received.source_symbol_count === expected.source_symbol_count &&
-        received.expected_source_symbol_count ===
-          expected.expected_source_symbol_count,
+          profileSnapshotKey(received) === profileSnapshotKey(expected) &&
+          typeof received.history_calendar_id === "string" &&
+          received.history_calendar_id.length > 0 &&
+          typeof received.history_calendar_revision === "string" &&
+          received.history_calendar_revision.length > 0 &&
+          received.window_start === expected.window_start &&
+          received.window_end === expected.window_end &&
+          received.history_session_count === expected.history_session_count &&
+          received.source_symbol_count === expected.source_symbol_count &&
+          received.expected_source_symbol_count ===
+            expected.expected_source_symbol_count,
       );
     if (
       data.namespace_id !== state.namespace_id ||
@@ -252,7 +251,7 @@ async function runChanges(requestId) {
       ? `${p.total}条MA20/ATR状态筛查命中`
       : `${s.changed_source_symbol_count}个变化对象`;
     $("changeSummary").textContent =
-      `${sessionRelationLabel(data.session_relation)} · 快照分母 ${data.before_snapshot.source_symbol_count}/${data.before_snapshot.expected_source_symbol_count} 与 ${data.after_snapshot.source_symbol_count}/${data.after_snapshot.expected_source_symbol_count} · 并集 ${s.source_symbol_union_count} · 交集 ${s.intersection_count} · 起始独有 ${s.before_only_count} · 结束独有 ${s.after_only_count} · 跨source_set ${s.cross_source_set_pair_count} · 跨价格坐标 ${s.cross_price_coordinate_pair_count} · Core/Profile不可比 ${s.core_semantics_incomparable_count}/${s.profile_semantics_incomparable_count} · 收盘/MA20未知 ${s.close_ma20_unknown_count} · Profile未观察 ${s.profile_unobserved_pair_count} · 完整变化 ${s.changed_source_symbol_count} · ${profileFieldId ? `Profile11 ${profileFieldLabel(profileFieldId)} ${profileChangeKind}` : "Profile11字段变化未过滤"} · 距离筛选 ${bias20AtrStateLabels[expectedBias20AtrStateFilter.before]} → ${bias20AtrStateLabels[expectedBias20AtrStateFilter.after]} · 当前命中 ${p.total} · ${hasDistanceFilter ? "距离筛查可包含现役变化分类为空的代码；并不代表状态发生变化或交易信号。" : "选股未评价。"}`;
+      `${sessionRelationLabel(data.session_relation)} · 快照分母 ${data.before_snapshot.source_symbol_count}/${data.before_snapshot.expected_source_symbol_count} 与 ${data.after_snapshot.source_symbol_count}/${data.after_snapshot.expected_source_symbol_count} · 并集 ${s.source_symbol_union_count} · 交集 ${s.intersection_count} · 起始独有 ${s.before_only_count} · 结束独有 ${s.after_only_count} · 跨价格坐标 ${s.cross_price_coordinate_pair_count} · Core/Profile不可比 ${s.core_semantics_incomparable_count}/${s.profile_semantics_incomparable_count} · 收盘/MA20未知 ${s.close_ma20_unknown_count} · Profile未观察 ${s.profile_unobserved_pair_count} · 完整变化 ${s.changed_source_symbol_count} · ${profileFieldId ? `Profile11 ${profileFieldLabel(profileFieldId)} ${profileChangeKind}` : "Profile11字段变化未过滤"} · 距离筛选 ${bias20AtrStateLabels[expectedBias20AtrStateFilter.before]} → ${bias20AtrStateLabels[expectedBias20AtrStateFilter.after]} · 当前命中 ${p.total} · ${hasDistanceFilter ? "距离筛查可包含现役变化分类为空的代码；并不代表状态发生变化或交易信号。" : "选股未评价。"}`;
     $("changePageStatus").textContent =
       `偏移 ${p.offset} · 本页 ${p.count}/${p.limit} · 筛选总计 ${p.total}`;
     $("changePrev").disabled = p.offset === 0;

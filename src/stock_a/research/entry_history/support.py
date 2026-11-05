@@ -13,6 +13,7 @@ from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
 from stock_a.research.entry_core.fields import _render_field, _render_value
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.source_discovery import _normalize_symbol
+from stock_a.research.structure import Bar
 
 
 def _field_from_pg_raw(
@@ -153,7 +154,12 @@ def _support_evidence(
             "atr_previous": _render_field(atr_previous),
             "clv": _render_field(clv),
         }
-    open_value, high, low, close = (exact_number(value) for value in today.ohlc.value)
+    ohlc_values = today.ohlc.value
+    if not isinstance(ohlc_values, (tuple, list)) or len(ohlc_values) != 4:
+        raise ResearchEntryError(
+            "SUPPORT_BAR_OHLC_INVALID", "支撑观察Bar必须含四个有序OHLC字段"
+        )
+    open_value, high, low, close = (exact_number(value) for value in ohlc_values)
     touch_low = lower - scale / 4
     touch_high = upper + scale / 4
     breach_below = lower - scale / 2
@@ -229,12 +235,11 @@ def research_stock_pg_support_followup_preview(
     requested_sessions: Sequence[date],
     history_points: Sequence[Mapping[str, Any]],
     package_sha256: str,
-    source_set_id: str,
     source_context: Mapping[str, Any],
-    sealed_source: Mapping[str, Any],
+    official_calendar: Mapping[str, Any],
 ) -> dict[str, Any]:
     """把单股精确PG历史D1证据接到冻结BREAKOUT_PLATFORM与支撑观察核。"""
-    from stock_a.research.structure import Bar, generate, observe_support
+    from stock_a.research.structure import generate, observe_support
 
     normalized = _normalize_symbol(symbol)[0]
     sessions = tuple(official_sessions)
@@ -243,37 +248,22 @@ def research_stock_pg_support_followup_preview(
     if (
         source_context.get("status") != "AVAILABLE"
         or source_context.get("target_session") != target_session.isoformat()
-        or sealed_source.get("status") != "AVAILABLE"
-        or sealed_source.get("target_session") != target_session.isoformat()
-        or source_context.get("source_content_id")
-        != sealed_source.get("source_content_id")
-        or source_context.get("source_capture_id")
-        != sealed_source.get("source_capture_id")
-        or source_context.get("raw_row_count") != sealed_source.get("raw_row_count")
-        or source_context.get("capture_expected_row_count")
-        != sealed_source.get("capture_expected_row_count")
-        or source_context.get("durability_status") != "VERIFIED_POST_COMMIT_READBACK"
-        or source_context.get("candidate_fallback") is not False
-        or source_context.get("database_write") is not False
-        or source_context.get("ddl_executed") is not False
+        or source_context.get("source_content_id") is None
+        or source_context.get("source_capture_id") is None
+        or source_context.get("raw_row_count")
+        != source_context.get("capture_expected_row_count")
+        or not isinstance(source_context.get("capture_digest"), str)
+        or re.fullmatch(r"[0-9a-f]{64}", source_context["capture_digest"]) is None
         or not isinstance(package_sha256, str)
         or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
-        or not isinstance(source_set_id, str)
-        or not source_set_id
-        or source_context.get("source_set_id") != source_set_id
         or source_context.get("package_sha256") != package_sha256
-        or source_context.get("namespace_id") != sealed_source.get("namespace_id")
-        or source_context.get("revision_id") != sealed_source.get("revision_id")
-        or source_context.get("source_digest") != sealed_source.get("source_digest")
-        or source_context.get("source_raw_digest")
-        != sealed_source.get("source_raw_digest")
-        or sealed_source.get("source_set_id") != source_set_id
-        or sealed_source.get("package_sha256") != package_sha256
-        or sealed_source.get("seal_status") != "SEALED"
-        or not sealed_source.get("sealed_at")
+        or not isinstance(official_calendar, Mapping)
+        or not official_calendar.get("calendar_id")
+        or not official_calendar.get("calendar_revision")
+        or not official_calendar.get("calendar_sha256")
     ):
         raise ResearchEntryError(
-            "SUPPORT_SOURCE_BINDING_INVALID", "支撑研究没有绑定同包SEALED来源修订"
+            "SUPPORT_SOURCE_BINDING_INVALID", "支撑研究没有绑定同一Raw捕获与包版本"
         )
     if (
         not sessions
@@ -305,7 +295,6 @@ def research_stock_pg_support_followup_preview(
         )
 
     namespace_id = source_context.get("namespace_id")
-    revision_id = source_context.get("revision_id")
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
     point_by_session: dict[date, Mapping[str, Any]] = {}
     row_by_session: dict[date, Mapping[str, Any] | None] = {}
@@ -361,8 +350,7 @@ def research_stock_pg_support_followup_preview(
     d1_state = d1["result"].get("state")
     source_identity = {
         "namespace_id": namespace_id,
-        "source_set_id": source_set_id,
-        "revision_id": revision_id,
+        "source_capture_id": source_context.get("source_capture_id"),
         "package_sha256": package_sha256,
         "source_symbol": normalized,
         "anchor_session": support_anchor_session.isoformat(),
@@ -384,42 +372,21 @@ def research_stock_pg_support_followup_preview(
         "formal_p15_admission": "NOT_EVALUATED",
         "source": {
             "namespace_id": namespace_id,
-            "source_set_id": source_set_id,
-            "source_revision_id": revision_id,
             "package_sha256": package_sha256,
             "source_content_id": source_context.get("source_content_id"),
             "source_capture_id": source_context.get("source_capture_id"),
             "source_digest": source_context.get("source_digest"),
             "source_raw_digest": source_context.get("source_raw_digest"),
-            "source_clock_role": (
-                source_context.get("source_clock_role")
-                or sealed_source.get("source_clock_role")
-                or sealed_source.get("capture_clock_role")
-                or (
-                    row_by_session[support_anchor_session].get("capture_clock_role")
-                    if row_by_session[support_anchor_session]
-                    else None
-                )
-                or (
-                    row_by_session[support_anchor_session].get("source_clock_role")
-                    if row_by_session[support_anchor_session]
-                    else None
-                )
-            ),
-            "source_time_quality": source_context.get("source_time_quality")
-            or sealed_source.get("source_time_quality"),
-            "source_available_at": source_context.get("source_available_at")
-            or sealed_source.get("source_available_at"),
-            "capture_read_started_at": sealed_source.get("capture_read_started_at"),
-            "capture_validated_at": sealed_source.get("capture_validated_at"),
-            "sealed_at": sealed_source.get("sealed_at"),
-            "seal_status": sealed_source.get("seal_status"),
-            "price_unit_status": source_context.get("price_unit_status"),
+            "source_clock_role": source_context.get("source_clock_role"),
+            "source_time_quality": source_context.get("source_time_quality"),
+            "source_available_at": source_context.get("source_available_at"),
+            "capture_read_started_at": source_context.get("capture_read_started_at"),
+            "capture_validated_at": source_context.get("capture_validated_at"),
         },
         "official_calendar": {
-            "calendar_id": sealed_source.get("calendar_id"),
-            "source_calendar_revision": sealed_source.get("calendar_revision"),
-            "calendar_sha256": sealed_source.get("calendar_sha256"),
+            "calendar_id": official_calendar.get("calendar_id"),
+            "source_calendar_revision": official_calendar.get("calendar_revision"),
+            "calendar_sha256": official_calendar.get("calendar_sha256"),
             "history_calendar_revision": anchor_predicate[
                 "official_dependency_window"
             ].get("calendar_revision"),
@@ -447,7 +414,6 @@ def research_stock_pg_support_followup_preview(
         },
         "formal_downstream": {
             "stable_security_identity": "NOT_ISSUED",
-            "p04_anchor": "NOT_CREATED",
             "p15_anchor": "NOT_CREATED",
             "d2_seed_focus": "NOT_EVALUATED",
             "trade_signal": "NOT_EVALUATED",
@@ -506,8 +472,7 @@ def research_stock_pg_support_followup_preview(
         (
             str(namespace_id),
             package_sha256,
-            str(source_set_id),
-            str(revision_id),
+            str(source_context.get("source_capture_id")),
             normalized,
             support_anchor_session.isoformat(),
             str(anchor_row.get("source_capture_id")),

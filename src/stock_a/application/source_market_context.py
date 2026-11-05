@@ -9,10 +9,8 @@ from fractions import Fraction
 import re
 from typing import Any, Mapping, Sequence
 
-from stock_a.application.source_set_candidate import (
-    SourceSetCandidateApplicationError,
-    _official_calendar,
-)
+from stock_a.research.entry_context.errors import ResearchEntryError
+from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.source_market_breadth import (
     RawPriceObservation,
     SourceCohortIdentity,
@@ -22,7 +20,7 @@ from stock_a.research.source_market_breadth import (
 )
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
-    read_sealed_source_market_breadth_history,
+    read_source_market_breadth_history,
 )
 
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -45,13 +43,13 @@ class SourceMarketContextError(Exception):
 
 @dataclass(frozen=True)
 class SourceMarketContextRead:
-    """一个精确SEALED来源池的市场宽度读取与内核结果。"""
+    """一个精确Raw来源版本的市场宽度读取与内核结果。"""
 
     target_session: date
     research_cutoff: date
     calendar: Mapping[str, Any]
     pg_result: Mapping[str, Any]
-    source_set: Mapping[str, Any]
+    source_version: Mapping[str, Any]
     cohort: SourceCohortIdentity
     calculation: SourceMarketBreadthResult
 
@@ -78,10 +76,9 @@ def read_source_market_context(
     *,
     target_session: date,
     research_cutoff: date,
-    source_set_id: str,
     package_sha256: str,
 ) -> SourceMarketContextRead:
-    """按固定官方日历和精确SEALED P03版本读取并计算一次来源宽度。"""
+    """按固定官方日历和精确Raw来源包读取并计算一次来源宽度。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
@@ -100,9 +97,19 @@ def read_source_market_context(
         )
 
     try:
-        calendar = _official_calendar(target_session)
-        target_index = calendar["sessions"].index(target_session)
-    except (SourceSetCandidateApplicationError, ValueError) as error:
+        payload, metadata, revisions, sessions = _load_calendar(target_session)
+        year_metadata = next(
+            item for item in metadata if item["year"] == target_session.year
+        )
+        calendar = {
+            "calendar_id": payload["calendar_id"],
+            "calendar_revision": payload["revision"],
+            "calendar_sha256": year_metadata["resource_sha256"],
+            "revision_chain": revisions,
+            "sessions": sessions,
+        }
+        target_index = sessions.index(target_session)
+    except (ResearchEntryError, ValueError) as error:
         raise SourceMarketContextError(
             "MARKET_BREADTH_CALENDAR_INVALID",
             str(error),
@@ -117,62 +124,39 @@ def read_source_market_context(
 
     session_window = calendar["sessions"][target_index - 4 : target_index + 1]
     try:
-        pg_result = read_sealed_source_market_breadth_history(
+        pg_result = read_source_market_breadth_history(
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_set_id=source_set_id,
             package_sha256=package_sha256,
             session_window=session_window,
         )
     except RawSourcePgError:
         raise
 
-    source_set = pg_result["source_set"]
-    if (
-        source_set["calendar_id"] != calendar["calendar_id"]
-        or source_set["calendar_revision"] != calendar["calendar_revision"]
-        or source_set["calendar_sha256"] != calendar["calendar_sha256"]
-    ):
-        raise SourceMarketContextError(
-            "MARKET_BREADTH_CALENDAR_SOURCE_SET_MISMATCH",
-            "SEALED来源集合所绑定的日历身份与当前官方日历不一致",
-            category="IDENTITY_MISMATCH",
-        )
-
+    source_version = pg_result["source_version"]
+    status_counts = source_version["target_status_counts"]
     cohort = SourceCohortIdentity(
         namespace_id=pg_result["namespace_id"],
-        source_set_id=source_set_id,
-        ingress_attempt_id=source_set["ingress_attempt_id"],
         target_session=target_session,
         package_sha256=package_sha256,
-        revision_id=int(source_set["revision_id"]),
-        source_content_id=source_set["source_content_id"],
-        source_capture_id=source_set["source_capture_id"],
-        source_dataset_id=source_set["source_dataset_id"],
-        source_byte_count=int(source_set["source_byte_count"]),
-        parser_contract=source_set["parser_contract"],
-        seal_status=source_set["seal_status"],
-        durability_status=source_set["durability_status"],
-        durability_source_capture_id=source_set["durability_source_capture_id"],
-        durability_source_digest=source_set["durability_source_digest"],
-        commit_ack_observed_at=source_set["commit_ack_observed_at"],
-        seal_digest_sha256=source_set["seal_digest_sha256"],
-        seal_writer_transaction_id=source_set["seal_writer_transaction_id"],
-        source_time_quality=source_set["source_time_quality"],
-        source_available_at=source_set["source_available_at"],
-        capture_read_started_at=source_set["capture_read_started_at"],
-        capture_validated_at=source_set["capture_validated_at"],
-        source_clock_role=source_set["source_clock_role"],
-        durable_at=source_set["durable_at"],
-        sealed_at=source_set["sealed_at"],
-        raw_row_count=int(source_set["raw_row_count"]),
-        target_present_count=int(source_set["target_present_count"]),
-        target_missing_count=int(source_set["target_missing_count"]),
-        read_failed_count=int(source_set["read_failed_count"]),
-        source_digest=source_set["source_digest"],
-        source_raw_digest=source_set["source_raw_digest"],
-        observed_raw_digest=pg_result["target_raw_digest"],
+        source_content_id=source_version["source_content_id"],
+        source_capture_id=source_version["source_capture_id"],
+        source_dataset_id=source_version["source_dataset_id"],
+        source_byte_count=source_version["source_byte_count"],
+        parser_contract=source_version["parser_contract"],
+        source_time_quality=source_version["source_time_quality"],
+        source_available_at=source_version["source_available_at"],
+        capture_read_started_at=source_version["capture_read_started_at"],
+        capture_validated_at=source_version["capture_validated_at"],
+        source_clock_role=source_version["source_clock_role"],
+        raw_row_count=source_version["raw_row_count"],
+        capture_expected_row_count=source_version["capture_expected_row_count"],
+        target_present_count=status_counts["TARGET_PRESENT"],
+        target_missing_count=status_counts["TARGET_MISSING"],
+        read_failed_count=status_counts["READ_FAILED"],
+        capture_digest=source_version["capture_digest"],
+        observed_raw_digest=source_version["observed_raw_digest"],
         calendar_id=calendar["calendar_id"],
         calendar_revision=calendar["calendar_revision"],
         calendar_sha256=calendar["calendar_sha256"],
@@ -205,7 +189,7 @@ def read_source_market_context(
         research_cutoff=research_cutoff,
         calendar=calendar,
         pg_result=pg_result,
-        source_set=source_set,
+        source_version=source_version,
         cohort=cohort,
         calculation=calculation,
     )
@@ -217,7 +201,7 @@ def source_market_context_payload(
     """输出市场宽度摘要，不暴露逐来源代码计算明细。"""
     calculation = market.calculation
     cohort = market.cohort
-    source_set = market.source_set
+    source_version = market.source_version
     pg_result = market.pg_result
     window = calculation.session_window
     status = (
@@ -255,9 +239,6 @@ def source_market_context_payload(
             ],
         },
         "source_cohort": {
-            "source_set_id": cohort.source_set_id,
-            "ingress_attempt_id": cohort.ingress_attempt_id,
-            "revision_id": cohort.revision_id,
             "namespace_id": cohort.namespace_id,
             "target_session": market.target_session.isoformat(),
             "package_sha256": cohort.package_sha256,
@@ -266,30 +247,19 @@ def source_market_context_payload(
             "source_dataset_id": cohort.source_dataset_id,
             "source_byte_count": cohort.source_byte_count,
             "parser_contract": cohort.parser_contract,
-            "seal_status": cohort.seal_status,
-            "durability_status": cohort.durability_status,
-            "durability_source_capture_id": cohort.durability_source_capture_id,
-            "durability_source_digest": cohort.durability_source_digest,
-            "commit_ack_observed_at": cohort.commit_ack_observed_at,
-            "seal_digest_sha256": cohort.seal_digest_sha256,
-            "seal_writer_transaction_id": cohort.seal_writer_transaction_id,
-            "source_digest": cohort.source_digest,
-            "source_raw_digest": cohort.source_raw_digest,
+            "capture_digest": cohort.capture_digest,
+            "source_raw_digest": cohort.capture_digest,
             "recomputed_target_raw_digest": cohort.observed_raw_digest,
-            "raw_digest_verified": cohort.source_raw_digest
-            == cohort.observed_raw_digest,
+            "raw_digest_verified": cohort.capture_digest == cohort.observed_raw_digest,
             "raw_row_count": cohort.raw_row_count,
             "target_present_count": cohort.target_present_count,
             "target_missing_count": cohort.target_missing_count,
             "read_failed_count": cohort.read_failed_count,
-            "price_unit_status": source_set["price_unit_status"],
             "source_time_quality": cohort.source_time_quality,
             "source_available_at": cohort.source_available_at,
             "capture_read_started_at": cohort.capture_read_started_at,
             "capture_validated_at": cohort.capture_validated_at,
             "source_clock_role": cohort.source_clock_role,
-            "durable_at": cohort.durable_at,
-            "sealed_at": cohort.sealed_at,
         },
         "metric": {
             "name": "B_fixed_source",
@@ -313,7 +283,7 @@ def source_market_context_payload(
         },
         "formal_market_breadth": {
             "status": "NOT_READY_HISTORICAL_UNIVERSE",
-            "reason": "本值只描述t日封存来源代码集合，不代表t与t-3各自正式上市总体。",
+            "reason": "本值只描述t日Raw来源代码集合，不代表t与t-3各自正式上市总体。",
             "missing_dependencies": [
                 "t与t-3官方有效上市身份总体及其精确比较集合",
                 "稳定security_id和日期有效身份映射",
@@ -386,21 +356,17 @@ def validate_source_market_context_binding(
             category="IDENTITY_MISMATCH",
         )
 
-    source_set = market.source_set
     market_identity = {
         "namespace_id": market.pg_result["namespace_id"],
-        "source_set_id": source_set["source_set_id"],
-        "revision_id": int(source_set["revision_id"]),
-        "source_capture_id": source_set["source_capture_id"],
+        "source_capture_id": market.source_version["source_capture_id"],
         "target_session": market.target_session.isoformat(),
         "package_sha256": market.cohort.package_sha256,
-        "source_content_id": source_set["source_content_id"],
-        "source_digest": source_set["source_digest"],
-        "source_raw_digest": source_set["source_raw_digest"],
-        "raw_row_count": int(source_set["raw_row_count"]),
-        "capture_expected_row_count": int(source_set["capture_expected_row_count"]),
-        "seal_status": source_set["seal_status"],
-        "durability_status": source_set["durability_status"],
+        "source_content_id": market.source_version["source_content_id"],
+        "source_raw_digest": market.source_version["observed_raw_digest"],
+        "raw_row_count": int(market.source_version["raw_row_count"]),
+        "capture_expected_row_count": int(
+            market.source_version["capture_expected_row_count"]
+        ),
     }
     d1_identity = {key: d1_source.get(key) for key in market_identity}
     d1_identity["research_cutoff"] = discovery.get("research_cutoff")
@@ -421,15 +387,12 @@ def validate_source_market_context_binding(
         or d1_source.get("target_raw_binding_verified") is not True
         or market.pg_result["target_raw_digest"] != d1_source.get("source_raw_digest")
         or market_calendar != d1_calendar_identity
-        or source_set["calendar_id"] != market_calendar["calendar_id"]
-        or source_set["calendar_revision"] != market_calendar["calendar_revision"]
-        or source_set["calendar_sha256"] != market_calendar["calendar_sha256"]
-        or _clock_identity(source_set.get("source_available_at"))
+        or _clock_identity(market.source_version.get("source_available_at"))
         != _clock_identity(d1_source.get("source_available_at"))
     ):
         raise SourceMarketContextError(
             "SOURCE_MARKET_CONTEXT_IDENTITY_MISMATCH",
-            "市场宽度与D1来源修订、capture、目标Raw摘要、时钟或官方日历不一致",
+            "市场宽度与D1来源捕获、Raw摘要、时钟或官方日历不一致",
             category="IDENTITY_MISMATCH",
         )
 
@@ -441,18 +404,14 @@ def validate_source_market_context_binding(
         ):
             raise SourceMarketContextError(
                 "SOURCE_MARKET_CONTEXT_IDENTITY_MISMATCH",
-                "行业或GN强弱结果缺少精确SEALED来源或日历身份",
+                "行业或GN强弱结果缺少来源身份或官方日历",
                 category="IDENTITY_MISMATCH",
             )
         strength_identity = {
             "namespace_id": strength.get("namespace_id"),
-            "source_set_id": strength_source.get("source_set_id"),
-            "revision_id": strength_source.get("revision_id"),
             "source_capture_id": strength_source.get("source_capture_id"),
             "target_session": strength.get("target_session"),
             "package_sha256": strength_source.get("package_sha256"),
-            "seal_status": strength_source.get("seal_status"),
-            "durability_status": strength_source.get("durability_status"),
         }
         expected_strength_identity = {
             key: market_identity[key] for key in strength_identity
@@ -472,7 +431,7 @@ def validate_source_market_context_binding(
         ):
             raise SourceMarketContextError(
                 "SOURCE_MARKET_CONTEXT_IDENTITY_MISMATCH",
-                "市场宽度与行业/GN强弱使用的来源集合、封口修订或官方日历不一致",
+                "市场宽度与行业/GN强弱使用的来源包、捕获或官方日历不一致",
                 category="IDENTITY_MISMATCH",
             )
 
@@ -508,19 +467,15 @@ def source_market_not_evaluable_payload(
             "not_evaluable_reason": reason,
         },
         "source_cohort": {
-            "source_set_id": source_identity.get("source_set_id"),
-            "revision_id": source_identity.get("revision_id"),
             "namespace_id": source_identity.get("namespace_id"),
             "target_session": target_session.isoformat(),
             "package_sha256": source_identity.get("package_sha256"),
             "source_content_id": source_identity.get("source_content_id"),
             "source_capture_id": source_identity.get("source_capture_id"),
-            "source_raw_digest": source_identity.get("source_raw_digest"),
+            "source_raw_digest": source_identity.get("observed_raw_digest"),
             "raw_row_count": n_source,
-            "seal_status": source_identity.get("seal_status"),
             "source_time_quality": source_identity.get("source_time_quality"),
             "source_available_at": source_identity.get("source_available_at"),
-            "sealed_at": source_identity.get("sealed_at"),
         },
         "metric": {
             "name": "B_fixed_source",
@@ -542,7 +497,7 @@ def source_market_not_evaluable_payload(
         "not_evaluable_reason_code": reason_code,
         "formal_market_breadth": {
             "status": "NOT_READY_HISTORICAL_UNIVERSE",
-            "reason": "来源级市场指标不可评价；该状态不代表正式市场轴。",
+            "reason": "来源级市场指标不可评价；该状态不代表正式市场总体。",
             "missing_dependencies": [
                 "t与t-3官方有效上市身份总体及其精确比较集合",
                 "稳定security_id和日期有效身份映射",

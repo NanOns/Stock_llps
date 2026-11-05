@@ -153,7 +153,6 @@ def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, 
     return {
         "contract": "STOCK-A-TDX-CANONICAL-READ-SELECTION/R1",
         "selection_status": "EPHEMERAL_READ_ONLY_SELECTION_COMPLETE",
-        "acceptance_status": "NOT_ACCEPTED_NOT_PERSISTED",
         "target_session": selection.target_session.isoformat(),
         "target_bar_status": "PRESENT" if target_present else "UNKNOWN_NO_TDX_BAR",
         "source_candidate_scope": {
@@ -290,8 +289,6 @@ def _render_canonical_selection(selection: CanonicalReadSelection) -> dict[str, 
             else "UNKNOWN_UNIT_AUTHORITY",
         },
         "fields": target_fields,
-        "production_admission": "DENY_SOURCE_AUTHORITY_IDENTITY_AND_PIT_UNBOUND",
-        "profile_admission": "DENY_TRUSTED_FOUNDATION_SELECTOR_REQUIRED",
     }
 
 

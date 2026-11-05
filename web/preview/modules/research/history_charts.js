@@ -82,7 +82,7 @@ function periodOhlc(period, binding) {
 function pointDetail(point) {
   const fields = point.raw_ohlc || {};
   const values = dayOhlc(point);
-  const source = state.timeline?.formal_source_set || {};
+  const source = state.timeline?.source_version || {};
   const root = $("chartDetail");
   renderPriceStructureObservation(point);
   root.replaceChildren();
@@ -115,8 +115,8 @@ function pointDetail(point) {
       `${state.timeline?.target_session || "—"} · ${state.timeline?.symbol || "—"} · ${point.package_sha256}`,
     ],
     [
-      "namespace / 轨迹截止日source_set",
-      `${point.namespace_id || state.timeline?.namespace_id || "—"} · ${source.source_set_id || state.timeline?.selection?.source_set_id || "UNKNOWN"}`,
+      "namespace / 来源包SHA",
+      `${point.namespace_id || state.timeline?.namespace_id || "—"} · ${point.package_sha256 || "UNKNOWN"}`,
     ],
     [
       "来源捕获 / 内容 / 条目SHA",
@@ -181,7 +181,7 @@ function periodDetail(period, mode) {
   appendText(
     root,
     "p",
-    `官方会话 ${period.elapsed_expected_session_count}/${period.calendar_expected_session_count} · 有效Bar ${period.valid_price_bar_count} · 缺Bar ${period.target_missing_count} · 读取失败 ${period.read_failed_count} · PG未保存 ${period.missing_history_count} · source_set ${state.rawPeriods?.snapshot_identity?.source_set_id || "UNKNOWN"}`,
+    `官方会话 ${period.elapsed_expected_session_count}/${period.calendar_expected_session_count} · 有效Bar ${period.valid_price_bar_count} · 缺Bar ${period.target_missing_count} · 读取失败 ${period.read_failed_count} · PG未保存 ${period.missing_history_count} · package SHA ${state.rawPeriods?.snapshot_identity?.package_sha256 || "UNKNOWN"}`,
     "muted",
   );
   if (!period.daily_rows?.length) {
@@ -245,10 +245,6 @@ function chartContextForTimeline(data) {
     package_sha256: data?.selection?.package_sha256 || data?.package_sha256,
     symbol: data?.selection?.source_symbol || data?.symbol,
     namespace_id: data?.selection?.namespace_id || data?.namespace_id,
-    source_set_id:
-      data?.selection?.source_set_id ||
-      data?.snapshot_identity?.source_set_id ||
-      null,
   };
 }
 function chartSlotLabel(item, mode) {
@@ -284,7 +280,7 @@ function renderCandlestickChart(data) {
   }
   const timelineBinding = chartContextForTimeline(data);
   const periodBinding = state.chartPeriodContext || timelineBinding;
-  identity.textContent = `${mode === "day" ? "日K轨迹" : mode === "week" ? "自然周K" : "自然月K"} · ${periodBinding.symbol} · 截止 ${periodBinding.target_session} · ${periodBinding.package_sha256} · namespace ${periodBinding.namespace_id} · source_set ${periodBinding.source_set_id || "无SEALED集合"} · RAW_UNADJUSTED / NON_PIT / SOURCE_SYMBOL_ONLY`;
+  identity.textContent = `${mode === "day" ? "日K轨迹" : mode === "week" ? "自然周K" : "自然月K"} · ${periodBinding.symbol} · 截止 ${periodBinding.target_session} · ${periodBinding.package_sha256} · namespace ${periodBinding.namespace_id} · RAW_UNADJUSTED / NON_PIT / SOURCE_SYMBOL_ONLY`;
   let items = [];
   let periods = [];
   if (mode === "day") {
@@ -298,7 +294,7 @@ function renderCandlestickChart(data) {
   } else {
     if (!rawPeriodsMatch(periodBinding)) {
       notice.textContent =
-        "尚无与当前轨迹日期、完整SHA、来源代码、namespace及source_set完全一致的周期结果；切换后按当前身份进行一次只读读取。";
+        "尚无与当前轨迹日期、完整SHA、来源代码和namespace完全一致的周期结果；切换后按当前身份进行一次只读读取。";
       if (!state.chartSelection) detail.replaceChildren();
       return;
     }
@@ -556,7 +552,6 @@ async function setChartMode(mode) {
       binding.symbol,
       {
         namespace_id: binding.namespace_id,
-        source_set_id: binding.source_set_id,
       },
       () =>
         state.timeline !== null &&
@@ -702,7 +697,6 @@ async function queryTimeline(binding = null) {
     symbol,
     session_count: sessionCount,
     namespace_id: binding?.namespace_id || null,
-    source_set_id: binding?.source_set_id || null,
     origin: binding?.origin || "manual",
     persistedProfileSnapshot: binding?.persistedProfileSnapshot || null,
     returnSelection: binding?.returnSelection || null,
@@ -734,12 +728,7 @@ async function queryTimeline(binding = null) {
         target_session: version.target_session,
         package_sha256: version.package_sha256,
         session_count: sessionCount,
-        ...(context.source_set_id && context.namespace_id
-          ? {
-              source_set_id: context.source_set_id,
-              namespace_id: context.namespace_id,
-            }
-          : {}),
+        ...(context.namespace_id ? { namespace_id: context.namespace_id } : {}),
       }),
     });
     if (!requestIsCurrent()) return;
@@ -753,11 +742,7 @@ async function queryTimeline(binding = null) {
       data.selection?.target_session !== version.target_session ||
       data.selection?.package_sha256 !== version.package_sha256 ||
       data.selection?.namespace_id !== data.namespace_id ||
-      data.selection?.source_set_id !==
-        (data.snapshot_identity?.source_set_id ?? null) ||
-      (context.namespace_id && data.namespace_id !== context.namespace_id) ||
-      (context.source_set_id &&
-        data.snapshot_identity?.source_set_id !== context.source_set_id)
+      (context.namespace_id && data.namespace_id !== context.namespace_id)
     )
       throw new Error("轨迹响应身份与精确变化快照不一致，已拒绝展示。");
     if (

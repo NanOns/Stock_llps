@@ -534,7 +534,7 @@ def build_closed_period_bars(
                 calendar_coverage_proof.seal_basis,
             )
         )
-        # 实体/逐行来源封口由P04/P05→P06适配层提供；纯内核不得把调用者标签当作可信身份。
+        # 实体与逐行来源身份须由调用方依据真实来源提供；纯内核不把调用者标签视为已验证身份。
         fact_identity_trusted = False
         dependency_identity = (period_dependency_identities or {}).get(period_id)
         action_proof = (

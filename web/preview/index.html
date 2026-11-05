@@ -22,7 +22,7 @@
       <section class="notice">
         <strong>数据边界</strong
         ><span id="dataBoundary"
-          >研究截止信息正在从本机服务读取。当前页面展示来源候选，不代表官方上市总体、稳定证券身份、交易状态或选股结论；自动日更、Head发布及生产切换暂停。</span
+          >研究截止信息正在从本机服务读取。当前页面展示已保存的来源行情和后验研究结果，不代表官方上市总体、稳定证券身份、交易状态或选股结论。</span
         >
       </section>
       <section
@@ -33,7 +33,7 @@
           <div>
             <h2 id="comparisonTitle">临时多股对照</h2>
             <p>
-              只在当前网页内存中保留最多3只来源代码；须来自同一精确SEALED快照。RAW指数从全部所选代码首个共同有效收盘设为100，不是复权收益、RPS或交易信号。
+              只在当前网页内存中保留最多3只来源代码；须来自同一目标日期、来源包SHA和画像修订。RAW指数从全部所选代码首个共同有效收盘设为100，不是复权收益、RPS或交易信号。
             </p>
           </div>
           <span id="comparisonCount" class="count">0/3</span>
@@ -81,7 +81,7 @@
               </label>
             </div>
             <div id="comparisonPeriodStatus" class="population" role="status">
-              读取同一SEALED来源快照下的周期数据后显示。
+              读取同一日期、包SHA与来源代码的PG Raw周期数据后显示。
             </div>
             <div class="table-wrap">
               <table class="comparison-table">
@@ -589,7 +589,7 @@
             <h2 id="profileBrowserTitle">已持久化来源代码价格画像</h2>
             <p>
               SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE ·
-              只查询精确P03来源版本和画像修订；不是正式上市Universe或P05结果。
+              只查询精确日期、来源包SHA和画像修订；不是正式上市Universe或稳定证券身份结果。
             </p>
           </div>
           <div class="pager-actions">
@@ -815,46 +815,6 @@
         <div id="population" class="population" role="status">
           等待读取PG来源目录。
         </div>
-      </section>
-      <section class="panel chain-panel" aria-labelledby="chainTitle">
-        <div class="panel-head">
-          <div>
-            <h2 id="chainTitle">当前数据链准备状态</h2>
-            <p>
-              使用当前明确选择的日期和完整SHA；仅做有界PG只读汇总，不计算Core/Profile或切换正式Head。
-            </p>
-          </div>
-          <span id="chainChecked" class="count">尚未查询</span>
-        </div>
-        <div id="chainState" class="chain-state" role="status">
-          请先从PG目录选择目标日期和来源包版本。
-        </div>
-        <section
-          class="source-ingress-summary"
-          aria-labelledby="sourceIngressTitle"
-        >
-          <h3 id="sourceIngressTitle">P00 计划与 P02 来源能力</h3>
-          <div id="sourceIngressSummary" role="status">
-            等待精确日期与来源包版本的实时PG核算。
-          </div>
-        </section>
-        <section class="source-set-candidate" aria-labelledby="sourceSetTitle">
-          <h3 id="sourceSetTitle">P03来源集合候选</h3>
-          <div id="sourceSetCandidate" role="status">
-            等待精确日期与包版本查询。
-          </div>
-        </section>
-        <section
-          class="formal-source-set"
-          aria-labelledby="formalSourceSetTitle"
-        >
-          <h3 id="formalSourceSetTitle">P03正式来源集合 · P04精确读取</h3>
-          <div id="formalSourceSet" role="status">
-            等待精确日期与来源包版本的正式封口读取。
-          </div>
-        </section>
-        <div id="chainOverview" class="chain-overview"></div>
-        <div id="chainGroups" class="chain-groups"></div>
       </section>
       <div class="columns">
         <section class="panel">

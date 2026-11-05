@@ -41,7 +41,6 @@ def research_universe_preview(
     discovery_budget: UniverseDiscoveryBudget | None = None,
     budget: CompareBudget | None = None,
     profile_contract: dict[str, Any] | None = None,
-    foundation_contract: dict[str, Any] | None = None,
     source_candidate_pool: Sequence[Mapping[str, Any]] | None = None,
     source_candidate_catalog: Mapping[str, Any] | None = None,
     source_captures: Mapping[str, VipdataEntryCapture] | None = None,
@@ -348,7 +347,6 @@ def research_universe_preview(
             limits=limits,
             budget=CompareBudget(remaining_bytes, remaining_records, remaining_seconds),
             profile_contract=profile_contract,
-            foundation_contract=foundation_contract,
             source_captures=(
                 {
                     item["symbol"]: source_captures[item["symbol"]]
@@ -496,7 +494,6 @@ def research_universe_preview(
             "source_bar_quality": asdict(quality_by_symbol[candidate["symbol"]])
             if candidate["symbol"] in quality_by_symbol
             else None,
-            "foundation_handoff": item.get("foundation_handoff"),
             "basic_fact_dimensions": item.get("basic_fact_dimensions"),
             "availability_explanation": item.get("availability_explanation"),
             "detail_query": {

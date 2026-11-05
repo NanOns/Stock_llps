@@ -12,17 +12,12 @@ function validateMa20DirectionHistory(data) {
     binding.source_symbol !== data.symbol ||
     binding.namespace_id !== data.namespace_id ||
     binding.package_sha256 !== data.package_sha256 ||
-    binding.source_set_id !== (data.formal_source_set?.source_set_id ?? null) ||
-    binding.source_set_revision !==
-      (data.formal_source_set?.revision_id ?? null) ||
-    binding.source_set_status !==
-      (data.formal_source_set?.status ?? "UNKNOWN") ||
     binding.calendar_id !== data.calendar_id ||
     binding.calendar_revision !== data.calendar_revision ||
     binding.price_coordinate !== data.price_coordinate ||
     binding.coordinate_id !== data.points?.[0]?.coordinate_id
   )
-    throw new Error("MA20方向记录没有绑定当前轨迹、来源集合、日历和价格坐标。");
+    throw new Error("MA20方向记录没有绑定当前轨迹、日历和价格坐标。");
   for (const requestedCount of [5, 10]) {
     const item = history.windows?.[String(requestedCount)];
     const actualCount = Math.min(requestedCount, data.points.length);
@@ -78,19 +73,16 @@ function validateComparisonTimeline(data, selection) {
     data.selection?.package_sha256 !== selection.package_sha256 ||
     data.selection?.session_count !== 75 ||
     data.selection?.namespace_id !== selection.namespace_id ||
-    data.selection?.source_set_id !== selection.source_set_id ||
     data.snapshot_identity?.namespace_id !== selection.namespace_id ||
     data.snapshot_identity?.target_session !== selection.target_session ||
     data.snapshot_identity?.package_sha256 !== selection.package_sha256 ||
-    data.snapshot_identity?.source_set_id !== selection.source_set_id ||
-    data.formal_source_set?.status !== "AVAILABLE" ||
-    data.formal_source_set?.source_set_id !== selection.source_set_id ||
+    data.source_version?.status !== "AVAILABLE" ||
     data.total_session_count > 75 ||
     !Array.isArray(data.points) ||
     data.points.length !== data.total_session_count
   )
     throw new Error(
-      "75会话响应的代码、RAW坐标或完整SEALED身份不匹配，已拒绝加入对照。",
+      "75会话响应的代码、RAW坐标或精确来源包版本不匹配，已拒绝加入对照。",
     );
   validateMa20DirectionHistory(data);
   const dates = data.points.map((point) => point.session_date);
@@ -164,7 +156,7 @@ function validateComparisonTimeline(data, selection) {
 }
 function validateComparisonRawPeriods(data, selection, timeline) {
   const identity = data?.snapshot_identity;
-  const formalSourceSet = data?.formal_source_set;
+  const formalSourceSet = data?.source_version;
   const responseSelection = data?.selection;
   if (
     data?.ok !== true ||
@@ -203,12 +195,12 @@ function validateComparisonRawPeriods(data, selection, timeline) {
     identity.price_coordinate !== "RAW_UNADJUSTED" ||
     formalSourceSet?.status !== "AVAILABLE" ||
     formalSourceSet?.source_set_id !== selection.source_set_id ||
-    formalSourceSet?.revision_id !== timeline.formal_source_set?.revision_id ||
+    formalSourceSet?.revision_id !== timeline.source_version?.revision_id ||
     !Array.isArray(data.periods?.week) ||
     !Array.isArray(data.periods?.month)
   )
     throw new Error(
-      "闭周/月响应的来源、SEALED快照、日历、窗口或RAW坐标与75会话轨迹不一致。",
+      "闭周/月响应的来源版本、日历、窗口或RAW坐标与75会话轨迹不一致。",
     );
   for (const [kind, periods] of Object.entries(data.periods)) {
     const seen = new Set();
@@ -322,7 +314,8 @@ async function loadComparisonRawPeriods(entries, requestId, requestKey) {
 async function compareSelectedSymbols() {
   const basket = state.comparisonBasket.map((item) => ({ ...item }));
   if (basket.length < 2 || basket.length > 3) {
-    state.comparisonMessage = "请选择2至3个同一精确SEALED快照的不同来源代码。";
+    state.comparisonMessage =
+      "请选择2至3个来自同一精确研究版本的不同来源代码。";
     renderComparisonBasket();
     return;
   }
@@ -357,7 +350,6 @@ async function compareSelectedSymbols() {
             target_session: selection.target_session,
             package_sha256: selection.package_sha256,
             session_count: 75,
-            source_set_id: selection.source_set_id,
             namespace_id: selection.namespace_id,
           }),
         });
@@ -396,7 +388,7 @@ async function compareSelectedSymbols() {
     pending: Boolean(entry.data),
   }));
   $("comparisonPeriodStatus").textContent =
-    "正在按同一目标、SEALED来源身份和官方日历读取现役PG周/月周期…";
+    "正在按同一目标、精确来源版本和官方日历读取现役PG周/月周期…";
   $("comparisonResults").hidden = false;
   renderComparisonResults();
   $("comparisonResults").scrollIntoView({ behavior: "smooth", block: "start" });

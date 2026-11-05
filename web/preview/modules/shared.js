@@ -9,7 +9,6 @@ const state = {
   limit: 20,
   total: 0,
   pageRequest: 0,
-  readinessRequest: 0,
   stockRequest: 0,
   catalogRequest: 0,
   profileSnapshots: [],
@@ -72,6 +71,13 @@ const state = {
   chartPeriodContext: null,
 };
 const previewQueryDebounceMs = 160;
+function readinessDetail(parent, label, value) {
+  const dt = document.createElement("dt");
+  dt.textContent = label;
+  const dd = document.createElement("dd");
+  dd.textContent = value;
+  parent.append(dt, dd);
+}
 let relationRefreshTimer = null;
 let relationRefreshPending = false;
 let relationRequestInFlight = false;

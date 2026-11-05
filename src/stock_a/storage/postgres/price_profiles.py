@@ -1,4 +1,4 @@
-"""按精确P03来源版本有界保存和读取价格画像。"""
+"""按来源日期、包版本与价格画像修订保存和读取价格画像。"""
 
 from __future__ import annotations
 
@@ -651,6 +651,57 @@ def insert_profile_records_in_transaction(
     return inserted
 
 
+def read_profile_storage_revision(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    source_set_id: str,
+    source_capture_id: str,
+) -> int:
+    """读取存量Profile外键对应的来源修订号，供现有PG键写入画像行。"""
+    try:
+        canonical_set_id = str(UUID(source_set_id))
+        canonical_capture_id = str(UUID(source_capture_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise PriceProfilePgError(
+            "PROFILE_STORAGE_KEY_INVALID", "画像行键或捕获UUID格式无效"
+        ) from error
+    if (
+        type(target_session) is not date
+        or canonical_set_id != source_set_id
+        or canonical_capture_id != source_capture_id
+        or not re.fullmatch(r"[0-9a-f]{64}", package_sha256)
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_STORAGE_KEY_INVALID", "画像存储版本键必须使用规范身份"
+        )
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        cursor.execute(
+            """SELECT DISTINCT revision_id
+FROM stock.source_sets
+WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
+  AND target_session=%s::date AND package_sha256=%s
+  AND source_capture_id=%s::uuid
+ORDER BY revision_id
+LIMIT 2""",
+            (
+                namespace_id,
+                source_set_id,
+                target_session,
+                package_sha256,
+                source_capture_id,
+            ),
+        )
+        revisions = cursor.fetchall()
+    if len(revisions) != 1 or type(revisions[0][0]) is not int:
+        raise PriceProfilePgError(
+            "PROFILE_STORAGE_REVISION_UNAVAILABLE",
+            "来源日期、包SHA、捕获与现存画像外键不一致",
+        )
+    return revisions[0][0]
+
+
 def persist_profile_records(
     config: Mapping[str, Any], records: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
@@ -683,37 +734,6 @@ def persist_profile_records(
         if namespace_id != first["namespace_id"]:
             raise PriceProfilePgError(
                 "PROFILE_NAMESPACE_MISMATCH", "画像命名空间与PG连接不一致"
-            )
-        cursor.execute(
-            """SELECT source_set_id::text, revision_id, seal_status,
-       durability_status, package_sha256, raw_row_count, source_capture_id::text
-FROM stock.source_sets
-WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid AND target_session=%s
-  AND package_sha256=%s""",
-            (
-                namespace_id,
-                first["source_set_id"],
-                first["target_session"],
-                first["package_sha256"],
-            ),
-        )
-        source_set = cursor.fetchone()
-        if source_set is None or source_set[2:6] != (
-            "SEALED",
-            "VERIFIED_POST_COMMIT_READBACK",
-            first["package_sha256"],
-            len(prepared),
-        ):
-            raise PriceProfilePgError(
-                "PROFILE_SOURCE_SET_INVALID", "P03来源集合封口或分母不匹配"
-            )
-        if int(source_set[1]) != first["source_set_revision"]:
-            raise PriceProfilePgError(
-                "PROFILE_SOURCE_SET_REVISION_MISMATCH", "P03来源集合修订不匹配"
-            )
-        if str(source_set[6]) != first["source_capture_id"]:
-            raise PriceProfilePgError(
-                "PROFILE_SOURCE_CAPTURE_MISMATCH", "画像捕获引用与P03不匹配"
             )
         cursor.execute(
             """SELECT source_symbol, market, board, source_capture_id::text
@@ -817,11 +837,20 @@ def list_profile_snapshots(
             """SELECT p.target_session, p.source_set_id::text, p.package_sha256,
        p.profile_revision, p.history_window_start, p.history_window_end,
        p.history_requested_session_count, count(*)::bigint,
-       min(s.raw_row_count), count(*)=min(s.raw_row_count)
+        min(r.raw_row_count),
+        count(*)=min(r.raw_row_count)
+         AND min(r.raw_symbol_count)=min(r.raw_row_count)
+         AND min(r.capture_count)=1
 FROM stock.source_symbol_price_profiles p
-JOIN stock.source_sets s ON s.namespace_id=p.namespace_id
-  AND s.source_set_id=p.source_set_id AND s.target_session=p.target_session
-  AND s.package_sha256=p.package_sha256 AND s.seal_status='SEALED'
+LEFT JOIN (
+    SELECT namespace_id, session_date, package_sha256,
+           count(*)::bigint AS raw_row_count,
+           count(DISTINCT source_symbol)::bigint AS raw_symbol_count,
+           count(DISTINCT source_capture_id)::bigint AS capture_count
+    FROM stock.source_raw_daily
+    GROUP BY namespace_id, session_date, package_sha256
+) r ON r.namespace_id=p.namespace_id AND r.session_date=p.target_session
+  AND r.package_sha256=p.package_sha256
 WHERE p.namespace_id=%s::uuid AND p.target_session<=%s
 GROUP BY p.target_session, p.source_set_id, p.package_sha256, p.profile_revision,
          p.history_window_start, p.history_window_end, p.history_requested_session_count
@@ -860,7 +889,7 @@ def read_source_profile_observability(
     source_capture_id: str,
     current_semantics_sha256: str,
 ) -> dict[str, Any]:
-    """按精确SEALED来源集合读取画像版本、符号集合和字段质量摘要。"""
+    """按画像行键与Raw捕获读取画像版本、符号集合和字段质量摘要。"""
     if (
         type(target_session) is not date
         or not isinstance(package_sha256, str)
@@ -878,11 +907,11 @@ def read_source_profile_observability(
         canonical_capture_id = str(UUID(source_capture_id))
     except (ValueError, TypeError, AttributeError) as error:
         raise PriceProfilePgError(
-            "PROFILE_OBSERVATION_KEY_INVALID", "画像观察的来源集合或捕获UUID无效"
+            "PROFILE_OBSERVATION_KEY_INVALID", "画像观察行键或捕获UUID无效"
         ) from error
     if canonical_set_id != source_set_id or canonical_capture_id != source_capture_id:
         raise PriceProfilePgError(
-            "PROFILE_OBSERVATION_KEY_INVALID", "来源集合与捕获UUID必须使用规范格式"
+            "PROFILE_OBSERVATION_KEY_INVALID", "画像行键与捕获UUID必须使用规范格式"
         )
 
     core_values = ", ".join(
@@ -894,54 +923,35 @@ def read_source_profile_observability(
     )
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
         cursor.execute(
-            """SELECT raw_row_count,seal_status,durability_status
-FROM stock.source_sets
-WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
-  AND target_session=%s::date AND package_sha256=%s
-  AND revision_id=%s AND source_capture_id=%s::uuid""",
-            (
-                namespace_id,
-                canonical_set_id,
-                target_session,
-                package_sha256,
-                source_set_revision,
-                canonical_capture_id,
-            ),
-        )
-        source_set = cursor.fetchone()
-        if source_set is None or source_set[1:] != (
-            "SEALED",
-            "VERIFIED_POST_COMMIT_READBACK",
-        ):
-            raise PriceProfilePgError(
-                "PROFILE_OBSERVATION_SOURCE_SET_MISMATCH",
-                "画像观察未找到精确SEALED来源集合与捕获修订",
-            )
-        raw_row_count = int(source_set[0])
-        if not 1 <= raw_row_count <= MAX_PROFILE_ROWS_PER_BATCH:
-            raise PriceProfilePgError(
-                "PROFILE_OBSERVATION_ROW_BUDGET_EXCEEDED",
-                "精确来源集合超过画像观察的固定行数上限",
-            )
-
-        cursor.execute(
             """SELECT count(*)::bigint AS raw_rows,
-       count(DISTINCT source_symbol)::bigint AS raw_symbols
-FROM stock.source_raw_daily
-WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
-  AND session_date=%s::date AND package_sha256=%s""",
+       count(DISTINCT r.source_symbol)::bigint AS raw_symbols,
+       count(DISTINCT r.source_capture_id)::bigint AS capture_count,
+       min(c.normalized_count) AS expected_count,
+       max(c.normalized_count) AS expected_count_max
+FROM stock.source_raw_daily r
+LEFT JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
+  AND c.capture_id=r.source_capture_id
+WHERE r.namespace_id=%s::uuid AND r.source_capture_id=%s::uuid
+  AND r.session_date=%s::date AND r.package_sha256=%s""",
             (namespace_id, canonical_capture_id, target_session, package_sha256),
         )
-        raw_row, raw_symbol_row = cursor.fetchone()
+        raw_row, raw_symbol_row, capture_count, expected_count, expected_count_max = (
+            cursor.fetchone()
+        )
         raw_rows = int(raw_row)
         raw_symbols = int(raw_symbol_row)
         if (
-            raw_rows > MAX_PROFILE_ROWS_PER_BATCH
+            not 1 <= raw_rows <= MAX_PROFILE_ROWS_PER_BATCH
+            or raw_rows > MAX_PROFILE_ROWS_PER_BATCH
             or raw_symbols > MAX_PROFILE_ROWS_PER_BATCH
+            or raw_symbols != raw_rows
+            or capture_count != 1
+            or expected_count != raw_rows
+            or expected_count != expected_count_max
         ):
             raise PriceProfilePgError(
                 "PROFILE_OBSERVATION_ROW_BUDGET_EXCEEDED",
-                "精确Raw来源集合超过画像观察的固定行数上限",
+                "画像观察的Raw代码集合与唯一捕获分母不一致",
             )
 
         cursor.execute(
@@ -1238,17 +1248,21 @@ def _snapshot_for_session(
 ) -> dict[str, Any]:
     exact_identity = (source_set_id, package_sha256, profile_revision)
     if any(value is not None for value in exact_identity):
-        if not all(isinstance(value, str) and value for value in exact_identity):
+        if not all(
+            isinstance(value, str) and value
+            for value in (package_sha256, profile_revision)
+        ):
             raise PriceProfilePgError(
                 "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-                "精确快照必须同时提供source_set_id、package_sha256和profile_revision",
+                "精确快照必须同时提供package_sha256和profile_revision",
             )
-        try:
-            source_set_id = str(UUID(source_set_id))
-        except (ValueError, TypeError, AttributeError) as error:
-            raise PriceProfilePgError(
-                "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID", "source_set_id不是UUID"
-            ) from error
+        if source_set_id is not None:
+            try:
+                source_set_id = str(UUID(source_set_id))
+            except (ValueError, TypeError, AttributeError) as error:
+                raise PriceProfilePgError(
+                    "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID", "画像存量行键不是UUID"
+                ) from error
         if len(package_sha256) != 64 or any(
             character not in "0123456789abcdef" for character in package_sha256
         ):
@@ -1270,25 +1284,32 @@ def _snapshot_for_session(
         "p.target_session<=%s",
     ]
     parameters: list[Any] = [namespace_id, target_session, max_target_session]
+    if package_sha256 is not None:
+        predicates.extend(("p.package_sha256=%s", "p.profile_revision=%s"))
+        parameters.extend((package_sha256, profile_revision))
     if source_set_id is not None:
-        predicates.extend(
-            (
-                "p.source_set_id=%s::uuid",
-                "p.package_sha256=%s",
-                "p.profile_revision=%s",
-            )
-        )
-        parameters.extend((source_set_id, package_sha256, profile_revision))
+        predicates.append("p.source_set_id=%s::uuid")
+        parameters.append(source_set_id)
     cursor.execute(
         """SELECT p.target_session, p.source_set_id::text, p.package_sha256,
        p.profile_revision, p.history_calendar_id, p.history_calendar_revision,
        p.history_window_start, p.history_window_end,
        p.history_requested_session_count, count(*)::bigint,
-       min(s.raw_row_count), count(*)=min(s.raw_row_count)
+       min(r.raw_row_count),
+       count(*)=min(r.raw_row_count)
+         AND min(r.raw_symbol_count)=min(r.raw_row_count)
+         AND min(r.capture_count)=1,
+       min(p.source_set_revision)::integer
 FROM stock.source_symbol_price_profiles p
-JOIN stock.source_sets s ON s.namespace_id=p.namespace_id
-  AND s.source_set_id=p.source_set_id AND s.target_session=p.target_session
-  AND s.package_sha256=p.package_sha256 AND s.seal_status='SEALED'
+LEFT JOIN (
+    SELECT namespace_id, session_date, package_sha256,
+           count(*)::bigint AS raw_row_count,
+           count(DISTINCT source_symbol)::bigint AS raw_symbol_count,
+           count(DISTINCT source_capture_id)::bigint AS capture_count
+    FROM stock.source_raw_daily
+    GROUP BY namespace_id, session_date, package_sha256
+) r ON r.namespace_id=p.namespace_id AND r.session_date=p.target_session
+  AND r.package_sha256=p.package_sha256
 WHERE """
         + " AND ".join(predicates)
         + """
@@ -1307,7 +1328,7 @@ ORDER BY p.source_set_id, p.profile_revision""",
     if len(rows) != 1:
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_AMBIGUOUS",
-            f"{target_session.isoformat()}有多个来源版本；请先运行source-symbol-price-profile --action snapshots列出精确键，再为changes显式提供该端source_set_id、package_sha256和profile_revision",
+            f"{target_session.isoformat()}仍有多个画像版本；请精确提供该端package_sha256和profile_revision",
         )
     row = rows[0]
     snapshot = {
@@ -1323,6 +1344,7 @@ ORDER BY p.source_set_id, p.profile_revision""",
         "source_symbol_count": int(row[9]),
         "expected_source_symbol_count": int(row[10]),
         "complete": bool(row[11]),
+        "source_set_revision": int(row[12]),
     }
     if not snapshot["complete"]:
         raise PriceProfilePgError(
@@ -2402,29 +2424,19 @@ def read_profile_change_page(
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SYMBOL_INVALID", "来源代码搜索只接受字母、数字和点号"
         )
-    before_identity = (
-        before_source_set_id,
-        before_package_sha256,
-        before_profile_revision,
-    )
-    after_identity = (
-        after_source_set_id,
-        after_package_sha256,
-        after_profile_revision,
-    )
-    if any(value is not None for value in before_identity) and not all(
-        value is not None for value in before_identity
+    if (before_package_sha256 is None) != (before_profile_revision is None) or (
+        before_source_set_id is not None and before_package_sha256 is None
     ):
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-            "起始快照必须同时提供source_set_id、package_sha256和profile_revision",
+            "起始快照须成对提供package_sha256与profile_revision；存量行键可省略",
         )
-    if any(value is not None for value in after_identity) and not all(
-        value is not None for value in after_identity
+    if (after_package_sha256 is None) != (after_profile_revision is None) or (
+        after_source_set_id is not None and after_package_sha256 is None
     ):
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-            "结束快照必须同时提供source_set_id、package_sha256和profile_revision",
+            "结束快照须成对提供package_sha256与profile_revision；存量行键可省略",
         )
     symbol_search = source_symbol.upper() if source_symbol else None
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
@@ -2951,12 +2963,12 @@ def read_profile_relation_screen(
     source_symbol: str | None = None,
     after_amount_ratio20_min: Decimal | str | None = None,
     after_volume_ratio20_min: Decimal | str | None = None,
-    before_source_set_id: str,
     before_package_sha256: str,
     before_profile_revision: str,
-    after_source_set_id: str,
     after_package_sha256: str,
     after_profile_revision: str,
+    before_source_set_id: str | None = None,
+    after_source_set_id: str | None = None,
 ) -> dict[str, Any]:
     """在完整两端来源并集上读取关系转移及结束日位置联合筛选。"""
     if (
@@ -3064,17 +3076,15 @@ def read_profile_relation_screen(
     if any(
         not isinstance(value, str) or not value
         for value in (
-            before_source_set_id,
             before_package_sha256,
             before_profile_revision,
-            after_source_set_id,
             after_package_sha256,
             after_profile_revision,
         )
     ):
         raise PriceProfilePgError(
             "PROFILE_RELATION_SNAPSHOT_IDENTITY_INVALID",
-            "前后快照必须完整提供source_set、package SHA和profile revision",
+            "前后快照必须精确提供package SHA和profile revision",
         )
 
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
@@ -3513,14 +3523,14 @@ def read_profile_breadth(
     before_session: date,
     after_session: date,
     max_target_session: date,
-    before_source_set_id: str,
+    before_source_set_id: str | None,
     before_package_sha256: str,
     before_profile_revision: str,
-    after_source_set_id: str,
+    after_source_set_id: str | None,
     after_package_sha256: str,
     after_profile_revision: str,
 ) -> dict[str, Any]:
-    """按两份精确封口画像只读聚合来源池MA20关系。"""
+    """按两份精确画像只读聚合来源池MA20关系。"""
     if (
         type(before_session) is not date
         or type(after_session) is not date
@@ -3533,17 +3543,16 @@ def read_profile_breadth(
             "广度对照日期必须递增，且不晚于显式研究截止日",
         )
     identities = (
-        before_source_set_id,
-        before_package_sha256,
-        before_profile_revision,
-        after_source_set_id,
-        after_package_sha256,
-        after_profile_revision,
+        (before_source_set_id, before_package_sha256, before_profile_revision),
+        (after_source_set_id, after_package_sha256, after_profile_revision),
     )
-    if any(not value for value in identities):
+    if any(
+        not package_sha or not revision
+        for _source_id, package_sha, revision in identities
+    ):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
-            "广度对照必须显式提供前后source_set、package SHA和profile revision",
+            "广度对照必须显式提供前后package SHA和profile revision",
         )
 
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
@@ -4387,7 +4396,7 @@ def read_profile_page(
     *,
     target_session: date,
     max_target_session: date,
-    source_set_id: str,
+    source_set_id: str | None = None,
     package_sha256: str,
     profile_revision: str,
     offset: int,
@@ -4426,12 +4435,13 @@ def read_profile_page(
         raise PriceProfilePgError("PROFILE_PAGE_INVALID", "画像查询日期或分页偏移无效")
     if type(limit) is not int or not 1 <= limit <= 100:
         raise PriceProfilePgError("PROFILE_PAGE_INVALID", "画像页大小必须为1至100")
-    try:
-        source_set_id = str(UUID(source_set_id))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise PriceProfilePgError(
-            "PROFILE_SOURCE_SET_ID_INVALID", "P03来源集合ID格式无效"
-        ) from error
+    if source_set_id is not None:
+        try:
+            source_set_id = str(UUID(source_set_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise PriceProfilePgError(
+                "PROFILE_SOURCE_SET_ID_INVALID", "存量画像来源键格式无效"
+            ) from error
     if (
         not isinstance(profile_revision, str)
         or len(profile_revision) != 64
@@ -4666,24 +4676,50 @@ def read_profile_page(
         )
     where_sql = " AND ".join(conditions)
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
-        parameters[0] = namespace_id
-        cursor.execute(
-            """SELECT source_set_id::text, revision_id, seal_status,
-       durability_status, package_sha256, raw_row_count
-FROM stock.source_sets WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
-  AND target_session=%s AND package_sha256=%s""",
-            (namespace_id, source_set_id, target_session, package_sha256),
+        snapshot = _snapshot_for_session(
+            cursor,
+            namespace_id=namespace_id,
+            target_session=target_session,
+            max_target_session=max_target_session,
+            source_set_id=source_set_id,
+            package_sha256=package_sha256,
+            profile_revision=profile_revision,
         )
-        source_set = cursor.fetchone()
-        if source_set is None or source_set[2:5] != (
-            "SEALED",
-            "VERIFIED_POST_COMMIT_READBACK",
-            package_sha256,
+        source_set_id = snapshot["source_set_id"]
+        source_set_revision = snapshot["source_set_revision"]
+        parameters[0] = namespace_id
+        parameters[2] = source_set_id
+        cursor.execute(
+            """SELECT count(*)::bigint,
+       count(DISTINCT r.source_symbol)::bigint,
+       count(DISTINCT r.source_capture_id)::bigint,
+       min(c.normalized_count), max(c.normalized_count)
+FROM stock.source_raw_daily r
+LEFT JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
+  AND c.capture_id=r.source_capture_id
+WHERE r.namespace_id=%s::uuid AND r.session_date=%s
+  AND r.package_sha256=%s""",
+            (namespace_id, target_session, package_sha256),
+        )
+        (
+            raw_total,
+            raw_symbols,
+            capture_count,
+            capture_expected,
+            capture_expected_max,
+        ) = cursor.fetchone()
+        expected_total = int(raw_total)
+        if (
+            expected_total < 1
+            or int(raw_symbols) != expected_total
+            or int(capture_count) != 1
+            or capture_expected != expected_total
+            or capture_expected_max != expected_total
         ):
             raise PriceProfilePgError(
-                "PROFILE_SOURCE_SET_NOT_FOUND", "没有匹配的完整SEALED来源版本"
+                "PROFILE_RAW_SOURCE_INCOMPLETE",
+                "目标日期与包SHA没有唯一且完整的Raw捕获来源代码集合",
             )
-        expected_total = int(source_set[5])
         cursor.execute(
             """SELECT count(*)::bigint FROM stock.source_symbol_price_profiles
 WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid AND target_session=%s
@@ -4973,7 +5009,7 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         "source_set_id": source_set_id,
         "package_sha256": package_sha256,
         "profile_revision": profile_revision,
-        "source_set_revision": int(source_set[1]),
+        "source_set_revision": source_set_revision,
         "source_pool_total": snapshot_total,
         "ratio_metadata": {
             "basis": "TDX_NATIVE_SAME_PACKAGE_SCALE_INVARIANT",
@@ -5019,7 +5055,7 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
             "ratio_filter": "POSTGRES_EXACT_FRACTION_CROSS_MULTIPLICATION",
             "price_position_filter": "POSTGRES_NUMERIC",
             "bias20_atr_filter": "POSTGRES_EXACT_NUMERIC_CROSS_MULTIPLICATION",
-            "bias20_atr_filter_scope": "COMPLETE_SEALED_SOURCE_PROFILE_SET",
+            "bias20_atr_filter_scope": "COMPLETE_SOURCE_PROFILE_SET",
             "profile_field_filter": "POSTGRES_ARRAY_FIELD_ID_INDEX",
             "profile_field_summary": "POSTGRES_FULL_SOURCE_SET",
             "all_candidates_recomputed": False,

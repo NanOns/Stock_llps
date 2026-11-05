@@ -55,19 +55,19 @@ function renderPersistedProfileObservation(point) {
   const snapshot = state.timelineContext?.persistedProfileSnapshot;
   const selectedSourceSet =
     state.timeline?.selection?.source_set_id ||
-    state.timeline?.formal_source_set?.source_set_id ||
+    state.timeline?.source_version?.source_set_id ||
     null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-    snapshot.target_session === point.session_date &&
-    snapshot.package_sha256 === point.package_sha256 &&
-    snapshot.namespace_id === point.namespace_id &&
-    snapshot.source_set_id === selectedSourceSet &&
-    snapshot.field_ids?.length,
+      snapshot.target_session === point.session_date &&
+      snapshot.package_sha256 === point.package_sha256 &&
+      snapshot.namespace_id === point.namespace_id &&
+      snapshot.source_set_id === selectedSourceSet &&
+      snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
-      "本次轨迹未附带与所选日期、source_set、完整包SHA及profile_revision一致的Profile11快照；此处仅展示RAW Core事实，不重新评价持久画像或选股状态。";
+      "本次轨迹未附带与所选日期、完整包SHA及profile_revision一致的Profile11快照；此处仅展示RAW Core事实，不重新评价持久画像或选股状态。";
     tableRow(rows, [
       "未绑定精确Profile11",
       "NOT_EVALUATED",
@@ -78,7 +78,7 @@ function renderPersistedProfileObservation(point) {
   }
   const comparable = snapshot.semantic_compatible === true;
   status.textContent =
-    `已绑定PG持久化快照 · ${snapshot.target_session} · source_set ${snapshot.source_set_id} · 包SHA ${snapshot.package_sha256} · Profile修订 ${snapshot.profile_revision}。` +
+    `已绑定PG持久化快照 · ${snapshot.target_session} · 包SHA ${snapshot.package_sha256} · Profile修订 ${snapshot.profile_revision}。` +
     (comparable
       ? " 此快照与两日变化合同兼容。"
       : " 仅展示本快照原值；两期语义不兼容，不能作变化比较。") +
@@ -117,12 +117,8 @@ function renderPriceStructureObservation(point) {
     return;
   }
   panel.hidden = false;
-  const sourceSetId =
-    state.timeline?.formal_source_set?.source_set_id ||
-    state.timeline?.selection?.source_set_id ||
-    "UNKNOWN";
   $("priceStructureIdentity").textContent =
-    `${point.session_date} · ${state.timeline?.symbol || "—"} · RAW_UNADJUSTED / ${state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · namespace ${point.namespace_id || "UNKNOWN"} · 轨迹截止日source_set ${sourceSetId} · 包SHA ${point.package_sha256 || "UNKNOWN"}`;
+    `${point.session_date} · ${state.timeline?.symbol || "—"} · RAW_UNADJUSTED / ${state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · namespace ${point.namespace_id || "UNKNOWN"} · 来源包SHA ${point.package_sha256 || "UNKNOWN"}`;
   const ohlc = dayOhlc(point);
   const summaries = [
     [
@@ -233,8 +229,6 @@ function renderPriceRelationHistory(history) {
     return;
   }
   panel.hidden = false;
-  const selectedSourceSet =
-    state.timeline?.selection?.source_set_id || "无SEALED source_set";
   for (const [label, value] of [
     [
       "官方会话 / 紧邻对",
@@ -266,7 +260,7 @@ function renderPriceRelationHistory(history) {
   const identity = state.timeline?.snapshot_identity || {};
   status.textContent =
     `${state.timeline?.symbol || "—"} · ${state.timeline?.target_session || "—"} · ` +
-    `source_set ${selectedSourceSet} · namespace ${state.timeline?.namespace_id || "UNKNOWN"} · ` +
+    `namespace ${state.timeline?.namespace_id || "UNKNOWN"} · ` +
     `完整包SHA ${state.timeline?.package_sha256 || "UNKNOWN"} · ` +
     `事件身份SHA ${text(history.identity_ref || identity.identity_sha256 || "UNKNOWN")}。` +
     "已知关系未变化不列为事件；UNKNOWN / 不可比原因独立统计。";
@@ -382,8 +376,7 @@ function renderMa20DirectionHistory(history) {
       : "");
   identity.textContent =
     `${binding.target_session || "—"} · ${binding.source_symbol || "—"} · ` +
-    `source_set ${binding.source_set_id || "未知"} / ${binding.source_set_status || "UNKNOWN"} ` +
-    `rev ${binding.source_set_revision || "未知"} · namespace ${binding.namespace_id || "UNKNOWN"} · ` +
+    `来源版本 · namespace ${binding.namespace_id || "UNKNOWN"} · ` +
     `日历 ${binding.calendar_id || "UNKNOWN"}/${binding.calendar_revision || "UNKNOWN"} · ` +
     `${binding.price_coordinate || "UNKNOWN"} / ${binding.coordinate_id || "UNKNOWN"} · ` +
     `package SHA ${binding.package_sha256 || "UNKNOWN"} · ` +
@@ -589,7 +582,7 @@ async function returnToChanges() {
       Number($("windowInput").value) !== originalSelection.session_count;
     const returnNotice =
       queryContextChanged || mainSelectionChanged
-        ? `已恢复原精确双日查询 ${binding.before_snapshot.target_session} → ${binding.after_snapshot.target_session} · ${binding.symbol}；重点候选序位已按原source_set、完整包SHA和profile revision重新读取。`
+        ? `已恢复原精确双日查询 ${binding.before_snapshot.target_session} → ${binding.after_snapshot.target_session} · ${binding.symbol}；重点候选序位已按原完整包SHA和profile revision重新读取。`
         : null;
 
     $("changeBeforeSelect").value = profileSnapshotKey(binding.before_snapshot);

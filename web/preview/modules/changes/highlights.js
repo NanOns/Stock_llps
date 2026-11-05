@@ -160,7 +160,7 @@ function appendHighlightSourceIdentity(parent, item, data) {
     value ? `${value.slice(0, length)}…` : "UNKNOWN";
   const identitySide = item.after_present ? "after" : "before";
   const identity = document.createElement("span");
-  identity.textContent = `${text(item[`${identitySide}_identity_status`])} · ${short(item.before_source_set_id)}→${short(item.after_source_set_id)} · SHA ${short(item[`${identitySide}_package_sha256`], 12)} · rev ${short(item.before_profile_revision, 12)}→${short(item.after_profile_revision, 12)}`;
+  identity.textContent = `${text(item[`${identitySide}_identity_status`])} · SHA ${short(item[`${identitySide}_package_sha256`], 12)} · rev ${short(item.before_profile_revision, 12)}→${short(item.after_profile_revision, 12)}`;
   source.append(identity);
   const qualityIdentity = document.createElement("span");
   qualityIdentity.textContent = `security_id ${text(item[`${identitySide}_stable_security_id_status`])} · 上市 ${text(item[`${identitySide}_listing_status`])} · 停牌 ${text(item[`${identitySide}_suspension_status`])} · ${text(item[`${identitySide}_pit_status`])} · ${text(data.formal_listing_universe || "UNKNOWN_NOT_CONNECTED")}`;
@@ -170,7 +170,7 @@ function appendHighlightSourceIdentity(parent, item, data) {
   summary.textContent = "展开完整来源版本身份";
   details.append(summary);
   const full = document.createElement("div");
-  full.textContent = `namespace ${data.namespace_id}；前 source_set ${item.before_source_set_id}；后 source_set ${item.after_source_set_id}；前包SHA ${item.before_package_sha256}；后包SHA ${item.after_package_sha256}；前 profile_revision ${item.before_profile_revision}；后 profile_revision ${item.after_profile_revision}；前后坐标 ${text(item.before_price_coordinate)} → ${text(item.after_price_coordinate)}`;
+  full.textContent = `namespace ${data.namespace_id}；前目标日 ${data.before_snapshot.target_session}；后目标日 ${data.after_snapshot.target_session}；前包SHA ${item.before_package_sha256}；后包SHA ${item.after_package_sha256}；前 profile_revision ${item.before_profile_revision}；后 profile_revision ${item.after_profile_revision}；前后坐标 ${text(item.before_price_coordinate)} → ${text(item.after_price_coordinate)}`;
   details.append(full);
   source.append(details);
   parent.append(source);

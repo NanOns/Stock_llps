@@ -9,9 +9,8 @@ import re
 import sys
 from typing import Any
 from stock_a.contracts import (
-    DAY_CHAIN_MODULES,
-    DayChainContractError,
-    load_day_chain_contract,
+    PriceProfileContractError,
+    load_price_profile_contract,
 )
 from stock_a.storage.postgres.source_raw import (
     RAW_DAILY_APPEND_TASK_SCOPES,
@@ -23,11 +22,10 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_history_page,
     read_raw_daily_history_stock,
     read_raw_daily_stock,
-    read_sealed_source_market_breadth_history,
 )
 from stock_a.application.pg_research import (
     PgResearchBindingError,
-    read_sealed_source_context,
+    read_source_version_context,
 )
 from stock_a.research.entry import (
     CompareBudget,
@@ -142,7 +140,7 @@ def _run_pg_raw_stock(args: argparse.Namespace) -> int:
             target_session=target,
             package_sha256=source_sha,
         )
-        source_context = read_sealed_source_context(
+        source_context = read_source_version_context(
             config,
             target_session=target,
             package_sha256=source_sha,
@@ -189,7 +187,7 @@ def _run_pg_raw_stock(args: argparse.Namespace) -> int:
         "package_sha256": source_sha,
         "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_DAILY_FROM_POSTGRESQL",
         "row": row,
-        "formal_source_set": source_context,
+        "source_version": source_context,
         "fallback_attempted": False,
         "database_io_attempted": True,
         "database_write_attempted": False,
@@ -232,7 +230,7 @@ def _run_pg_raw_universe(args: argparse.Namespace) -> int:
             market=args.market,
             board=args.board,
         )
-        source_context = read_sealed_source_context(
+        source_context = read_source_version_context(
             config,
             target_session=target,
             package_sha256=source_sha,
@@ -274,7 +272,7 @@ def _run_pg_raw_universe(args: argparse.Namespace) -> int:
         return _EXIT_UNAVAILABLE
     result.update(
         {
-            "formal_source_set": source_context,
+            "source_version": source_context,
             "ok": True,
             "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_DAILY_FROM_POSTGRESQL",
             "database_io_attempted": True,
@@ -360,14 +358,14 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             package_sha256=source_sha,
             sessions=sessions,
         )
-        source_context = read_sealed_source_context(
+        source_context = read_source_version_context(
             config,
             target_session=target,
             package_sha256=source_sha,
             namespace_id=history["namespace_id"],
             target_raw_rows=history["history_rows"],
         )
-        profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+        profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
         result = research_stock_pg_history_preview(
             symbol=args.symbol,
             target_session=target.isoformat(),
@@ -408,7 +406,7 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             error=True,
         )
         return _EXIT_UNAVAILABLE
-    except (ResearchEntryError, DayChainContractError) as error:
+    except (ResearchEntryError, PriceProfileContractError) as error:
         code = getattr(error, "code", "PROFILE_CONTRACT_UNAVAILABLE")
         _emit(
             {
@@ -429,7 +427,7 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             "database_write_attempted": False,
             "dml_executed": False,
             "configuration_path": str(config_path),
-            "formal_source_set": source_context,
+            "source_version": source_context,
         }
     )
     if getattr(args, "output_format", "json") == "summary":
@@ -446,7 +444,7 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             f"PG历史研究预览 {result.get('symbol')} {target.isoformat()} "
             f"窗口={result.get('window', {}).get('start_session')}..{result.get('window', {}).get('end_session')} "
             f"有效Bar={result.get('window', {}).get('real_bar_count')}/{result.get('window', {}).get('requested_sessions')} "
-            f"P03/P04={source_context.get('source_set_id')}",
+            f"包SHA={source_sha[:12]}",
         ]
         line.extend(
             f"{name}={_summary_field(fields.get(name))}" for name in core_labels
@@ -496,7 +494,7 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             for row in candidate["history_rows"]
             if row["session_date"] == target
         ]
-        source_context = read_sealed_source_context(
+        source_context = read_source_version_context(
             config,
             target_session=target,
             package_sha256=source_sha,
@@ -504,7 +502,7 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             target_raw_rows=target_rows,
             expected_raw_row_count=page["version_row_count"],
         )
-        profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+        profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
         result = research_universe_pg_history_preview(
             target_session=target.isoformat(),
             package_sha256=source_sha,
@@ -539,7 +537,7 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             error=True,
         )
         return _EXIT_UNAVAILABLE
-    except DayChainContractError as error:
+    except PriceProfileContractError as error:
         _emit(
             {
                 "ok": False,
@@ -559,7 +557,7 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             "database_write_attempted": False,
             "dml_executed": False,
             "configuration_path": str(config_path),
-            "formal_source_set": source_context,
+            "source_version": source_context,
         }
     )
     if getattr(args, "output_format", "summary") == "summary":
@@ -568,7 +566,7 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             f"PG历史候选页 offset={page_info['offset']} limit={page_info['limit']} "
             f"rows={page_info['page_count']} filtered_total={page_info['total_source_candidates']} "
             f"next={page_info['next_offset']} window={result['session_start']}..{result['session_end']} "
-            f"来源版本={result['source_version_status']} P03/P04={source_context.get('source_set_id')} "
+            f"来源版本={result['source_version_status']} 包SHA={source_sha[:12]} "
             f"实际/期望={result['source_version_row_count']}/{result['source_version_expected_row_count']}",
         ]
         for item in result["results"]:

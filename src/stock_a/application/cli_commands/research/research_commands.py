@@ -10,9 +10,8 @@ import sys
 import time
 from typing import Any
 from stock_a.contracts import (
-    DAY_CHAIN_MODULES,
-    DayChainContractError,
-    load_day_chain_contract,
+    PriceProfileContractError,
+    load_price_profile_contract,
 )
 from stock_a.domain import ContractError
 from stock_a.sources.tdx.day import UnitContract
@@ -147,11 +146,11 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         raise DiagnosticError(
             "ARGUMENT_CONTRACT_INVALID", f"单位或读取预算无效：{error}", _EXIT_ARGUMENT
         ) from error
-    foundation_contract = None
-    if not compare:
+    profile_contract = None
+    if not compare and getattr(args, "include_profile_preview", False):
         try:
-            foundation_contract = load_day_chain_contract(_CONFIG_ROOT).document
-        except DayChainContractError as error:
+            profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
+        except PriceProfileContractError as error:
             _emit(
                 {
                     "ok": False,
@@ -162,11 +161,6 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 error=True,
             )
             return _EXIT_UNAVAILABLE
-    profile_contract = (
-        foundation_contract
-        if (not compare and getattr(args, "include_profile_preview", False))
-        else None
-    )
     identity_projection = None
     identity_snapshot: dict[str, Any] | None = None
     identity_query_status = "NOT_REQUESTED"
@@ -281,7 +275,6 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 units=units,
                 limits=limits,
                 profile_contract=profile_contract,
-                foundation_contract=foundation_contract,
                 include_baostock_evidence=getattr(
                     args, "include_baostock_evidence", False
                 ),
@@ -296,7 +289,6 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 units=units,
                 limits=limits,
                 profile_contract=profile_contract,
-                foundation_contract=foundation_contract,
                 include_baostock_evidence=getattr(
                     args, "include_baostock_evidence", False
                 ),
@@ -603,26 +595,29 @@ def _run_research_universe(args: argparse.Namespace) -> int:
         raise DiagnosticError(
             "ARGUMENT_CONTRACT_INVALID", f"单位或预算合同无效：{error}", _EXIT_ARGUMENT
         ) from error
-    try:
-        foundation_contract = load_day_chain_contract(_CONFIG_ROOT).document
-    except DayChainContractError as error:
-        _emit(
-            {
-                "ok": False,
-                "code": error.code,
-                "message": str(error),
-                "database_io_attempted": False,
-            },
-            error=True,
-        )
-        return _EXIT_UNAVAILABLE
-    profile_contract = (
-        foundation_contract
-        if args.include_profile_preview or args.full_source_core_profile
-        else None
-    )
+    profile_contract = None
+    if args.include_profile_preview or args.full_source_core_profile:
+        try:
+            profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
+        except PriceProfileContractError as error:
+            _emit(
+                {
+                    "ok": False,
+                    "code": error.code,
+                    "message": str(error),
+                    "database_io_attempted": False,
+                },
+                error=True,
+            )
+            return _EXIT_UNAVAILABLE
     try:
         if args.full_source_core_profile:
+            if profile_contract is None:
+                raise DiagnosticError(
+                    "PROFILE_CONTRACT_UNAVAILABLE",
+                    "全范围Core/Profile模式没有可用的画像字段合同",
+                    _EXIT_UNAVAILABLE,
+                )
             candidate_index_started = time.monotonic()
             pool = vipdata_research_candidate_pool(package)
             candidate_index_seconds = time.monotonic() - candidate_index_started
@@ -661,7 +656,6 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 discovery_budget=discovery_budget,
                 budget=budget,
                 profile_contract=profile_contract,
-                foundation_contract=foundation_contract,
             )
         else:
             candidate_index_started = time.monotonic()
@@ -723,7 +717,6 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 discovery_budget=discovery_budget,
                 budget=budget,
                 profile_contract=profile_contract,
-                foundation_contract=foundation_contract,
                 source_candidate_pool=pool.candidates,
                 source_candidate_catalog=pool.catalog,
                 source_target_quality_report=target_quality_report,
@@ -808,7 +801,6 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 "price_coordinate": "RAW_UNADJUSTED",
                 "amount_unit_authority": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
                 "volume_unit_authority": "CALLER_DECLARED_RESEARCH_ASSUMPTION",
-                "acceptance_status": "NOT_ACCEPTED_NOT_PERSISTED",
             }
     except VipdataError as error:
         _emit(

@@ -4,7 +4,6 @@
       "order": 0,
       "definition": {
         "field_id": "identity.entity_id",
-        "producer_stage": "P04",
         "value_type": "string",
         "unit": "identity",
         "expression_ref": "ALG-01",
@@ -12,13 +11,6 @@
         "window_contract": "NONE",
         "coordinate_role": "NONE",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P05",
-          "P06",
-          "P08"
-        ],
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -34,7 +26,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "identity_calendar_universe",
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
@@ -42,7 +33,6 @@
       "order": 1,
       "definition": {
         "field_id": "identity.session",
-        "producer_stage": "P04",
         "value_type": "date",
         "unit": "market_session",
         "expression_ref": "ALG-01",
@@ -50,13 +40,6 @@
         "window_contract": "NONE",
         "coordinate_role": "NONE",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P05",
-          "P06",
-          "P08"
-        ],
         "value_schema": {
           "type": "date",
           "nullable_only_with_quality": true,
@@ -72,7 +55,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "identity_calendar_universe",
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
@@ -80,7 +62,6 @@
       "order": 2,
       "definition": {
         "field_id": "raw.open",
-        "producer_stage": "P05",
         "producer_symbol": "stock_a.sources.tdx.day:decode_day_record",
         "value_type": "decimal",
         "unit": "CNY",
@@ -92,12 +73,6 @@
         "window_contract": "NONE",
         "coordinate_role": "NONE",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P06"
-        ],
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -115,7 +90,6 @@
           "context.source_cutoff",
           "context.selected_raw_open"
         ],
-        "output_artifact": "raw_bars",
         "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
@@ -123,7 +97,6 @@
       "order": 3,
       "definition": {
         "field_id": "raw.high",
-        "producer_stage": "P05",
         "producer_symbol": "stock_a.sources.tdx.day:decode_day_record",
         "value_type": "decimal",
         "unit": "CNY",
@@ -135,12 +108,6 @@
         "window_contract": "NONE",
         "coordinate_role": "NONE",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P06"
-        ],
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -158,7 +125,6 @@
           "context.source_cutoff",
           "context.selected_raw_high"
         ],
-        "output_artifact": "raw_bars",
         "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
@@ -166,7 +132,6 @@
       "order": 4,
       "definition": {
         "field_id": "raw.low",
-        "producer_stage": "P05",
         "producer_symbol": "stock_a.sources.tdx.day:decode_day_record",
         "value_type": "decimal",
         "unit": "CNY",
@@ -178,12 +143,6 @@
         "window_contract": "NONE",
         "coordinate_role": "NONE",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P06"
-        ],
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -201,7 +160,6 @@
           "context.source_cutoff",
           "context.selected_raw_low"
         ],
-        "output_artifact": "raw_bars",
         "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
@@ -209,7 +167,6 @@
       "order": 5,
       "definition": {
         "field_id": "raw.close",
-        "producer_stage": "P05",
         "producer_symbol": "stock_a.sources.tdx.day:decode_day_record",
         "value_type": "decimal",
         "unit": "CNY",
@@ -221,12 +178,6 @@
         "window_contract": "NONE",
         "coordinate_role": "NONE",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P06"
-        ],
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -244,7 +195,6 @@
           "context.source_cutoff",
           "context.selected_raw_close"
         ],
-        "output_artifact": "raw_bars",
         "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
@@ -252,7 +202,6 @@
       "order": 6,
       "definition": {
         "field_id": "raw.amount",
-        "producer_stage": "P05",
         "producer_symbol": "stock_a.sources.tdx.day:decode_day_record",
         "value_type": "decimal",
         "unit": "CNY",
@@ -264,13 +213,6 @@
         "window_contract": "NONE",
         "coordinate_role": "NONE",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P06",
-          "P07"
-        ],
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -288,7 +230,6 @@
           "context.source_cutoff",
           "context.selected_raw_amount"
         ],
-        "output_artifact": "raw_bars",
         "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
@@ -296,7 +237,6 @@
       "order": 7,
       "definition": {
         "field_id": "raw.volume",
-        "producer_stage": "P05",
         "producer_symbol": "stock_a.sources.tdx.day:decode_day_record",
         "value_type": "decimal",
         "unit": "shares",
@@ -308,13 +248,6 @@
         "window_contract": "NONE",
         "coordinate_role": "NONE",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P06",
-          "P07"
-        ],
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -332,7 +265,6 @@
           "context.source_cutoff",
           "context.selected_raw_volume"
         ],
-        "output_artifact": "raw_bars",
         "dependency_identity_policy": "ACTUAL_FIELD_SEMANTIC_DIGEST_PLUS_SELECTED_PROVENANCE_NOT_WHOLE_CAPTURE"
       }
     },
@@ -340,7 +272,6 @@
       "order": 8,
       "definition": {
         "field_id": "raw.session_state",
-        "producer_stage": "P05",
         "value_type": "enum",
         "unit": "state",
         "expression_ref": "ACTUAL_OR_CONFIRMED_STATUS_OR_UNKNOWN",
@@ -351,14 +282,6 @@
         "window_contract": "NONE",
         "coordinate_role": "NONE",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P07",
-          "P08",
-          "P06"
-        ],
         "value_schema": {
           "type": "enum",
           "nullable_only_with_quality": true,
@@ -375,7 +298,6 @@
           "context.target_session",
           "context.source_cutoff"
         ],
-        "output_artifact": "bar_status",
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
@@ -383,7 +305,6 @@
       "order": 9,
       "definition": {
         "field_id": "coordinate.id",
-        "producer_stage": "P06",
         "producer_symbol": "stock_a.canonical.adjustment:AdjustmentFactor.target_coordinate_id",
         "value_type": "string",
         "unit": "identity",
@@ -395,12 +316,6 @@
         "window_contract": "NONE",
         "coordinate_role": "NONE",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P06",
-          "P08"
-        ],
         "value_schema": {
           "type": "string",
           "nullable_only_with_quality": true,
@@ -417,14 +332,13 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.sealed_actions_revision",
+          "context.action_revision",
           "context.coordinate_contract_version",
           "context.calendar_ref"
         ],
-        "output_artifact": "coordinates",
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
         "context_input_bindings": {
-          "context.sealed_actions_revision": "actions",
+          "context.action_revision": "actions",
           "context.calendar_ref": "identity_calendar_universe",
           "context.coordinate_contract_version": "day_plan",
           "context.source_cutoff": "day_plan"
@@ -435,7 +349,6 @@
       "order": 10,
       "definition": {
         "field_id": "adjusted.open",
-        "producer_stage": "P06",
         "producer_symbol": "stock_a.canonical.adjustment:adjust_ohlc",
         "value_type": "decimal",
         "unit": "CNY",
@@ -447,11 +360,6 @@
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
         "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS"
-        ],
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -466,9 +374,8 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.sealed_actions_revision"
+          "context.action_revision"
         ],
-        "output_artifact": "adjusted_bars",
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
@@ -476,7 +383,6 @@
       "order": 11,
       "definition": {
         "field_id": "adjusted.high",
-        "producer_stage": "P06",
         "producer_symbol": "stock_a.canonical.adjustment:adjust_ohlc",
         "value_type": "decimal",
         "unit": "CNY",
@@ -488,12 +394,6 @@
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
         "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -508,9 +408,8 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.sealed_actions_revision"
+          "context.action_revision"
         ],
-        "output_artifact": "adjusted_bars",
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
@@ -518,7 +417,6 @@
       "order": 12,
       "definition": {
         "field_id": "adjusted.low",
-        "producer_stage": "P06",
         "producer_symbol": "stock_a.canonical.adjustment:adjust_ohlc",
         "value_type": "decimal",
         "unit": "CNY",
@@ -530,12 +428,6 @@
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
         "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -550,9 +442,8 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.sealed_actions_revision"
+          "context.action_revision"
         ],
-        "output_artifact": "adjusted_bars",
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
@@ -560,7 +451,6 @@
       "order": 13,
       "definition": {
         "field_id": "adjusted.close",
-        "producer_stage": "P06",
         "producer_symbol": "stock_a.canonical.adjustment:adjust_ohlc",
         "value_type": "decimal",
         "unit": "CNY",
@@ -572,14 +462,6 @@
         "window_contract": "NONE",
         "coordinate_role": "TARGET_SESSION",
         "persistence_policy": "BOUNDED_IN_MEMORY_VIEW_OR_NECESSARY_FROZEN_REFERENCE_NOT_ALL_TARGET_HISTORY_COPIES",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P07",
-          "P09",
-          "P08"
-        ],
         "value_schema": {
           "type": "decimal",
           "nullable_only_with_quality": true,
@@ -594,9 +476,8 @@
         "context_dependencies": [
           "context.target_session",
           "context.source_cutoff",
-          "context.sealed_actions_revision"
+          "context.action_revision"
         ],
-        "output_artifact": "adjusted_bars",
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
       }
     },
@@ -604,7 +485,6 @@
       "order": 76,
       "definition": {
         "field_id": "period.closed_week",
-        "producer_stage": "P06",
         "producer_symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars",
         "value_type": "typed_bar_set_reference",
         "unit": "OHLCV",
@@ -622,12 +502,6 @@
         "window_contract": "CLOSED_PERIOD_R1",
         "coordinate_role": "TARGET_SESSION",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "typed_bar_set_reference",
           "nullable_only_with_quality": true,
@@ -646,12 +520,11 @@
           "context.target_session",
           "context.source_cutoff",
           "context.calendar_ref",
-          "context.sealed_actions_revision",
+          "context.action_revision",
           "context.coordinate_contract_version"
         ],
-        "output_artifact": "period_bars",
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+        "window_identity_ref": "profile_price_history_policy",
         "period_selection": {
           "calendar": "EXACT_VERSIONED_OFFICIAL_CALENDAR",
           "closed_at_or_before": "context.target_session_and_source_cutoff",
@@ -667,7 +540,6 @@
       "order": 78,
       "definition": {
         "field_id": "period.closed_month",
-        "producer_stage": "P06",
         "producer_symbol": "stock_a.canonical.adjustment_periods:build_closed_period_bars",
         "value_type": "typed_bar_set_reference",
         "unit": "OHLCV",
@@ -685,12 +557,6 @@
         "window_contract": "CLOSED_PERIOD_R1",
         "coordinate_role": "TARGET_SESSION",
         "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "CHART",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "typed_bar_set_reference",
           "nullable_only_with_quality": true,
@@ -709,12 +575,11 @@
           "context.target_session",
           "context.source_cutoff",
           "context.calendar_ref",
-          "context.sealed_actions_revision",
+          "context.action_revision",
           "context.coordinate_contract_version"
         ],
-        "output_artifact": "period_bars",
         "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy",
+        "window_identity_ref": "profile_price_history_policy",
         "period_selection": {
           "calendar": "EXACT_VERSIONED_OFFICIAL_CALENDAR",
           "closed_at_or_before": "context.target_session_and_source_cutoff",
@@ -724,95 +589,6 @@
           "partial_ipo_period": "NOT_COMPLETE_PERIOD_FOR_TREND",
           "component_quality": "PRICE_TREND_DOES_NOT_REQUIRE_KNOWN_AMOUNT_OR_VOLUME"
         }
-      }
-    },
-    {
-      "order": 86,
-      "definition": {
-        "field_id": "bao.capability_state",
-        "producer_stage": "P02",
-        "value_type": "enum",
-        "unit": "capability",
-        "expression_ref": "ACCOUNT_OPTIONAL_SOURCE_FAILURE_NOT_CORE_BLOCK",
-        "input_fields": [],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P03"
-        ],
-        "value_schema": {
-          "type": "enum",
-          "nullable_only_with_quality": true,
-          "reject_bool_for_number": true,
-          "finite_numeric_only": true
-        },
-        "business_key": [
-          "namespace_id",
-          "job_id",
-          "dataset_role"
-        ],
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff"
-        ],
-        "output_artifact": "bao_capability_status",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE"
-      }
-    },
-    {
-      "order": 87,
-      "definition": {
-        "field_id": "source_set.id",
-        "producer_stage": "P03",
-        "value_type": "string",
-        "unit": "identity",
-        "expression_ref": "EXACT_DATASET_CONTENT_AND_CAPTURE_BINDINGS",
-        "input_fields": [
-          "capture.content_sha",
-          "capture.durable_at",
-          "bao.capability_state",
-          "capture.canonical_digest"
-        ],
-        "window_contract": "NONE",
-        "coordinate_role": "NONE",
-        "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
-        "value_schema": {
-          "type": "string",
-          "nullable_only_with_quality": true,
-          "reject_bool_for_number": true,
-          "finite_numeric_only": true
-        },
-        "business_key": [
-          "namespace_id",
-          "source_set_id"
-        ],
-        "context_dependencies": [
-          "context.target_session",
-          "context.source_cutoff",
-          "context.capture_dataset_id",
-          "context.capture_parser_version",
-          "context.capture_unit_version",
-          "context.capture_binding_id"
-        ],
-        "output_artifact": "source_set",
-        "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-        "expression_components": [
-          "capture.content_sha",
-          "capture.canonical_digest",
-          "capture.durable_at",
-          "bao.capability_state",
-          "context.capture_dataset_id",
-          "context.capture_parser_version",
-          "context.capture_unit_version",
-          "context.capture_binding_id"
-        ]
       }
     }
   ],

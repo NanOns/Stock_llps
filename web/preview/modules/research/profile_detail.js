@@ -19,7 +19,10 @@ function showProfileDetail(item) {
     ["来源范围", item.calculation_scope],
     ["命名空间", item.namespace_id],
     ["研究资格", `${item.identity_status} · ${item.pit_status}`],
-    ["source_set_id", item.source_set_id],
+    [
+      "来源版本定位键",
+      `${item.target_session} · ${item.package_sha256} · ${item.profile_revision}`,
+    ],
     ["来源包SHA-256", item.package_sha256],
     [
       "画像修订 / 合同SHA",
@@ -159,7 +162,7 @@ async function openProfileTimeline(item) {
     appendText(
       root,
       "p",
-      "当前PG目录没有这条画像对应的精确RAW来源版本或source_set；已停止跳转，没有回退其它版本。",
+      "当前PG目录没有这条画像对应的精确RAW来源版本；已停止跳转，没有回退其它版本。",
       "message",
     );
     return;

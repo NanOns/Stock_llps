@@ -158,7 +158,7 @@ _REASONS = {
     "RAW_SOURCE_IDENTITY_MISMATCH": "历史行与目标来源代码、命名空间或日期不一致。",
     "RAW_PACKAGE_REVISION_MISMATCH": "官方会话窗口内的RAW包修订不一致。",
     "RAW_SOURCE_CONTENT_MISMATCH": "官方会话窗口内的RAW来源内容摘要不一致。",
-    "RAW_TARGET_CAPTURE_MISMATCH": "目标RAW行与SEALED来源捕获身份不一致。",
+    "RAW_TARGET_CAPTURE_MISMATCH": "目标RAW行与来源捕获身份不一致。",
     "PRICE_COORDINATE_MISMATCH": "官方会话窗口内的价格坐标不是RAW_UNADJUSTED。",
     "OFFICIAL_SESSION_BAR_MISSING": "严格官方窗口至少一个会话缺少有效RAW日线。",
     "RAW_PRICE_QUALITY_UNKNOWN": "官方会话RAW价格质量未知。",

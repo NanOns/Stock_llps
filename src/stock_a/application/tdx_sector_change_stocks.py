@@ -106,7 +106,7 @@ def _d1_symbol_index(discovery: Mapping[str, Any]) -> dict[str, Mapping[str, Any
         indexed[symbol] = record
     if len(indexed) != discovery.get("source_pool_count"):
         raise TdxSectorMembersApplicationError(
-            "D1_SYMBOL_PARTITION_NOT_CLOSED", "D1完整代码集合与SEALED来源池分母不一致"
+            "D1_SYMBOL_PARTITION_NOT_CLOSED", "D1完整代码集合与Raw来源池分母不一致"
         )
     return indexed
 
@@ -208,7 +208,6 @@ def _changed_stock_page(
     required_source_fields = (
         "namespace_id",
         "source_set_id",
-        "revision_id",
         "target_session",
         "package_sha256",
         "source_content_id",
@@ -217,7 +216,7 @@ def _changed_stock_page(
     )
     if any(not source.get(field) for field in required_source_fields):
         raise TdxSectorMembersApplicationError(
-            "D1_SOURCE_IDENTITY_MISSING", "全局CHANGED页缺少完整SEALED来源引用"
+            "D1_SOURCE_IDENTITY_MISSING", "全局CHANGED页缺少Raw来源引用"
         )
     for detail in d1_symbols.values():
         for event in detail.get("anchor_events", []):
@@ -226,7 +225,6 @@ def _changed_stock_page(
                 not isinstance(event_source, Mapping)
                 or event_source.get("namespace_id") != source["namespace_id"]
                 or event_source.get("source_set_id") != source["source_set_id"]
-                or event_source.get("revision_id") != source["revision_id"]
                 or event_source.get("package_sha256") != source["package_sha256"]
                 or event_source.get("source_content_id") != source["source_content_id"]
                 or event_source.get("source_raw_digest") != source["source_raw_digest"]
@@ -236,7 +234,7 @@ def _changed_stock_page(
             ):
                 raise TdxSectorMembersApplicationError(
                     "D1_CHANGED_EVENT_SOURCE_MISMATCH",
-                    "D1变化锚事件与精确SEALED来源包或目标捕获不一致",
+                    "D1变化锚事件与Raw来源包或目标捕获不一致",
                 )
 
     sectors_by_symbol: dict[str, dict[tuple[str, str, str], dict[str, Any]]] = {
@@ -320,8 +318,6 @@ def _changed_stock_page(
         member["source_evidence"].update(
             {
                 "source_digest": source.get("source_digest"),
-                "seal_status": source.get("seal_status"),
-                "sealed_at": discovery.get("source_sealed_at"),
                 "capture_started_at": discovery.get("source_capture_started_at"),
                 "capture_validated_at": discovery.get("source_capture_validated_at"),
                 "official_calendar": discovery.get("official_calendar"),
@@ -447,15 +443,13 @@ def _d0_launch_new_linkage(
         or not isinstance(after.get("source_pool"), Mapping)
         or set(transition_counts) != _D0_CHANGE_TRANSITIONS
         or len(change_rows) != source_keys.get("source_union_count")
-        or not isinstance(before.get("source_set"), Mapping)
-        or not isinstance(after.get("source_set"), Mapping)
-        or before["source_set"].get("seal_status") != "SEALED"
-        or after["source_set"].get("seal_status") != "SEALED"
+        or not isinstance(before.get("source_version"), Mapping)
+        or not isinstance(after.get("source_version"), Mapping)
         or before.get("namespace_id") != after.get("namespace_id")
-        or before["source_set"].get("package_sha256")
-        != after["source_set"].get("package_sha256")
-        or before["source_set"].get("source_content_id")
-        != after["source_set"].get("source_content_id")
+        or before["source_version"].get("package_sha256")
+        != after["source_version"].get("package_sha256")
+        or before["source_version"].get("source_content_id")
+        != after["source_version"].get("source_content_id")
         or before.get("official_calendar") != after.get("official_calendar")
         or before.get("session_contract") != after.get("session_contract")
         or before.get("algorithm_contract") != after.get("algorithm_contract")
@@ -607,18 +601,16 @@ def _d0_launch_new_linkage(
             "D0_MEMBERSHIP_PARTITION_NOT_CLOSED", "全局新增股票成员映射分母未闭合"
         )
 
-    before_source = before["source_set"]
-    after_source = after["source_set"]
+    before_source = before["source_version"]
+    after_source = after["source_version"]
     summary = {
         "status": "AVAILABLE" if stock_rows else "EMPTY",
-        "analysis_scope": "FULL_SEALED_SOURCE_POOL_D0_NEW_LAUNCH_JOINED_TO_CURRENT_TDX_MEMBERS",
+        "analysis_scope": "FULL_RAW_SOURCE_POOL_D0_NEW_LAUNCH_JOINED_TO_CURRENT_TDX_MEMBERS",
         "scenario": "LAUNCH_CONFIRM",
         "transition": "FALSE_TO_TRUE",
         "source_key": "market+source_symbol",
         "before": {
             "target_session": before.get("target_session"),
-            "source_set_id": before_source.get("source_set_id"),
-            "revision_id": before_source.get("revision_id"),
             "source_capture_id": before_source.get("source_capture_id"),
             "namespace_id": before.get("namespace_id"),
             "package_sha256": before_source.get("package_sha256"),
@@ -628,13 +620,9 @@ def _d0_launch_new_linkage(
             "source_available_at": before_source.get("source_available_at"),
             "source_time_quality": before_source.get("source_time_quality"),
             "source_clock_role": before_source.get("source_clock_role"),
-            "seal_status": before_source.get("seal_status"),
-            "sealed_at": before_source.get("sealed_at"),
         },
         "after": {
             "target_session": after.get("target_session"),
-            "source_set_id": after_source.get("source_set_id"),
-            "revision_id": after_source.get("revision_id"),
             "source_capture_id": after_source.get("source_capture_id"),
             "namespace_id": after.get("namespace_id"),
             "package_sha256": after_source.get("package_sha256"),
@@ -644,8 +632,6 @@ def _d0_launch_new_linkage(
             "source_available_at": after_source.get("source_available_at"),
             "source_time_quality": after_source.get("source_time_quality"),
             "source_clock_role": after_source.get("source_clock_role"),
-            "seal_status": after_source.get("seal_status"),
-            "sealed_at": after_source.get("sealed_at"),
         },
         "source_pool_count": expected_comparable,
         "source_union_count": source_keys["source_union_count"],
@@ -780,7 +766,7 @@ def combine_sector_strength_and_d1_changes(
     d1_source = discovery.get("source")
     if not isinstance(d1_source, Mapping):
         raise TdxSectorMembersApplicationError(
-            "D1_SOURCE_IDENTITY_MISSING", "D1发现结果缺少SEALED来源身份"
+            "D1_SOURCE_IDENTITY_MISSING", "D1发现结果缺少Raw来源身份"
         )
     expected_identity = {
         "target_session": discovery.get("target_session"),
@@ -795,10 +781,9 @@ def combine_sector_strength_and_d1_changes(
         or not expected_identity["source_set_id"]
         or not expected_identity["package_sha256"]
         or not expected_identity["namespace_id"]
-        or d1_source.get("seal_status") != "SEALED"
     ):
         raise TdxSectorMembersApplicationError(
-            "D1_SOURCE_NOT_SEALED", "D1变化发现未绑定完整SEALED来源身份"
+            "D1_SOURCE_IDENTITY_INVALID", "D1变化发现未绑定明确Raw来源身份"
         )
 
     board_rows: list[dict[str, Any]] = []
@@ -815,7 +800,7 @@ def combine_sector_strength_and_d1_changes(
             "TDX_TDXHY_CFG" if kind == "INDUSTRY" else "TDX_INFOHARBOR_BLOCK_DAT"
         )
         snapshot = strength.get("snapshot", {})
-        target_source = strength.get("target_source_set", {})
+        target_source = strength.get("source_version", {})
         if snapshot.get("source_kind") != expected_source_kind:
             raise TdxSectorMembersApplicationError(
                 "SNAPSHOT_BOARD_KIND_MISMATCH",
@@ -824,14 +809,14 @@ def combine_sector_strength_and_d1_changes(
         actual_identity = {
             "target_session": strength.get("target_session"),
             "research_cutoff": strength.get("research_cutoff"),
-            "source_set_id": target_source.get("source_set_id"),
+            "source_set_id": target_source.get("profile_storage_key"),
             "package_sha256": target_source.get("package_sha256"),
             "namespace_id": strength.get("namespace_id"),
         }
         if actual_identity != expected_identity:
             raise TdxSectorMembersApplicationError(
                 "R03_R04_SOURCE_IDENTITY_MISMATCH",
-                "R03强弱与R04变化不是同目标、同SEALED包、同namespace来源口径",
+                "R03强弱与R04变化不是同目标、同包SHA、同namespace来源口径",
             )
         strength_calendar = strength.get("official_calendar")
         d1_calendar = discovery.get("official_calendar")
@@ -879,7 +864,7 @@ def combine_sector_strength_and_d1_changes(
             {
                 "board_kind": kind,
                 "snapshot": snapshot,
-                "target_source_set": target_source,
+                "source_version": target_source,
                 "target_profile_snapshot": strength.get("target_profile_snapshot"),
                 "official_calendar": strength.get("official_calendar"),
                 "window_sessions": strength.get("window_sessions"),
@@ -966,19 +951,17 @@ def combine_sector_strength_and_d1_changes(
             all_board_rows=all_board_rows,
         )
         d0_after = d0_launch_changes["after"]
-        d0_after_source = d0_after["source_set"]
+        d0_after_source = d0_after["source_version"]
         if (
             d0_after.get("target_session") != expected_identity["target_session"]
             or d0_after.get("research_cutoff") != expected_identity["research_cutoff"]
             or d0_after.get("namespace_id") != expected_identity["namespace_id"]
-            or d0_after_source.get("source_set_id")
-            != expected_identity["source_set_id"]
             or d0_after_source.get("package_sha256")
             != expected_identity["package_sha256"]
         ):
             raise TdxSectorMembersApplicationError(
                 "D0_D1_SOURCE_IDENTITY_MISMATCH",
-                "D0后端与既有D1变化不是同目标、同SEALED来源包、同DEV命名空间",
+                "D0后端与既有D1变化不是同目标、同来源包、同DEV命名空间",
             )
     all_legal_board_count = len(all_board_rows)
     source_kind_counts = {
@@ -1162,7 +1145,7 @@ def combine_sector_strength_and_d1_changes(
         "analysis_scope": "NON_PIT_RETROSPECTIVE_CURRENT_TDX_MEMBER_CORE_RETURN_WITH_D1_SUPPORT_CHANGE",
         "target_session": expected_identity["target_session"],
         "research_cutoff": expected_identity["research_cutoff"],
-        "source_set_id": expected_identity["source_set_id"],
+        "profile_storage_key": expected_identity["source_set_id"],
         "package_sha256": expected_identity["package_sha256"],
         "namespace_id": expected_identity["namespace_id"],
         "price_coordinate": "RAW_UNADJUSTED",
@@ -1229,7 +1212,7 @@ def combine_sector_strength_and_d1_changes(
                 else None
             ),
             "stable_tie_order": "board_kind ASC, board_native_id ASC COLLATE C",
-            "complete_source_sets_joined_before_filter_sort_pagination": True,
+            "complete_source_versions_joined_before_filter_sort_pagination": True,
         },
         "boards": board_page_payload,
         "detail_board": detail,

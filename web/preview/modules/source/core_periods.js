@@ -1,6 +1,6 @@
 /* Stock A预览页面core_periods职责模块；保持原业务逻辑和交互。 */
 "use strict";
-function rawItems(raw, formalSourceSet) {
+function rawItems(raw, sourceVersion) {
   const pairs = [
     ["目标日Bar", `${text(raw.bar_status)} · ${text(raw.bar_reason)}`],
     [
@@ -26,8 +26,8 @@ function rawItems(raw, formalSourceSet) {
     ],
     ["来源包SHA", text(raw.source.package_sha256)],
     [
-      "P03 SEALED / P04来源集合",
-      `${text(formalSourceSet?.seal_status)} · ${text(formalSourceSet?.source_set_id)} · revision ${text(formalSourceSet?.revision_id)}`,
+      "PG来源捕获 / 内容",
+      `${text(sourceVersion?.source_capture_id)} · ${text(sourceVersion?.source_content_id)}`,
     ],
     [
       "来源对象 / 目标日Bar",
@@ -143,7 +143,6 @@ function rawPeriodBinding(data) {
     package_sha256: data.package_sha256,
     symbol: data.symbol || data.source_symbol,
     namespace_id: data.namespace_id,
-    source_set_id: data.snapshot_identity?.source_set_id ?? null,
   };
 }
 function rawPeriodCacheKey(binding) {
@@ -152,7 +151,6 @@ function rawPeriodCacheKey(binding) {
     binding.package_sha256,
     binding.symbol,
     binding.namespace_id,
-    binding.source_set_id || "NONE",
   ].join("|");
 }
 function rawPeriodsMatch(binding) {
@@ -180,7 +178,6 @@ async function loadRawPeriods(
     package_sha256: version.package_sha256,
     symbol,
     namespace_id: expectedIdentity?.namespace_id || null,
-    source_set_id: expectedIdentity?.source_set_id || null,
   };
   if (!binding.namespace_id)
     throw new Error("周期查询缺少已核验的namespace身份。");
@@ -202,14 +199,13 @@ async function loadRawPeriods(
     package_sha256: binding.package_sha256,
     symbol: binding.symbol,
     namespace_id: binding.namespace_id,
-    source_set_id: binding.source_set_id || "NONE",
   });
   const data = await api(`/api/source-symbol/raw-periods?${query}`);
   if (requestId !== state.rawPeriodRequest || !isCurrent()) return null;
   const actual = rawPeriodBinding(data);
   if (rawPeriodCacheKey(actual) !== cacheKey) {
     throw new Error(
-      "周期响应日期、代码、namespace、source_set或完整包SHA不匹配，已拒绝展示。",
+      "周期响应日期、代码、namespace或完整包SHA不匹配，已拒绝展示。",
     );
   }
   state.rawPeriods = data;

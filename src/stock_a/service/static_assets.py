@@ -14,10 +14,8 @@ _ASSET_TYPES = {
     "app.css": "text/css; charset=utf-8",
     "styles/page.css": "text/css; charset=utf-8",
     "styles/source.css": "text/css; charset=utf-8",
-    "styles/chain.css": "text/css; charset=utf-8",
     "styles/history.css": "text/css; charset=utf-8",
     "modules/shared.js": "text/javascript; charset=utf-8",
-    "modules/source/readiness.js": "text/javascript; charset=utf-8",
     "modules/source/catalog.js": "text/javascript; charset=utf-8",
     "modules/source/core_periods.js": "text/javascript; charset=utf-8",
     "modules/source/core_profile.js": "text/javascript; charset=utf-8",
@@ -38,7 +36,6 @@ _ASSET_TYPES = {
 }
 _LEGACY_APP_MODULES = (
     "modules/shared.js",
-    "modules/source/readiness.js",
     "modules/source/catalog.js",
     "modules/source/core_periods.js",
     "modules/source/core_profile.js",

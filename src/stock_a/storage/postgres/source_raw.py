@@ -1792,7 +1792,7 @@ def read_raw_daily_history_batch(
         if namespace_id != expected_namespace_id:
             raise RawSourcePgError(
                 "SOURCE_NAMESPACE_MISMATCH",
-                "价格事实RAW读取命名空间与SEALED目标来源不一致",
+                "价格事实RAW读取命名空间与目标Raw来源不一致",
             )
         cursor.execute(
             """SELECT r.namespace_id, r.source_symbol, r.session_date,
@@ -1844,14 +1844,14 @@ ORDER BY r.source_symbol, r.session_date""",
         if row["source_content_id"] != expected_source_content_id:
             raise RawSourcePgError(
                 "SOURCE_CONTENT_MISMATCH",
-                "价格事实RAW历史行与SEALED来源内容摘要不一致",
+                "价格事实RAW历史行与来源内容摘要不一致",
             )
         if row["session_date"] == target_session and (
             row["source_capture_id"] != expected_target_capture_id
         ):
             raise RawSourcePgError(
                 "TARGET_CAPTURE_MISMATCH",
-                "价格事实RAW目标行与SEALED来源捕获身份不一致",
+                "价格事实RAW目标行与来源捕获身份不一致",
             )
         rows_by_symbol[row["source_symbol"]].append(row)
 
@@ -1882,42 +1882,25 @@ ORDER BY r.source_symbol, r.session_date""",
     }
 
 
-def read_sealed_source_market_breadth_history(
+def read_source_market_breadth_history(
     config: Mapping[str, Any],
     *,
     target_session: date,
     research_cutoff: date,
-    source_set_id: str,
     package_sha256: str,
     session_window: Sequence[date],
 ) -> dict[str, Any]:
-    """一次只读事务读取SEALED来源篮及同包SHA的四个价格会话。"""
+    """从一个只读快照按Raw捕获读取来源篮与所需历史价格行。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
+        or not isinstance(package_sha256, str)
+        or _SHA256.fullmatch(package_sha256) is None
     ):
         raise RawSourcePgError(
-            "MARKET_BREADTH_DATE_INVALID",
-            "目标会话必须是明确日期且不晚于研究截止日",
-        )
-    if not isinstance(source_set_id, str):
-        raise RawSourcePgError(
-            "MARKET_BREADTH_SOURCE_SET_INVALID", "必须显式提供SEALED source_set_id"
-        )
-    try:
-        canonical_source_set_id = str(uuid.UUID(source_set_id))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise RawSourcePgError(
-            "MARKET_BREADTH_SOURCE_SET_INVALID", "source_set_id必须为规范UUID"
-        ) from error
-    if canonical_source_set_id != source_set_id:
-        raise RawSourcePgError(
-            "MARKET_BREADTH_SOURCE_SET_INVALID", "source_set_id必须为规范UUID"
-        )
-    if not isinstance(package_sha256, str) or _SHA256.fullmatch(package_sha256) is None:
-        raise RawSourcePgError(
-            "MARKET_BREADTH_PACKAGE_SHA_INVALID", "必须显式提供完整小写包SHA-256"
+            "MARKET_BREADTH_QUERY_INVALID",
+            "市场宽度查询必须绑定截止日内的明确日期和完整包SHA",
         )
     if (
         not isinstance(session_window, (tuple, list))
@@ -1929,7 +1912,7 @@ def read_sealed_source_market_breadth_history(
     ):
         raise RawSourcePgError(
             "MARKET_BREADTH_SESSION_WINDOW_INVALID",
-            "必须提供截止日内t-4至t的五个相邻官方会话",
+            "必须提供截止日内t−4至t的五个相邻官方会话",
         )
 
     price_sessions = (
@@ -1938,129 +1921,69 @@ def read_sealed_source_market_breadth_history(
         session_window[3],
         session_window[4],
     )
-    source_set_columns = (
-        "namespace_id::text AS namespace_id",
-        "ingress_attempt_id::text AS ingress_attempt_id",
-        "target_session AS target_session",
-        "package_sha256 AS package_sha256",
-        "source_set_id::text AS source_set_id",
-        "revision_id AS revision_id",
-        "source_content_id AS source_content_id",
-        "source_capture_id::text AS source_capture_id",
-        "source_byte_count AS source_byte_count",
-        "parser_contract AS parser_contract",
-        "source_digest AS source_digest",
-        "source_raw_digest AS source_raw_digest",
-        "source_dataset_id AS source_dataset_id",
-        "capture_expected_row_count AS capture_expected_row_count",
-        "raw_row_count AS raw_row_count",
-        "target_present_count AS target_present_count",
-        "target_missing_count AS target_missing_count",
-        "read_failed_count AS read_failed_count",
-        "capture_read_started_at AS capture_read_started_at",
-        "capture_validated_at AS capture_validated_at",
-        "source_available_at AS source_available_at",
-        "source_time_quality AS source_time_quality",
-        "source_clock_role AS source_clock_role",
-        "price_unit_status AS price_unit_status",
-        "calendar_id AS calendar_id",
-        "calendar_revision AS calendar_revision",
-        "calendar_sha256 AS calendar_sha256",
-        "durability_status AS durability_status",
-        "commit_ack_observed_at AS commit_ack_observed_at",
-        "durable_at AS durable_at",
-        "durability_source_capture_id::text AS durability_source_capture_id",
-        "durability_source_digest AS durability_source_digest",
-        "seal_digest_sha256 AS seal_digest_sha256",
-        "seal_status AS seal_status",
-        "seal_writer_transaction_id AS seal_writer_transaction_id",
-        "sealed_at AS sealed_at",
-    )
-
     with _transaction(config, write=False) as (_connection, cursor, namespace_id):
-        cursor.execute(
-            f"SELECT {', '.join(source_set_columns)} FROM stock.source_sets "
-            "WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid "
-            "AND target_session=%s AND package_sha256=%s",
-            (namespace_id, source_set_id, target_session, package_sha256),
-        )
-        source_set_rows = [
-            dict(zip([item.name for item in cursor.description], row, strict=True))
-            for row in cursor.fetchall()
-        ]
-        if len(source_set_rows) != 1:
-            raise RawSourcePgError(
-                "MARKET_BREADTH_SOURCE_SET_NO_MATCH",
-                "PG中没有唯一匹配的namespace、目标日、source_set和包SHA",
-            )
-        source_set = source_set_rows[0]
-        if (
-            source_set["seal_status"] != "SEALED"
-            or source_set["source_set_id"] != source_set_id
-            or source_set["namespace_id"] != namespace_id
-            or source_set["target_session"] != target_session
-            or source_set["package_sha256"].strip() != package_sha256
-            or source_set["durability_status"] != "VERIFIED_POST_COMMIT_READBACK"
-            or source_set["source_dataset_id"] != _DATASET_ID
-            or source_set["seal_digest_sha256"] is None
-            or source_set["durability_source_capture_id"]
-            != source_set["source_capture_id"]
-            or source_set["durability_source_digest"] != source_set["source_digest"]
-            or source_set["raw_row_count"] != source_set["capture_expected_row_count"]
-            or source_set["raw_row_count"]
-            != source_set["target_present_count"]
-            + source_set["target_missing_count"]
-            + source_set["read_failed_count"]
-            or source_set["read_failed_count"] != 0
-            or source_set["commit_ack_observed_at"] is None
-            or source_set["durable_at"] is None
-            or source_set["sealed_at"] is None
-            or source_set["sealed_at"] < source_set["durable_at"]
-            or source_set["commit_ack_observed_at"] > source_set["durable_at"]
-        ):
-            raise RawSourcePgError(
-                "MARKET_BREADTH_SOURCE_SET_SEAL_INVALID",
-                "SEALED来源集合身份、封口摘要或行数分母不闭合",
-            )
-        if not 1 <= source_set["raw_row_count"] <= 5000:
-            raise RawSourcePgError(
-                "MARKET_BREADTH_SOURCE_LIMIT_EXCEEDED",
-                "来源集合不在现行完整保留容量内；拒绝截断或抽样",
-            )
-
         target_rows = _read_raw_rows(
             cursor, namespace_id, target_session, package_sha256
         )
+        if not target_rows:
+            raise RawSourcePgError(
+                "MARKET_BREADTH_SOURCE_VERSION_MISSING",
+                "PG中没有该日期和包SHA的Raw来源行",
+            )
         source_symbols = tuple(row["source_symbol"] for row in target_rows)
+        capture_ids = {str(row["source_capture_id"]) for row in target_rows}
+        content_ids = {str(row["source_content_id"]).strip() for row in target_rows}
+        if (
+            len(source_symbols) != len(set(source_symbols))
+            or tuple(sorted(source_symbols)) != source_symbols
+            or len(target_rows) > 5000
+            or len(capture_ids) != 1
+            or len(content_ids) != 1
+        ):
+            raise RawSourcePgError(
+                "MARKET_BREADTH_SOURCE_VERSION_AMBIGUOUS",
+                "目标日Raw来源行未形成唯一、有界的捕获版本",
+            )
+        capture_id = next(iter(capture_ids))
+        content_id = next(iter(content_ids))
+        capture = _read_capture(cursor, namespace_id, capture_id)
+        if capture is None:
+            raise RawSourcePgError(
+                "MARKET_BREADTH_CAPTURE_MISSING", "目标日Raw行缺少来源捕获记录"
+            )
+        cursor.execute(
+            """SELECT dataset_id, byte_sha, byte_count
+FROM stock.source_contents
+WHERE namespace_id=%s::uuid AND content_id=%s""",
+            (namespace_id, content_id),
+        )
+        content = cursor.fetchone()
+        if content is None:
+            raise RawSourcePgError(
+                "MARKET_BREADTH_CONTENT_MISSING", "目标日Raw行缺少来源内容记录"
+            )
+        dataset_id, byte_sha, byte_count = content
+        if (
+            capture.content_id != content_id
+            or capture.parser_contract != _PARSER_CONTRACT
+            or dataset_id != _DATASET_ID
+            or str(byte_sha).strip() != package_sha256
+            or capture.normalized_count != len(target_rows)
+            or _row_digest(target_rows) != capture.canonical_digest
+        ):
+            raise RawSourcePgError(
+                "MARKET_BREADTH_SOURCE_VERSION_INVALID",
+                "Raw行、捕获记录与来源包内容摘要不一致",
+            )
         target_status_counts = {
             status: sum(row["bar_status"] == status for row in target_rows)
             for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED")
         }
-        target_reference_errors = sum(
-            str(row["namespace_id"]) != namespace_id
-            or row["session_date"] != target_session
-            or row["package_sha256"].strip() != package_sha256
-            or str(row["source_capture_id"]) != source_set["source_capture_id"]
-            or row["source_content_id"] != source_set["source_content_id"]
-            for row in target_rows
-        )
-        target_raw_digest = _row_digest(target_rows)
-        if (
-            len(target_rows) != source_set["raw_row_count"]
-            or len(source_symbols) != len(set(source_symbols))
-            or target_reference_errors != 0
-            or target_status_counts["TARGET_PRESENT"]
-            != source_set["target_present_count"]
-            or target_status_counts["TARGET_MISSING"]
-            != source_set["target_missing_count"]
-            or target_status_counts["READ_FAILED"] != source_set["read_failed_count"]
-            or target_raw_digest != source_set["source_raw_digest"]
-        ):
+        if sum(target_status_counts.values()) != len(target_rows):
             raise RawSourcePgError(
-                "MARKET_BREADTH_SOURCE_SET_RAW_MISMATCH",
-                "目标日Raw行数、业务键、质量分区或封口SHA不一致",
+                "MARKET_BREADTH_BAR_STATUS_INVALID",
+                "Raw来源池包含未登记的Bar状态",
             )
-
         cursor.execute(
             f"SELECT {_RAW_SELECT} FROM stock.source_raw_daily "
             "WHERE namespace_id=%s::uuid AND source_symbol=ANY(%s::text[]) "
@@ -2075,31 +1998,49 @@ def read_sealed_source_market_breadth_history(
     expected_symbols = set(source_symbols)
     expected_sessions = set(price_sessions)
     history_keys = [(row["source_symbol"], row["session_date"]) for row in history_rows]
-    history_reference_errors = sum(
-        str(row["namespace_id"]) != namespace_id
-        or row["source_symbol"] not in expected_symbols
-        or row["session_date"] not in expected_sessions
-        or row["package_sha256"].strip() != package_sha256
-        or row["bar_status"] not in _BAR_STATUSES
-        for row in history_rows
-    )
     if (
         len(history_rows) > len(source_symbols) * len(price_sessions)
         or len(history_keys) != len(set(history_keys))
-        or history_reference_errors != 0
+        or any(
+            str(row["namespace_id"]) != namespace_id
+            or row["source_symbol"] not in expected_symbols
+            or row["session_date"] not in expected_sessions
+            or str(row["package_sha256"]).strip() != package_sha256
+            or row["bar_status"] not in _BAR_STATUSES
+            for row in history_rows
+        )
     ):
         raise RawSourcePgError(
             "MARKET_BREADTH_HISTORY_REFERENCE_INVALID",
             "同包SHA历史Raw行包含重复键或越界来源身份",
         )
 
-    output_source_set = {key: _db_scalar(value) for key, value in source_set.items()}
+    source_version = {
+        "namespace_id": namespace_id,
+        "target_session": target_session.isoformat(),
+        "package_sha256": package_sha256,
+        "source_content_id": content_id,
+        "source_capture_id": capture_id,
+        "source_dataset_id": dataset_id,
+        "source_byte_count": int(byte_count),
+        "parser_contract": capture.parser_contract,
+        "source_time_quality": capture.source_time_quality,
+        "source_available_at": _db_scalar(capture.source_available_at),
+        "capture_read_started_at": _db_scalar(capture.read_started_at),
+        "capture_validated_at": _db_scalar(capture.validated_at),
+        "source_clock_role": capture.source_clock_role,
+        "raw_row_count": len(target_rows),
+        "capture_expected_row_count": capture.normalized_count,
+        "target_status_counts": target_status_counts,
+        "capture_digest": capture.canonical_digest,
+        "observed_raw_digest": _row_digest(target_rows),
+    }
     observations = [
         {
             "namespace_id": str(row["namespace_id"]),
             "source_symbol": row["source_symbol"],
             "session_date": row["session_date"],
-            "package_sha256": row["package_sha256"].strip(),
+            "package_sha256": str(row["package_sha256"]).strip(),
             "raw_close": row["raw_close"],
             "price_quality": row["price_quality"],
             "price_reason": row["price_reason"],
@@ -2110,15 +2051,15 @@ def read_sealed_source_market_breadth_history(
     ]
     return {
         "namespace_id": namespace_id,
-        "source_set": output_source_set,
+        "source_version": source_version,
         "source_symbols": source_symbols,
         "target_raw_row_count": len(target_rows),
-        "target_raw_digest": target_raw_digest,
+        "target_raw_digest": source_version["observed_raw_digest"],
         "target_status_counts": target_status_counts,
         "price_sessions": tuple(price_sessions),
         "history_rows": observations,
         "history_row_count": len(observations),
-        "transaction": "REPEATABLE_READ_READ_ONLY",
+        "transaction": "REPEATABLE READ READ ONLY",
         "database_write_attempted": False,
         "ddl_executed": False,
         "dml_executed": False,
@@ -2708,6 +2649,135 @@ WHERE r.namespace_id=%s::uuid AND r.session_date=%s AND r.package_sha256=%s""",
         "ddl_executed": False,
         "source_zip_opened": False,
         "source_recalculated": False,
+    }
+
+
+def read_source_version_context(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    expected_namespace_id: str | None = None,
+) -> dict[str, Any]:
+    """按现存Raw、捕获和内容行读取一个明确来源版本，不依赖封口对象。"""
+    summary = read_raw_daily_readiness(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+    )
+    if summary.get("status") != "AVAILABLE":
+        return summary
+    if summary.get("version_status") != "CLOSED":
+        raise RawSourcePgError(
+            "SOURCE_VERSION_INCOMPLETE",
+            "明确日期与来源包SHA的Raw行尚未覆盖捕获时记录的来源代码数",
+        )
+    namespace_id = summary["namespace_id"]
+    if expected_namespace_id is not None:
+        try:
+            canonical_namespace_id = str(uuid.UUID(expected_namespace_id))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise RawSourcePgError(
+                "PG_NAMESPACE_ID_INVALID", "expected_namespace_id必须是UUID"
+            ) from error
+        if canonical_namespace_id != expected_namespace_id:
+            raise RawSourcePgError(
+                "PG_NAMESPACE_ID_INVALID", "expected_namespace_id必须为规范小写UUID"
+            )
+        if namespace_id != expected_namespace_id:
+            raise RawSourcePgError(
+                "SOURCE_NAMESPACE_MISMATCH", "Raw来源版本与请求命名空间不一致"
+            )
+
+    with _transaction(config, write=False) as (
+        _connection,
+        cursor,
+        connected_namespace,
+    ):
+        if connected_namespace != namespace_id:
+            raise RawSourcePgError(
+                "SOURCE_NAMESPACE_CHANGED", "读取来源版本期间PG命名空间发生变化"
+            )
+        cursor.execute(
+            """SELECT DISTINCT r.source_content_id, r.source_capture_id::text,
+       c.read_started_at, c.validated_at, c.source_available_at,
+       c.source_time_quality, c.source_clock_role, c.parser_contract,
+       c.canonical_digest, s.dataset_id, s.byte_sha, s.byte_count
+FROM stock.source_raw_daily r
+JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
+  AND c.capture_id=r.source_capture_id
+JOIN stock.source_contents s ON s.namespace_id=r.namespace_id
+  AND s.content_id=r.source_content_id
+WHERE r.namespace_id=%s::uuid AND r.session_date=%s AND r.package_sha256=%s
+ORDER BY r.source_capture_id::text, r.source_content_id
+LIMIT 2""",
+            (namespace_id, target_session, package_sha256),
+        )
+        versions = cursor.fetchall()
+    if len(versions) != 1:
+        raise RawSourcePgError(
+            "SOURCE_VERSION_AMBIGUOUS",
+            "指定日期与包SHA没有唯一捕获和内容引用",
+        )
+    (
+        source_content_id,
+        source_capture_id,
+        capture_started_at,
+        capture_validated_at,
+        source_available_at,
+        source_time_quality,
+        source_clock_role,
+        parser_contract,
+        capture_digest,
+        dataset_id,
+        byte_sha,
+        byte_count,
+    ) = versions[0]
+    if (
+        dataset_id != _DATASET_ID
+        or str(byte_sha).strip() != package_sha256
+        or source_available_at is not None
+        and source_time_quality != "VERIFIED_SOURCE_TIME"
+    ):
+        raise RawSourcePgError(
+            "SOURCE_VERSION_REFERENCE_INVALID",
+            "来源内容或捕获元数据与精确包SHA/可得时钟不一致",
+        )
+    return {
+        "status": "AVAILABLE",
+        "namespace_id": namespace_id,
+        "target_session": target_session.isoformat(),
+        "package_sha256": package_sha256,
+        "source_content_id": str(source_content_id).strip(),
+        "source_capture_id": source_capture_id,
+        "source_dataset_id": dataset_id,
+        "source_byte_count": int(byte_count),
+        "parser_contract": parser_contract,
+        "capture_digest": str(capture_digest).strip(),
+        "capture_started_at": _db_scalar(capture_started_at),
+        "capture_validated_at": _db_scalar(capture_validated_at),
+        "source_available_at": _db_scalar(source_available_at),
+        "source_time_quality": source_time_quality,
+        "source_clock_role": source_clock_role,
+        "raw_row_count": summary["stored_row_count"],
+        "capture_expected_row_count": summary["capture_expected_row_count"],
+        "bar_status_counts": summary["bar_status_counts"],
+        "price_qualities": summary["price_qualities"],
+        "amount_qualities": summary["amount_qualities"],
+        "amount_unit_statuses": summary["amount_unit_statuses"],
+        "volume_qualities": summary["volume_qualities"],
+        "volume_unit_statuses": summary["volume_unit_statuses"],
+        "version_status": "COMPLETE",
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "official_listing_universe_status": "UNKNOWN",
+        "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
+        "listing_status": "LISTING_STATUS_UNKNOWN",
+        "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "transaction": "REPEATABLE READ READ ONLY",
+        "database_write": False,
+        "ddl_executed": False,
     }
 
 

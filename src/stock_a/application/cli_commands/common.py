@@ -212,7 +212,7 @@ def _source_file_size(path: Path) -> int:
         ) from error
 
 
-def _parse_source_set_date(value: str) -> date:
+def _parse_session_date(value: str) -> date:
     if (
         not isinstance(value, str)
         or re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) is None

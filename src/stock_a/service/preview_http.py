@@ -18,13 +18,7 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
-from stock_a.application.snapshot_reuse import (
-    SnapshotChanged,
-    SnapshotReuse,
-    SnapshotWitnessUnavailable,
-)
-
-from stock_a.contracts import DayChainContractError, load_day_chain_contract
+from stock_a.contracts import PriceProfileContractError, load_price_profile_contract
 from stock_a.application.runtime_config import (
     DiagnosticError,
     _CONFIG_ROOT,
@@ -36,8 +30,7 @@ from stock_a.application.runtime_config import (
 from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.application.pg_research import (
     PgResearchBindingError,
-    bind_source_context_to_raw_rows,
-    read_sealed_source_context,
+    read_source_version_context,
 )
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
@@ -59,30 +52,18 @@ from stock_a.application.source_stock_change_context import (
 )
 from stock_a.application.source_d0_raw import (
     SourceD0RawError,
+    _official_calendar,
     query_source_d0_raw_launch,
 )
 from stock_a.application.source_tdx_sector_membership import (
     read_tdx_sector_symbol_membership,
 )
-from stock_a.application.source_ingress import (
-    SourceIngressError,
-    build_source_ingress_plan,
-)
-from stock_a.application.source_set_candidate import (
-    SourceSetCandidateApplicationError,
-    _official_calendar,
-)
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
     read_raw_daily_catalog,
     read_raw_daily_page,
-    read_raw_daily_readiness,
     read_raw_daily_stock,
     read_raw_daily_history_stock,
-)
-from stock_a.storage.postgres.source_set_candidate import (
-    SourceSetCandidatePgError,
-    read_source_set_candidate,
 )
 from stock_a.research import core as research_core
 from stock_a.research import entry as research_entry
@@ -95,7 +76,6 @@ from stock_a.research.raw_periods import (
 )
 
 
-from stock_a.service.readiness import build_chain_readiness_payload
 from stock_a.service.serialization import _json_value, canonical_sha
 from stock_a.service.static_assets import read_static_asset, static_asset_routes
 
@@ -108,9 +88,6 @@ _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _SYMBOL_SEARCH = re.compile(r"^[A-Za-z0-9.]{1,9}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
-_PROFILE_CONTRACT_NAME = "STOCK_A_DAY_CHAIN_R11"
-
-
 # 只登记运行代码当前实际提供的能力边界。阶段名称、输入、产物和消费者始终来自机器合同。
 
 
@@ -133,15 +110,9 @@ def _source_context_preview_error(error: Exception) -> PreviewHttpError | None:
         "SECTOR_SNAPSHOT_UUID_INVALID",
         "SECTOR_SNAPSHOT_IDS_NOT_DISTINCT",
         "DEV_NAMESPACE_INVALID",
-        "P04_NAMESPACE_ID_INVALID",
-        "P04_SOURCE_SET_ID_INVALID",
+        "PG_RESEARCH_PROFILE_KEY_INVALID",
     }
-    if code in {
-        "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE",
-        "PG_RESEARCH_P04_SOURCE_SET_INVALID",
-    }:
-        status = 409
-    elif code.startswith("PG_"):
+    if code.startswith("PG_"):
         status = 503
     elif category == "ARGUMENT" or code in request_errors:
         status = 400
@@ -416,66 +387,15 @@ def _preview_source_context(
     target_raw_rows: Sequence[Mapping[str, Any]],
     expected_raw_row_count: int | None = None,
 ) -> dict[str, Any]:
-    """P03存在时精确绑定；不存在时只披露Raw查询身份并保留正式状态未知。"""
-    unavailable_code = None
-    try:
-        return read_sealed_source_context(
-            config,
-            target_session=target_session,
-            package_sha256=package_sha256,
-            namespace_id=namespace_id,
-            target_raw_rows=target_raw_rows,
-            expected_raw_row_count=expected_raw_row_count,
-        )
-    except PgResearchBindingError as error:
-        if error.code != "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE":
-            raise
-        unavailable_code = error.code
-    target_rows = [
-        row
-        for row in target_raw_rows
-        if row.get("session_date") == target_session
-        or row.get("session_date") == target_session.isoformat()
-    ]
-    if expected_raw_row_count is None and not target_rows:
-        raise PgResearchBindingError(
-            "PG_RESEARCH_TARGET_RAW_UNAVAILABLE",
-            "缺少精确目标日Raw行；不能创建来源代码研究上下文。",
-        )
-    if any(
-        row.get("package_sha256") != package_sha256
-        or (
-            row.get("namespace_id") is not None
-            and str(row.get("namespace_id")) != namespace_id
-        )
-        for row in target_rows
-    ):
-        raise PgResearchBindingError(
-            "PG_RESEARCH_RAW_IDENTITY_MISMATCH",
-            "目标日Raw行与显式namespace或包SHA不匹配。",
-        )
-    return {
-        "status": "UNKNOWN",
-        "target_session": target_session.isoformat(),
-        "package_sha256": package_sha256,
-        "namespace_id": namespace_id,
-        "source_set_id": None,
-        "revision_id": None,
-        "seal_status": "UNKNOWN_NO_P03_SOURCE_SET",
-        "durability_status": "UNKNOWN_NO_P04_READBACK",
-        "formal_source_set_status": "UNKNOWN",
-        "formal_source_set_reason": unavailable_code,
-        "source_content_id": None,
-        "source_capture_id": None,
-        "source_digest": None,
-        "source_raw_digest": None,
-        "raw_revalidation_proof_level": "UNKNOWN",
-        "target_raw_binding_count": len(target_rows),
-        "target_raw_binding_status": "EXACT_PG_RAW_QUERY_WITHOUT_P03_BINDING",
-        "database_write": False,
-        "ddl_executed": False,
-        "candidate_fallback": False,
-    }
+    """按Raw捕获事实绑定请求版本与当前返回行。"""
+    return read_source_version_context(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        namespace_id=namespace_id,
+        target_raw_rows=target_raw_rows,
+        expected_raw_row_count=expected_raw_row_count,
+    )
 
 
 class _PreviewState:
@@ -484,7 +404,6 @@ class _PreviewState:
             raise DiagnosticError("RESEARCH_CUTOFF_REQUIRED", "必须显式绑定研究截止日")
         self.research_cutoff = research_cutoff
         self.config, self.config_path = load_runtime_config()
-        self.source_watch_reuse = SnapshotReuse(self.config)
         services = self.config.get("services")
         development = (
             services.get("development") if isinstance(services, Mapping) else None
@@ -498,7 +417,7 @@ class _PreviewState:
             raise DiagnosticError(
                 "CONFIG_INVALID", "本机研究预览要求配置development服务为127.0.0.1:28766"
             )
-        self.profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+        self.profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
         self.profile_contract_sha256 = canonical_sha(self.profile_contract)
         self.core_source_sha256 = hashlib.sha256(
             Path(research_core.__file__).read_bytes()
@@ -517,7 +436,6 @@ class _PreviewState:
         session_count: int | None = None,
         session_start: str | None = None,
         calendar_revision: str | None = None,
-        source_set_id: str | None = None,
     ) -> dict[str, Any]:
         fields: dict[str, Any] = {
             "identity_type": "PREVIEW_SNAPSHOT_IDENTITY_NON_PIT",
@@ -529,7 +447,10 @@ class _PreviewState:
             "price_coordinate": "RAW_UNADJUSTED",
             "core_source_sha256": self.core_source_sha256,
             "research_entry_source_sha256": self.entry_source_sha256,
-            "profile_contract": _PROFILE_CONTRACT_NAME,
+            "profile_contract": (
+                f"{self.profile_contract['contract_id']}/"
+                f"{self.profile_contract['version']}"
+            ),
             "profile_contract_sha256": self.profile_contract_sha256,
         }
         if session_count is not None:
@@ -539,8 +460,6 @@ class _PreviewState:
                 "session_end": target_session,
                 "calendar_revision": calendar_revision,
             }
-        if source_set_id is not None:
-            fields["source_set_id"] = source_set_id
         return {**fields, "identity_sha256": canonical_sha(fields)}
 
 
@@ -568,12 +487,7 @@ class _BoundedHTTPServer(ThreadingHTTPServer):
         super().__init__(server_address, _PreviewHandler)
 
     def server_close(self) -> None:
-        try:
-            super().server_close()
-        finally:
-            reuse = getattr(self.state, "source_watch_reuse", None)
-            if reuse is not None:
-                reuse.close()
+        super().server_close()
 
     def process_request(self, request: socket.socket, client_address: Any) -> None:
         if not self._request_slots.acquire(blocking=False):
@@ -688,18 +602,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             self._error(error)
             return
         if isinstance(error, PgResearchBindingError):
-            if error.code in {
-                "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE",
-                "PG_RESEARCH_P04_SOURCE_SET_INVALID",
-                "P04_NAMESPACE_MISMATCH",
-                "P04_SOURCE_SET_KEY_MISMATCH",
-            }:
+            if error.code.endswith("MISMATCH") or error.code.endswith("AMBIGUOUS"):
                 status = 409
-            elif error.code in {
-                "P04_NAMESPACE_ID_INVALID",
-                "P04_SOURCE_SET_ID_INVALID",
-            }:
+            elif error.code.endswith("INVALID"):
                 status = 400
+            elif error.code.endswith("UNAVAILABLE") or error.code.endswith("MISSING"):
+                status = 404
             else:
                 status = 503
             self._error(PreviewHttpError(status, error.code, str(error)))
@@ -750,15 +658,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 status = 503
             self._error(PreviewHttpError(status, error.code, str(error)))
             return
-        if isinstance(error, SourceSetCandidatePgError):
-            self._error(PreviewHttpError(503, error.code, str(error)))
-            return
         if isinstance(error, DiagnosticError):
             status = 400 if error.code.endswith("INVALID") else 503
             self._error(PreviewHttpError(status, error.code, str(error)))
             return
         if isinstance(
-            error, (DayChainContractError, research_entry.ResearchEntryError)
+            error, (PriceProfileContractError, research_entry.ResearchEntryError)
         ):
             code = getattr(error, "code", "PREVIEW_CONTRACT_UNAVAILABLE")
             status = (
@@ -773,7 +678,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         route = str(getattr(self, "path", "")).split("?", 1)[0]
         known_routes = {
             "/api/preview/catalog",
-            "/api/preview/chain-readiness",
             "/api/preview/raw",
             "/api/preview/source-launch-watch",
             "/api/preview/source-page",
@@ -945,11 +849,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     scenario="LAUNCH_CONFIRM",
                     action="changes",
                     before_session=before_session,
-                    before_source_set_id=source_set_before,
                     before_package_sha256=package_sha256,
                     target_session=target_session,
                     research_cutoff=research_cutoff,
-                    source_set_id=source_set_after,
                     package_sha256=package_sha256,
                     transition="ALL",
                     offset=0,
@@ -998,19 +900,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "FALSE_TO_TRUE集合未闭合到完整九态转移计数",
                 )
             if (
-                changes.get("before", {}).get("source_set", {}).get("source_set_id")
-                != source_set_before
-                or changes.get("after", {}).get("source_set", {}).get("source_set_id")
-                != source_set_after
-                or changes.get("before", {}).get("source_set", {}).get("package_sha256")
+                changes.get("before", {})
+                .get("source_version", {})
+                .get("package_sha256")
                 != package_sha256
-                or changes.get("after", {}).get("source_set", {}).get("package_sha256")
+                or changes.get("after", {})
+                .get("source_version", {})
+                .get("package_sha256")
                 != package_sha256
             ):
                 raise PreviewHttpError(
                     409,
                     "SOURCE_LAUNCH_WATCH_SOURCE_IDENTITY_MISMATCH",
-                    "D0实际source_set或package与请求不一致",
+                    "D0实际Raw来源键或包SHA与请求不一致",
                 )
             if (
                 changes.get("before", {}).get("namespace_id") != namespace_id
@@ -1096,125 +998,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             key: actual_calendar[key]
             for key in ("calendar_id", "calendar_revision", "calendar_sha256")
         }
-        reuse_key = (
-            namespace_id,
-            before_session,
-            target_session,
-            research_cutoff,
-            source_set_before,
-            source_set_after,
-            package_sha256,
-            industry_snapshot_id,
-            concept_snapshot_id,
-            calendar_revision,
-            tuple(sorted(calendar_identity.items())),
-        )
-
-        def resolved_watch_identity(result: Any) -> str:
-            changes, complete = result[:2]
-            endpoints = []
-            expected = (
-                ("before", before_session, source_set_before),
-                ("after", target_session, source_set_after),
-            )
-            for side, session, expected_set in expected:
-                endpoint = changes[side]
-                source = endpoint["source_set"]
-                calendar = endpoint["official_calendar"]
-                if (
-                    endpoint.get("target_session") != session.isoformat()
-                    or endpoint.get("namespace_id") != namespace_id
-                    or source.get("source_set_id") != expected_set
-                    or source.get("package_sha256") != package_sha256
-                    or type(source.get("revision_id")) is not int
-                    or source["revision_id"] < 1
-                    or source.get("seal_status") != "SEALED"
-                    or endpoint.get("session_contract") != "D0_SESSION_R2"
-                    or not endpoint.get("algorithm_contract")
-                    or calendar != calendar_identity
-                    or not re.fullmatch(
-                        r"[0-9a-f]{64}", str(calendar.get("calendar_sha256", ""))
-                    )
-                    or source.get("calendar_id") != calendar.get("calendar_id")
-                    or source.get("calendar_revision")
-                    != calendar.get("calendar_revision")
-                    or source.get("calendar_sha256") != calendar.get("calendar_sha256")
-                    or not source.get("source_content_id")
-                    or not source.get("source_capture_id")
-                    or not source.get("parser_contract")
-                    or not re.fullmatch(
-                        r"[0-9a-f]{64}", str(source.get("source_raw_digest", ""))
-                    )
-                    or not re.fullmatch(
-                        r"[0-9a-f]{64}", str(source.get("source_digest", ""))
-                    )
-                ):
-                    raise ValueError("来源观察缓存缺少完整的端点版本身份")
-                endpoints.append(
-                    {
-                        "source": source,
-                        "calendar": calendar,
-                        "session_contract": endpoint["session_contract"],
-                        "algorithm_contract": endpoint["algorithm_contract"],
-                    }
-                )
-            snapshots = complete["membership_snapshots"]
-            if len(snapshots) != 2 or {
-                (item.get("snapshot_id"), item.get("board_kind")) for item in snapshots
-            } != {(industry_snapshot_id, "INDUSTRY"), (concept_snapshot_id, "CONCEPT")}:
-                raise ValueError("来源观察缓存缺少两类精确板块快照")
-            if any(
-                not re.fullmatch(
-                    r"[0-9a-f]{64}", str(item.get("source_file_sha256", ""))
-                )
-                for item in snapshots
-            ):
-                raise ValueError("来源观察缓存缺少板块来源摘要")
-            if not changes.get("contract") or not changes.get("producer_version"):
-                raise ValueError("来源观察缓存缺少D0合同或生产版本")
-            return canonical_sha(
-                {
-                    "endpoints": endpoints,
-                    "snapshots": snapshots,
-                    "contract": changes["contract"],
-                    "producer_version": changes["producer_version"],
-                }
-            )
-
-        try:
-            (
-                (
-                    changes,
-                    complete,
-                    d0_reader_wall_seconds,
-                    membership_read_wall_seconds,
-                    aggregation_wall_seconds,
-                ),
-                cache_hit,
-            ) = self.preview_server.state.source_watch_reuse.get_or_build(
-                reuse_key, namespace_id, build_full_watch, resolved_watch_identity
-            )
-        except SnapshotChanged as error:
-            raise PreviewHttpError(
-                409,
-                "SOURCE_LAUNCH_WATCH_SNAPSHOT_CHANGED",
-                "来源观察期间数据库版本发生变化，请重新请求",
-            ) from error
-        except SnapshotWitnessUnavailable as error:
-            raise PreviewHttpError(
-                503,
-                "SOURCE_LAUNCH_WATCH_WITNESS_UNAVAILABLE",
-                "来源观察无法校验数据库快照，请稍后重试",
-            ) from error
+        (
+            changes,
+            complete,
+            d0_reader_wall_seconds,
+            membership_read_wall_seconds,
+            aggregation_wall_seconds,
+        ) = build_full_watch()
+        cache_hit = False
         transition_counts = changes["transition_counts"]
         stocks = complete["stocks"]
         boards = complete["boards"]
-        if cache_hit:
-            d0_reader_wall_seconds = 0.0
-            membership_read_wall_seconds = 0.0
-            aggregation_wall_seconds = 0.0
-            for endpoint in ("before", "after"):
-                changes[endpoint]["execution"] = None
         filtered = stocks
         if board_kind is not None and board_native_id is not None:
             filtered = [
@@ -1454,10 +1248,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_source_set_id",
                         "before_package_sha256",
                         "before_profile_revision",
-                        "after_source_set_id",
                         "after_package_sha256",
                         "after_profile_revision",
                         "offset",
@@ -1535,10 +1327,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_source_set_id",
                         "before_package_sha256",
                         "before_profile_revision",
-                        "after_source_set_id",
                         "after_package_sha256",
                         "after_profile_revision",
                         "relation_field",
@@ -1558,22 +1348,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 required = {
                     "before_session",
                     "after_session",
-                    "before_source_set_id",
                     "before_package_sha256",
                     "before_profile_revision",
-                    "after_source_set_id",
                     "after_package_sha256",
                     "after_profile_revision",
                     "relation_field",
-                    "transition_type",
-                    "offset",
-                    "limit",
                 }
                 if not required.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_RELATION_QUERY_REQUIRED",
-                        "RAW关系查询必须绑定前后完整画像身份、关系字段、转移类别和分页参数",
+                        "RAW关系查询必须绑定前后日期、包SHA、画像修订和关系字段",
                     )
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
@@ -1584,7 +1369,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     after_session, self.preview_server.state.research_cutoff
                 )
                 limit = _positive_int(
-                    _nonnegative_int(values["limit"], "limit", 100) or 0,
+                    _nonnegative_int(values.get("limit", "50"), "limit", 100) or 0,
                     "limit",
                     100,
                 )
@@ -1593,10 +1378,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     before_session=before_session,
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    offset=_nonnegative_int(values["offset"], "offset"),
+                    offset=_nonnegative_int(values.get("offset", "0"), "offset"),
                     limit=limit,
                     relation_field=values["relation_field"],
-                    transition_type=values["transition_type"],
+                    transition_type=values.get("transition_type", "ALL"),
                     ma20_direction=values.get("ma20_direction", "ALL"),
                     after_amount_ratio20_min=values.get("after_amount_ratio20_min"),
                     after_volume_ratio20_min=values.get("after_volume_ratio20_min"),
@@ -1609,10 +1394,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         if values.get("symbol")
                         else None
                     ),
-                    before_source_set_id=values["before_source_set_id"],
                     before_package_sha256=_sha(values["before_package_sha256"]),
                     before_profile_revision=_sha(values["before_profile_revision"]),
-                    after_source_set_id=values["after_source_set_id"],
                     after_package_sha256=_sha(values["after_package_sha256"]),
                     after_profile_revision=_sha(values["after_profile_revision"]),
                 )
@@ -1644,18 +1427,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 required = {
                     "before_session",
                     "after_session",
-                    "before_source_set_id",
                     "before_package_sha256",
                     "before_profile_revision",
-                    "after_source_set_id",
                     "after_package_sha256",
                     "after_profile_revision",
                 }
-                if set(values) != required:
+                if not required.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_BREADTH_QUERY_REQUIRED",
-                        "来源池广度必须精确提供前后日期、source_set、包SHA和画像修订",
+                        "来源池广度必须精确提供前后日期、包SHA和画像修订",
                     )
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
@@ -1670,10 +1451,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     before_session=before_session,
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    before_source_set_id=values["before_source_set_id"],
+                    before_source_set_id=values.get("before_source_set_id"),
                     before_package_sha256=_sha(values["before_package_sha256"]),
                     before_profile_revision=_sha(values["before_profile_revision"]),
-                    after_source_set_id=values["after_source_set_id"],
+                    after_source_set_id=values.get("after_source_set_id"),
                     after_package_sha256=_sha(values["after_package_sha256"]),
                     after_profile_revision=_sha(values["after_profile_revision"]),
                 )
@@ -1884,7 +1665,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 required = {
                     "target_session",
-                    "source_set_id",
                     "package_sha256",
                     "profile_revision",
                 }
@@ -1892,7 +1672,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_QUERY_REQUIRED",
-                        "画像查询必须显式绑定日期、source_set、包SHA和画像修订",
+                        "画像查询必须显式绑定日期、包SHA和画像修订",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
@@ -1910,7 +1690,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.config,
                     target_session=target,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    source_set_id=values["source_set_id"],
+                    source_set_id=values.get("source_set_id"),
                     package_sha256=package_sha,
                     profile_revision=values["profile_revision"],
                     offset=offset,
@@ -1957,104 +1737,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json(200, result)
                 return
-            if parsed.path == "/api/preview/chain-readiness":
-                values = _query(self.path, {"target_session", "package_sha256"})
-                if set(values) != {"target_session", "package_sha256"}:
-                    raise PreviewHttpError(
-                        400,
-                        "PREVIEW_QUERY_REQUIRED",
-                        "数据链准备状态必须显式提供目标日期和完整来源包SHA",
-                    )
-                target = _iso_date(values["target_session"])
-                _require_research_cutoff(
-                    target, self.preview_server.state.research_cutoff
-                )
-                package_sha = _sha(values["package_sha256"])
-                source_version = read_raw_daily_readiness(
-                    self.preview_server.state.config,
-                    target_session=target,
-                    package_sha256=package_sha,
-                )
-                source_candidate = read_source_set_candidate(
-                    self.preview_server.state.config,
-                    target_session=target,
-                    package_sha256=package_sha,
-                )
-                if source_version["status"] == "EMPTY":
-                    raise PreviewHttpError(
-                        404,
-                        "PG_SOURCE_NO_MATCH",
-                        "当前DEV namespace中没有该明确日期和来源包SHA的Raw来源版本",
-                    )
-                try:
-                    source_ingress_result = build_source_ingress_plan(
-                        self.preview_server.state.config,
-                        target_session=target,
-                        package_sha256=package_sha,
-                    )
-                except (
-                    SourceIngressError,
-                    SourceSetCandidateApplicationError,
-                ) as error:
-                    raise PreviewHttpError(
-                        409,
-                        "PREVIEW_SOURCE_INGRESS_UNAVAILABLE",
-                        f"来源准备状态无法核验：{error}",
-                    ) from error
-                p04_input = source_ingress_result.get("p01_capture", {}).get(
-                    "p04_input", {}
-                )
-                try:
-                    source_profile_observation = (
-                        read_source_symbol_price_profile_observation(
-                            self.preview_server.state.config,
-                            self.preview_server.state.profile_contract,
-                            target_session=target,
-                            package_sha256=package_sha,
-                            source_set=p04_input,
-                        )
-                    )
-                except PgPriceProfileError as error:
-                    source_profile_observation = {
-                        "status": "READ_FAILED",
-                        "reason_code": error.code,
-                        "target_session": target.isoformat(),
-                        "package_sha256": package_sha,
-                        "database_write": False,
-                        "ddl_executed": False,
-                    }
-                try:
-                    tdx_sector_observation = (
-                        read_latest_tdx_sector_snapshot_observation(
-                            self.preview_server.state.config,
-                            target_session=target,
-                            package_sha256=package_sha,
-                            source_profile=source_profile_observation,
-                        )
-                    )
-                except TdxSectorMembersApplicationError as error:
-                    tdx_sector_observation = {
-                        "status": "READ_FAILED",
-                        "reason_code": error.code,
-                        "target_session": target.isoformat(),
-                        "package_sha256": package_sha,
-                        "membership_mode": ("CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"),
-                        "snapshots": [],
-                        "database_write": False,
-                        "ddl_executed": False,
-                    }
-                checked_at = datetime.now().astimezone().isoformat(timespec="seconds")
-                payload = build_chain_readiness_payload(
-                    self.preview_server.state.profile_contract,
-                    source_version,
-                    checked_at=checked_at,
-                    source_set_candidate=source_candidate,
-                    source_ingress_result=source_ingress_result,
-                    source_profile_observation=source_profile_observation,
-                    tdx_sector_observation=tdx_sector_observation,
-                )
-                self._send_json(200, payload)
-                return
             if parsed.path == "/api/preview/raw":
                 values = _query(
                     self.path, {"target_session", "package_sha256", "symbol"}
@@ -2096,7 +1778,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     namespace_id=str(row["namespace_id"]),
                     target_session=target.isoformat(),
                     package_sha256=package_sha,
-                    source_set_id=source_context["source_set_id"],
                 )
                 self._send_json(
                     200,
@@ -2104,7 +1785,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "snapshot_identity": identity,
                         "raw": raw,
-                        "formal_source_set": source_context,
+                        "source_version": source_context,
                         "database_write": False,
                     },
                 )
@@ -2112,13 +1793,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/source-symbol/raw-periods":
                 values = _query(
                     self.path,
-                    {
-                        "target_session",
-                        "package_sha256",
-                        "symbol",
-                        "namespace_id",
-                        "source_set_id",
-                    },
+                    {"target_session", "package_sha256", "symbol", "namespace_id"},
                 )
                 self._raw_period_request_context = {
                     "target_session": values.get("target_session"),
@@ -2126,51 +1801,29 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "package_sha256": values.get("package_sha256"),
                     "price_coordinate": "RAW_UNADJUSTED",
                     "namespace_id": values.get("namespace_id"),
-                    "source_set_id": values.get("source_set_id"),
                     "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
                     "identity_status": "REQUEST_NOT_RESOLVED",
                 }
                 required = {"target_session", "package_sha256", "symbol"}
-                if set(values) != required:
-                    if not required.issubset(values):
-                        raise PreviewHttpError(
-                            400,
-                            "RAW_PERIOD_QUERY_REQUIRED",
-                            "RAW周期查询必须显式提供日期、完整SHA和来源代码",
-                        )
-                expected_namespace_id = None
-                expected_source_set_id = None
-                expected_source_set_bound = "source_set_id" in values
-                identity_fields = set(values) & {"namespace_id", "source_set_id"}
-                if identity_fields and identity_fields != {
-                    "namespace_id",
-                    "source_set_id",
+                if set(values) not in {
+                    frozenset(required),
+                    frozenset(required | {"namespace_id"}),
                 }:
                     raise PreviewHttpError(
                         400,
-                        "PREVIEW_SOURCE_IDENTITY_INVALID",
-                        "周期查询的namespace_id与source_set_id必须同时提供",
+                        "RAW_PERIOD_QUERY_REQUIRED",
+                        "RAW周期查询须提供日期、完整SHA、来源代码及可选namespace",
                     )
+                expected_namespace_id = None
                 if "namespace_id" in values:
                     try:
                         expected_namespace_id = str(UUID(values["namespace_id"]))
-                        if (
-                            expected_source_set_bound
-                            and values["source_set_id"] != "NONE"
-                        ):
-                            expected_source_set_id = str(UUID(values["source_set_id"]))
                     except (ValueError, TypeError, AttributeError) as error:
                         raise PreviewHttpError(
                             400,
                             "PREVIEW_SOURCE_IDENTITY_INVALID",
-                            "周期来源身份须使用有效的namespace_id和source_set_id",
+                            "周期来源身份须使用有效的namespace_id",
                         ) from error
-                elif "source_set_id" in values:
-                    raise PreviewHttpError(
-                        400,
-                        "PREVIEW_SOURCE_IDENTITY_INVALID",
-                        "周期source_set_id必须与namespace_id一并提供",
-                    )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
@@ -2202,26 +1855,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 if expected_namespace_id is not None and (
                     expected_namespace_id != history["namespace_id"]
-                    or (
-                        expected_source_set_bound
-                        and expected_source_set_id != source_context["source_set_id"]
-                    )
-                    or (
-                        expected_source_set_id is not None
-                        and source_context["status"] != "AVAILABLE"
-                    )
+                    or source_context["status"] != "AVAILABLE"
                 ):
                     self._raw_period_request_context.update(
                         {
                             "resolved_namespace_id": history["namespace_id"],
-                            "resolved_source_set_id": source_context["source_set_id"],
                             "identity_status": "REQUEST_IDENTITY_MISMATCH",
                         }
                     )
                     raise PreviewHttpError(
                         409,
                         "PREVIEW_SOURCE_IDENTITY_MISMATCH",
-                        "周期返回的namespace或SEALED source_set与所选来源上下文不一致",
+                        "周期返回的namespace或Raw来源键与请求不一致",
                     )
                 calendar_payload, _metadata, _year_revision, calendar_sessions = (
                     research_entry._load_calendar(target)
@@ -2236,11 +1881,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     session_dates=sessions,
                     history_rows=history["history_rows"],
                 )
-                foundation = self.preview_server.state.profile_contract.get(
-                    "scope_bindings", {}
-                ).get("FOUNDATION_EOD", {})
-                profile_rules = foundation.get("profile_expression_registry", {})
-                field_registry = foundation.get("field_registry", [])
+                profile_contract = self.preview_server.state.profile_contract
+                profile_rules = profile_contract.get("profile_expression_registry", {})
+                field_registry = profile_contract.get("field_registry", [])
                 trends = {
                     kind.lower(): evaluate_raw_period_trend(
                         kind=kind,
@@ -2283,7 +1926,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     session_count=len(sessions),
                     session_start=sessions[0].isoformat(),
                     calendar_revision=calendar_revision,
-                    source_set_id=source_context["source_set_id"],
                 )
                 self._send_json(
                     200,
@@ -2305,13 +1947,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "package_sha256": package_sha,
                         "namespace_id": history["namespace_id"],
                         "snapshot_identity": identity,
-                        "formal_source_set": source_context,
+                        "source_version": source_context,
                         "selection": {
                             "source_symbol": symbol,
                             "target_session": target.isoformat(),
                             "package_sha256": package_sha,
                             "namespace_id": history["namespace_id"],
-                            "source_set_id": source_context["source_set_id"],
                         },
                         "calendar_id": calendar_payload["calendar_id"],
                         "calendar_revision": calendar_revision,
@@ -2417,7 +2058,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     namespace_id=namespace_id,
                     target_session=target.isoformat(),
                     package_sha256=package_sha,
-                    source_set_id=source_context["source_set_id"],
                 )
                 self._send_json(
                     200,
@@ -2425,7 +2065,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "ok": True,
                         "snapshot_identity": identity,
                         "page": _page_public_fields(page),
-                        "formal_source_set": source_context,
+                        "source_version": source_context,
                     },
                 )
                 return
@@ -2524,39 +2164,38 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self._send_json(200, self._source_launch_watch(body))
                 return
             expected = {"symbol", "target_session", "package_sha256", "session_count"}
-            allowed_timeline = expected | {"source_set_id", "namespace_id"}
+            allowed_timeline = expected | {"namespace_id"}
             source_change_required = {
                 "include_source_change_context",
                 "before_session",
-                "before_source_set_id",
                 "before_package_sha256",
                 "industry_snapshot_id",
                 "concept_snapshot_id",
             }
             source_change_optional = {
+                "source_set_id",
+                "before_source_set_id",
+                "research_cutoff",
                 "before_profile_revision",
                 "after_profile_revision",
             }
+            has_before_profile_revision = (
+                isinstance(body, dict) and "before_profile_revision" in body
+            )
+            has_after_profile_revision = (
+                isinstance(body, dict) and "after_profile_revision" in body
+            )
             if (
                 post_path == "/api/preview/stock-timeline"
-                and isinstance(body, dict)
-                and bool(source_change_optional & set(body))
-                and not source_change_optional <= set(body)
+                and has_before_profile_revision != has_after_profile_revision
             ):
                 raise PreviewHttpError(
                     400,
                     "PREVIEW_PROFILE_REVISIONS_MUST_BE_PAIRED",
                     "before_profile_revision与after_profile_revision必须同时提供",
                 )
-            source_change_body = allowed_timeline | source_change_required
-            source_change_bodies = {
-                frozenset(source_change_body),
-                frozenset(source_change_body | source_change_optional),
-                frozenset(source_change_body | {"research_cutoff"}),
-                frozenset(
-                    source_change_body | source_change_optional | {"research_cutoff"}
-                ),
-            }
+            source_change_body = expected | {"namespace_id"} | source_change_required
+            source_change_allowed = source_change_body | source_change_optional
             valid_body = isinstance(body, dict) and (
                 set(body) == expected
                 or (
@@ -2565,14 +2204,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 or (
                     post_path == "/api/preview/stock-timeline"
-                    and frozenset(body) in source_change_bodies
+                    and source_change_body <= set(body) <= source_change_allowed
                 )
             )
             if not valid_body:
                 raise PreviewHttpError(
                     400,
                     "PREVIEW_BODY_FIELDS_INVALID",
-                    "请求体须包含symbol、target_session、package_sha256、session_count；轨迹可绑定source_set_id与namespace_id，并可显式启用单股变化上下文",
+                    "请求体须包含symbol、target_session、package_sha256、session_count；轨迹可绑定namespace_id，并可显式启用单股变化上下文",
                 )
             symbol = _symbol(body["symbol"])
             target_text = body["target_session"]
@@ -2580,7 +2219,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             _require_research_cutoff(target, self.preview_server.state.research_cutoff)
             package_sha = _sha(body["package_sha256"])
             session_count = _positive_int(body["session_count"], "session_count", 75)
-            source_change_opt_in = frozenset(body) in source_change_bodies
+            source_change_opt_in = source_change_required <= set(body)
             research_cutoff = self.preview_server.state.research_cutoff
             if source_change_opt_in and "research_cutoff" in body:
                 research_cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
@@ -2621,29 +2260,38 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "前后来源包SHA必须相同",
                     )
                 try:
-                    before_source_set_id = str(UUID(body["before_source_set_id"]))
+                    if "before_source_set_id" in body:
+                        before_source_set_id = str(UUID(body["before_source_set_id"]))
                     industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
                     concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
                 except (ValueError, TypeError, AttributeError) as error:
                     raise PreviewHttpError(
                         400,
                         "PREVIEW_SOURCE_CHANGE_ID_INVALID",
-                        "前日source_set及行业/概念快照ID须为有效UUID",
+                        "可选存量画像键及行业/概念快照ID须为有效UUID",
                     ) from error
                 if source_change_optional <= set(body):
                     before_profile_revision = _sha(body["before_profile_revision"])
                     after_profile_revision = _sha(body["after_profile_revision"])
             expected_source_set_id = None
             expected_namespace_id = None
-            if allowed_timeline <= set(body):
+            if "source_set_id" in body:
                 try:
                     expected_source_set_id = str(UUID(body["source_set_id"]))
+                except (ValueError, TypeError, AttributeError) as error:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_SOURCE_IDENTITY_INVALID",
+                        "存量画像来源键须使用有效source_set_id",
+                    ) from error
+            if "namespace_id" in body:
+                try:
                     expected_namespace_id = str(UUID(body["namespace_id"]))
                 except (ValueError, TypeError, AttributeError) as error:
                     raise PreviewHttpError(
                         400,
                         "PREVIEW_SOURCE_IDENTITY_INVALID",
-                        "轨迹来源身份须使用有效的source_set_id和namespace_id",
+                        "轨迹来源身份须使用有效namespace_id",
                     ) from error
             resolved_target, sessions, calendar_revision = resolve_pg_history_window(
                 target.isoformat(), session_count
@@ -2677,31 +2325,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_CHANGE_SESSIONS_NOT_ADJACENT",
                         "前后日期必须是同一日历版本中的相邻官方会话",
                     )
-            prevalidated_source_context = None
-            if (
-                post_path == "/api/preview/stock-timeline"
-                and expected_source_set_id is not None
-                and expected_namespace_id is not None
-            ):
-                try:
-                    prevalidated_source_context = read_sealed_source_context(
-                        self.preview_server.state.config,
-                        target_session=target,
-                        package_sha256=package_sha,
-                        namespace_id=expected_namespace_id,
-                        expected_source_set_id=expected_source_set_id,
-                    )
-                except PgResearchBindingError as error:
-                    if error.code == "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE":
-                        raise PreviewHttpError(
-                            409,
-                            "PREVIEW_SOURCE_IDENTITY_MISMATCH",
-                            "请求的source_set未通过精确P04封口核验；未读取单股行情",
-                        ) from error
-                    mapped = _source_context_preview_error(error)
-                    if mapped is None:
-                        raise
-                    raise mapped from error
             history = read_raw_daily_history_stock(
                 self.preview_server.state.config,
                 source_symbol=symbol,
@@ -2724,32 +2347,21 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     namespace_id=history["namespace_id"],
                     profile_contract=self.preview_server.state.profile_contract,
                 )
-                if prevalidated_source_context is not None:
-                    source_context = bind_source_context_to_raw_rows(
-                        prevalidated_source_context,
-                        target_session=target,
-                        package_sha256=package_sha,
-                        namespace_id=history["namespace_id"],
-                        source_set_id=expected_source_set_id,
-                        target_raw_rows=history["history_rows"],
-                    )
-                else:
-                    source_context = _preview_source_context(
-                        self.preview_server.state.config,
-                        target_session=target,
-                        package_sha256=package_sha,
-                        namespace_id=history["namespace_id"],
-                        target_raw_rows=history["history_rows"],
-                    )
+                source_context = _preview_source_context(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    package_sha256=package_sha,
+                    namespace_id=history["namespace_id"],
+                    target_raw_rows=history["history_rows"],
+                )
                 if expected_namespace_id is not None and (
                     expected_namespace_id != history["namespace_id"]
-                    or expected_source_set_id != source_context["source_set_id"]
                     or source_context["status"] != "AVAILABLE"
                 ):
                     raise PreviewHttpError(
                         409,
                         "PREVIEW_SOURCE_IDENTITY_MISMATCH",
-                        "轨迹返回的namespace或SEALED source_set与变化快照不一致",
+                        "轨迹返回的namespace或Raw来源键与变化快照不一致",
                     )
                 if source_change_opt_in:
                     try:
@@ -2769,7 +2381,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             research_cutoff=research_cutoff,
                             before_source_set_id=before_source_set_id,
                             before_package_sha256=before_package_sha,
-                            source_set_id=source_context["source_set_id"],
+                            source_set_id=expected_source_set_id,
                             package_sha256=package_sha,
                             symbol=symbol,
                             before_profile_revision=before_profile_revision,
@@ -2791,10 +2403,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     session_count=session_count,
                     session_start=sessions[0].isoformat(),
                     calendar_revision=calendar_revision,
-                    source_set_id=source_context["source_set_id"],
                 )
                 result["snapshot_identity"] = identity
-                result["formal_source_set"] = source_context
+                result["source_version"] = source_context
                 result["selection"] = {
                     "source_symbol": symbol,
                     "target_session": target.isoformat(),
@@ -2802,7 +2413,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "session_count": session_count,
                     "calendar_revision": calendar_revision,
                     "namespace_id": history["namespace_id"],
-                    "source_set_id": source_context["source_set_id"],
                 }
                 relation_history = result.get("price_relation_history")
                 if isinstance(relation_history, dict):
@@ -2819,9 +2429,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     if isinstance(binding, dict):
                         binding.update(
                             {
-                                "source_set_id": source_context["source_set_id"],
-                                "source_set_revision": source_context["revision_id"],
-                                "source_set_status": source_context["status"],
+                                "source_capture_id": source_context[
+                                    "source_capture_id"
+                                ],
+                                "source_content_id": source_context[
+                                    "source_content_id"
+                                ],
+                                "package_sha256": package_sha,
                             }
                         )
                 self._send_json(200, result)
@@ -2853,10 +2467,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 session_count=session_count,
                 session_start=sessions[0].isoformat(),
                 calendar_revision=calendar_revision,
-                source_set_id=source_context["source_set_id"],
             )
             result["snapshot_identity"] = identity
-            result["formal_source_set"] = source_context
+            result["source_version"] = source_context
             result["selection"] = {
                 "source_symbol": symbol,
                 "target_session": target.isoformat(),
@@ -2895,7 +2508,7 @@ def run_preview_server(
     try:
         state = _PreviewState(research_cutoff=research_cutoff)
         server = _BoundedHTTPServer((_HOST, _PORT), state)
-    except (OSError, DiagnosticError, DayChainContractError) as error:
+    except (OSError, DiagnosticError, PriceProfileContractError) as error:
         print(f"预览服务未启动：{type(error).__name__}。", file=sys.stderr)
         return _EXIT_UNAVAILABLE
     print(

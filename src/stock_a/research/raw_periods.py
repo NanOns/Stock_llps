@@ -486,7 +486,6 @@ def evaluate_raw_period_trend(
     diagnostic_definition.update(
         {
             "field_id": diagnostic_input_id,
-            "producer_stage": "R02_NON_PIT_RAW_RESEARCH",
             "producer_symbol": diagnostic_producer,
             "value_type": "closed_prices",
             "unit": "RAW_UNADJUSTED_OHLC",
@@ -497,7 +496,7 @@ def evaluate_raw_period_trend(
                 "context.target_session",
                 "context.source_cutoff",
                 "context.calendar_ref",
-                "context.sealed_actions_revision",
+                "context.action_revision",
                 "context.coordinate_contract_version",
             ],
         }
@@ -576,7 +575,7 @@ def evaluate_raw_period_trend(
         "context.target_session": target_session,
         "context.source_cutoff": target_session.isoformat(),
         "context.calendar_ref": f"{calendar_id}:{calendar_revision}",
-        "context.sealed_actions_revision": "UNKNOWN_ACTION_SELECTION_NOT_BOUND",
+        "context.action_revision": "UNKNOWN_ACTION_SELECTION_NOT_BOUND",
         "context.coordinate_contract_version": "RAW_UNADJUSTED_NON_PIT_DIAGNOSTIC_R1",
     }
     field_value = ClosedPrices(
@@ -591,7 +590,6 @@ def evaluate_raw_period_trend(
         field_id=diagnostic_input_id,
         field=FieldValue(field_value),
         unit=diagnostic_definition["unit"],
-        producer_stage=diagnostic_definition["producer_stage"],
         producer_symbol=diagnostic_producer,
         producer_source_sha256=producer_source_sha256,
         expression_ref=diagnostic_definition["expression_ref"],

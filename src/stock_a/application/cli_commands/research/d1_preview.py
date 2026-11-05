@@ -4,11 +4,9 @@ from __future__ import annotations
 
 import argparse
 import re
-import uuid
 from stock_a.contracts import (
-    DAY_CHAIN_MODULES,
-    DayChainContractError,
-    load_day_chain_contract,
+    PriceProfileContractError,
+    load_price_profile_contract,
 )
 from stock_a.storage.postgres.source_raw import (
     RAW_DAILY_APPEND_TASK_SCOPES,
@@ -20,21 +18,13 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_history_page,
     read_raw_daily_history_stock,
     read_raw_daily_stock,
-    read_sealed_source_market_breadth_history,
 )
 from stock_a.application.source_d1_support_changes import (
     discover_source_d1_support_changes,
 )
-from stock_a.application.source_set_candidate import (
-    SourceSetCandidateApplicationError,
-    _official_calendar,
-    persist_source_set_candidate,
-    prepare_source_set_candidate,
-    read_source_set_candidate,
-)
 from stock_a.application.pg_research import (
     PgResearchBindingError,
-    read_sealed_source_context,
+    read_source_version_context,
 )
 from stock_a.research.entry import (
     CompareBudget,
@@ -68,7 +58,7 @@ from stock_a.application.research_window import (
     resolve_pg_history_window as _pg_history_window,
 )
 
-from stock_a.application.cli_commands.common import _emit, _parse_source_set_date
+from stock_a.application.cli_commands.common import _emit, _parse_session_date
 from stock_a.application.cli_commands.research.d1_discovery import (
     _discover_source_d1_support_cohort,
     _discover_source_d1_true,
@@ -76,8 +66,8 @@ from stock_a.application.cli_commands.research.d1_discovery import (
 
 
 def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
-    target = _parse_source_set_date(args.target_session)
-    cutoff = _parse_source_set_date(args.research_cutoff)
+    target = _parse_session_date(args.target_session)
+    cutoff = _parse_session_date(args.research_cutoff)
     if target > cutoff:
         raise DiagnosticError(
             "D1_BREAKOUT_DATE_AFTER_CUTOFF",
@@ -90,21 +80,6 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             "必须提供完整64位小写package SHA-256",
             _EXIT_ARGUMENT,
         )
-    try:
-        canonical_source_set_id = str(uuid.UUID(args.source_set_id))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise DiagnosticError(
-            "D1_BREAKOUT_SOURCE_SET_ID_INVALID",
-            "source_set_id必须为规范UUID",
-            _EXIT_ARGUMENT,
-        ) from error
-    if canonical_source_set_id != args.source_set_id:
-        raise DiagnosticError(
-            "D1_BREAKOUT_SOURCE_SET_ID_INVALID",
-            "source_set_id必须为规范UUID",
-            _EXIT_ARGUMENT,
-        )
-
     history_mode = any(
         (args.history_start, args.history_end, args.history_last is not None)
     )
@@ -139,7 +114,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 "--support-anchor-session必须与--symbol及单股历史范围同时使用",
                 _EXIT_ARGUMENT,
             )
-        support_anchor = _parse_source_set_date(args.support_anchor_session)
+        support_anchor = _parse_session_date(args.support_anchor_session)
     if args.support_cohort_anchor_session is not None:
         if (
             args.only_true
@@ -153,9 +128,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 "来源批次支撑模式不可与--only-true、单代码、单股历史或其他状态筛选混用",
                 _EXIT_ARGUMENT,
             )
-        support_cohort_anchor = _parse_source_set_date(
-            args.support_cohort_anchor_session
-        )
+        support_cohort_anchor = _parse_session_date(args.support_cohort_anchor_session)
     if args.change_only and support_cohort_anchor is None:
         raise DiagnosticError(
             "D1_BREAKOUT_CHANGE_ONLY_SELECTION_INVALID",
@@ -239,7 +212,13 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
     history_sessions = ()
     event_window_start = None
     if discover_support_changes:
-        event_window_start = _parse_source_set_date(args.event_window_start)
+        if not isinstance(args.event_window_start, str):
+            raise DiagnosticError(
+                "D1_SUPPORT_DISCOVERY_WINDOW_INVALID",
+                "多历史变化发现必须提供事件窗口起始会话",
+                _EXIT_ARGUMENT,
+            )
+        event_window_start = _parse_session_date(args.event_window_start)
         if event_window_start not in sessions or event_window_start >= target:
             raise DiagnosticError(
                 "D1_SUPPORT_DISCOVERY_WINDOW_INVALID",
@@ -256,8 +235,8 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 )
             history_sessions = sessions[-args.history_last :]
         else:
-            start = _parse_source_set_date(args.history_start)
-            end = _parse_source_set_date(args.history_end)
+            start = _parse_session_date(args.history_start)
+            end = _parse_session_date(args.history_end)
             if (
                 start not in sessions
                 or end not in sessions
@@ -313,7 +292,6 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 cutoff,
                 sessions,
                 calendar_revision,
-                args.source_set_id,
                 args.package_sha256,
                 event_window_start,
                 offset,
@@ -329,7 +307,6 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 cutoff,
                 sessions,
                 calendar_revision,
-                args.source_set_id,
                 args.package_sha256,
                 support_cohort_anchor,
                 offset,
@@ -346,7 +323,6 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 cutoff,
                 sessions,
                 calendar_revision,
-                args.source_set_id,
                 args.package_sha256,
                 offset,
                 limit,
@@ -371,7 +347,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             for row in candidate["history_rows"]
             if row["session_date"] == target
         ]
-        source_context = read_sealed_source_context(
+        source_context = read_source_version_context(
             config,
             target_session=target,
             package_sha256=args.package_sha256,
@@ -379,11 +355,6 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             target_raw_rows=target_rows,
             expected_raw_row_count=page["version_row_count"],
         )
-        if source_context["source_set_id"] != args.source_set_id:
-            raise PgResearchBindingError(
-                "D1_BREAKOUT_SOURCE_SET_ID_MISMATCH",
-                "指定source_set_id与目标日精确SEALED来源集合不一致",
-            )
         if (
             page["version_status"] != "CLOSED"
             or not page["partition_closed"]
@@ -394,39 +365,20 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
         ):
             raise PgResearchBindingError(
                 "D1_BREAKOUT_SOURCE_POOL_NOT_CLOSED",
-                "目标日来源池与精确SEALED分母未闭合，拒绝生成谓词结果",
+                "目标日来源池与Raw捕获分母未闭合，拒绝生成谓词结果",
             )
 
-        profile_contract = load_day_chain_contract(_CONFIG_ROOT).document
+        profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
+        calendar_payload, calendar_metadata, _, _ = _load_calendar(target)
+        target_calendar_metadata = next(
+            item for item in calendar_metadata if item["year"] == target.year
+        )
+        official_calendar = {
+            "calendar_id": calendar_payload["calendar_id"],
+            "calendar_revision": calendar_payload["revision"],
+            "calendar_sha256": target_calendar_metadata["resource_sha256"],
+        }
         if history_mode:
-            from stock_a.storage.postgres.source_set_ingress import (
-                read_p04_source_input,
-            )
-
-            sealed = read_p04_source_input(
-                config, target_session=target, package_sha256=args.package_sha256
-            )
-            if (
-                sealed.get("status") != "AVAILABLE"
-                or sealed.get("source_set_id") != source_context["source_set_id"]
-                or sealed.get("namespace_id") != source_context["namespace_id"]
-                or sealed.get("seal_status") != "SEALED"
-                or not sealed.get("sealed_at")
-            ):
-                raise PgResearchBindingError(
-                    "D1_BREAKOUT_SOURCE_CLOCK_MISMATCH",
-                    "来源封口时钟与精确来源集合不一致",
-                )
-            if support_anchor is not None:
-                official_calendar = _official_calendar(target)
-                if any(
-                    sealed.get(key) != official_calendar[key]
-                    for key in ("calendar_id", "calendar_revision", "calendar_sha256")
-                ):
-                    raise PgResearchBindingError(
-                        "D1_BREAKOUT_SUPPORT_CALENDAR_MISMATCH",
-                        "支撑历史来源封口与当前版本化官方日历身份、修订或摘要不一致",
-                    )
             candidate = page["candidates"][0]
             rows = candidate["history_rows"]
             points = []
@@ -490,6 +442,12 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     )
             support_followup = None
             if support_anchor is not None:
+                if not isinstance(source_symbol, str):
+                    raise DiagnosticError(
+                        "D1_BREAKOUT_SUPPORT_SELECTION_INVALID",
+                        "支撑跟踪必须绑定单个来源代码",
+                        _EXIT_ARGUMENT,
+                    )
                 support_followup = research_stock_pg_support_followup_preview(
                     symbol=source_symbol,
                     target_session=target,
@@ -498,9 +456,8 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     requested_sessions=history_sessions,
                     history_points=support_history_points,
                     package_sha256=args.package_sha256,
-                    source_set_id=args.source_set_id,
                     source_context=source_context,
-                    sealed_source=sealed,
+                    official_calendar=official_calendar,
                 )
             _emit(
                 {
@@ -516,9 +473,12 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     "research_cutoff": cutoff.isoformat(),
                     "calendar_revision": calendar_revision,
                     "source": source_context,
-                    "source_capture_started_at": sealed.get("capture_read_started_at"),
-                    "source_capture_validated_at": sealed.get("capture_validated_at"),
-                    "source_sealed_at": sealed.get("sealed_at"),
+                    "source_capture_started_at": source_context.get(
+                        "capture_read_started_at"
+                    ),
+                    "source_capture_validated_at": source_context.get(
+                        "capture_validated_at"
+                    ),
                     "n_total": len(points),
                     "n_true": counts["TRUE"],
                     "n_false": counts["FALSE"],
@@ -575,7 +535,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             error=True,
         )
         return _EXIT_UNAVAILABLE
-    except (DayChainContractError, ResearchEntryError) as error:
+    except (PriceProfileContractError, ResearchEntryError) as error:
         _emit(
             {
                 "ok": False,
@@ -649,13 +609,11 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
         "calendar_revision": calendar_revision,
         "package_sha256": args.package_sha256,
         "namespace_id": source_context["namespace_id"],
-        "source_set_id": source_context["source_set_id"],
-        "source_set_status": source_context["seal_status"],
         "source_time_quality": source_context["source_time_quality"],
         "source_available_at": source_context["source_available_at"],
-        "price_unit_status": source_context["price_unit_status"],
-        "amount_unit_status": source_context["amount_unit_status"],
-        "volume_unit_status": source_context["volume_unit_status"],
+        "price_qualities": source_context["price_qualities"],
+        "amount_unit_statuses": source_context["amount_unit_statuses"],
+        "volume_unit_statuses": source_context["volume_unit_statuses"],
         "source_pool_actual_total": source_context["raw_row_count"],
         "page": {
             "offset": offset,

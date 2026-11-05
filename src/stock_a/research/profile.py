@@ -35,12 +35,11 @@ class WindowIdentity:
 
 @dataclass(frozen=True)
 class ProfileInput:
-    """Core/上游字段值及其可核验的生产身份与上下文。"""
+    """Core/上游字段值及其计算身份与上下文。"""
 
     field_id: str
     field: FieldValue
     unit: str
-    producer_stage: str
     producer_symbol: str
     producer_source_sha256: str
     expression_ref: str
@@ -63,11 +62,7 @@ class RuntimeProducerBinding:
 
 @dataclass(frozen=True)
 class ProfileHandoff:
-    """画像纯内核的输入集合及调用方声明的比较期望。
-
-    此对象本身不证明来源可信。生产准入必须来自独立验证过的FOUNDATION选择器；
-    该选择器尚未实现，故 profile() 生产入口当前一律阻断。
-    """
+    """画像求值的输入集合、目标日期和比较窗口。"""
 
     inputs: Mapping[str, ProfileInput]
     target_session: date
@@ -164,8 +159,7 @@ def validate_profile_handoff(
         producer_symbol = expected.get("producer_symbol")
         runtime_producer = handoff.runtime_producers.get(producer_symbol)
         if (
-            not expected.get("producer_stage")
-            or not isinstance(producer_symbol, str)
+            not isinstance(producer_symbol, str)
             or not isinstance(runtime_producer, RuntimeProducerBinding)
             or runtime_producer.symbol != producer_symbol
             or not isinstance(runtime_producer.source_sha256, str)
@@ -184,7 +178,6 @@ def validate_profile_handoff(
             )
         exact = {
             "unit": expected.get("unit"),
-            "producer_stage": expected.get("producer_stage"),
             "producer_symbol": producer_symbol,
             "producer_source_sha256": runtime_producer.source_sha256,
             "expression_ref": expected.get("expression_ref"),
@@ -478,7 +471,7 @@ def evaluate_profile_kernel(
     rules: Mapping,
     field_registry: list[Mapping],
 ) -> FieldValue:
-    """执行可独立验证的纯画像规则；不构成生产准入或可信身份证明。"""
+    """执行字段合同定义的纯画像规则，保留输入质量与缺失原因。"""
     rule = _rule_for(field_id, rules)
     _validate_rule(rule)
     inputs = validate_profile_handoff(field_id, handoff, rules, field_registry)
@@ -647,15 +640,8 @@ def profile(
     rules: Mapping,
     field_registry: list[Mapping],
 ) -> FieldValue:
-    """生产画像入口；可信FOUNDATION选择器未实现时先拒绝全部生产求值。"""
-    rule = _rule_for(field_id, rules)
-    _validate_rule(rule)
-    # 先执行可独立核验的合同拒绝，避免重复registry、缺producer等错误被遮蔽。
-    # 这些比较只验证结构一致性；同一调用方仍可同时伪造输入和期望身份。
-    validate_profile_handoff(field_id, handoff, rules, field_registry)
-    raise ContractError(
-        "生产画像准入阻断：可信FOUNDATION选择器及已验证行选择结果尚未实现"
-    )
+    """按画像字段合同求值；来源身份与时间质量保留在各输入字段上。"""
+    return evaluate_profile_kernel(field_id, handoff, rules, field_registry)
 
 
 def closed_prices_from_period_bars(
@@ -855,7 +841,7 @@ def evaluate_closed_period_trend(
         raise ContractError("闭合周期生产者符号缺失")
     if not all(
         isinstance(definition.get(name), str) and definition[name]
-        for name in ("unit", "producer_stage", "expression_ref", "parameter_version")
+        for name in ("unit", "expression_ref", "parameter_version")
     ):
         raise ContractError("闭合周期输入缺少字段、参数或版本合同")
     revisions = {
@@ -892,14 +878,13 @@ def evaluate_closed_period_trend(
         "context.target_session": target_session,
         "context.source_cutoff": source_cutoff,
         "context.calendar_ref": next(iter(calendar_refs)),
-        "context.sealed_actions_revision": selected[-1].action_revision,
+        "context.action_revision": selected[-1].action_revision,
         "context.coordinate_contract_version": coordinate_contract_version,
     }
     supplied = ProfileInput(
         field_id=period_field_id,
         field=period_value,
         unit=definition["unit"],
-        producer_stage=definition["producer_stage"],
         producer_symbol=producer_symbol,
         producer_source_sha256=producer_source_sha256,
         expression_ref=definition["expression_ref"],

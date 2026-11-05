@@ -76,66 +76,38 @@
     "contract": "STOCK-A-CONFIGURATION-POLICY/R1",
     "root": "G:/codex work/Stock A/config",
     "root_only": true,
+    "test_configuration_or_fixture_allowed": false,
+    "unknown_files": "REJECT",
     "public_files": [
       {
         "path": "runtime.defaults.json",
         "role": "BUSINESS_RUNTIME_CONFIGURATION",
         "contract": "STOCK-A-RUNTIME-DEFAULTS/R9",
-        "consumer": "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official; SOURCE_INGRESS P00/P02 reads source_policy.baostock_supplement"
+        "consumer": "application startup / configuration resolver; source-vipdata reads source_policy.vipdata_official; single-stock research reads source_policy.baostock_supplement"
       },
       {
-        "path": "contracts/day-chain.contract.json",
-        "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT",
-        "contract": "STOCK-A-DAY-CHAIN/R11",
-        "consumer": "stock_a.contracts.load_day_chain_contract（唯一入口清单）"
+        "path": "contracts/price-profile.contract.json",
+        "role": "BUSINESS_PARAMETER_CONTRACT",
+        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
+        "consumer": "stock_a.contracts.load_price_profile_contract（唯一入口清单）"
       },
       {
-        "path": "contracts/day-chain/pipeline.json",
-        "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R11",
-        "consumer": "stock_a.contracts.load_day_chain_contract（pipeline）"
+        "path": "contracts/price-profile/fields-source.json",
+        "role": "BUSINESS_PARAMETER_CONTRACT",
+        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
+        "consumer": "stock_a.contracts.load_price_profile_contract（fields-source）"
       },
       {
-        "path": "contracts/day-chain/fields-source.json",
-        "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R11",
-        "consumer": "stock_a.contracts.load_day_chain_contract（source fields）"
+        "path": "contracts/price-profile/fields-core.json",
+        "role": "BUSINESS_PARAMETER_CONTRACT",
+        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
+        "consumer": "stock_a.contracts.load_price_profile_contract（fields-core）"
       },
       {
-        "path": "contracts/day-chain/fields-core.json",
-        "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R11",
-        "consumer": "stock_a.contracts.load_day_chain_contract（Core fields）"
-      },
-      {
-        "path": "contracts/day-chain/fields-profile.json",
-        "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R11",
-        "consumer": "stock_a.contracts.load_day_chain_contract（cross/Profile rules）"
-      },
-      {
-        "path": "contracts/day-chain/fields-control.json",
-        "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R11",
-        "consumer": "stock_a.contracts.load_day_chain_contract（control fields）"
-      },
-      {
-        "path": "contracts/day-chain/research.json",
-        "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R11",
-        "consumer": "stock_a.contracts.load_day_chain_contract（research rules）"
-      },
-      {
-        "path": "contracts/day-chain/service.json",
-        "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R11",
-        "consumer": "stock_a.contracts.load_day_chain_contract（service contract）"
-      },
-      {
-        "path": "contracts/day-chain/policies.json",
-        "role": "BUSINESS_PIPELINE_DESIGN_CONTRACT_MODULE",
-        "contract": "STOCK-A-DAY-CHAIN/R11",
-        "consumer": "stock_a.contracts.load_day_chain_contract（policies）"
+        "path": "contracts/price-profile/fields-profile.json",
+        "role": "BUSINESS_PARAMETER_CONTRACT",
+        "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
+        "consumer": "stock_a.contracts.load_price_profile_contract（fields-profile）"
       }
     ],
     "private_files": {

@@ -70,23 +70,23 @@ def build_d0_launch_watch_membership_result(
             "D0_MEMBERSHIP_NAMESPACE_MISMATCH", "TDX成员namespace与D0来源不一致"
         )
 
-    before_set = before.get("source_set")
-    after_set = after.get("source_set")
+    before_version = before.get("source_version")
+    after_version = after.get("source_version")
     snapshots = membership_read.get("snapshots")
     memberships = membership_read.get("memberships")
     if (
-        not isinstance(before_set, Mapping)
-        or not isinstance(after_set, Mapping)
+        not isinstance(before_version, Mapping)
+        or not isinstance(after_version, Mapping)
         or not isinstance(snapshots, list)
         or not isinstance(memberships, list)
         or membership_read.get("membership_mode")
         != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-        or before_set.get("package_sha256") != after_set.get("package_sha256")
+        or before_version.get("package_sha256") != after_version.get("package_sha256")
         or before.get("namespace_id") != after.get("namespace_id")
     ):
         raise TdxSectorMembersApplicationError(
             "D0_MEMBERSHIP_SOURCE_IDENTITY_INVALID",
-            "TDX联接需要同namespace、同包的完整D0来源端点及后验快照",
+            "TDX联接需要同namespace、同包的完整D0 Raw端点及后验快照",
         )
 
     snapshot_by_id: dict[str, Mapping[str, Any]] = {}
@@ -319,7 +319,7 @@ def build_d0_launch_watch_membership_result(
             "target_session": target_session,
             "research_cutoff": after.get("research_cutoff"),
             "namespace_id": after.get("namespace_id"),
-            "package_sha256": after_set.get("package_sha256"),
+            "package_sha256": after_version.get("package_sha256"),
             "global_new_stock_count": len(ft_symbols),
             "global_unique_source_symbol_count": len(ft_symbols),
             "mapped_distinct_source_symbol_count": mapped_count,

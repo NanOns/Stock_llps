@@ -5,10 +5,6 @@ from __future__ import annotations
 from hashlib import sha256
 from pathlib import Path
 from stock_a.research.entry_core.comparison import research_compare
-from stock_a.research.entry_context.contracts import (
-    FoundationTypedFieldHandoff,
-    FoundationTypedHandoff,
-)
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.windows import (
     CompareBudget,
@@ -39,10 +35,8 @@ from stock_a.research.entry_history.universe_history import (
 _IMPLEMENTATION_MODULES = (
     "stock_a.research.entry_core.comparison",
     "stock_a.research.entry_core.fields",
-    "stock_a.research.entry_context.contracts",
     "stock_a.research.entry_context.errors",
     "stock_a.research.entry_context.windows",
-    "stock_a.research.entry_core.foundation",
     "stock_a.research.entry_history.history_preview",
     "stock_a.research.entry_history.history_timeline",
     "stock_a.research.entry_core.profile_preview",
@@ -72,8 +66,6 @@ def implementation_source_sha256() -> str:
 
 __all__ = [
     "CompareBudget",
-    "FoundationTypedFieldHandoff",
-    "FoundationTypedHandoff",
     "ResearchEntryError",
     "UniverseDiscoveryBudget",
     "_load_calendar",

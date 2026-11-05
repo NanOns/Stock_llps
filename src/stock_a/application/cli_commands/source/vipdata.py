@@ -45,7 +45,6 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_history_page,
     read_raw_daily_history_stock,
     read_raw_daily_stock,
-    read_sealed_source_market_breadth_history,
 )
 from stock_a.research.entry import (
     CompareBudget,
@@ -720,7 +719,7 @@ def _consume_source_vipdata_inner(
                 "raw_availability": consumer["raw_availability"],
                 "core_availability": consumer["core_availability"],
                 "canonical_selection": consumer.get("canonical_selection"),
-                "status_semantics": "NON_PIT_RETROSPECTIVE；不代表官方身份、来源封口、PG接受或生产准入",
+                "status_semantics": "NON_PIT_RETROSPECTIVE；不代表官方实体身份或历史可用时钟",
             }
         except (
             VipdataError,

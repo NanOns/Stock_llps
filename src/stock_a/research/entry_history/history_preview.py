@@ -776,7 +776,6 @@ def research_stock_pg_history_preview(
         "ma20_window_valid_bar_count": ma20_actual_bars,
         "ma20_window_expected_bar_count": len(ma20_window_sessions),
         "missing_history_sessions": [day.isoformat() for day in missing_dates],
-        "formal_foundation_status": "NOT_ADMITTED",
         "source": {
             "storage": "POSTGRESQL_TYPED_SOURCE_RAW",
             "namespace_id": namespace_id,

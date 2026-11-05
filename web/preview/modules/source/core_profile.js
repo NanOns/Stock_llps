@@ -33,9 +33,7 @@ async function queryStock(event) {
     state.timelineRequest++;
     renderTimeline(null);
   }
-  clearRawPeriodState(
-    "正在读取所选日期、来源代码、namespace和source_set的自然周/月…",
-  );
+  clearRawPeriodState("正在读取所选日期、来源代码和PG捕获版本的自然周/月…");
   const v = selectedVersion();
   if (!v) {
     setMessage("请先从真实PG目录选择目标日期和来源包版本。");
@@ -82,7 +80,6 @@ async function queryStock(event) {
       a.namespace_id !== b.namespace_id ||
       a.target_session !== b.target_session ||
       a.package_sha256 !== b.package_sha256 ||
-      a.source_set_id !== b.source_set_id ||
       b.target_session !== v.target_session ||
       b.package_sha256 !== v.package_sha256
     )
@@ -96,13 +93,12 @@ async function queryStock(event) {
       state.chartPeriodContext = {
         ...state.chartPeriodContext,
         namespace_id: b.namespace_id,
-        source_set_id: b.source_set_id || null,
       };
     $("stockResult").hidden = false;
     setMessage("研究预览已返回；数值为RAW_UNADJUSTED / NON_PIT。", true);
     $("resultTitle").textContent = `${symbol} · ${v.target_session}`;
     $("resultMode").textContent =
-      `${result.status} · ${result.source_object_status} · ${result.target_bar_status} · ${result.price_coordinate} · ${result.identity_status} · 正式准入 ${result.formal_foundation_status}`;
+      `${result.status} · ${result.source_object_status} · ${result.target_bar_status} · ${result.price_coordinate} · ${result.identity_status}`;
     $("snapshotId").textContent =
       `预览身份SHA256：${result.snapshot_identity.identity_sha256}（非正式context token） · 来源包SHA：${v.package_sha256}`;
     $("windowText").textContent =
@@ -116,7 +112,7 @@ async function queryStock(event) {
       `${result.window.price_window_valid_bar_count}/${result.window.price_window_expected_bar_count})，` +
       `未使用未来会话。缺Bar不证明停牌、退市或上市前。`;
     $("resultMode").dataset.namespace = result.snapshot_identity.namespace_id;
-    rawItems(raw.raw, raw.formal_source_set);
+    rawItems(raw.raw, raw.source_version);
     renderFields($("coreRows"), result.core.fields, coreNames);
     renderFields(
       $("allCoreRows"),
@@ -148,7 +144,7 @@ async function queryStock(event) {
     ) {
       await queryTimeline({
         namespace_id: b.namespace_id,
-        source_set_id: b.source_set_id || null,
+        source_set_id: previousTimelineContext?.source_set_id || null,
         origin: previousTimelineContext?.origin || "manual",
         returnSelection: previousTimelineContext?.returnSelection || null,
         returnBinding: previousTimelineContext?.returnBinding || null,

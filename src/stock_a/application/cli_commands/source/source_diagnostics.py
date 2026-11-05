@@ -14,9 +14,8 @@ import stat
 import time
 from typing import Any
 from stock_a.contracts import (
-    DAY_CHAIN_MODULES,
-    DayChainContractError,
-    load_day_chain_contract,
+    PriceProfileContractError,
+    load_price_profile_contract,
 )
 from stock_a.sources.tdx.day import UnitContract
 from stock_a.sources.tdx.actions import (
@@ -369,7 +368,6 @@ def _collect_source_phase0(args: argparse.Namespace) -> dict[str, Any]:
                 "available_at": "UNKNOWN",
                 "published_at": "UNKNOWN",
                 "captured_at": "this local CLI read observation only; not historical first capture",
-                "sealed_at": "UNKNOWN",
             },
             "required": True,
             "status": "BLOCKED",
@@ -587,11 +585,12 @@ def _run_doctor(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config(args.config)
     snapshot = _configuration_snapshot(config, config_path)
     try:
-        loaded_contract = load_day_chain_contract(config["paths"]["configuration_root"])
-    except DayChainContractError as error:
+        loaded_contract = load_price_profile_contract(
+            config["paths"]["configuration_root"]
+        )
+    except PriceProfileContractError as error:
         raise DiagnosticError(error.code, str(error)) from error
     contract_document = loaded_contract.document
-    foundation = contract_document["scope_bindings"]["FOUNDATION_EOD"]
     _emit(
         {
             "ok": False,
@@ -599,19 +598,20 @@ def _run_doctor(args: argparse.Namespace) -> int:
             "message": "本地包与配置结构已检查；未核验真实来源或数据库连接，不允许据此启动业务",
             "package": package,
             **snapshot,
-            "day_chain_contract": {
+            "price_profile_semantics": {
                 "contract_id": contract_document["contract_id"],
                 "version": contract_document["version"],
                 "assembled_sha256": loaded_contract.assembled_sha256,
                 "module_count": len(loaded_contract.module_paths),
                 "module_paths": list(loaded_contract.module_paths),
-                "stage_count": len(contract_document["stages"]),
-                "artifact_count": len(contract_document["artifact_groups"]),
-                "foundation_field_count": len(foundation["field_registry"]),
-                "profile_expression_count": len(
-                    foundation["profile_expression_registry"]
+                "field_count": len(contract_document["field_registry"]),
+                "core_field_count": sum(
+                    item["field_id"].startswith("core.")
+                    for item in contract_document["field_registry"]
                 ),
-                "production_readiness_claim": False,
+                "profile_expression_count": len(
+                    contract_document["profile_expression_registry"]
+                ),
             },
             "business_start_permitted": False,
             "database_connection_attempted": False,

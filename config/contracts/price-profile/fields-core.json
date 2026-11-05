@@ -13,11 +13,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -40,11 +35,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -67,12 +57,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -95,12 +79,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -123,11 +101,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -150,11 +123,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -177,10 +145,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -203,10 +167,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -229,11 +189,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -256,11 +211,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -283,12 +233,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -311,11 +255,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -338,12 +277,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -366,11 +299,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -393,10 +321,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -419,10 +343,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -447,11 +367,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -495,11 +410,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -521,12 +431,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -549,11 +453,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -597,11 +496,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -645,13 +539,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07",
-          "P08",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -674,11 +561,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P08"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -701,12 +583,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P08",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -729,11 +605,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P08"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -756,11 +627,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -783,10 +649,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -809,10 +671,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -835,11 +693,6 @@
         ],
         "window_contract": "CROSS_SESSION_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P07"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -862,11 +715,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -889,11 +737,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -916,11 +759,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -944,11 +782,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -972,11 +805,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1000,11 +828,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1028,10 +851,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1056,11 +875,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1083,11 +897,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1110,11 +919,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "NONE",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1137,11 +941,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "bool",
           "nullable_only_with_quality": true,
@@ -1164,11 +963,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "bool",
           "nullable_only_with_quality": true,
@@ -1193,11 +987,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS",
-          "P09"
-        ],
         "value_schema": {
           "type": "bool",
           "nullable_only_with_quality": true,
@@ -1220,10 +1009,6 @@
         ],
         "window_contract": "TECH_ACTUAL_R1",
         "coordinate_role": "TARGET_SESSION",
-        "consumers": [
-          "BASE_STOCK_DETAIL",
-          "DATA_STATUS"
-        ],
         "value_schema": {
           "type": "number",
           "nullable_only_with_quality": true,
@@ -1247,13 +1032,11 @@
       "context.calendar_ref"
     ],
     "dependency_identity_policy": "TRANSITIVE_INPUT_CONTEXT_AND_WINDOW_CLOSURE",
-    "output_artifact": "core_primitives",
     "parameter_policy": "EXPLICIT_NORMATIVE_RULE_REFERENCES_NO_IMPLEMENTATION_DEFAULTS",
     "parameter_version": "STOCK_A_FOUNDATION_PARAMETERS_R1",
     "persistence_policy": "TYPED_REQUIRED_VALUE_OR_REFERENCE_NO_WINDOW_COPY",
-    "producer_stage": "P07",
     "producer_symbol": "stock_a.research.core:calculate_core",
     "quality_policy": "FIELD_LOCAL_UNKNOWN_OR_NA_WITH_REASON_NOT_UNIMPLEMENTED",
-    "window_identity_ref": "scope_bindings.FOUNDATION_EOD.history_policy"
+    "window_identity_ref": "profile_price_history_policy"
   }
 }

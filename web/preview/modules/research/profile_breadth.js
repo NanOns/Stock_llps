@@ -230,7 +230,7 @@ function renderProfileBreadth(data) {
     appendText(
       identity,
       "p",
-      `${title} ${snapshot.target_session} · source_set ${snapshot.source_set_id} · package SHA ${snapshot.package_sha256} · profile revision ${snapshot.profile_revision} · 日历 ${snapshot.history_calendar_id}/${snapshot.history_calendar_revision} · 窗口 ${snapshot.window_start} 至 ${snapshot.window_end} · ${snapshot.history_session_count}个官方会话`,
+      `${title} ${snapshot.target_session} · package SHA ${snapshot.package_sha256} · profile revision ${snapshot.profile_revision} · 日历 ${snapshot.history_calendar_id}/${snapshot.history_calendar_revision} · 窗口 ${snapshot.window_start} 至 ${snapshot.window_end} · ${snapshot.history_session_count}个官方会话`,
     );
   }
   appendText(
@@ -269,7 +269,7 @@ async function loadProfileBreadth(before, after) {
   appendText(
     root,
     "p",
-    "正在读取两份精确封口画像的全来源代码池与已存MA20…",
+    "正在读取两端精确画像的全来源代码池与已存MA20…",
     "muted",
   );
   $("profileBreadthOpenFull").disabled = true;

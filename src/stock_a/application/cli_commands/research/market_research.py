@@ -7,9 +7,8 @@ import re
 import sys
 from typing import Any
 from stock_a.contracts import (
-    DAY_CHAIN_MODULES,
-    DayChainContractError,
-    load_day_chain_contract,
+    PriceProfileContractError,
+    load_price_profile_contract,
 )
 from stock_a.storage.postgres.source_raw import (
     RAW_DAILY_APPEND_TASK_SCOPES,
@@ -21,11 +20,6 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_history_page,
     read_raw_daily_history_stock,
     read_raw_daily_stock,
-)
-from stock_a.application.source_set_candidate import (
-    persist_source_set_candidate,
-    prepare_source_set_candidate,
-    read_source_set_candidate,
 )
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
@@ -53,13 +47,13 @@ from stock_a.application.runtime_config import (
     load_runtime_config as _load_runtime_config,
 )
 
-from stock_a.application.cli_commands.common import _emit, _parse_source_set_date
+from stock_a.application.cli_commands.common import _emit, _parse_session_date
 
 
 def _run_source_market_breadth(args: argparse.Namespace) -> int:
     config, config_path = _load_runtime_config()
-    target_session = _parse_source_set_date(args.target_session)
-    research_cutoff = _parse_source_set_date(args.research_cutoff)
+    target_session = _parse_session_date(args.target_session)
+    research_cutoff = _parse_session_date(args.research_cutoff)
     if target_session > research_cutoff:
         raise DiagnosticError(
             "MARKET_BREADTH_DATE_AFTER_CUTOFF",
@@ -78,7 +72,6 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            source_set_id=args.source_set_id,
             package_sha256=args.package_sha256,
         )
     except SourceMarketContextError as error:
@@ -172,7 +165,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 "原生量额比值上下界仅适用于画像query",
                 _EXIT_ARGUMENT,
             )
-        max_target_session = _parse_source_set_date(args.research_cutoff)
+        max_target_session = _parse_session_date(args.research_cutoff)
         if args.action == "snapshots":
             result = source_symbol_price_profile_snapshots(
                 config, max_target_session=max_target_session
@@ -186,8 +179,8 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 )
             result = query_source_symbol_price_profile_changes(
                 config,
-                before_session=_parse_source_set_date(args.before_session),
-                after_session=_parse_source_set_date(args.after_session),
+                before_session=_parse_session_date(args.before_session),
+                after_session=_parse_session_date(args.after_session),
                 max_target_session=max_target_session,
                 offset=args.offset,
                 limit=args.limit,
@@ -213,7 +206,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
             ):
                 raise DiagnosticError(
                     "PROFILE_QUERY_KEY_REQUIRED",
-                    "画像查询必须显式指定目标日期、source_set、包SHA和profile_revision",
+                    "画像查询必须显式指定目标日期、来源键、包SHA和profile_revision",
                     _EXIT_ARGUMENT,
                 )
             if args.core_field is None and args.core_quality is not None:
@@ -224,7 +217,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 )
             result = query_source_symbol_price_profiles(
                 config,
-                target_session=_parse_source_set_date(args.target_session),
+                target_session=_parse_session_date(args.target_session),
                 max_target_session=max_target_session,
                 source_set_id=args.source_set_id,
                 package_sha256=args.package_sha256,
@@ -256,7 +249,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
             ):
                 raise DiagnosticError(
                     "PROFILE_COMPUTE_KEY_REQUIRED",
-                    "画像计算必须显式指定目标日期、SEALED source_set、包SHA与计算scope",
+                    "画像计算必须显式指定目标日期、已存在画像来源键、包SHA与计算scope",
                     _EXIT_ARGUMENT,
                 )
             if re.fullmatch(r"[0-9a-f]{64}", args.package_sha256) is None:
@@ -265,12 +258,12 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                     "完整TDX包SHA必须是64位小写十六进制值",
                     _EXIT_ARGUMENT,
                 )
-            target_session = _parse_source_set_date(args.target_session)
+            target_session = _parse_session_date(args.target_session)
             if target_session > max_target_session:
                 raise PgPriceProfileError(
                     "PROFILE_DATE_AFTER_CUTOFF", "画像计算目标日超过显式研究截止日"
                 )
-            loaded_contract = load_day_chain_contract(_CONFIG_ROOT)
+            loaded_contract = load_price_profile_contract(_CONFIG_ROOT)
             result = run_source_symbol_price_profile(
                 config,
                 target_session=target_session,
@@ -281,7 +274,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 page_size=args.page_size,
                 profile_contract=loaded_contract.document,
             )
-    except (PgPriceProfileError, DayChainContractError) as error:
+    except (PgPriceProfileError, PriceProfileContractError) as error:
         _emit(
             {
                 "ok": False,

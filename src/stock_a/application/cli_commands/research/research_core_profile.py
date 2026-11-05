@@ -120,9 +120,8 @@ def _run_full_source_core_profile(
             sample_symbols.add(item["symbol"])
             sampled_groups.add(group)
 
-    scope = profile_contract.get("scope_bindings", {}).get("FOUNDATION_EOD", {})
-    field_registry = scope.get("field_registry", [])
-    rules = scope.get("profile_expression_registry", {})
+    field_registry = profile_contract.get("field_registry", [])
+    rules = profile_contract.get("profile_expression_registry", {})
     core_fields = sorted(
         {
             item.get("field_id")
@@ -511,7 +510,6 @@ def _run_full_source_core_profile(
             "first_available_at": "UNKNOWN",
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "membership_and_listing_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
-            "acceptance_status": "NOT_ACCEPTED_NOT_PERSISTED",
         },
         "performance": {
             "zip_sha_crc_validation_seconds": None,

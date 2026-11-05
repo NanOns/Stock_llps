@@ -17,7 +17,7 @@ from stock_a.application.pg_price_profiles import (
 def register_commands(commands):
     d0_raw = commands.add_parser(
         "source-d0-raw",
-        help="只读计算精确SEALED来源池的D0 LAUNCH_CONFIRM原始谓词与相邻变化",
+        help="只读计算Raw来源池的D0 LAUNCH_CONFIRM原始谓词与相邻变化",
     )
     d0_raw.add_argument(
         "--action",
@@ -40,10 +40,6 @@ def register_commands(commands):
     d0_raw.add_argument(
         "--research-cutoff", required=True, help="研究数据截止官方会话YYYY-MM-DD"
     )
-    d0_raw.add_argument(
-        "--source-set-id", required=True, help="目标日SEALED P03 source_set UUID"
-    )
-    d0_raw.add_argument("--before-source-set-id", help="前日SEALED P03 source_set UUID")
     d0_raw.add_argument(
         "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
     )
@@ -83,32 +79,26 @@ def register_commands(commands):
 
     source_market_breadth = commands.add_parser(
         "source-market-breadth",
-        help="只读计算固定P03来源代码集合的RAW正收益状态差宽度",
+        help="只读计算固定日期和来源版本的RAW正收益状态差宽度",
     )
     source_market_breadth.add_argument(
         "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
     )
     source_market_breadth.add_argument(
         "--research-cutoff", required=True, help="研究数据截止交易会话YYYY-MM-DD"
-    )
-    source_market_breadth.add_argument(
-        "--source-set-id", required=True, help="目标日SEALED P03 source_set UUID"
     )
     source_market_breadth.add_argument(
         "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
     )
     source_d1_breakout = commands.add_parser(
         "source-d1-breakout-preview",
-        help="只读预览精确SEALED来源池的ALG-29原始突破谓词",
+        help="只读预览精确来源版本的ALG-29原始突破谓词",
     )
     source_d1_breakout.add_argument(
         "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
     )
     source_d1_breakout.add_argument(
         "--research-cutoff", required=True, help="研究数据截止交易会话YYYY-MM-DD"
-    )
-    source_d1_breakout.add_argument(
-        "--source-set-id", required=True, help="目标日SEALED P03 source_set UUID"
     )
     source_d1_breakout.add_argument(
         "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
@@ -166,7 +156,7 @@ def register_commands(commands):
     )
     price_profile = commands.add_parser(
         "source-symbol-price-profile",
-        help="按精确P03封口版本计算、保存或分页查询来源代码级NON_PIT价格画像",
+        help="按精确日期和来源版本计算、保存或分页查询来源代码级NON_PIT价格画像",
     )
     price_profile.add_argument(
         "--action",
@@ -182,7 +172,7 @@ def register_commands(commands):
     price_profile.add_argument("--before-session", help="变化查询的前一画像日期")
     price_profile.add_argument("--after-session", help="变化查询的后一画像日期")
     price_profile.add_argument(
-        "--before-source-set-id", help="changes前态画像的精确SEALED source_set UUID"
+        "--before-source-set-id", help="changes前态画像的精确存储行键"
     )
     price_profile.add_argument(
         "--before-package-sha256", help="changes前态画像的精确来源包SHA-256"
@@ -192,7 +182,7 @@ def register_commands(commands):
         help="changes前态画像的精确profile_revision SHA-256",
     )
     price_profile.add_argument(
-        "--after-source-set-id", help="changes后态画像的精确SEALED source_set UUID"
+        "--after-source-set-id", help="changes后态画像的精确存储行键"
     )
     price_profile.add_argument(
         "--after-package-sha256", help="changes后态画像的精确来源包SHA-256"
@@ -233,7 +223,7 @@ def register_commands(commands):
         help="按Core MA20/ATR斜率精确符号变化筛选完整来源集合",
     )
     price_profile.add_argument("--target-session", help="精确目标交易会话YYYY-MM-DD")
-    price_profile.add_argument("--source-set-id", help="正式SEALED P03 source_set UUID")
+    price_profile.add_argument("--source-set-id", help="现存画像行的精确存储键")
     price_profile.add_argument("--package-sha256", help="精确TDX来源包SHA-256")
     price_profile.add_argument(
         "--scope",
@@ -341,31 +331,6 @@ def register_commands(commands):
         default="json",
         help="输出摘要或完整JSON",
     )
-    source_p04 = commands.add_parser(
-        "source-p04-read",
-        help="按精确日期与包SHA只读正式P03来源集合",
-    )
-    source_p04.add_argument(
-        "--target-session", required=True, help="目标交易会话YYYY-MM-DD"
-    )
-    source_p04.add_argument(
-        "--package-sha256", required=True, help="完整TDX来源包SHA-256"
-    )
-    source_p04.add_argument(
-        "--audit-mode",
-        action="store_true",
-        help="显式逐行读取Raw并按该来源版本的实际行数重算封口摘要",
-    )
-    coverage = commands.add_parser(
-        "source-p04-identity-coverage", help="只读封口来源代码与身份隔离覆盖"
-    )
-    coverage.add_argument("--target-session", required=True, help="目标交易会话")
-    coverage.add_argument("--research-cutoff", required=True, help="研究截止日")
-    coverage.add_argument("--source-set-id", required=True, help="精确来源集合ID")
-    coverage.add_argument("--package-sha256", required=True, help="完整来源包SHA-256")
-    coverage.add_argument("--symbol", help="可选精确来源代码")
-    coverage.add_argument("--offset", type=int, default=0, help="分页偏移")
-    coverage.add_argument("--limit", type=int, default=30, help="页大小1至100")
     preview_serve = commands.add_parser(
         "preview-serve",
         help="显式启动本机PG来源级研究预览页面（仅127.0.0.1:28766）",

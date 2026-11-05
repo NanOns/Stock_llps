@@ -1,4 +1,4 @@
-"""将真实P03 SEALED PG Raw窗口接入来源代码价格画像批处理。"""
+"""将PG Raw历史窗口接入来源代码价格画像批处理。"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ from typing import Any, Mapping
 from stock_a.canonical.adjustment_periods import PERIOD_AGGREGATION_VERSION
 from stock_a.application.pg_research import (
     PgResearchBindingError,
-    read_sealed_source_context,
+    read_source_version_context,
 )
 from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.research.entry import (
@@ -31,6 +31,7 @@ from stock_a.storage.postgres.price_profiles import (
     read_profile_page,
     read_profile_pair,
     read_profile_relation_screen,
+    read_profile_storage_revision,
 )
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
@@ -43,7 +44,6 @@ _PRODUCER_CONTRACT = "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1"
 _PRODUCER_SEMANTICS_VERSION = "CORE43_PROFILE11_SOURCE_SYMBOL_R4_NATIVE_RATIO_WIRED"
 _FIELD_SEMANTIC_KEYS = (
     "field_id",
-    "producer_stage",
     "producer_symbol",
     "value_type",
     "unit",
@@ -145,13 +145,12 @@ def _history_window_sha256(rows: list[Mapping[str, Any]]) -> str:
 
 
 def _profile_semantics_sha256(profile_contract: Mapping[str, Any]) -> str:
-    """只摘要FOUNDATION真实消费的Core字段与Profile11规则语义。"""
-    foundation = profile_contract.get("scope_bindings", {}).get("FOUNDATION_EOD", {})
-    registry = foundation.get("field_registry", ())
-    rules = foundation.get("profile_expression_registry", {})
+    """摘要Core字段与Profile11公式的实际数值语义。"""
+    registry = profile_contract.get("field_registry", ())
+    rules = profile_contract.get("profile_expression_registry", {})
     if not isinstance(registry, (tuple, list)) or not isinstance(rules, Mapping):
         raise PgPriceProfileError(
-            "PROFILE_SEMANTICS_UNBOUND", "FOUNDATION Core/Profile语义登记缺失"
+            "PROFILE_SEMANTICS_UNBOUND", "Core/Profile字段合同缺失"
         )
     definitions = {
         item.get("field_id"): item
@@ -205,7 +204,7 @@ def _profile_semantics_sha256(profile_contract: Mapping[str, Any]) -> str:
     if missing_fields:
         raise PgPriceProfileError(
             "PROFILE_SEMANTICS_UNBOUND",
-            "FOUNDATION消费了未登记字段：" + ", ".join(missing_fields),
+            "画像计算使用了未登记字段：" + ", ".join(missing_fields),
         )
     payload = {
         "producer_semantics_version": _PRODUCER_SEMANTICS_VERSION,
@@ -475,20 +474,19 @@ def run_source_symbol_price_profile(
         raise PgPriceProfileError(
             "PROFILE_PAGE_SIZE_INVALID", "来源分页批大小必须在1至100之间"
         )
-    foundation = profile_contract.get("scope_bindings", {}).get("FOUNDATION_EOD", {})
     field_count = sum(
         isinstance(item, dict)
         and isinstance(item.get("field_id"), str)
         and item["field_id"].startswith("core.")
-        for item in foundation.get("field_registry", ())
+        for item in profile_contract.get("field_registry", ())
     )
     profile_count = sum(
         isinstance(item, dict) and isinstance(item.get("field_id"), str)
-        for item in foundation.get("profile_expression_registry", {}).values()
+        for item in profile_contract.get("profile_expression_registry", {}).values()
     )
     if (field_count, profile_count) != (43, 11):
         raise PgPriceProfileError(
-            "PROFILE_CONTRACT_INVALID", "现役FOUNDATION合同不是Core43/Profile11"
+            "PROFILE_CONTRACT_INVALID", "现役画像字段合同不是Core43/Profile11"
         )
     semantics_sha256 = _profile_semantics_sha256(profile_contract)
     try:
@@ -499,16 +497,20 @@ def run_source_symbol_price_profile(
             raise PgPriceProfileError(
                 "PROFILE_TARGET_NOT_TRADING_SESSION", "输入日期不是已登记官方交易会话"
             )
-        source_context = read_sealed_source_context(
+        source_context = read_source_version_context(
             config,
             target_session=target_session,
             package_sha256=package_sha256,
             namespace_id=None,
         )
-        if source_context["source_set_id"] != source_set_id:
-            raise PgPriceProfileError(
-                "PROFILE_SOURCE_SET_ID_MISMATCH", "输入source_set_id与精确P04读回不一致"
-            )
+        source_context["source_set_id"] = source_set_id
+        source_context["revision_id"] = read_profile_storage_revision(
+            config,
+            target_session=target_session,
+            package_sha256=package_sha256,
+            source_set_id=source_set_id,
+            source_capture_id=source_context["source_capture_id"],
+        )
         offset = 0
         raw_total: int | None = None
         records: list[dict[str, Any]] = []
@@ -533,7 +535,7 @@ def run_source_symbol_price_profile(
                     or raw_total != source_context["capture_expected_row_count"]
                 ):
                     raise PgPriceProfileError(
-                        "PROFILE_SOURCE_PARTITION_OPEN", "PG Raw或P03来源分母未闭合"
+                        "PROFILE_SOURCE_PARTITION_OPEN", "PG Raw或来源捕获分母未闭合"
                     )
             if page["total_count"] != raw_total or page["version_status"] != "CLOSED":
                 raise PgPriceProfileError(
@@ -653,27 +655,23 @@ def read_source_symbol_price_profile_observation(
     package_sha256: str,
     source_set: Mapping[str, Any],
 ) -> dict[str, Any]:
-    """按精确P03来源身份投影已保存Core/Profile画像及质量。"""
+    """按Raw捕获和现存画像行键投影已保存Core/Profile画像及质量。"""
     source_set_id = source_set.get("source_set_id")
-    source_set_revision = source_set.get("revision_id")
     source_capture_id = source_set.get("source_capture_id")
     if (
         source_set.get("status") != "AVAILABLE"
-        or source_set.get("seal_status") != "SEALED"
-        or source_set.get("durability_status") != "VERIFIED_POST_COMMIT_READBACK"
         or source_set.get("target_session") != target_session.isoformat()
         or source_set.get("package_sha256") != package_sha256
         or not isinstance(source_set_id, str)
-        or type(source_set_revision) is not int
         or not isinstance(source_capture_id, str)
     ):
         return {
             "status": "NOT_COMPUTED",
-            "reason_code": "EXACT_SEALED_SOURCE_SET_UNAVAILABLE",
+            "reason_code": "RAW_SOURCE_VERSION_UNAVAILABLE",
             "target_session": target_session.isoformat(),
             "package_sha256": package_sha256,
             "profile_revision_selection": {
-                "rule": "REQUIRES_EXACT_SEALED_SOURCE_SET",
+                "rule": "REQUIRES_EXACT_RAW_CAPTURE_AND_STORED_PROFILE_KEY",
                 "selected_profile_revision": None,
                 "candidate_revision_count": 0,
                 "current_semantics_match_count": 0,
@@ -682,6 +680,13 @@ def read_source_symbol_price_profile_observation(
             "ddl_executed": False,
         }
     try:
+        source_set_revision = read_profile_storage_revision(
+            config,
+            target_session=target_session,
+            package_sha256=package_sha256,
+            source_set_id=source_set_id,
+            source_capture_id=source_capture_id,
+        )
         semantics_sha256 = _profile_semantics_sha256(profile_contract)
         observation = read_source_profile_observability(
             config,
@@ -697,9 +702,8 @@ def read_source_symbol_price_profile_observation(
             getattr(error, "code", "PROFILE_OBSERVATION_READ_FAILED"), str(error)
         ) from error
 
-    foundation = profile_contract.get("scope_bindings", {}).get("FOUNDATION_EOD", {})
-    core_registry = foundation.get("field_registry", ())
-    profile_registry = foundation.get("profile_expression_registry", {})
+    core_registry = profile_contract.get("field_registry", ())
+    profile_registry = profile_contract.get("profile_expression_registry", {})
     observation["contract_field_counts"] = {
         "core43_registered_fields": sum(
             1

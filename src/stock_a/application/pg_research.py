@@ -1,15 +1,18 @@
-"""将单股PG Raw研究读取绑定到精确封口的P03来源集合。"""
+"""将明确来源版本直接绑定到PostgreSQL Raw研究行。"""
 
 from __future__ import annotations
 
 from datetime import date
 from typing import Any, Mapping, Sequence
 
-from stock_a.storage.postgres.source_set_ingress import read_p04_source_input
+from stock_a.storage.postgres.source_raw import (
+    RawSourcePgError,
+    read_source_version_context as _read_source_version_context,
+)
 
 
 class PgResearchBindingError(Exception):
-    """P04封口来源与用户请求的PG Raw未能精确闭合。"""
+    """来源版本与用户请求的PG Raw事实无法精确闭合。"""
 
     def __init__(self, code: str, message: str):
         self.code = code
@@ -28,20 +31,18 @@ def bind_source_context_to_raw_rows(
     target_session: date,
     package_sha256: str,
     namespace_id: str,
-    source_set_id: str,
     target_raw_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """将已精确预检的P04来源上下文与单股Raw目标日行闭合。"""
+    """核对所选来源版本与目标日Raw行的日期、包、内容和捕获引用。"""
     if (
         source_context.get("status") != "AVAILABLE"
         or source_context.get("target_session") != target_session.isoformat()
         or source_context.get("package_sha256") != package_sha256
         or source_context.get("namespace_id") != namespace_id
-        or source_context.get("source_set_id") != source_set_id
     ):
         raise PgResearchBindingError(
-            "PG_RESEARCH_P04_SOURCE_CONTEXT_MISMATCH",
-            "预检P04来源上下文与请求的日期、包SHA、namespace或source_set不一致。",
+            "PG_RESEARCH_SOURCE_VERSION_MISMATCH",
+            "来源版本上下文与请求日期、包SHA或namespace不一致。",
         )
     target_rows = [
         row
@@ -53,18 +54,18 @@ def bind_source_context_to_raw_rows(
             "PG_RESEARCH_TARGET_RAW_AMBIGUOUS",
             "单股Raw查询必须返回恰好一条精确目标日行。",
         )
-    source_content_id = source_context.get("source_content_id")
-    source_capture_id = source_context.get("source_capture_id")
     target_row = target_rows[0]
     if (
         target_row.get("package_sha256") != package_sha256
         or target_row.get("namespace_id") != namespace_id
-        or target_row.get("source_content_id") != source_content_id
-        or target_row.get("source_capture_id") != source_capture_id
+        or target_row.get("source_content_id")
+        != source_context.get("source_content_id")
+        or target_row.get("source_capture_id")
+        != source_context.get("source_capture_id")
     ):
         raise PgResearchBindingError(
-            "PG_RESEARCH_P04_RAW_REFERENCE_MISMATCH",
-            "单股目标日Raw行与预检P04 source_content/capture绑定不一致。",
+            "PG_RESEARCH_RAW_REFERENCE_MISMATCH",
+            "目标日Raw行与来源包内容或捕获引用不一致。",
         )
     bound_context = dict(source_context)
     bound_context["target_raw_binding_count"] = 1
@@ -72,127 +73,65 @@ def bind_source_context_to_raw_rows(
     return bound_context
 
 
-def read_sealed_source_context(
+def read_source_version_context(
     config: Mapping[str, Any],
     *,
     target_session: date,
     package_sha256: str,
     namespace_id: str | None,
-    expected_source_set_id: str | None = None,
     target_raw_rows: Sequence[Mapping[str, Any]] = (),
     expected_raw_row_count: int | None = None,
 ) -> dict[str, Any]:
-    """只读读取P04精确SEALED并核对目标日Raw捕获与内容身份。"""
+    """从Raw、捕获与内容事实取上下文；旧profile键只作为行筛选值回传。"""
     try:
-        source_set = read_p04_source_input(
+        source = _read_source_version_context(
             config,
             target_session=target_session,
             package_sha256=package_sha256,
             expected_namespace_id=namespace_id,
-            expected_source_set_id=expected_source_set_id,
         )
-    except Exception as error:
+    except RawSourcePgError as error:
+        raise PgResearchBindingError(error.code, str(error)) from error
+    if source.get("status") != "AVAILABLE":
         raise PgResearchBindingError(
-            getattr(error, "code", "PG_RESEARCH_P04_READ_FAILED"),
-            "P04精确SEALED source_set只读读取失败。",
-        ) from error
-    if source_set.get("status") != "AVAILABLE":
-        raise PgResearchBindingError(
-            "PG_RESEARCH_P04_SOURCE_SET_UNAVAILABLE",
-            "该目标日与来源包SHA没有可用的精确P04封口source_set；拒绝使用候选或其他版本回退。",
+            "PG_RESEARCH_SOURCE_VERSION_UNAVAILABLE",
+            "该日期与来源包SHA没有可用的Raw来源版本。",
         )
-    if (
-        source_set.get("target_session") != target_session.isoformat()
-        or source_set.get("package_sha256") != package_sha256
-        or (namespace_id is not None and source_set.get("namespace_id") != namespace_id)
-        or (
-            expected_source_set_id is not None
-            and source_set.get("source_set_id") != expected_source_set_id
-        )
-        or source_set.get("seal_status") != "SEALED"
-        or source_set.get("durability_status") != "VERIFIED_POST_COMMIT_READBACK"
-        or source_set.get("candidate_fallback") is not False
-        or source_set.get("database_write") is not False
-        or source_set.get("ddl_executed") is not False
-    ):
-        raise PgResearchBindingError(
-            "PG_RESEARCH_P04_SOURCE_SET_INVALID",
-            "P04读回未满足精确日期、包SHA、namespace、SEALED及提交后读回合同。",
-        )
-
     if expected_raw_row_count is not None and (
         type(expected_raw_row_count) is not int
-        or expected_raw_row_count != source_set.get("raw_row_count")
+        or expected_raw_row_count != source.get("raw_row_count")
     ):
         raise PgResearchBindingError(
-            "PG_RESEARCH_P04_RAW_COUNT_MISMATCH",
-            "PG Raw目标日行数与P04封口分母不一致。",
+            "PG_RESEARCH_RAW_COUNT_MISMATCH",
+            "目标日Raw行数与同一捕获记录的来源代码数不一致。",
         )
-
-    target_rows = [
-        row
-        for row in target_raw_rows
-        if _is_target_session(row.get("session_date"), target_session)
-    ]
-    if target_raw_rows and not target_rows:
-        raise PgResearchBindingError(
-            "PG_RESEARCH_TARGET_RAW_AMBIGUOUS",
-            "本次PG读取未返回精确目标日Raw行。",
-        )
-    if target_rows:
-        for target_row in target_rows:
+    if target_raw_rows:
+        target_rows = [
+            row
+            for row in target_raw_rows
+            if _is_target_session(row.get("session_date"), target_session)
+        ]
+        if not target_rows:
+            raise PgResearchBindingError(
+                "PG_RESEARCH_TARGET_RAW_MISSING", "读取中没有精确目标日Raw行。"
+            )
+        for row in target_rows:
             if (
-                target_row.get("package_sha256") != package_sha256
-                or target_row.get("namespace_id") != source_set.get("namespace_id")
-                or target_row.get("source_content_id")
-                != source_set.get("source_content_id")
-                or target_row.get("source_capture_id")
-                != source_set.get("source_capture_id")
+                row.get("package_sha256") != package_sha256
+                or str(row.get("namespace_id")) != source.get("namespace_id")
+                or row.get("source_content_id") != source.get("source_content_id")
+                or str(row.get("source_capture_id")) != source.get("source_capture_id")
             ):
                 raise PgResearchBindingError(
-                    "PG_RESEARCH_P04_RAW_REFERENCE_MISMATCH",
-                    "目标日Raw行与P04 source_content/capture绑定不一致。",
+                    "PG_RESEARCH_RAW_REFERENCE_MISMATCH",
+                    "目标日Raw行跨包、跨namespace、跨内容或跨捕获。",
                 )
-
-    p02 = source_set.get("p02_capability")
-    bao_status = p02.get("status", "UNKNOWN") if isinstance(p02, Mapping) else "UNKNOWN"
-    raw_revalidation = source_set.get("raw_revalidation")
-    proof_level = (
-        raw_revalidation.get("proof_level", "UNKNOWN")
-        if isinstance(raw_revalidation, Mapping)
-        else "UNKNOWN"
-    )
-    return {
-        "status": "AVAILABLE",
-        "target_session": target_session.isoformat(),
-        "package_sha256": package_sha256,
-        "namespace_id": source_set["namespace_id"],
-        "source_set_id": source_set["source_set_id"],
-        "revision_id": source_set["revision_id"],
-        "seal_status": source_set["seal_status"],
-        "durability_status": source_set["durability_status"],
-        "source_time_quality": source_set.get("source_time_quality", "UNKNOWN"),
-        "source_available_at": source_set.get("source_available_at"),
-        "price_unit_status": source_set.get("price_unit_status", "UNKNOWN"),
-        "amount_unit_status": source_set.get("amount_unit_status", "UNIT_UNVERIFIED"),
-        "volume_unit_status": source_set.get("volume_unit_status", "UNIT_UNVERIFIED"),
-        "source_content_id": source_set["source_content_id"],
-        "source_capture_id": source_set["source_capture_id"],
-        "source_digest": source_set["source_digest"],
-        "source_raw_digest": source_set["source_raw_digest"],
-        "raw_row_count": source_set["raw_row_count"],
-        "capture_expected_row_count": source_set["capture_expected_row_count"],
-        "raw_revalidation_proof_level": proof_level,
-        "target_raw_binding_count": len(target_rows),
-        "target_raw_binding_verified": bool(target_rows),
-        "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
-        "listing_status": "LISTING_STATUS_UNKNOWN",
-        "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
-        "official_listing_universe_status": "UNKNOWN",
-        "pit_status": "NON_PIT_RETROSPECTIVE",
-        "price_coordinate": "RAW_UNADJUSTED",
-        "baostock_status": bao_status,
-        "database_write": False,
-        "ddl_executed": False,
-        "candidate_fallback": False,
-    }
+    source["source_raw_digest"] = source.get("capture_digest")
+    source["source_digest"] = source.get("capture_digest")
+    source["capture_read_started_at"] = source.get("capture_started_at")
+    source["target_raw_binding_count"] = len(target_raw_rows)
+    source["target_raw_binding_verified"] = bool(target_raw_rows)
+    source["database_write"] = False
+    source["ddl_executed"] = False
+    source["candidate_fallback"] = False
+    return source

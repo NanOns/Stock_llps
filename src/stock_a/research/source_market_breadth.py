@@ -20,39 +20,27 @@ SOURCE_MARKET_BREADTH_CONTRACT = "MKT-02_RAW_POSITIVE_RETURN_STATE_DELTA_R1"
 
 @dataclass(frozen=True)
 class SourceCohortIdentity:
-    """目标日来源集合身份和封口摘要的显式输入。"""
+    """目标日Raw来源版本和实际捕获信息。"""
 
     namespace_id: str
-    source_set_id: str
-    ingress_attempt_id: str
     target_session: date
     package_sha256: str
-    revision_id: int
     source_content_id: str
     source_capture_id: str
     source_dataset_id: str
     source_byte_count: int
     parser_contract: str
-    seal_status: str
-    durability_status: str
-    durability_source_capture_id: str
-    durability_source_digest: str
-    commit_ack_observed_at: str
-    seal_digest_sha256: str
-    seal_writer_transaction_id: str
     source_time_quality: str
     source_available_at: str | None
     capture_read_started_at: str
     capture_validated_at: str
     source_clock_role: str
-    durable_at: str
-    sealed_at: str
     raw_row_count: int
+    capture_expected_row_count: int
     target_present_count: int
     target_missing_count: int
     read_failed_count: int
-    source_digest: str
-    source_raw_digest: str
+    capture_digest: str
     observed_raw_digest: str
     calendar_id: str
     calendar_revision: str
@@ -143,27 +131,22 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
         type(cohort.target_session) is not date
         or cohort.target_session > inputs.research_cutoff
     ):
-        raise ValueError("来源集合目标日必须是截止日前的明确会话")
+        raise ValueError("来源目标日必须是截止日前的明确会话")
     if (
         not isinstance(cohort.package_sha256, str)
         or _SHA256.fullmatch(cohort.package_sha256) is None
     ):
-        raise ValueError("来源集合必须绑定完整小写包SHA-256")
+        raise ValueError("来源版本必须绑定完整小写包SHA-256")
     if (
         not isinstance(cohort.calendar_sha256, str)
         or _SHA256.fullmatch(cohort.calendar_sha256) is None
     ):
-        raise ValueError("来源集合必须绑定完整日历SHA-256")
+        raise ValueError("来源版本必须绑定完整日历SHA-256")
     try:
         uuid.UUID(cohort.namespace_id)
-        uuid.UUID(cohort.source_set_id)
-        uuid.UUID(cohort.ingress_attempt_id)
         uuid.UUID(cohort.source_capture_id)
-        uuid.UUID(cohort.durability_source_capture_id)
     except (ValueError, TypeError, AttributeError) as error:
-        raise ValueError(
-            "namespace、来源集合、ingress attempt与capture身份必须是UUID"
-        ) from error
+        raise ValueError("namespace与capture身份必须是UUID") from error
     if cohort.source_dataset_id != "TDX_VIPDATA_PACKAGE":
         raise ValueError("市场宽度来源必须是已登记的TDX VIPDATA包")
     if (
@@ -171,16 +154,12 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
         or inputs.calendar_revision != cohort.calendar_revision
         or inputs.calendar_sha256 != cohort.calendar_sha256
     ):
-        raise ValueError("官方日历身份与SEALED来源集合不一致")
-    if cohort.seal_status != "SEALED":
-        raise ValueError("来源集合未封口")
-    if cohort.durability_status != "VERIFIED_POST_COMMIT_READBACK":
-        raise ValueError("来源集合缺少提交后持久读回证明")
+        raise ValueError("官方日历身份与输入会话不一致")
     if (
-        type(cohort.revision_id) is not int
-        or cohort.revision_id < 1
-        or type(cohort.raw_row_count) is not int
+        type(cohort.raw_row_count) is not int
         or cohort.raw_row_count < 0
+        or type(cohort.capture_expected_row_count) is not int
+        or cohort.capture_expected_row_count < 0
         or any(
             type(value) is not int or value < 0
             for value in (
@@ -189,44 +168,32 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
                 cohort.read_failed_count,
             )
         )
+        or cohort.raw_row_count != cohort.capture_expected_row_count
         or cohort.raw_row_count != len(inputs.source_symbols)
         or cohort.target_present_count
         + cohort.target_missing_count
         + cohort.read_failed_count
         != cohort.raw_row_count
-        or cohort.read_failed_count != 0
     ):
-        raise ValueError("来源集合修订或Raw行数/状态分母不闭合")
+        raise ValueError("Raw行数或来源状态分母不闭合")
     for digest in (
-        cohort.source_digest,
         cohort.source_content_id,
-        cohort.source_raw_digest,
+        cohort.capture_digest,
         cohort.observed_raw_digest,
-        cohort.durability_source_digest,
-        cohort.seal_digest_sha256,
     ):
         if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
-            raise ValueError("来源集合摘要必须为完整小写SHA-256")
-    if cohort.source_raw_digest != cohort.observed_raw_digest:
-        raise ValueError("目标日Raw业务键集合摘要与封口摘要不一致")
+            raise ValueError("来源版本摘要必须为完整小写SHA-256")
+    if cohort.capture_digest != cohort.observed_raw_digest:
+        raise ValueError("目标日Raw行摘要与捕获记录不一致")
     if (
         type(cohort.source_byte_count) is not int
         or cohort.source_byte_count <= 0
         or not cohort.parser_contract
         or not cohort.source_clock_role
-        or not isinstance(cohort.seal_writer_transaction_id, str)
-        or not cohort.seal_writer_transaction_id.isdigit()
-        or not cohort.commit_ack_observed_at
         or not cohort.capture_read_started_at
         or not cohort.capture_validated_at
-        or not cohort.durable_at
-        or not cohort.sealed_at
     ):
-        raise ValueError("来源捕获时钟、封口交易或来源包身份不完整")
-    if cohort.durability_source_digest != cohort.source_digest:
-        raise ValueError("提交后持久性证明未绑定同一来源摘要")
-    if cohort.durability_source_capture_id != cohort.source_capture_id:
-        raise ValueError("提交后持久性证明未绑定同一来源捕获")
+        raise ValueError("来源捕获时钟或来源包身份不完整")
     if (
         cohort.source_available_at is not None
         and cohort.source_time_quality != "VERIFIED_SOURCE_TIME"

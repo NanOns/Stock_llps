@@ -36,7 +36,6 @@ from stock_a.application.source_d0_raw import (
 )
 from stock_a.application.pg_research import (
     PgResearchBindingError,
-    read_sealed_source_context,
 )
 from stock_a.research.entry import (
     CompareBudget,
@@ -86,11 +85,11 @@ from stock_a.application.tdx_sector_change_stocks import (
 )
 from stock_a.sources.tdx.remote_sector import TdxRemoteSectorError
 
-from stock_a.application.cli_commands.common import _emit, _parse_source_set_date
+from stock_a.application.cli_commands.common import _emit, _parse_session_date
 
 
 def _run_source_raw_catalog(args: argparse.Namespace) -> int:
-    max_target_session = _parse_source_set_date(args.research_cutoff)
+    max_target_session = _parse_session_date(args.research_cutoff)
     config, config_path = _load_runtime_config()
     try:
         result = read_raw_daily_catalog(
@@ -168,8 +167,8 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 snapshot_id=args.snapshot_id,
                 board_kind=args.board_kind,
                 board_native_id=args.board_native_id,
-                target_session=_parse_source_set_date(args.target_session),
-                research_cutoff=_parse_source_set_date(args.research_cutoff),
+                target_session=_parse_session_date(args.target_session),
+                research_cutoff=_parse_session_date(args.research_cutoff),
                 source_set_id=args.source_set_id,
                 package_sha256=args.package_sha256,
                 profile_revision=args.profile_revision,
@@ -182,9 +181,9 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 snapshot_id=args.snapshot_id,
                 board_kind=args.board_kind,
                 board_native_id=args.board_native_id,
-                before_session=_parse_source_set_date(args.before_session),
-                after_session=_parse_source_set_date(args.after_session),
-                research_cutoff=_parse_source_set_date(args.research_cutoff),
+                before_session=_parse_session_date(args.before_session),
+                after_session=_parse_session_date(args.after_session),
+                research_cutoff=_parse_session_date(args.research_cutoff),
                 before_source_set_id=args.before_source_set_id,
                 before_package_sha256=args.before_package_sha256,
                 before_profile_revision=args.before_profile_revision,
@@ -204,8 +203,8 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 snapshot_id=args.snapshot_id,
                 board_kind=args.board_kind,
                 board_native_id=args.board_native_id,
-                target_session=_parse_source_set_date(args.target_session),
-                research_cutoff=_parse_source_set_date(args.research_cutoff),
+                target_session=_parse_session_date(args.target_session),
+                research_cutoff=_parse_session_date(args.research_cutoff),
                 source_set_id=args.source_set_id,
                 package_sha256=args.package_sha256,
                 profile_revision=args.profile_revision,
@@ -287,8 +286,8 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
 
 
 def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
-    target = _parse_source_set_date(args.target_session)
-    cutoff = _parse_source_set_date(args.research_cutoff)
+    target = _parse_session_date(args.target_session)
+    cutoff = _parse_session_date(args.research_cutoff)
     include_d0_launch_new = getattr(args, "include_d0_launch_new", False)
     d0_new_only = getattr(args, "d0_new_only", False)
     if not include_d0_launch_new and (args.sort_by == "d0_launch_new" or d0_new_only):
@@ -306,7 +305,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 "启用D0新增启动联动时必须提供--d0-before-session与--d0-before-source-set-id",
                 _EXIT_ARGUMENT,
             )
-        d0_before_session = _parse_source_set_date(args.d0_before_session)
+        d0_before_session = _parse_session_date(args.d0_before_session)
         if d0_before_session >= target or d0_before_session > cutoff:
             raise DiagnosticError(
                 "D0_BEFORE_SESSION_INVALID",
@@ -417,7 +416,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
         )
     except ResearchEntryError as error:
         raise DiagnosticError(error.code, str(error), _EXIT_ARGUMENT) from error
-    event_window_start = _parse_source_set_date(args.event_window_start)
+    event_window_start = _parse_session_date(args.event_window_start)
     if event_window_start not in sessions or event_window_start >= target:
         raise DiagnosticError(
             "SECTOR_CHANGE_EVENT_WINDOW_INVALID",
@@ -438,11 +437,9 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 scenario="LAUNCH_CONFIRM",
                 action="changes",
                 before_session=d0_before_session,
-                before_source_set_id=d0_before_source_set_id,
                 before_package_sha256=args.package_sha256,
                 target_session=target,
                 research_cutoff=cutoff,
-                source_set_id=source_set_id,
                 package_sha256=args.package_sha256,
                 transition="ALL",
                 offset=0,
@@ -484,7 +481,6 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             cutoff,
             sessions,
             calendar_revision,
-            source_set_id,
             args.package_sha256,
             event_window_start,
             0,
@@ -517,7 +513,6 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                     config,
                     target_session=target,
                     research_cutoff=cutoff,
-                    source_set_id=source_set_id,
                     package_sha256=args.package_sha256,
                 )
             except SourceMarketContextError as error:
@@ -527,7 +522,6 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 result["source_market_context"] = source_market_not_evaluable_payload(
                     source_identity={
                         **d1_source,
-                        "sealed_at": discovery.get("source_sealed_at"),
                     },
                     official_calendar=discovery["official_calendar"],
                     target_session=target,

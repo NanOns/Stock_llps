@@ -15,7 +15,7 @@ from stock_a.application.runtime_config import (
     load_runtime_config as _load_runtime_config,
 )
 
-from stock_a.application.cli_commands.common import _emit, _parse_source_set_date
+from stock_a.application.cli_commands.common import _emit, _parse_session_date
 from stock_a.application.cli_commands.research.d1_preview import (
     _run_source_d1_breakout_preview,
 )
@@ -37,13 +37,6 @@ from stock_a.application.cli_commands.source.source_diagnostics import (
     _run_pg_bind,
     _run_pg_identity,
     _run_source_phase0,
-)
-from stock_a.application.cli_commands.source.source_ingress import (
-    _run_source_ingress_plan,
-    _run_source_p03_write,
-    _run_source_p04_identity_coverage,
-    _run_source_p04_read,
-    _run_source_set_candidate,
 )
 from stock_a.application.cli_commands.source.vipdata import (
     _run_source_inspect,
@@ -99,10 +92,6 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_raw_catalog(args)
         if args.command == "source-tdx-sector-members":
             return _run_source_tdx_sector_members(args)
-        if args.command == "source-set-candidate":
-            return _run_source_set_candidate(args, compute_candidate=True)
-        if args.command == "source-set-catalog":
-            return _run_source_set_candidate(args, compute_candidate=False)
         if args.command == "source-symbol-price-profile":
             return _run_source_symbol_price_profile(args)
         if args.command == "source-market-breadth":
@@ -111,21 +100,13 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_d0_raw(args)
         if args.command == "source-d1-breakout-preview":
             return _run_source_d1_breakout_preview(args)
-        if args.command == "source-p04-identity-coverage":
-            return _run_source_p04_identity_coverage(args)
-        if args.command == "source-p04-read":
-            return _run_source_p04_read(args)
-        if args.command == "source-ingress-plan":
-            return _run_source_ingress_plan(args)
-        if args.command == "source-p03-write":
-            return _run_source_p03_write(args)
         if args.command == "preview-serve":
             from stock_a.service.preview_http import run_preview_server
 
             return run_preview_server(
                 host=args.host,
                 port=args.port,
-                research_cutoff=_parse_source_set_date(args.research_cutoff),
+                research_cutoff=_parse_session_date(args.research_cutoff),
             )
     except DiagnosticError as error:
         _emit(

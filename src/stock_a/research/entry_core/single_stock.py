@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from datetime import date, timedelta
 from pathlib import Path
 import time
@@ -37,7 +37,6 @@ from stock_a.research.entry_core.fields import (
     _unit_trust_status,
 )
 from stock_a.research.entry_context.errors import ResearchEntryError
-from stock_a.research.entry_core.foundation import _build_foundation_typed_handoff
 from stock_a.research.entry_core.profile_preview import (
     _build_profile_preview,
     _source_path,
@@ -118,7 +117,6 @@ def research_stock(
     units: UnitContract,
     limits: ReadLimits,
     profile_contract: dict[str, Any] | None = None,
-    foundation_contract: dict[str, Any] | None = None,
     include_baostock_evidence: bool = False,
     vipdata_capture: VipdataEntryCapture | None = None,
     identity_projection: IdentityLifecycleProjection | None = None,
@@ -538,8 +536,6 @@ def research_stock(
             "price_coordinate": "RAW_UNADJUSTED",
             "amount_unit_authority": _unit_trust_status(units.amount_to_cny),
             "volume_unit_authority": _unit_trust_status(units.volume_to_shares),
-            "acceptance_status": "NOT_ACCEPTED_NOT_PERSISTED",
-            "profile_admission": "DENY_TRUSTED_FOUNDATION_SELECTOR_REQUIRED",
         }
     if type(include_baostock_evidence) is not bool:
         raise ResearchEntryError(
@@ -557,12 +553,4 @@ def research_stock(
             target_session=target.isoformat(),
             tdx_result=result,
         )
-    result["foundation_handoff"] = asdict(
-        _build_foundation_typed_handoff(
-            result=result,
-            foundation_contract=foundation_contract or profile_contract,
-            history=history,
-            calendar_revision=calendar_revision,
-        )
-    )
     return result

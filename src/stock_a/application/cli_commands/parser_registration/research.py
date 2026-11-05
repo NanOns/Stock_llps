@@ -41,7 +41,7 @@ def register_commands(commands):
     stock.add_argument(
         "--include-profile-preview",
         action="store_true",
-        help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT且不开放生产准入",
+        help="在同一次Raw/Core只读结果上附加11项基础画像组件预览；非PIT研究结果",
     )
     stock.add_argument(
         "--include-baostock-evidence",
@@ -167,7 +167,7 @@ def register_commands(commands):
     universe.add_argument(
         "--include-profile-preview",
         action="store_true",
-        help="在本页已评价Raw/Core结果上附加11项基础画像组件预览；非PIT且不开放生产准入",
+        help="在本页已评价Raw/Core结果上附加11项基础画像组件预览；非PIT研究结果",
     )
     universe.add_argument(
         "--max-directory-entries",
