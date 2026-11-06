@@ -107,6 +107,10 @@
   scroll-margin-top: 16px;
 }
 
+.sector-change-explorer [hidden] {
+  display: none !important;
+}
+
 .sector-controls,
 .sector-inline-controls {
   display: flex;

@@ -55,6 +55,7 @@ from stock_a.application.source_sector_change_research import (
     build_source_sector_change_view,
 )
 from stock_a.application.source_stock_change_context import (
+    SourceStockChangeContextError,
     query_source_stock_change_context,
 )
 from stock_a.application.source_d0_raw import (
@@ -445,6 +446,34 @@ class _PreviewState:
         self.source_sector_change_cache_key: tuple[Any, ...] | None = None
         self.source_sector_change_cache_inputs: SourceSectorChangeInputs | None = None
         self.source_sector_change_cache_expires_at = 0.0
+        self.single_d0_cache_lock = threading.Lock()
+        self.single_d0_cache_key: tuple[Any, ...] | None = None
+        self.single_d0_cache_rows: dict[str, Any] = {}
+        self.single_d0_cache_expires_at = 0.0
+
+    def single_d0_rows(
+        self, cache_key: tuple[Any, ...], factory: Any
+    ) -> dict[str, Any]:
+        """按精确双日来源身份短时复用D0全池，不在每次单股点击重复计算。"""
+        with self.single_d0_cache_lock:
+            if (
+                self.single_d0_cache_key == cache_key
+                and time.monotonic() < self.single_d0_cache_expires_at
+            ):
+                return self.single_d0_cache_rows
+            result = factory()
+            if (
+                result["selection"]["page_count"]
+                != result["source_key_set"]["source_union_count"]
+            ):
+                raise SourceStockChangeContextError(
+                    "D0_CHANGE_PARTITION_NOT_CLOSED", "单股观察要求完整D0来源集合。"
+                )
+            rows = {row["source_symbol"]: row for row in result["results"]}
+            self.single_d0_cache_key = cache_key
+            self.single_d0_cache_rows = rows
+            self.single_d0_cache_expires_at = time.monotonic() + 600
+            return rows
 
     def source_sector_change_inputs(
         self,
@@ -1196,8 +1225,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "stock_offset",
             "stock_limit",
         }
-        allowed_fields = (required, required | {"observation_mode"})
-        if not isinstance(body, dict) or set(body) not in allowed_fields:
+        if not isinstance(body, dict) or not required <= set(body) <= (
+            required | {"observation_mode", "explain_symbol"}
+        ):
             raise PreviewHttpError(
                 400,
                 "SECTOR_CHANGE_BODY_INVALID",
@@ -1215,6 +1245,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "观察模式只能为D1或D0",
             )
         include_d0_launch_new = observation_mode == "D0"
+        explain_symbol = (
+            _symbol(body["explain_symbol"]) if "explain_symbol" in body else None
+        )
+        read_d0 = include_d0_launch_new or explain_symbol is not None
         target = _iso_date(body["target_session"])
         cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
         _require_research_cutoff(target, cutoff)
@@ -1226,7 +1260,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             body["pg_history_session_count"], "pg_history_session_count", 75
         )
         d0_before_session = None
-        if include_d0_launch_new:
+        if read_d0:
             try:
                 resolved_target, adjacent_sessions, _ = resolve_pg_history_window(
                     target.isoformat(), 2
@@ -1408,7 +1442,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 concept_snapshot_id,
                 event_window_start.isoformat(),
                 history_session_count,
-                include_d0_launch_new,
+                read_d0,
                 d0_before_session.isoformat() if d0_before_session else None,
             )
             inputs, cache_hit = self.preview_server.state.source_sector_change_inputs(
@@ -1424,7 +1458,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     profile_revision=profile_revision,
                     event_window_start=event_window_start,
                     pg_history_session_count=history_session_count,
-                    include_d0_launch_new=include_d0_launch_new,
+                    include_d0_launch_new=read_d0,
                     d0_before_session=d0_before_session,
                 ),
             )
@@ -1466,6 +1500,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 stock_limit=stock_limit,
                 include_source_market_context=False,
                 member_search=member_search,
+                explain_symbol=explain_symbol,
                 d0_new_only=include_d0_launch_new,
             )
         except TdxSectorMembersApplicationError as error:
@@ -2554,6 +2589,76 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 return
             if post_path == "/api/preview/sector-change-stocks":
                 self._send_json(200, self._sector_change_stocks(body))
+                return
+            if (
+                post_path == "/api/preview/stock-timeline"
+                and isinstance(body, dict)
+                and body.get("source_observation_only") is True
+            ):
+                if set(body) != {
+                    "source_observation_only",
+                    "symbol",
+                    "target_session",
+                    "package_sha256",
+                    "namespace_id",
+                    "research_cutoff",
+                }:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_BODY_FIELDS_INVALID",
+                        "单股来源观察请求字段不完整或含未登记字段",
+                    )
+                symbol = _symbol(body["symbol"])
+                target = _iso_date(body["target_session"])
+                cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
+                _require_research_cutoff(target, cutoff)
+                _require_research_cutoff(
+                    cutoff, self.preview_server.state.research_cutoff
+                )
+                package = _sha(body["package_sha256"])
+                try:
+                    namespace = str(UUID(body["namespace_id"]))
+                except (ValueError, TypeError, AttributeError) as error:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_SOURCE_IDENTITY_INVALID",
+                        "namespace_id须为有效UUID",
+                    ) from error
+                _, pair, _ = resolve_pg_history_window(target.isoformat(), 2)
+                try:
+                    rows = self.preview_server.state.single_d0_rows(
+                        (namespace, pair[0], target, cutoff, package),
+                        lambda: query_source_d0_raw_launch(
+                            self.preview_server.state.config,
+                            scenario="LAUNCH_CONFIRM",
+                            action="changes",
+                            before_session=pair[0],
+                            target_session=target,
+                            research_cutoff=cutoff,
+                            before_package_sha256=package,
+                            package_sha256=package,
+                            expected_namespace_id=namespace,
+                            transition="ALL",
+                            offset=0,
+                            limit=5000,
+                        ),
+                    )
+                except (SourceD0RawError, SourceStockChangeContextError) as error:
+                    mapped = _source_context_preview_error(error)
+                    if mapped is None:
+                        raise
+                    raise mapped from error
+                self._send_json(
+                    200,
+                    {
+                        "source_symbol": symbol,
+                        "target_session": target.isoformat(),
+                        "d0_change": rows.get(symbol),
+                        "d1_status": "NOT_EVALUATED",
+                        "membership_status": "NOT_EVALUATED",
+                        "formal_evaluation_status": "NOT_EVALUATED",
+                    },
+                )
                 return
             expected = {"symbol", "target_session", "package_sha256", "session_count"}
             allowed_timeline = expected | {"namespace_id"}

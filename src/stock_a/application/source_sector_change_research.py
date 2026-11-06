@@ -244,6 +244,7 @@ def build_source_sector_change_view(
     include_source_market_context: bool = False,
     include_price_safety_facts: bool = False,
     member_search: str | None = None,
+    explain_symbol: str | None = None,
 ) -> dict[str, Any]:
     """从同一全量来源读入生成一个板块/成员/个股分页视图。"""
     result = combine_sector_strength_and_d1_changes(
@@ -266,6 +267,7 @@ def build_source_sector_change_view(
         d0_launch_changes=inputs.d0_launch_changes,
         d0_new_only=d0_new_only,
         member_search=member_search,
+        explain_symbol=explain_symbol,
     )
     if include_source_market_context:
         try:

@@ -682,6 +682,7 @@ def combine_sector_strength_and_d1_changes(
     d0_launch_changes: Mapping[str, Any] | None = None,
     d0_new_only: bool = False,
     member_search: str | None = None,
+    explain_symbol: str | None = None,
 ) -> dict[str, Any]:
     """先联接完整来源集合，再过滤、排序及分页板块和板内股票。"""
     if (
@@ -965,6 +966,10 @@ def combine_sector_strength_and_d1_changes(
                 "D0_D1_SOURCE_IDENTITY_MISMATCH",
                 "D0后端与既有D1变化不是同目标、同来源包、同DEV命名空间",
             )
+    d0_by_symbol = {
+        item["source_symbol"]: item
+        for item in (d0_launch_changes or {}).get("results", [])
+    }
     all_legal_board_count = len(all_board_rows)
     source_kind_counts = {
         kind: sum(row["board_kind"] == kind for row in all_board_rows)
@@ -1031,6 +1036,8 @@ def combine_sector_strength_and_d1_changes(
         members = []
         for symbol in detail_board["_member_symbols"]:
             member = _member_detail(symbol, d1_symbols.get(symbol))
+            if d0_launch_changes is not None:
+                member["d0_change"] = d0_by_symbol.get(symbol)
             d1_history_base = [
                 "stock-a",
                 "source-d1-breakout-preview",
@@ -1241,6 +1248,35 @@ def combine_sector_strength_and_d1_changes(
             offset=stock_offset,
             limit=stock_limit,
         )
+    if explain_symbol is not None:
+        memberships = [
+            {
+                "board_kind": row["board_kind"],
+                "board_native_id": row["board_native_id"],
+                "board_name": row["board_name"],
+                "snapshot_id": row["_board_snapshot"]["snapshot_id"],
+            }
+            for row in all_board_rows
+            if explain_symbol in row["_member_symbols"]
+        ]
+        result["symbol_observation"] = {
+            "source_symbol": explain_symbol,
+            "in_target_raw_pool": explain_symbol in d1_symbols,
+            "d1": _member_detail(explain_symbol, d1_symbols.get(explain_symbol)),
+            "d0_change": d0_by_symbol.get(explain_symbol),
+            "memberships": memberships,
+            "missing_membership_kinds": [
+                kind
+                for kind in ("INDUSTRY", "CONCEPT")
+                if not any(board["board_kind"] == kind for board in memberships)
+            ],
+            "membership_status": (
+                "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
+                if memberships
+                else "NO_CURRENT_TDX_BOARD_MEMBERSHIP_MATCH"
+            ),
+            "formal_evaluation_status": "NOT_EVALUATED",
+        }
     if d0_launch_summary is not None:
         full_d0_stock_rows = d0_launch_summary.pop("stocks")
         d0_launch_summary.pop("members_by_board")
