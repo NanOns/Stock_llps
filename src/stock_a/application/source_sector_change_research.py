@@ -75,6 +75,7 @@ def prepare_source_sector_change_inputs(
     pg_history_session_count: int,
     include_d0_launch_new: bool = False,
     d0_before_session: date | None = None,
+    cross_period_board_kind: str | None = None,
 ) -> SourceSectorChangeInputs:
     """从固定PG读取完整行业/GN集合与指定事件窗的D1历史。"""
     if (
@@ -186,6 +187,7 @@ def prepare_source_sector_change_inputs(
                     member_limit=0,
                     include_all_boards=True,
                     include_all_member_symbols=True,
+                    include_cross_period_inputs=board_kind == cross_period_board_kind,
                     read_context=strength_read_context,
                 )
             )

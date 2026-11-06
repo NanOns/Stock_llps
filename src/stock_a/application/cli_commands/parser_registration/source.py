@@ -254,6 +254,9 @@ def register_commands(commands):
         help="只读计算全来源探索性RPS/Seed并汇总指定板块完整成员",
     )
     sector_change_stocks.add_argument(
+        "--loo-source-symbol", help="剔除一个目标来源股票，重算同类板块竞争位置"
+    )
+    sector_change_stocks.add_argument(
         "--event-window-start", required=True, help="D1历史事件窗口起始官方会话"
     )
     sector_change_stocks.add_argument(

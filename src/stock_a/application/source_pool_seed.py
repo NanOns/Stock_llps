@@ -566,6 +566,161 @@ def _board_native(pool, symbols, peer_members, board_id):
     return result
 
 
+def _cross_period_boards(peer_members, inputs):
+    """固定成员下逐字段取双端交集，再对同类型板块全集求中秩。"""
+    target, prior, previous = (
+        "target",
+        "three_official_sessions_before",
+        "previous_official_session",
+    )
+    results = {}
+    for board_id, members in peer_members.items():
+        n = len(members)
+        endpoints = {}
+        for endpoint in (target, prior, previous):
+            quotes = sum(
+                bool(inputs.get(s, {}).get(endpoint, {}).get("actual_quote"))
+                for s in members
+            )
+            endpoints[endpoint] = {
+                "actual_quote_count": quotes,
+                "unknown_quote_count": n - quotes,
+                "quote_coverage": str(Fraction(quotes, n)) if n else None,
+            }
+        result = {
+            "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
+            "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+            "price_coordinate": "RAW_UNADJUSTED",
+            "member_count": n,
+            "mapped_count": sum(bool(inputs.get(s, {}).get("mapped")) for s in members),
+            "unmapped_count": sum(not inputs.get(s, {}).get("mapped") for s in members),
+            "endpoints": endpoints,
+        }
+        for field, earlier in (
+            ("ret5", prior),
+            ("ret20", prior),
+            ("ret1", prior),
+            ("above_ma20", prior),
+            ("ret1_delta1", previous),
+        ):
+            raw_field = "ret1" if field == "ret1_delta1" else field
+            a = {s: inputs.get(s, {}).get(target, {}).get(raw_field) for s in members}
+            b = {s: inputs.get(s, {}).get(earlier, {}).get(raw_field) for s in members}
+            common = [s for s in members if a[s] is not None and b[s] is not None]
+            qualified = (
+                n >= 5
+                and len(common) >= 5
+                and 5 * len(common) >= 4 * n
+                and all(
+                    endpoints[e]["actual_quote_count"] >= 5
+                    and 5 * endpoints[e]["actual_quote_count"] >= 4 * n
+                    for e in (target, earlier)
+                )
+            )
+
+            def aggregate(values):
+                if not qualified:
+                    return None
+                if raw_field == "above_ma20":
+                    return Fraction(sum(values), len(values))
+                numbers = [Fraction(v) for v in values]
+                if raw_field == "ret1":
+                    return Fraction(sum(v > 0 for v in numbers), len(numbers))
+                return median(numbers)
+
+            now = aggregate([a[s] for s in common])
+            before = aggregate([b[s] for s in common])
+            result[field] = {
+                "target_known": sum(v is not None for v in a.values()),
+                "prior_known": sum(v is not None for v in b.values()),
+                "target_unknown": sum(v is None for v in a.values()),
+                "prior_unknown": sum(v is None for v in b.values()),
+                "common_count": len(common),
+                "denominator": n,
+                "target": str(now) if now is not None else None,
+                "prior": str(before) if before is not None else None,
+                "delta": str(now - before)
+                if now is not None and before is not None
+                else None,
+            }
+        results[board_id] = result
+    for field in ("ret5", "ret20"):
+        for endpoint in ("target", "prior"):
+            values = [
+                Fraction(row[field][endpoint])
+                for row in results.values()
+                if row[field][endpoint] is not None
+            ]
+            for row in results.values():
+                own = row[field][endpoint]
+                rank = None
+                if own is not None and len(values) >= 2:
+                    value = Fraction(own)
+                    rank = (
+                        100
+                        * (
+                            sum(v < value for v in values)
+                            + Fraction(sum(v == value for v in values) - 1, 2)
+                        )
+                        / (len(values) - 1)
+                    )
+                row[field][endpoint + "_percentile"] = (
+                    str(rank) if rank is not None else None
+                )
+                row[field][endpoint + "_peer_count"] = len(values)
+        for row in results.values():
+            metric = row[field]
+            a, b = metric["target_percentile"], metric["prior_percentile"]
+            metric["percentile_delta_pp"] = (
+                str(Fraction(a) - Fraction(b))
+                if a is not None and b is not None
+                else None
+            )
+    for row in results.values():
+        dq = row["ret5"]["percentile_delta_pp"]
+        delta1 = row["ret1_delta1"]["delta"]
+        pulse = _and(
+            _tri(Fraction(dq) >= 10) if dq is not None else _tri(None, "DQ5_UNKNOWN"),
+            _tri(Fraction(delta1) >= Fraction(5, 100))
+            if delta1 is not None
+            else _tri(None, "BREADTH_DELTA1_UNKNOWN"),
+        )
+        row["rotation"] = {
+            "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
+            "dq5_pp": dq,
+            "breadth_delta3": row["ret1"]["delta"],
+            "breadth_delta1": delta1,
+            "pulse": pulse,
+            "formal_state": "NOT_EVALUATED",
+            "reason": "FROZEN_EPISODE_AND_BASKET_UNAVAILABLE",
+        }
+    return results
+
+
+def _loo_differences(before, after):
+    """仅对两侧均已知的同口径板块结果计算差值。"""
+
+    def difference(left, right):
+        return (
+            str(Fraction(right) - Fraction(left))
+            if left is not None and right is not None
+            else None
+        )
+
+    return {
+        "ret5_median": difference(before["ret5"]["median"], after["ret5"]["median"]),
+        "ret20_median": difference(before["ret20"]["median"], after["ret20"]["median"]),
+        "breadth": difference(before["breadth"]["value"], after["breadth"]["value"]),
+        "ma20_width": difference(
+            before["ma20_width"]["value"], after["ma20_width"]["value"]
+        ),
+        "rs5_pp": difference(before["ret5"]["percentile"], after["ret5"]["percentile"]),
+        "rs20_pp": difference(
+            before["ret20"]["percentile"], after["ret20"]["percentile"]
+        ),
+    }
+
+
 def read_board_seed_facts(
     config: dict[str, Any],
     pool: Mapping[str, Any],
@@ -574,6 +729,9 @@ def read_board_seed_facts(
     board_kind: str,
     board_native_id: str,
     peer_members: Mapping[str, list[str]] | None = None,
+    cross_period_inputs: Mapping[str, Any] | None = None,
+    cross_period_sessions: Mapping[str, str] | None = None,
+    loo_symbol: str | None = None,
 ) -> dict[str, Any]:
     """复用现役成员读取，按完整成员计数并保留未映射未知。"""
     offset = 0
@@ -632,4 +790,47 @@ def read_board_seed_facts(
         if set(peer_members.get(board_native_id, ())) != set(symbols):
             raise ValueError("板块完整成员与同类板块读取不一致")
         result["native"] = _board_native(pool, symbols, peer_members, board_native_id)
+        if cross_period_inputs is not None:
+            result["native"]["cross_period"] = _cross_period_boards(
+                peer_members, cross_period_inputs
+            )[board_native_id]
+            result["native"]["cross_period"]["sessions"] = cross_period_sessions
+        if loo_symbol is not None:
+            known_symbol = loo_symbol in pool["facts"] or any(
+                loo_symbol in members for members in peer_members.values()
+            )
+            if not known_symbol:
+                result["loo"] = {
+                    "source_symbol": loo_symbol,
+                    "state": "UNKNOWN",
+                    "reason": "SOURCE_SYMBOL_NOT_FOUND",
+                }
+            elif loo_symbol not in symbols:
+                result["loo"] = {"source_symbol": loo_symbol, "state": "NOT_APPLICABLE"}
+            else:
+                reduced = {
+                    key: [s for s in members if s != loo_symbol]
+                    for key, members in peer_members.items()
+                }
+                after = _board_native(
+                    pool, reduced[board_native_id], reduced, board_native_id
+                )
+                if cross_period_inputs is not None:
+                    after["cross_period"] = _cross_period_boards(
+                        reduced, cross_period_inputs
+                    )[board_native_id]
+                    after["cross_period"]["sessions"] = cross_period_sessions
+                result["loo"] = {
+                    "source_symbol": loo_symbol,
+                    "state": "APPLIED",
+                    "source_mapping": "MAPPED"
+                    if loo_symbol in pool["facts"]
+                    else "UNMAPPED",
+                    "affected_board_count": sum(
+                        loo_symbol in members for members in peer_members.values()
+                    ),
+                    "before": result["native"],
+                    "after": after,
+                    "differences": _loo_differences(result["native"], after),
+                }
     return result

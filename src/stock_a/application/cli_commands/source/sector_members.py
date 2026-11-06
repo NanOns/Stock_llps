@@ -292,6 +292,12 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
     cutoff = _parse_session_date(args.research_cutoff)
     include_d0_launch_new = getattr(args, "include_d0_launch_new", False)
     include_seed = getattr(args, "include_source_seed_board", False)
+    if args.loo_source_symbol and not include_seed:
+        raise DiagnosticError(
+            "LOO_REQUIRES_SOURCE_SEED_BOARD",
+            "单股LOO须启用来源Seed板块",
+            _EXIT_ARGUMENT,
+        )
     if include_seed and (
         not args.profile_revision
         or not args.detail_board_kind
@@ -434,6 +440,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             pg_history_session_count=args.pg_history_session_count,
             include_d0_launch_new=include_d0_launch_new,
             d0_before_session=d0_before_session,
+            cross_period_board_kind=args.detail_board_kind if include_seed else None,
         )
         result = build_source_sector_change_view(
             config,
@@ -483,17 +490,27 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 if args.detail_board_kind == "INDUSTRY"
                 else concept_snapshot_id
             )
+            strength_input = next(
+                item
+                for item in inputs.strength_results
+                if item["filter"]["board_kind"] == args.detail_board_kind
+            )
             result["source_seed_board"] = read_board_seed_facts(
                 config,
                 pool,
                 snapshot_id=snapshot_id,
                 board_kind=args.detail_board_kind,
                 board_native_id=args.detail_board_native_id,
-                peer_members=next(
-                    item["all_member_symbols_for_linkage"]
-                    for item in inputs.strength_results
-                    if item["filter"]["board_kind"] == args.detail_board_kind
-                ),
+                peer_members=strength_input["all_member_symbols_for_linkage"],
+                cross_period_inputs=strength_input["cross_period_inputs_for_linkage"],
+                cross_period_sessions={
+                    "target": strength_input["target_session"],
+                    "three_official_sessions_before": strength_input[
+                        "three_official_sessions_before"
+                    ],
+                    "previous_official_session": strength_input["window_sessions"][-2],
+                },
+                loo_symbol=args.loo_source_symbol,
             )
             result["source_seed_pool"] = {
                 key: value for key, value in pool.items() if key != "facts"

@@ -28,6 +28,7 @@ from stock_a.domain import FieldValue, unknown
 from stock_a.research.core import (
     CoreObservation,
     MarketSessionCalendar,
+    calculate_core,
     calculate_core_return,
 )
 from stock_a.research.entry import ResearchEntryError, _load_calendar
@@ -1080,6 +1081,7 @@ def read_tdx_sector_strength(
     member_limit: int,
     include_all_boards: bool = False,
     include_all_member_symbols: bool = False,
+    include_cross_period_inputs: bool = False,
     read_context: TdxSectorStrengthReadContext | None = None,
 ) -> dict[str, Any]:
     """按完整TDX成员集合计算来源级Core收益中位数及三会话变化。"""
@@ -1103,6 +1105,7 @@ def read_tdx_sector_strength(
         or not 0 <= member_limit <= 100
         or type(include_all_boards) is not bool
         or type(include_all_member_symbols) is not bool
+        or type(include_cross_period_inputs) is not bool
         or (include_all_member_symbols and not include_all_boards)
     ):
         raise TdxSectorMembersApplicationError(
@@ -1189,7 +1192,11 @@ def read_tdx_sector_strength(
         target_endpoint: len(window_sessions) - 1,
         prior_endpoint: len(window_sessions) - 4,
     }
+    if include_cross_period_inputs:
+        endpoint_indexes["previous_official_session"] = len(window_sessions) - 2
     member_returns: dict[str, dict[str, Any]] = {}
+    cross_period_inputs: dict[str, dict[str, Any]] = {}
+    core_fields_calculated: set[str] = set()
     for symbol in symbols:
         observations: list[CoreObservation] = []
         observation_issues: list[str | None] = []
@@ -1218,6 +1225,8 @@ def read_tdx_sector_strength(
                 for row in observations
             ]
         endpoint_values: dict[str, dict[str, Any]] = {}
+        if include_cross_period_inputs:
+            cross_period_inputs[symbol] = {"mapped": symbol in profile_by_symbol}
         for endpoint, end_index in endpoint_indexes.items():
             endpoint_history = observations[: end_index + 1]
             endpoint_issues = observation_issues[: end_index + 1]
@@ -1227,6 +1236,37 @@ def read_tdx_sector_strength(
                 sessions=window_sessions[: end_index + 1],
             )
             endpoint_values[endpoint] = {}
+            if include_cross_period_inputs:
+                bar = endpoint_history[-1]
+                fields = (bar.open, bar.high, bar.low, bar.close)
+                quote = bar.state == "ACTUAL" and all(
+                    item is not None and item.quality == "OBSERVED" for item in fields
+                )
+                if quote:
+                    opening, high, low, close = (
+                        Fraction(item.value) for item in fields
+                    )
+                    quote = (
+                        min(opening, high, low, close) > 0
+                        and low <= min(opening, close)
+                        and high >= max(opening, low, close)
+                    )
+                core = calculate_core(
+                    endpoint_history, official_calendar=endpoint_calendar
+                )
+                core_fields_calculated.update(core)
+                ret1, ma20 = core["core.ret1"], core["core.ma20"]
+                cross_period_inputs[symbol][endpoint] = {
+                    "actual_quote": quote,
+                    "ret1": str(ret1.value)
+                    if quote and ret1.quality == "OBSERVED"
+                    else None,
+                    "above_ma20": (
+                        close > Fraction(ma20.value)
+                        if quote and ma20.quality == "OBSERVED"
+                        else None
+                    ),
+                }
             for periods in (5, 20):
                 field = f"ret{periods}"
                 result = calculate_core_return(
@@ -1294,6 +1334,10 @@ def read_tdx_sector_strength(
                     "reason": reason,
                     "value_source": value_source,
                 }
+                if include_cross_period_inputs:
+                    cross_period_inputs[symbol][endpoint][field] = (
+                        str(value) if quote and value is not None else None
+                    )
         member_returns[symbol] = endpoint_values
 
     summaries: list[dict[str, Any]] = []
@@ -1413,6 +1457,19 @@ def read_tdx_sector_strength(
             }
             for native_id, values in sort_values.items()
         }
+    if include_cross_period_inputs:
+        output["cross_period_inputs_for_linkage"] = cross_period_inputs
+        output["return_fields_calculated"] = sorted(
+            field for field in core_fields_calculated if field.startswith("core.ret")
+        )
+        output["non_return_core_factors_recalculated"] = sorted(
+            field
+            for field in core_fields_calculated
+            if not field.startswith("core.ret")
+        )
+        output["return_provenance"]["ret5_and_prior_endpoint_returns"] = (
+            "同包Raw官方会话窗口复用Core收益内核；额外计算ret1和MA20供跨期宽度研究。"
+        )
     if include_all_member_symbols:
         output["all_member_symbols_for_linkage"] = {
             board["board_native_id"]: sorted(
