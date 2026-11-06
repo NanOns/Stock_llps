@@ -163,8 +163,14 @@ def read_source_pool_seed(
     profile_revision: str,
     profile_contract: dict[str, Any],
     history_session_count: int,
+    selected_symbols: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """读取精确已存画像并复用现役Core/Profile计算未持久的Seed输入。"""
+    if selected_symbols is not None and (
+        not isinstance(selected_symbols, frozenset)
+        or any(not isinstance(symbol, str) or not symbol for symbol in selected_symbols)
+    ):
+        raise ValueError("来源模式的指定代码集合无效")
     rps = read_source_pool_rps(
         config,
         target_session=target_session,
@@ -231,6 +237,8 @@ def read_source_pool_seed(
             raise ValueError("来源池与画像身份不一致")
         for candidate in page["candidates"]:
             symbol = candidate["source_symbol"]
+            if selected_symbols is not None and symbol not in selected_symbols:
+                continue
             rows = candidate["history_rows"]
             try:
                 preview = research_stock_pg_history_preview(
@@ -373,7 +381,10 @@ def read_source_pool_seed(
         offset = page["next_offset"]
         if offset is None:
             break
-    if set(seed_facts) != set(profiles):
+    expected_symbols = (
+        set(profiles) if selected_symbols is None else set(profiles) & selected_symbols
+    )
+    if set(seed_facts) != expected_symbols:
         raise ValueError("Seed事实没有覆盖完整来源池")
     seed_counts = Counter(fact["seed"]["state"] for fact in seed_facts.values())
     return {
@@ -391,7 +402,11 @@ def read_source_pool_seed(
         "corporate_action_continuity": rps["corporate_action_continuity"],
         "formal_research_universe": rps["formal_research_universe"],
         "endpoint_counts": rps["endpoint_counts"],
-        "source_pool_total": len(seed_facts),
+        "source_pool_total": len(profiles),
+        "seed_evaluated_count": len(seed_facts),
+        "seed_evaluation_scope": "FULL_SOURCE_POOL"
+        if selected_symbols is None
+        else "EXPLICIT_SOURCE_SYMBOLS",
         "seed_counts": {
             state: seed_counts[state] for state in ("TRUE", "FALSE", "UNKNOWN")
         },

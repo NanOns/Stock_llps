@@ -18,6 +18,7 @@ from stock_a.application.runtime_config import (
 )
 from stock_a.application.source_d0_raw import (
     SourceD0RawError,
+    attach_recovery_failure_followup,
     query_source_d0_raw_launch,
 )
 
@@ -44,6 +45,27 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
             before_package_sha256=args.before_package_sha256,
             transition=args.transition,
         )
+        if getattr(args, "followup_session", None):
+            if (
+                args.scenario != "RECOVERY_TURN"
+                or args.action != "current"
+                or not args.symbol
+                or len(result["results"]) != 1
+            ):
+                raise SourceD0RawError(
+                    "D0_FOLLOWUP_SCOPE_INVALID",
+                    "后继观察要求单只股票的恢复诊断当前查询。",
+                    category="ARGUMENT",
+                )
+            attach_recovery_failure_followup(
+                config,
+                result["results"][0],
+                target=_parse_session_date(args.target_session),
+                followup=_parse_session_date(args.followup_session),
+                cutoff=_parse_session_date(args.research_cutoff),
+                package_sha256=args.package_sha256,
+                namespace_id=result["namespace_id"],
+            )
     except DiagnosticError as error:
         _emit(
             {"ok": False, "code": error.code, "message": str(error)},
@@ -69,7 +91,7 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
             {
                 "ok": False,
                 "code": "D0_RAW_ENGINEERING_ERROR",
-                "message": f"D0 LAUNCH原始场景读取失败：{type(error).__name__}",
+                "message": f"D0原始场景读取失败：{type(error).__name__}",
                 "database_write_attempted": False,
                 "ddl_executed": False,
                 "dml_executed": False,

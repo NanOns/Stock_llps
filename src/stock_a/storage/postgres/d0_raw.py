@@ -15,7 +15,7 @@ _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 MAX_SOURCE_SYMBOLS = 5000
 _MAX_SOURCE_SYMBOLS = MAX_SOURCE_SYMBOLS
-_MAX_HISTORY_CELLS = _MAX_SOURCE_SYMBOLS * 21
+_MAX_HISTORY_CELLS = _MAX_SOURCE_SYMBOLS * 25
 
 
 class D0RawPgError(ValueError):
@@ -291,7 +291,7 @@ def read_source_d0_raw_window(
         or target_session > research_cutoff
         or not isinstance(package_sha256, str)
         or _SHA256.fullmatch(package_sha256) is None
-        or not 1 <= len(selected_sessions) <= 21
+        or not 1 <= len(selected_sessions) <= 25
         or any(type(session) is not date for session in selected_sessions)
         or tuple(sorted(set(selected_sessions))) != selected_sessions
         or selected_sessions[-1] != target_session

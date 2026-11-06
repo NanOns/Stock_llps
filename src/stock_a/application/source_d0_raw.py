@@ -1,4 +1,4 @@
-"""来源股票D0 LAUNCH_CONFIRM诊断级原始场景只读应用用例。"""
+"""来源股票D0启动和恢复原始场景只读诊断。"""
 
 from __future__ import annotations
 
@@ -14,12 +14,20 @@ from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.d0_launch_raw import (
     calculate_d0_launch_confirm_raw,
+    calculate_d0_recovery_turn_raw,
     fraction_payload,
 )
+from stock_a.application.source_pool_factors import read_source_pool_rps
+from stock_a.application.tdx_sector_members import _raw_window_observation
+from stock_a.research.core import MarketSessionCalendar, calculate_core
 from stock_a.storage.postgres.d0_raw import (
     MAX_SOURCE_SYMBOLS,
     D0RawPgError,
     read_source_d0_raw_window,
+)
+from stock_a.storage.postgres.source_raw import (
+    RawSourcePgError,
+    read_raw_daily_history_stock,
 )
 
 
@@ -48,6 +56,197 @@ class SourceD0RawError(ValueError):
         self.code = code
         self.category = category
         super().__init__(message)
+
+
+def attach_source_d1_prior_reference(
+    item: dict[str, Any], discovery: Mapping[str, Any]
+) -> None:
+    """给D0诊断附上前一会话已观察的来源级D1支撑，不构造正式父事件。"""
+    symbol = item["source_symbol"]
+    if discovery.get("target_session") != item["target_session"]:
+        raise SourceD0RawError("D0_D1_SESSION_MISMATCH", "D0与D1目标会话不一致。")
+    previous = discovery["previous_official_session"]
+    details = [
+        row
+        for row in discovery.get("complete_symbol_details", ())
+        if row.get("source_symbol") == symbol
+    ]
+    if len(details) != 1:
+        raise SourceD0RawError(
+            "D0_D1_SOURCE_SYMBOL_MISMATCH", "D1完整来源池缺少唯一股票。"
+        )
+    references = []
+    for event in details[0]["anchor_events"]:
+        observation = event.get("support_observation_before")
+        if event["support_anchor_session"] >= item["target_session"] or not isinstance(
+            observation, Mapping
+        ):
+            continue
+        if observation.get("session") != previous:
+            raise SourceD0RawError(
+                "D0_D1_PRIOR_SESSION_MISMATCH", "D1支撑观察不是D0前一官方会话。"
+            )
+        support = observation.get("support_observation") or {}
+        references.append(
+            {
+                "anchor_session": event["support_anchor_session"],
+                "observable_session": previous,
+                "state": support.get("state"),
+                "quality": support.get("quality"),
+                "event_key": event.get("event_key"),
+                "birth_predicate": event.get("raw_d1_breakout_predicate"),
+                "platform_generation": event.get("platform_generation"),
+                "prior_observation": observation,
+                "after_observation": event.get("support_observation_after"),
+            }
+        )
+    usable_states = {
+        "IDLE",
+        "APPROACHING",
+        "TESTING",
+        "HELD_TENTATIVE",
+        "RETESTING",
+        "HELD_CONFIRMED",
+        "BREACHED_SHALLOW",
+        "RECLAIMED",
+    }
+    usable = [
+        ref
+        for ref in references
+        if ref["quality"] == "OBSERVED" and ref["state"] in usable_states
+    ]
+    item["d1_prior_structure_reference"] = {
+        "state": "TRUE" if usable else "UNKNOWN",
+        "reason": "SOURCE_SUPPORT_OBSERVED"
+        if usable
+        else "NO_PROVEN_UNBROKEN_SOURCE_SUPPORT_OR_LEFT_CENSORED",
+        "formal_parent": "NOT_FORMAL_PARENT",
+        "references": references,
+    }
+    for scenario in ("STRONG_PULLBACK", "TREND_CONTINUE"):
+        item["other_scenario_partial_predicates"][scenario][
+            "source_prior_support_reference"
+        ] = {
+            "state": "TRUE" if usable else "UNKNOWN",
+            "formal_parent": "NOT_FORMAL_PARENT",
+        }
+
+
+def attach_recovery_failure_followup(
+    config: Mapping[str, Any],
+    item: dict[str, Any],
+    *,
+    target: date,
+    followup: date,
+    cutoff: date,
+    package_sha256: str,
+    namespace_id: str,
+) -> None:
+    """只观察诊断线出生后有界官方会话，不生成D2状态。"""
+    if type(followup) is not date or not target < followup <= cutoff:
+        raise SourceD0RawError(
+            "D0_FOLLOWUP_DATE_INVALID",
+            "后继会话必须晚于出生且不晚于研究截止。",
+            category="ARGUMENT",
+        )
+    calendar = _official_calendar(followup)["sessions"]
+    try:
+        start, end = calendar.index(target), calendar.index(followup)
+    except ValueError as error:
+        raise SourceD0RawError(
+            "D0_FOLLOWUP_NOT_OFFICIAL_SESSION",
+            "出生及后继须为官方会话。",
+            category="ARGUMENT",
+        ) from error
+    sessions = calendar[start : end + 1]
+    if not 2 <= len(sessions) <= 11:
+        raise SourceD0RawError(
+            "D0_FOLLOWUP_WINDOW_INVALID",
+            "后继窗口须为1至10个官方会话。",
+            category="ARGUMENT",
+        )
+    try:
+        history = read_raw_daily_history_stock(
+            config,
+            source_symbol=item["source_symbol"],
+            target_session=target,
+            package_sha256=package_sha256,
+            sessions=sessions,
+            expected_namespace_id=namespace_id,
+            starts_at_target=True,
+            research_cutoff=cutoff,
+        )
+    except RawSourcePgError as error:
+        raise SourceD0RawError(error.code, str(error)) from error
+    by_date = {row["session_date"]: row for row in history["history_rows"]}
+    line_data = item["failure_line_candidate"]["value"]
+    line = (
+        Fraction(int(line_data["numerator"]), int(line_data["denominator"]))
+        if line_data
+        else None
+    )
+    birth = by_date.get(target)
+    result = []
+    for session in sessions[1:]:
+        row = by_date.get(session)
+        reason = None
+        close = None
+        if line is None:
+            reason = "FAILURE_LINE_CANDIDATE_UNAVAILABLE"
+        elif row is None:
+            saved_end = (history.get("saved_session_range") or [None, None])[1]
+            reason = (
+                "NOT_AVAILABLE_AFTER_SAVED_RANGE"
+                if saved_end is not None and session.isoformat() > saved_end
+                else "FOLLOWUP_RAW_NOT_STORED"
+            )
+        elif (
+            birth is None
+            or not birth.get("source_entry_sha256")
+            or not row.get("source_entry_sha256")
+            or row.get("source_entry_sha256") != birth.get("source_entry_sha256")
+            or row.get("source_content_id") != birth.get("source_content_id")
+            or row.get("price_coordinate") != "RAW_UNADJUSTED"
+        ):
+            reason = "FOLLOWUP_COORDINATE_OR_SOURCE_MISMATCH"
+        elif (
+            row.get("bar_status") != "TARGET_PRESENT"
+            or row.get("price_quality") != "OBSERVED"
+        ):
+            reason = "FOLLOWUP_PRICE_UNKNOWN"
+        else:
+            try:
+                if any(
+                    isinstance(row[key], bool)
+                    for key in ("raw_open", "raw_high", "raw_low", "raw_close")
+                ):
+                    raise ValueError("布尔值不是有效OHLC")
+                values = [
+                    Fraction(row[key])
+                    for key in ("raw_open", "raw_high", "raw_low", "raw_close")
+                ]
+                opening, high, low, close = values
+                if (
+                    min(values) <= 0
+                    or not low <= min(opening, close)
+                    or not high >= max(opening, close)
+                ):
+                    reason, close = "FOLLOWUP_OHLC_INVALID", None
+            except (TypeError, ValueError, ZeroDivisionError):
+                reason = "FOLLOWUP_OHLC_INVALID"
+        result.append(
+            {
+                "session": session.isoformat(),
+                "close": fraction_payload(close),
+                "close_at_or_below_line": None if reason else close <= line,
+                "quality": "UNKNOWN" if reason else "OBSERVED",
+                "reason": reason,
+            }
+        )
+    item["failure_line_followup"] = {
+        "role": "DIAGNOSTIC_ONLY_NOT_D2",
+        "observations": result,
+    }
 
 
 def _fraction(value: Any) -> dict[str, str] | None:
@@ -103,6 +302,114 @@ def _target_row_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "stable_security_id_status": "UNVERIFIED",
         "pit_status": "NON_PIT_RETROSPECTIVE",
     }
+
+
+def _attach_continuation_core(
+    item,
+    *,
+    rows,
+    sessions,
+    calendar,
+    namespace_id,
+    source_content_id,
+    target_capture_id,
+    parser_contract,
+):
+    """将现役Core斜率和前高投影到延续场景，保留其actual窗口身份。"""
+    symbol = item["source_symbol"]
+    present = {
+        day: row
+        for day, row in rows.items()
+        if isinstance(day, date) and row is not None
+    }
+    hashes = {
+        row.get("source_entry_sha256")
+        for row in present.values()
+        if row.get("source_entry_sha256")
+    }
+    inconsistent = len(hashes) > 1 or any(
+        row.get("parser_contract") != parser_contract
+        or row.get("source_symbol") != symbol
+        or row.get("namespace_id") != namespace_id
+        or row.get("source_content_id") != source_content_id
+        or row.get("reference_quality") is False
+        for row in present.values()
+    )
+    result = item["other_scenario_partial_predicates"]["TREND_CONTINUE"]
+    if inconsistent:
+        for key in ("core_slope_positive", "close_above_core_prior_high20"):
+            result[key] = {
+                "state": "UNKNOWN",
+                "quality": "UNKNOWN",
+                "reason": "RAW_SOURCE_IDENTITY_MISMATCH",
+            }
+        return
+    by_key = {(symbol, day): row for day, row in present.items()}
+    counts = {
+        key: {"row_count": 1, "package_count": 1, "capture_count": 1} for key in by_key
+    }
+    history = tuple(
+        _raw_window_observation(
+            source_symbol=symbol,
+            session=day,
+            raw_by_key=by_key,
+            revision_counts=counts,
+            target_session=sessions[-1],
+            target_capture_id=target_capture_id,
+        )[0]
+        for day in sessions
+    )
+    core = calculate_core(
+        history,
+        official_calendar=MarketSessionCalendar(
+            calendar["calendar_id"],
+            calendar["calendar_revision_chain"],
+            tuple(sessions),
+        ),
+    )
+    damage = core["core.price_damage"]
+    item["common_gate_diagnostics"]["core_price_damage"] = {
+        "state": ("TRUE" if damage.value else "FALSE")
+        if damage.quality == "OBSERVED"
+        else "UNKNOWN",
+        "reason": damage.reason,
+        "window_role": "CORE_ACTUAL_WINDOW",
+    }
+    slope, high = core["core.ma_slope20_atr"], core["core.prior_high20"]
+    close = history[-1].close
+    slope_value = Fraction(slope.value) if slope.quality == "OBSERVED" else None
+    high_value = Fraction(high.value) if high.quality == "OBSERVED" else None
+    close_value = Fraction(close.value) if close.quality == "OBSERVED" else None
+    for key, value, threshold, formula, reason in (
+        (
+            "core_slope_positive",
+            slope_value,
+            Fraction(0),
+            "core.ma_slope20_atr>0",
+            slope.reason,
+        ),
+        (
+            "close_above_core_prior_high20",
+            close_value,
+            high_value,
+            "C>core.prior_high20",
+            high.reason or close.reason,
+        ),
+    ):
+        known = value is not None and threshold is not None
+        result[key] = {
+            "state": "UNKNOWN"
+            if not known
+            else "TRUE"
+            if value > threshold
+            else "FALSE",
+            "quality": "OBSERVED" if known else "UNKNOWN",
+            "reason": None if known else reason,
+            "formula": formula,
+            "value": fraction_payload(value),
+            "threshold": fraction_payload(threshold),
+            "window_role": "CORE_ACTUAL_WINDOW",
+        }
 
 
 def _classify_transition(before_state: str | None, after_state: str | None) -> str:
@@ -173,7 +480,7 @@ def query_source_d0_raw_launch(
     expected_namespace_id: str | None = None,
     _history_symbol: str | None = None,
 ) -> dict[str, Any]:
-    """读取LAUNCH原始状态，或联结相邻官方会话的三态变化。"""
+    """读取启动或恢复原始状态，或联结启动相邻官方会话的三态变化。"""
     expected_namespace_id = _canonical_expected_namespace(expected_namespace_id)
     if _history_symbol is not None and (
         action != "current"
@@ -184,6 +491,12 @@ def query_source_d0_raw_launch(
             "D0_SOURCE_SYMBOL_INVALID", "内部历史窗口代码无效。", category="ARGUMENT"
         )
     if action == "changes":
+        if scenario != "LAUNCH_CONFIRM":
+            raise SourceD0RawError(
+                "D0_CHANGES_SCENARIO_UNSUPPORTED",
+                "相邻变化目前仅支持LAUNCH_CONFIRM。",
+                category="ARGUMENT",
+            )
         return _query_source_d0_raw_launch_changes(
             config,
             scenario=scenario,
@@ -219,10 +532,10 @@ def query_source_d0_raw_launch(
             category="ARGUMENT",
         )
     state = "ALL" if state is None else state
-    if scenario != "LAUNCH_CONFIRM":
+    if scenario not in {"LAUNCH_CONFIRM", "RECOVERY_TURN"}:
         raise SourceD0RawError(
             "D0_SCENARIO_NOT_IMPLEMENTED",
-            "本读者只实现LAUNCH_CONFIRM诊断raw谓词；其他场景标记NOT_IMPLEMENTED。",
+            "该诊断场景尚未实现。",
             category="ARGUMENT",
         )
     if (
@@ -263,7 +576,8 @@ def query_source_d0_raw_launch(
         target_index = calendar["sessions"].index(target_session)
     except (ResearchEntryError, ValueError) as error:
         raise SourceD0RawError("D0_OFFICIAL_CALENDAR_INVALID", str(error)) from error
-    sessions = calendar["sessions"][max(0, target_index - 20) : target_index + 1]
+    lookback = 24 if scenario == "RECOVERY_TURN" else 20
+    sessions = calendar["sessions"][max(0, target_index - lookback) : target_index + 1]
     calendar_identity = {
         "calendar_id": calendar["calendar_id"],
         "calendar_revision": calendar["calendar_revision"],
@@ -287,6 +601,23 @@ def query_source_d0_raw_launch(
     read_cpu_seconds = time.process_time() - cpu_started
 
     source_version = pg_result["source_version"]
+    rps_facts = {}
+    rps_input_error = None
+    if scenario == "RECOVERY_TURN":
+        try:
+            rps = read_source_pool_rps(
+                config,
+                target_session=target_session,
+                research_cutoff=research_cutoff,
+                package_sha256=package_sha256,
+                expected_namespace_id=pg_result["namespace_id"],
+            )
+            if set(rps["facts"]) != set(pg_result["source_symbols"]):
+                rps_input_error = "D0_RPS_SOURCE_POOL_MISMATCH"
+            else:
+                rps_facts = rps["facts"]
+        except ValueError as error:
+            rps_input_error = f"RPS_INPUT_VALUE_ERROR:{error}"
     calculate_started = time.perf_counter()
     calculate_cpu_started = time.process_time()
     results = []
@@ -294,7 +625,7 @@ def query_source_d0_raw_launch(
     false_reasons: Counter[str] = Counter()
     state_counts: Counter[str] = Counter()
     for source_symbol in pg_result["source_symbols"]:
-        item = calculate_d0_launch_confirm_raw(
+        arguments = dict(
             target_session=target_session,
             official_sessions=sessions,
             history_rows_by_session=pg_result["history_rows_by_symbol"][source_symbol],
@@ -304,8 +635,20 @@ def query_source_d0_raw_launch(
             source_content_id=source_version["source_content_id"],
             target_capture_id=source_version["source_capture_id"],
             parser_contract=source_version["parser_contract"],
-            include_history_window=source_symbol in (symbol, _history_symbol),
         )
+        if scenario == "LAUNCH_CONFIRM":
+            item = calculate_d0_launch_confirm_raw(
+                **arguments,
+                include_history_window=source_symbol in (symbol, _history_symbol),
+            )
+        else:
+            item = calculate_d0_recovery_turn_raw(
+                **arguments,
+                rps5_delta3=rps_facts.get(source_symbol, {}).get("rps5_delta3_pp"),
+                rps20=rps_facts.get(source_symbol, {}).get("rps20"),
+                include_prior_ols=source_symbol == symbol,
+            )
+            item["rps_input_error"] = rps_input_error
         target_row = pg_result["target_rows"][source_symbol]
         item.update(
             {
@@ -332,6 +675,23 @@ def query_source_d0_raw_launch(
     ]
     selected_count = len(selected)
     page = selected[offset : offset + limit]
+    if scenario == "RECOVERY_TURN" and symbol is not None:
+        for item in page:
+            _attach_continuation_core(
+                item,
+                rows=pg_result["history_rows_by_symbol"][item["source_symbol"]],
+                sessions=sessions,
+                calendar=calendar,
+                namespace_id=pg_result["namespace_id"],
+                source_content_id=source_version["source_content_id"],
+                target_capture_id=source_version["source_capture_id"],
+                parser_contract=source_version["parser_contract"],
+            )
+    elif scenario == "RECOVERY_TURN":
+        for item in page:
+            item["other_scenario_partial_predicates"]["TREND_CONTINUE"][
+                "core_fields_status"
+            ] = "NOT_REQUESTED_SELECT_EXACT_SOURCE_SYMBOL"
     source_count = pg_result["source_count"]
     if sum(state_counts.values()) != source_count:
         raise SourceD0RawError(
@@ -340,8 +700,12 @@ def query_source_d0_raw_launch(
 
     return {
         "ok": True,
-        "contract": "STOCK_A_D0_LAUNCH_CONFIRM_SOURCE_SYMBOL_RAW_R1",
-        "producer_version": "STOCK_A_D0_LAUNCH_RAW_READER_R1",
+        "contract": "STOCK_A_D0_LAUNCH_CONFIRM_SOURCE_SYMBOL_RAW_R1"
+        if scenario == "LAUNCH_CONFIRM"
+        else "STOCK_A_D0_RECOVERY_TURN_SOURCE_SYMBOL_RAW_R1",
+        "producer_version": "STOCK_A_D0_LAUNCH_RAW_READER_R1"
+        if scenario == "LAUNCH_CONFIRM"
+        else "STOCK_A_D0_RECOVERY_RAW_READER_R1",
         "algorithm_contract": "ALG-28 + §11.6 D0_SCENARIO_FACTS_R3",
         "scenario": scenario,
         "scenario_role": "DIAGNOSTIC_ONLY",
@@ -354,7 +718,9 @@ def query_source_d0_raw_launch(
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "episode_status": "NOT_ISSUED",
         "other_scenarios": {
-            "RECOVERY_TURN": "NOT_IMPLEMENTED",
+            "RECOVERY_TURN": "AVAILABLE_VIA_SEPARATE_REQUEST"
+            if scenario == "LAUNCH_CONFIRM"
+            else "CURRENT",
             "STRONG_PULLBACK": "NOT_IMPLEMENTED",
             "TREND_CONTINUE": "NOT_IMPLEMENTED",
         },

@@ -1,11 +1,13 @@
-"""D0 LAUNCH_CONFIRM诊断级原始谓词的严格会话计算。"""
+"""D0来源级启动与恢复诊断的严格会话计算。"""
 
 from __future__ import annotations
 
 from datetime import date
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
+
+from stock_a.research.d0_price_facts import calculate_d0_first_day_damage
 
 
 _SCENARIO = "LAUNCH_CONFIRM"
@@ -498,7 +500,7 @@ def calculate_d0_launch_confirm_raw(
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "episode_status": "NOT_ISSUED",
         "other_scenarios": {
-            "RECOVERY_TURN": "NOT_IMPLEMENTED",
+            "RECOVERY_TURN": "AVAILABLE_VIA_SEPARATE_REQUEST",
             "STRONG_PULLBACK": "NOT_IMPLEMENTED",
             "TREND_CONTINUE": "NOT_IMPLEMENTED",
         },
@@ -510,4 +512,441 @@ def calculate_d0_launch_confirm_raw(
     }
 
 
-__all__ = ["calculate_d0_launch_confirm_raw", "fraction_payload"]
+def calculate_d0_recovery_turn_raw(
+    *,
+    target_session,
+    official_sessions,
+    history_rows_by_session,
+    source_symbol,
+    package_sha256,
+    namespace_id,
+    source_content_id,
+    target_capture_id,
+    parser_contract,
+    rps5_delta3,
+    rps20=None,
+    include_prior_ols=False,
+):
+    """按严格市场会话计算恢复结构；各子条件独立保留未知。"""
+    sessions = tuple(official_sessions)
+    if (
+        not sessions
+        or sessions[-1] != target_session
+        or tuple(sorted(set(sessions))) != sessions
+        or len(sessions) > 25
+    ):
+        raise ValueError("恢复诊断的官方会话窗口无效")
+    rows = dict(history_rows_by_session)
+    rows["_target_session"] = target_session
+    checked = [
+        _window_row(
+            day,
+            rows,
+            source_symbol=source_symbol,
+            package_sha256=package_sha256,
+            namespace_id=namespace_id,
+            source_content_id=source_content_id,
+            target_capture_id=target_capture_id,
+            parser_contract=parser_contract,
+        )
+        for day in sessions
+    ]
+    entry_shas = {
+        row.get("source_entry_sha256")
+        for row, _, _ in checked
+        if row is not None and row.get("source_entry_sha256")
+    }
+    if len(entry_shas) > 1:
+        checked = [
+            (row, None, "RAW_SOURCE_ENTRY_SHA_CONFLICT") for row, _, _ in checked
+        ]
+
+    def price(index, field):
+        if index < -len(checked) or index >= len(checked):
+            return None
+        values = checked[index][1]
+        return None if values is None else values[field]
+
+    def ma(end, length):
+        index = len(sessions) + end if end < 0 else end
+        if index - length + 1 < 0:
+            return None
+        values = [price(i, "close") for i in range(index - length + 1, index + 1)]
+        return (
+            sum(values, Fraction()) / length
+            if all(v is not None for v in values)
+            else None
+        )
+
+    def predicate(name, value, formula, inputs=None):
+        state = "UNKNOWN" if value is None else "TRUE" if value else "FALSE"
+        result = _predicate(
+            state, reason_code=f"{name.upper()}_{state}", formula=formula, inputs=inputs
+        )
+        result["reason"] = (
+            "所需严格会话或来源字段不足。" if value is None else "已按所列公式计算。"
+        )
+        return result
+
+    close, previous = price(-1, "close"), price(-2, "close")
+    high, low = price(-1, "high"), price(-1, "low")
+    ma5, previous_ma5 = ma(-1, 5), ma(-2, 5)
+    ma20, previous_ma20, ma20_minus3 = ma(-1, 20), ma(-2, 20), ma(-4, 20)
+    prior_pairs = [(price(i, "close"), ma(i, 20)) for i in range(-6, -1)]
+    below = (
+        sum(c <= avg for c, avg in prior_pairs)
+        if all(c is not None and avg is not None for c, avg in prior_pairs)
+        else None
+    )
+    r5 = (
+        previous <= previous_ma5 and close > ma5
+        if all(v is not None for v in (previous, previous_ma5, close, ma5))
+        else None
+    )
+    r20_parts = [
+        predicate(
+            "r20_cross",
+            previous <= previous_ma20 and close > ma20
+            if all(v is not None for v in (previous, previous_ma20, close, ma20))
+            else None,
+            "C[t-1]<=MA20[t-1] AND C[t]>MA20[t]",
+        ),
+        predicate(
+            "prior5_below",
+            below >= 2 if below is not None else None,
+            "prior5_below>=2",
+            {"prior5_below": below},
+        ),
+        predicate(
+            "ma20_slope",
+            ma20 >= ma20_minus3
+            if ma20 is not None and ma20_minus3 is not None
+            else None,
+            "MA20[t]>=MA20[t-3]",
+            {"MA20_t": ma20, "MA20_t_minus_3": ma20_minus3},
+        ),
+    ]
+    r20_state = _tri_and({str(i): item for i, item in enumerate(r20_parts)})
+    r5_state = "UNKNOWN" if r5 is None else "TRUE" if r5 else "FALSE"
+    trigger = (
+        "TRUE"
+        if "TRUE" in (r5_state, r20_state)
+        else "UNKNOWN"
+        if "UNKNOWN" in (r5_state, r20_state)
+        else "FALSE"
+    )
+    clv = (
+        (close - low) / (high - low)
+        if all(v is not None for v in (close, high, low)) and high != low
+        else None
+    )
+    amount_rows = checked[-21:]
+    amount_identity_errors = {
+        "RAW_SOURCE_IDENTITY_MISMATCH",
+        "RAW_TARGET_CAPTURE_MISMATCH",
+        "RAW_REFERENCE_QUALITY_UNKNOWN",
+        "RAW_PARSER_CONTRACT_MISMATCH",
+        "RAW_SOURCE_ENTRY_SHA_CONFLICT",
+        "OFFICIAL_SESSION_ROW_MISSING",
+        "OFFICIAL_SESSION_BAR_MISSING",
+    }
+    amounts = [
+        _raw_amount(
+            sessions[len(sessions) - len(amount_rows) + i],
+            row,
+            parser_contract=parser_contract,
+        )[0]
+        if error not in amount_identity_errors
+        else None
+        for i, (row, _, error) in enumerate(amount_rows)
+    ]
+    units = {
+        row.get("amount_unit_status") if row else None for row, _, _ in amount_rows
+    }
+    amr = None
+    if (
+        len(amounts) == 21
+        and all(v is not None for v in amounts)
+        and units == {"UNIT_UNVERIFIED"}
+    ):
+        mean = sum(amounts[:-1], Fraction()) / 20
+        if mean > 0:
+            amr = amounts[-1] / mean
+    delta = (
+        Fraction(rps5_delta3.value)
+        if rps5_delta3 is not None and rps5_delta3.quality == "OBSERVED"
+        else None
+    )
+    strength20 = (
+        Fraction(rps20.value)
+        if rps20 is not None and rps20.quality == "OBSERVED"
+        else None
+    )
+    predicates = {
+        "trigger": _predicate(
+            trigger,
+            reason_code=f"RECOVERY_TRIGGER_{trigger}",
+            formula="R5 OR R20",
+            inputs={"R5": r5_state, "R20": r20_state},
+        ),
+        "positive_ret1": predicate(
+            "positive_ret1",
+            close > previous if close is not None and previous is not None else None,
+            "C[t]>C[t-1]",
+            {"C_t": close, "C_previous": previous},
+        ),
+        "clv": predicate(
+            "clv",
+            clv >= Fraction(11, 20) if clv is not None else None,
+            "CLV>=0.55",
+            {"CLV": clv},
+        ),
+        "rps5_delta3": predicate(
+            "rps5_delta3",
+            delta > 0 if delta is not None else None,
+            "rps5_delta3_pp>0",
+            {"delta_pp": delta},
+        ),
+        "amr": predicate(
+            "amr",
+            amr >= Fraction(21, 20) if amr is not None else None,
+            "A[t]/mean(A[t-20..t-1])>=1.05",
+            {"amr": amr},
+        ),
+        "close_ma20": predicate(
+            "close_ma20",
+            close / ma20 >= Fraction(49, 50)
+            if close is not None and ma20 is not None
+            else None,
+            "C[t]/MA20[t]>=0.98",
+            {"C_t": close, "MA20_t": ma20},
+        ),
+    }
+    predicates["trigger"]["reason"] = (
+        "R5或R20的输入不足。" if trigger == "UNKNOWN" else "已按R5或R20归约。"
+    )
+    damage = calculate_d0_first_day_damage(
+        target_session=target_session,
+        official_sessions=sessions,
+        history_rows_by_session=history_rows_by_session,
+        source_symbol=source_symbol,
+        package_sha256=package_sha256,
+        namespace_id=namespace_id,
+        source_content_id=source_content_id,
+        target_capture_id=target_capture_id,
+    )
+    damage_input_error = next((error for _, _, error in checked[-20:] if error), None)
+    damage_state = damage.state if damage_input_error is None else "UNKNOWN"
+    ret1 = close / previous - 1 if close is not None and previous is not None else None
+    severe = (
+        "UNKNOWN"
+        if ret1 is None
+        else "TRUE"
+        if ret1 <= Fraction(-2, 25)
+        else "FALSE"
+        if ret1 > Fraction(-1, 25)
+        else "UNKNOWN"
+    )
+    state = _tri_and(predicates)
+    first = (
+        next((key for key, item in predicates.items() if item["state"] == state), None)
+        if state != "TRUE"
+        else None
+    )
+    previous_ma10 = ma(-2, 10)
+    prior_highs = (
+        [price(i, "high") for i in range(-21, -1)] if len(sessions) >= 21 else []
+    )
+    phh20 = (
+        max(prior_highs)
+        if len(prior_highs) == 20 and all(v is not None for v in prior_highs)
+        else None
+    )
+    shadow_clear = (
+        not (high > phh20 and close <= phh20)
+        if high is not None and close is not None and phh20 is not None
+        else None
+    )
+    retest = (
+        low <= Fraction(101, 100) * previous_ma10 and close >= previous_ma10
+        if low is not None and close is not None and previous_ma10 is not None
+        else None
+    )
+    prior_closes = (
+        [price(i, "close") for i in range(-21, -1)] if len(sessions) >= 21 else []
+    )
+    ols_slope = ols_r2 = None
+    if (
+        include_prior_ols
+        and len(prior_closes) == 20
+        and all(value is not None for value in prior_closes)
+    ):
+        if len(set(prior_closes)) == 1:
+            ols_slope = Decimal(0)
+        else:
+            with localcontext() as context:
+                context.prec = 34
+                logs = [
+                    (Decimal(value.numerator) / Decimal(value.denominator)).ln()
+                    for value in prior_closes
+                ]
+                mean_y = sum(logs, Decimal(0)) / Decimal(20)
+                mean_x = Decimal(19) / 2
+                sxx = sum(((Decimal(i) - mean_x) ** 2 for i in range(20)), Decimal(0))
+                sxy = sum(
+                    (
+                        (Decimal(i) - mean_x) * (value - mean_y)
+                        for i, value in enumerate(logs)
+                    ),
+                    Decimal(0),
+                )
+                syy = sum(((value - mean_y) ** 2 for value in logs), Decimal(0))
+                ols_slope = sxy / sxx
+                if syy != 0:
+                    ols_r2 = sxy * sxy / (sxx * syy)
+    partial = {
+        "STRONG_PULLBACK": {
+            "prior_ols_status": "EVALUATED"
+            if include_prior_ols
+            else "NOT_REQUESTED_SELECT_EXACT_SOURCE_SYMBOL",
+            "prior_ols_slope_positive": predicate(
+                "prior_ols_slope_positive",
+                ols_slope > 0 if ols_slope is not None else None,
+                "OLS20(log C)[t-1].slope>0",
+                {"slope": str(ols_slope) if ols_slope is not None else None},
+            ),
+            "prior_ols_r2_at_least_040": predicate(
+                "prior_ols_r2_at_least_040",
+                ols_r2 >= Decimal("0.40") if ols_r2 is not None else None,
+                "OLS20(log C)[t-1].R2>=0.40",
+                {"r2": str(ols_r2) if ols_r2 is not None else None},
+            ),
+            "reclaim_ma5": predicate(
+                "reclaim_ma5", r5, "C[t-1]<=MA5[t-1] AND C[t]>MA5[t]"
+            ),
+            "retest_previous_ma10": predicate(
+                "retest_previous_ma10",
+                retest,
+                "L[t]<=1.01*MA10[t-1] AND C[t]>=MA10[t-1]",
+                {"MA10_previous": previous_ma10},
+            ),
+            "close_not_below_previous": predicate(
+                "close_not_below_previous",
+                close >= previous
+                if close is not None and previous is not None
+                else None,
+                "C[t]>=C[t-1]",
+            ),
+            "clv": predicates["clv"],
+            "no_shadow_rejection": predicate(
+                "no_shadow_rejection",
+                shadow_clear,
+                "NOT(H[t]>PHH20 AND C[t]<=PHH20)",
+                {"PHH20": phh20},
+            ),
+        },
+        "TREND_CONTINUE": {
+            "ma_order": predicate(
+                "ma_order",
+                close >= ma5 >= ma20
+                if all(v is not None for v in (close, ma5, ma20))
+                else None,
+                "C[t]>=MA5[t]>=MA20[t]",
+            ),
+            "positive_ret1": predicates["positive_ret1"],
+            "clv": predicates["clv"],
+            "rps20_at_least_70": predicate(
+                "rps20_at_least_70",
+                strength20 >= 70 if strength20 is not None else None,
+                "RPS20>=70",
+                {"rps20": strength20},
+            ),
+            "amr_range": predicate(
+                "amr_range",
+                Fraction(4, 5) <= amr <= Fraction(5, 2) if amr is not None else None,
+                "0.8<=amr20<=2.5",
+                {"amr": amr},
+            ),
+        },
+    }
+    if not include_prior_ols:
+        for key in ("prior_ols_slope_positive", "prior_ols_r2_at_least_040"):
+            partial["STRONG_PULLBACK"][key]["reason"] = "未请求指定来源代码的前态OLS。"
+    elif ols_slope is not None and ols_r2 is None:
+        partial["STRONG_PULLBACK"]["prior_ols_r2_at_least_040"]["reason"] = (
+            "前态log收盘价总平方差为零。"
+        )
+    line = (
+        ma20
+        if r20_state == "TRUE"
+        else ma5
+        if r20_state == "FALSE" and r5_state == "TRUE"
+        else None
+    )
+    return {
+        "source_symbol": source_symbol,
+        "target_session": target_session.isoformat(),
+        "scenario": "RECOVERY_TURN",
+        "scenario_raw": state,
+        "quality": "UNKNOWN" if state == "UNKNOWN" else "OBSERVED",
+        "main_reason": f"{state}:{first}" if first else "ALL_PREDICATES_TRUE",
+        "predicates": predicates,
+        "trigger_detail": {
+            "r5": r5_state,
+            "r20": r20_state,
+            "r20_components": r20_parts,
+            "ma5": fraction_payload(ma5),
+            "ma20": fraction_payload(ma20),
+            "prior5_below": below,
+        },
+        "other_scenario_partial_predicates": partial,
+        "other_scenario_status": "NOT_EVALUATED_FORMAL_PARENT_AND_OTHER_INPUTS_UNPROVED",
+        "other_scenario_missing_dependencies": {
+            "formal_t_minus_1_parent": "UNKNOWN",
+            "pullback_frozen_peak_and_window": "UNKNOWN",
+            "pullback_volume_windows": "UNKNOWN_FROZEN_PEAK_AND_WINDOW_UNPROVED",
+            "continuation_formal_loo_confirmed_raw": "NOT_EVALUATED",
+            "diagnostic_d1_reference": "NOT_FORMAL_PARENT",
+        },
+        "common_gate_diagnostics": {
+            "first_day_damage": {
+                "state": damage_state,
+                "quality": damage.quality if damage_state != "UNKNOWN" else "UNKNOWN",
+                "reason": damage_input_error or damage.reason_code,
+                "close_to_ma20": fraction_payload(damage.close_to_ma20)
+                if damage_state != "UNKNOWN"
+                else None,
+            },
+            "severe_drop": {
+                "state": severe,
+                "reason": "PRIOR_SIGMA20_NOT_PRODUCED"
+                if severe == "UNKNOWN"
+                else "DETERMINED_BY_EXACT_RET1_BOUND",
+                "ret1": fraction_payload(ret1),
+            },
+            "liquidity_cny": "UNKNOWN_UNIT_UNVERIFIED",
+            "research_universe": "UNKNOWN",
+            "corporate_action_coordinate": "UNKNOWN",
+            "formal_admission": "NOT_AUTHORIZED",
+        },
+        "failure_line_candidate": {
+            "value": fraction_payload(line) if state == "TRUE" else None,
+            "source": ("R20_MA20" if r20_state == "TRUE" else "R5_MA5")
+            if state == "TRUE" and line is not None
+            else None,
+            "evaluation_starts": "NEXT_OFFICIAL_SESSION",
+            "role": "DIAGNOSTIC_ONLY_NOT_D2",
+        },
+        "session_contract": _SESSION_CONTRACT,
+        "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
+        "absolute_liquidity_cny_status": "UNKNOWN_UNIT_UNVERIFIED",
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "episode_status": "NOT_ISSUED",
+    }
+
+
+__all__ = [
+    "calculate_d0_launch_confirm_raw",
+    "calculate_d0_recovery_turn_raw",
+    "fraction_payload",
+]

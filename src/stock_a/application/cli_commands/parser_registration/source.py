@@ -209,6 +209,10 @@ def register_commands(commands):
     sector_strength.add_argument("--package-sha256", required=True)
     sector_strength.add_argument("--profile-revision")
     sector_strength.add_argument(
+        "--rotation-start",
+        help="按后验固定成员研究从该官方会话至目标日的Rotation候选；需指定板块编号",
+    )
+    sector_strength.add_argument(
         "--sort-by",
         choices=("delta20", "delta5", "ret20", "ret5"),
         default="delta20",
@@ -248,6 +252,9 @@ def register_commands(commands):
     )
     sector_change_stocks.add_argument("--package-sha256", required=True)
     sector_change_stocks.add_argument("--profile-revision")
+    sector_change_stocks.add_argument(
+        "--d0-structure-symbol", help="对一个来源代码联接D0恢复诊断和前态D1支撑参考"
+    )
     sector_change_stocks.add_argument(
         "--include-source-seed-board",
         action="store_true",

@@ -17,7 +17,7 @@ from stock_a.application.pg_price_profiles import (
 def register_commands(commands):
     d0_raw = commands.add_parser(
         "source-d0-raw",
-        help="只读计算Raw来源池的D0 LAUNCH_CONFIRM原始谓词与相邻变化",
+        help="只读计算Raw来源池D0启动、恢复诊断及启动相邻变化",
     )
     d0_raw.add_argument(
         "--action",
@@ -27,9 +27,9 @@ def register_commands(commands):
     )
     d0_raw.add_argument(
         "--scenario",
-        choices=("LAUNCH_CONFIRM",),
+        choices=("LAUNCH_CONFIRM", "RECOVERY_TURN"),
         required=True,
-        help="本批仅实现LAUNCH_CONFIRM诊断原始场景",
+        help="选择来源级启动或恢复诊断场景",
     )
     d0_raw.add_argument(
         "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
@@ -69,8 +69,9 @@ def register_commands(commands):
         default=None,
         help="changes动作的三态转移筛选；缺端类别也可单独筛选",
     )
+    d0_raw.add_argument("--symbol", help="可选精确来源代码SH./SZ.加六位数字")
     d0_raw.add_argument(
-        "--symbol", help="可选精确来源代码SH./SZ.加六位数字；输出21会话原值详情"
+        "--followup-session", help="恢复诊断候选线后继观察终点；须指定单只来源代码"
     )
     d0_raw.add_argument("--offset", type=int, default=0, help="稳定分页偏移，默认0")
     d0_raw.add_argument(

@@ -1649,6 +1649,70 @@ ORDER BY requested.expected_board_kind COLLATE "C",
     }
 
 
+def read_rotation_snapshot_members(
+    config: dict[str, Any], *, snapshot_id: str, board_kind: str
+) -> dict[str, Any]:
+    """读取同类板块的完整后验快照成员，不依赖当日画像。"""
+    _validate_snapshot_uuid(snapshot_id)
+    if board_kind not in {"INDUSTRY", "CONCEPT"}:
+        raise TdxSectorMembersPgError(
+            "BOARD_KIND_INVALID", "板块类型必须为INDUSTRY或CONCEPT"
+        )
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        cursor.execute(
+            """SELECT snapshot_id::text, source_kind, source_file_sha256,
+       source_path_role, source_file_size, observed_at, source_valid_on,
+       source_known_at, source_available_at, clock_quality, research_mode,
+       parse_contract_version, rows_declared, source_quality
+FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
+            (snapshot_id,),
+        )
+        snapshot_row = cursor.fetchone()
+        if snapshot_row is None:
+            raise TdxSectorMembersPgError(
+                "SECTOR_SNAPSHOT_NOT_FOUND", "未找到精确TDX成员来源快照"
+            )
+        snapshot = _snapshot_payload(snapshot_row)
+        expected_kind = (
+            "TDX_TDXHY_CFG" if board_kind == "INDUSTRY" else "TDX_INFOHARBOR_BLOCK_DAT"
+        )
+        if (
+            snapshot["source_kind"] != expected_kind
+            or snapshot["research_mode"] != "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"
+        ):
+            raise TdxSectorMembersPgError(
+                "SECTOR_SNAPSHOT_MODE_REJECTED", "成员快照来源或后验研究模式不匹配"
+            )
+        cursor.execute(
+            """SELECT c.board_native_id, c.board_name, m.source_symbol
+FROM stock.tdx_sector_catalog c LEFT JOIN stock.tdx_sector_members m
+ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind AND m.board_native_id=c.board_native_id
+WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s
+ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
+""",
+            (snapshot_id, board_kind),
+        )
+        boards: dict[str, dict[str, Any]] = {}
+        for board_id, board_name, symbol in cursor.fetchall():
+            board = boards.setdefault(board_id, {"name": board_name, "members": []})
+            if board["name"] != board_name:
+                raise TdxSectorMembersPgError(
+                    "SECTOR_SNAPSHOT_INCONSISTENT", "板块名称不一致"
+                )
+            if symbol is not None:
+                if symbol in board["members"]:
+                    raise TdxSectorMembersPgError(
+                        "SECTOR_MEMBER_DUPLICATE", "成员快照包含重复代码"
+                    )
+                board["members"].append(symbol)
+    return {
+        "namespace_id": namespace_id,
+        "snapshot": snapshot,
+        "board_kind": board_kind,
+        "boards": boards,
+    }
+
+
 def query_sector_catalog(
     config: dict[str, Any],
     *,

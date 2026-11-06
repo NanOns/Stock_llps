@@ -32,6 +32,7 @@ from stock_a.application.source_d1_support_changes import (
 )
 from stock_a.application.source_d0_raw import (
     SourceD0RawError,
+    attach_source_d1_prior_reference,
     query_source_d0_raw_launch,
 )
 from stock_a.application.pg_research import (
@@ -201,23 +202,68 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 core_transition_kind=args.core_transition_kind,
             )
         elif args.sector_action == "strength":
-            result = read_tdx_sector_strength(
-                config,
-                snapshot_id=args.snapshot_id,
-                board_kind=args.board_kind,
-                board_native_id=args.board_native_id,
-                target_session=_parse_session_date(args.target_session),
-                research_cutoff=_parse_session_date(args.research_cutoff),
-                package_sha256=args.package_sha256,
-                profile_revision=args.profile_revision,
-                changed_only=args.changed_only,
-                sort_by=args.sort_by,
-                direction=args.direction,
-                offset=args.offset,
-                limit=args.limit,
-                member_offset=args.member_offset,
-                member_limit=args.member_limit,
-            )
+            if getattr(args, "rotation_start", None):
+                if args.board_native_id is None:
+                    raise DiagnosticError(
+                        "ROTATION_BOARD_REQUIRED",
+                        "Rotation研究必须指定精确板块编号",
+                        _EXIT_ARGUMENT,
+                    )
+                if (
+                    args.changed_only
+                    or args.sort_by != "delta20"
+                    or args.direction != "STRONGER"
+                    or args.offset != 0
+                    or args.limit != 30
+                    or args.member_offset != 0
+                    or args.member_limit != 30
+                ):
+                    raise DiagnosticError(
+                        "ROTATION_FILTER_INVALID",
+                        "Rotation研究不接受强弱榜单的筛选、排序或分页参数",
+                        _EXIT_ARGUMENT,
+                    )
+                from stock_a.application.source_sector_change_research import (
+                    read_retrospective_rotation,
+                )
+                from stock_a.contracts import load_price_profile_contract
+
+                profile_contract = (
+                    load_price_profile_contract(_CONFIG_ROOT).document
+                    if args.profile_revision
+                    else None
+                )
+
+                result = read_retrospective_rotation(
+                    config,
+                    snapshot_id=args.snapshot_id,
+                    board_kind=args.board_kind,
+                    board_native_id=args.board_native_id,
+                    start_session=_parse_session_date(args.rotation_start),
+                    target_session=_parse_session_date(args.target_session),
+                    research_cutoff=_parse_session_date(args.research_cutoff),
+                    package_sha256=args.package_sha256,
+                    profile_revision=args.profile_revision,
+                    profile_contract=profile_contract,
+                )
+            else:
+                result = read_tdx_sector_strength(
+                    config,
+                    snapshot_id=args.snapshot_id,
+                    board_kind=args.board_kind,
+                    board_native_id=args.board_native_id,
+                    target_session=_parse_session_date(args.target_session),
+                    research_cutoff=_parse_session_date(args.research_cutoff),
+                    package_sha256=args.package_sha256,
+                    profile_revision=args.profile_revision,
+                    changed_only=args.changed_only,
+                    sort_by=args.sort_by,
+                    direction=args.direction,
+                    offset=args.offset,
+                    limit=args.limit,
+                    member_offset=args.member_offset,
+                    member_limit=args.member_limit,
+                )
         else:
             raise DiagnosticError(
                 "SECTOR_ACTION_INVALID", "未登记的行业概念成员操作", _EXIT_ARGUMENT
@@ -251,7 +297,7 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
             error=True,
         )
         return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
-    except TdxSectorMembersPgError as error:
+    except (TdxSectorMembersPgError, RawSourcePgError) as error:
         write_attempted = args.sector_action == "ingest" or (
             args.sector_action == "refresh-remote" and not args.validate_only
         )
@@ -467,6 +513,23 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 args, "include_price_safety_facts", False
             ),
         )
+        if getattr(args, "d0_structure_symbol", None):
+            d0 = query_source_d0_raw_launch(
+                config,
+                scenario="RECOVERY_TURN",
+                target_session=target,
+                research_cutoff=cutoff,
+                package_sha256=args.package_sha256,
+                symbol=args.d0_structure_symbol,
+                limit=1,
+                expected_namespace_id=inputs.discovery["source"]["namespace_id"],
+            )
+            if len(d0["results"]) != 1:
+                raise SourceD0RawError(
+                    "D0_D1_SYMBOL_NOT_FOUND", "目标来源池不含指定股票。"
+                )
+            attach_source_d1_prior_reference(d0["results"][0], inputs.discovery)
+            result["d0_d1_structure_diagnostic"] = d0
         if include_seed:
             from stock_a.application.runtime_config import _CONFIG_ROOT
             from stock_a.application.source_pool_seed import (
