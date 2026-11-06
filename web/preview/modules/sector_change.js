@@ -847,15 +847,39 @@ function renderSectorSymbolObservation(data) {
       .map((board) => `${sectorLabel(board.board_kind)} ${board.board_name}`)
       .join("、") || item.membership_status;
   const selectedBoard = state.sectorChange.selectedBoard;
-  const boardReason = selectedBoard
-    ? item.memberships.some(
-        (board) =>
-          board.board_kind === selectedBoard.board_kind &&
-          board.board_native_id === selectedBoard.board_native_id,
+  let boardReason = "未选择板块";
+  if (selectedBoard) {
+    const isMember = item.memberships.some(
+      (board) =>
+        board.board_kind === selectedBoard.board_kind &&
+        board.board_native_id === selectedBoard.board_native_id,
+    );
+    const search = $("sectorMemberSearch").value.trim().toUpperCase();
+    const memberState = $("sectorMemberState").value;
+    const detail = data.detail_board || {};
+    const memberPage =
+      data.observation_mode === "D0" && !search
+        ? detail.d0_launch_new_member_page?.members
+        : detail.member_page?.members;
+    if (!isMember) boardReason = "不属于当前所选板块";
+    else if (search && !item.source_symbol.includes(search))
+      boardReason = "被当前板内代码筛选排除";
+    else if (
+      data.observation_mode === "D1" &&
+      memberState !== "ALL" &&
+      memberState !== d1.change_state
+    )
+      boardReason = "被当前板内D1状态筛选排除";
+    else if (data.observation_mode === "D0" && !search && !qualifies)
+      boardReason = "默认板内表只显示本次D0新增，当前状态未列入";
+    else if (
+      (memberPage || []).some(
+        (member) => member.source_symbol === item.source_symbol,
       )
-      ? "属于当前所选板块；板内列表还受搜索、状态和分页条件影响"
-      : "不属于当前所选板块"
-    : "未选择板块";
+    )
+      boardReason = "位于当前板内页";
+    else boardReason = "符合当前板内筛选但不在本页，受分页截取";
+  }
   const missing = (item.missing_membership_kinds || [])
     .map(sectorLabel)
     .join("、");
