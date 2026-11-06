@@ -2595,14 +2595,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 and isinstance(body, dict)
                 and body.get("source_observation_only") is True
             ):
-                if set(body) != {
+                required_observation_fields = {
                     "source_observation_only",
                     "symbol",
                     "target_session",
                     "package_sha256",
                     "namespace_id",
                     "research_cutoff",
-                }:
+                }
+                membership_fields = {"industry_snapshot_id", "concept_snapshot_id"}
+                if set(body) not in (
+                    required_observation_fields,
+                    required_observation_fields | membership_fields,
+                ):
                     raise PreviewHttpError(
                         400,
                         "PREVIEW_BODY_FIELDS_INVALID",
@@ -2648,6 +2653,30 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     if mapped is None:
                         raise
                     raise mapped from error
+                membership = {
+                    "status": "NOT_EVALUATED",
+                    "reason": "未同时选择行业与GN快照",
+                }
+                if membership_fields <= set(body):
+                    try:
+                        membership = read_tdx_sector_symbol_membership(
+                            self.preview_server.state.config,
+                            source_symbol=symbol,
+                            target_session=target,
+                            industry_snapshot_id=body["industry_snapshot_id"],
+                            concept_snapshot_id=body["concept_snapshot_id"],
+                            expected_namespace_id=namespace,
+                        )
+                    except Exception as error:
+                        if getattr(error, "code", None) != "SECTOR_SNAPSHOT_NOT_FOUND":
+                            mapped = _source_context_preview_error(error)
+                            if mapped is None:
+                                raise
+                            raise mapped from error
+                        membership = {
+                            "status": "NOT_EVALUATED",
+                            "reason": "所选行业或GN快照不存在",
+                        }
                 self._send_json(
                     200,
                     {
@@ -2655,7 +2684,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "target_session": target.isoformat(),
                         "d0_change": rows.get(symbol),
                         "d1_status": "NOT_EVALUATED",
-                        "membership_status": "NOT_EVALUATED",
+                        "membership_status": membership["status"],
+                        "current_tdx_membership": membership,
                         "formal_evaluation_status": "NOT_EVALUATED",
                     },
                 )

@@ -744,6 +744,8 @@ async function loadSectorSingleD0() {
   $("sectorChangeStatus").textContent =
     "板块或画像输入未齐，正在只读查询单股D0；D1和归属不作推断。";
   try {
+    const industry = $("sectorIndustrySnapshotSelect").value;
+    const concept = $("sectorConceptSnapshotSelect").value;
     const data = await api("/api/preview/stock-timeline", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -754,6 +756,9 @@ async function loadSectorSingleD0() {
         package_sha256: version.package_sha256,
         namespace_id: state.sectorChange.context.namespace_id,
         research_cutoff: state.sectorChange.context.research_cutoff,
+        ...(industry && concept
+          ? { industry_snapshot_id: industry, concept_snapshot_id: concept }
+          : {}),
       }),
     });
     const current = sectorSelectedVersion();
@@ -761,11 +766,23 @@ async function loadSectorSingleD0() {
       request !== state.sectorChange.request ||
       current?.target_session !== version.target_session ||
       current?.package_sha256 !== version.package_sha256 ||
+      $("sectorIndustrySnapshotSelect").value !== industry ||
+      $("sectorConceptSnapshotSelect").value !== concept ||
       $("sectorExplainSymbol").value.trim().toUpperCase() !== symbol
     )
       return;
     const root = $("sectorSymbolObservation");
-    root.textContent = `${symbol} · D0 ${sectorD0Description(data.d0_change)}；目标Raw ${data.d0_change?.after ? "存在" : "缺行"}；D1与板块归属 NOT_EVALUATED，正式选股 NOT_EVALUATED。`;
+    const membership = data.current_tdx_membership;
+    const boards = (membership.memberships || [])
+      .map((board) => `${sectorLabel(board.board_kind)} ${board.board_name}`)
+      .join("、");
+    const membershipText =
+      membership.status === "AVAILABLE_EMPTY"
+        ? "NO_CURRENT_TDX_BOARD_MEMBERSHIP_MATCH"
+        : membership.status === "AVAILABLE"
+          ? boards
+          : `NOT_EVALUATED（${membership.reason}）`;
+    root.textContent = `${symbol} · D0 ${sectorD0Description(data.d0_change)}；目标Raw ${data.d0_change?.after ? "存在" : "缺行"}；D1 NOT_EVALUATED；当前行业/GN归属（后验 NON_PIT）：${membershipText}；正式选股 NOT_EVALUATED。`;
     if (data.d0_change?.after) {
       root.append(document.createTextNode(" "));
       root.append(sectorStockButton(symbol, {}, version.target_session));
@@ -773,7 +790,7 @@ async function loadSectorSingleD0() {
     state.sectorChange.singleD0Available = true;
     root.hidden = false;
     $("sectorChangeStatus").textContent =
-      "仅单股D0已读取；未指定完整板块/画像输入，榜单和归属未计算。";
+      "单股D0已读取；完整画像或事件窗未齐，D1及榜单未计算。";
   } catch (error) {
     if (request === state.sectorChange.request)
       sectorClearOutput(`单股来源观察失败：${error.message}`);
