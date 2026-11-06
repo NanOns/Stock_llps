@@ -41,6 +41,7 @@ from stock_a.storage.postgres.tdx_sector_members import (
     query_sector_members,
     query_sector_strength,
     query_latest_sector_source_observation,
+    query_tdx_sector_source_snapshot_catalog,
     tdx_sector_strength_read_context,
     verify_remote_sector_source_readback,
 )
@@ -531,6 +532,16 @@ def read_latest_tdx_sector_snapshot_observation(
         )
         snapshot["membership_mode"] = "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
     return observation
+
+
+def read_tdx_sector_source_snapshot_catalog(
+    config: dict[str, Any],
+) -> dict[str, Any]:
+    """读取全部已保存行业与GN快照，供页面显式绑定来源身份。"""
+    try:
+        return query_tdx_sector_source_snapshot_catalog(config)
+    except TdxSectorMembersPgError as error:
+        raise TdxSectorMembersApplicationError(error.code, str(error)) from error
 
 
 def read_tdx_sector_members(
@@ -1419,6 +1430,7 @@ __all__ = [
     "ingest_tdx_sector_members",
     "read_tdx_sector_catalog",
     "read_latest_tdx_sector_snapshot_observation",
+    "read_tdx_sector_source_snapshot_catalog",
     "read_tdx_sector_breadth",
     "read_tdx_sector_members",
     "read_tdx_sector_strength",

@@ -1037,6 +1037,99 @@ ORDER BY s.source_kind""",
     }
 
 
+def query_tdx_sector_source_snapshot_catalog(config: dict[str, Any]) -> dict[str, Any]:
+    """读取PG内全部行业与GN概念快照身份，供用户显式选择。"""
+    try:
+        with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+            cursor.execute(
+                """SELECT s.snapshot_id::text AS snapshot_id,s.source_kind,
+       s.source_file_sha256,s.observed_at,s.source_valid_on,
+       s.source_known_at,s.source_available_at,s.clock_quality,
+       s.research_mode,s.parse_contract_version,s.rows_declared,s.source_quality,
+       c.catalog_rows,c.industry_catalog_rows,c.concept_catalog_rows,
+       c.excluded_catalog_rows,m.member_rows,m.industry_member_rows,
+       m.concept_member_rows,m.distinct_member_symbols,
+       m.invalid_membership_quality_rows
+FROM stock.tdx_sector_source_snapshots s
+LEFT JOIN LATERAL (
+    SELECT count(*)::bigint AS catalog_rows,
+           count(*) FILTER (WHERE board_kind='INDUSTRY')::bigint
+               AS industry_catalog_rows,
+           count(*) FILTER (WHERE board_kind='CONCEPT')::bigint
+               AS concept_catalog_rows,
+           count(*) FILTER (WHERE board_kind NOT IN ('INDUSTRY','CONCEPT'))::bigint
+               AS excluded_catalog_rows
+    FROM stock.tdx_sector_catalog
+    WHERE snapshot_id=s.snapshot_id
+) c ON TRUE
+LEFT JOIN LATERAL (
+    SELECT count(*)::bigint AS member_rows,
+           count(*) FILTER (WHERE board_kind='INDUSTRY')::bigint
+               AS industry_member_rows,
+           count(*) FILTER (WHERE board_kind='CONCEPT')::bigint
+               AS concept_member_rows,
+           count(DISTINCT source_symbol)::bigint AS distinct_member_symbols,
+           count(*) FILTER (WHERE membership_quality<>'OBSERVED_SOURCE_RELATION')::bigint
+               AS invalid_membership_quality_rows
+    FROM stock.tdx_sector_members
+    WHERE snapshot_id=s.snapshot_id
+) m ON TRUE
+WHERE s.source_kind IN ('TDX_TDXHY_CFG','TDX_INFOHARBOR_BLOCK_DAT')
+ORDER BY s.source_kind,s.observed_at,s.snapshot_id"""
+            )
+            columns = [column.name for column in cursor.description]
+            snapshots = [
+                dict(zip(columns, row, strict=True)) for row in cursor.fetchall()
+            ]
+    except TdxSectorMembersPgError:
+        raise
+    except (RawSourcePgError, PriceProfilePgError) as error:
+        raise TdxSectorMembersPgError(error.code, str(error)) from error
+    except Exception as error:
+        raise TdxSectorMembersPgError(
+            "SECTOR_SNAPSHOT_CATALOG_READ_FAILED",
+            f"TDX板块快照目录只读查询失败（{type(error).__name__}）",
+        ) from error
+
+    date_fields = ("source_valid_on",)
+    datetime_fields = ("observed_at", "source_known_at", "source_available_at")
+    integer_fields = {
+        "rows_declared",
+        "catalog_rows",
+        "industry_catalog_rows",
+        "concept_catalog_rows",
+        "excluded_catalog_rows",
+        "member_rows",
+        "industry_member_rows",
+        "concept_member_rows",
+        "distinct_member_symbols",
+        "invalid_membership_quality_rows",
+    }
+    for snapshot in snapshots:
+        snapshot["snapshot_id"] = str(snapshot["snapshot_id"])
+        snapshot["source_file_sha256"] = str(snapshot["source_file_sha256"]).strip()
+        for field in date_fields:
+            if snapshot[field] is not None:
+                snapshot[field] = snapshot[field].isoformat()
+        for field in datetime_fields:
+            if snapshot[field] is not None:
+                snapshot[field] = snapshot[field].isoformat()
+        for field in integer_fields:
+            snapshot[field] = int(snapshot[field] or 0)
+        snapshot["membership_mode"] = "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
+        snapshot["source_time_role"] = (
+            "OBSERVED_AT_IS_LOCAL_OBSERVATION_NOT_SOURCE_AVAILABILITY"
+        )
+
+    return {
+        "status": "AVAILABLE" if snapshots else "NO_MATCH",
+        "namespace_id": namespace_id,
+        "snapshots": snapshots,
+        "database_write": False,
+        "ddl_executed": False,
+    }
+
+
 def query_tdx_sector_symbol_membership(
     config: dict[str, Any],
     *,

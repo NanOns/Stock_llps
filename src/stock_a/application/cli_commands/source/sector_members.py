@@ -83,6 +83,10 @@ from stock_a.application.tdx_sector_members import (
 from stock_a.application.tdx_sector_change_stocks import (
     combine_sector_strength_and_d1_changes,
 )
+from stock_a.application.source_sector_change_research import (
+    prepare_source_sector_change_inputs,
+    build_source_sector_change_view,
+)
 from stock_a.sources.tdx.remote_sector import TdxRemoteSectorError
 
 from stock_a.application.cli_commands.common import _emit, _parse_session_date
@@ -401,70 +405,26 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
         )
 
     config, config_path = _load_runtime_config()
-    strength_results = []
-    d1_read_attempted = False
-    d0_read_attempted = False
-    d0_launch_changes = None
+    d1_read_attempted = True
+    d0_read_attempted = include_d0_launch_new
     try:
-        if include_d0_launch_new:
-            d0_read_attempted = True
-            d0_launch_changes = query_source_d0_raw_launch(
-                config,
-                scenario="LAUNCH_CONFIRM",
-                action="changes",
-                before_session=d0_before_session,
-                before_package_sha256=args.package_sha256,
-                target_session=target,
-                research_cutoff=cutoff,
-                package_sha256=args.package_sha256,
-                transition="ALL",
-                offset=0,
-                limit=5000,
-            )
-        with tdx_sector_strength_read_context(config) as strength_read_context:
-            for kind, snapshot_id in (
-                ("INDUSTRY", industry_snapshot_id),
-                ("CONCEPT", concept_snapshot_id),
-            ):
-                strength = read_tdx_sector_strength(
-                    config,
-                    snapshot_id=snapshot_id,
-                    board_kind=kind,
-                    board_native_id=None,
-                    target_session=target,
-                    research_cutoff=cutoff,
-                    package_sha256=args.package_sha256,
-                    profile_revision=args.profile_revision,
-                    changed_only=False,
-                    sort_by="delta20",
-                    direction="STRONGER",
-                    offset=0,
-                    limit=1,
-                    member_offset=0,
-                    member_limit=0,
-                    include_all_boards=True,
-                    include_all_member_symbols=True,
-                    read_context=strength_read_context,
-                )
-                strength_results.append(strength)
-
-        d1_read_attempted = True
-        discovery = discover_source_d1_support_changes(
+        inputs = prepare_source_sector_change_inputs(
             config,
-            config_path,
-            target,
-            cutoff,
-            sessions,
-            calendar_revision,
-            args.package_sha256,
-            event_window_start,
-            0,
-            1,
-            include_symbol_details=True,
+            str(config_path),
+            target_session=target,
+            research_cutoff=cutoff,
+            industry_snapshot_id=industry_snapshot_id,
+            concept_snapshot_id=concept_snapshot_id,
+            package_sha256=args.package_sha256,
+            profile_revision=args.profile_revision,
+            event_window_start=event_window_start,
+            pg_history_session_count=args.pg_history_session_count,
+            include_d0_launch_new=include_d0_launch_new,
+            d0_before_session=d0_before_session,
         )
-        result = combine_sector_strength_and_d1_changes(
-            strength_results,
-            discovery,
+        result = build_source_sector_change_view(
+            config,
+            inputs,
             board_kind_filter=args.board_kind,
             detail_board_kind=args.detail_board_kind,
             detail_board_native_id=args.detail_board_native_id,
@@ -479,48 +439,14 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             include_changed_stock_page=args.include_changed_stock_page,
             stock_offset=args.stock_offset,
             stock_limit=args.stock_limit,
-            d0_launch_changes=d0_launch_changes,
             d0_new_only=d0_new_only,
+            include_source_market_context=getattr(
+                args, "include_source_market_context", False
+            ),
+            include_price_safety_facts=getattr(
+                args, "include_price_safety_facts", False
+            ),
         )
-        if getattr(args, "include_source_market_context", False):
-            try:
-                market_read = read_source_market_context(
-                    config,
-                    target_session=target,
-                    research_cutoff=cutoff,
-                    package_sha256=args.package_sha256,
-                )
-            except SourceMarketContextError as error:
-                if error.category != "NOT_EVALUABLE":
-                    raise
-                d1_source = discovery["source"]
-                result["source_market_context"] = source_market_not_evaluable_payload(
-                    source_identity={
-                        **d1_source,
-                    },
-                    official_calendar=discovery["official_calendar"],
-                    target_session=target,
-                    research_cutoff=cutoff,
-                    reason_code=error.code,
-                    reason=str(error),
-                )
-            else:
-                validate_source_market_context_binding(
-                    market_read,
-                    strength_results=strength_results,
-                    discovery=discovery,
-                )
-                result["source_market_context"] = source_market_context_payload(
-                    market_read
-                )
-        if getattr(args, "include_price_safety_facts", False):
-            attach_source_d1_price_safety_facts(
-                result,
-                config=config,
-                discovery=discovery,
-                target_session=target,
-                research_cutoff=cutoff,
-            )
     except (
         TdxSectorMembersApplicationError,
         TdxSectorMembersPgError,
@@ -552,35 +478,5 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
         _emit(error_payload, error=True)
         return _EXIT_UNAVAILABLE
 
-    result.update(
-        {
-            "ok": True,
-            "operation": "change-stocks",
-            "configuration_path": str(config_path),
-            "database_io_attempted": True,
-            "database_read": {
-                "database": "stock_a",
-                "schema": "stock",
-                "account": "stock_a",
-                "server": "127.0.0.1:5432",
-                "transactions": [item["database_read"] for item in strength_results],
-                "d1_transaction": discovery["execution"]["database_transaction"],
-                "d1_source_pages_read": discovery["execution"]["source_pages_read"],
-                "d1_raw_history_batch_reads": discovery["execution"][
-                    "raw_history_batch_reads"
-                ],
-            },
-            "d1_execution": discovery["execution"],
-            "database_write_attempted": False,
-            "ddl_executed": False,
-            "dml_executed": False,
-            "dml_rows_affected": 0,
-        }
-    )
-    if d0_launch_changes is not None:
-        result["d0_execution"] = d0_launch_changes["execution"]
-        result["database_read"]["d0_transactions"] = d0_launch_changes["execution"][
-            "transaction"
-        ]
     _emit(result)
     return _EXIT_OK

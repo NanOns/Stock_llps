@@ -3,6 +3,7 @@
 $("reloadCatalog").addEventListener("click", async () => {
   await loadCatalog();
   await loadProfileSnapshots();
+  initializeSectorChangeExplorer();
 });
 $("versionSelect").addEventListener("change", () => {
   state.offset = 0;

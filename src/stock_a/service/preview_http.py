@@ -46,6 +46,12 @@ from stock_a.application.pg_price_profiles import (
 from stock_a.application.tdx_sector_members import (
     TdxSectorMembersApplicationError,
     read_latest_tdx_sector_snapshot_observation,
+    read_tdx_sector_source_snapshot_catalog,
+)
+from stock_a.application.source_sector_change_research import (
+    SourceSectorChangeInputs,
+    prepare_source_sector_change_inputs,
+    build_source_sector_change_view,
 )
 from stock_a.application.source_stock_change_context import (
     query_source_stock_change_context,
@@ -111,6 +117,10 @@ def _source_context_preview_error(error: Exception) -> PreviewHttpError | None:
         "SECTOR_SNAPSHOT_IDS_NOT_DISTINCT",
         "DEV_NAMESPACE_INVALID",
         "PG_RESEARCH_PROFILE_KEY_INVALID",
+        "SECTOR_CHANGE_IDENTITY_INVALID",
+        "SECTOR_CHANGE_SOURCE_ID_INVALID",
+        "SECTOR_CHANGE_EVENT_WINDOW_INVALID",
+        "D0_BEFORE_SESSION_INVALID",
     }
     if code.startswith("PG_"):
         status = 503
@@ -426,6 +436,30 @@ class _PreviewState:
         self.raw_period_source_sha256 = hashlib.sha256(
             Path(research_raw_periods.__file__).read_bytes()
         ).hexdigest()
+        self.source_sector_change_cache_lock = threading.Lock()
+        self.source_sector_change_cache_key: tuple[Any, ...] | None = None
+        self.source_sector_change_cache_inputs: SourceSectorChangeInputs | None = None
+        self.source_sector_change_cache_expires_at = 0.0
+
+    def source_sector_change_inputs(
+        self,
+        cache_key: tuple[Any, ...],
+        factory: Any,
+    ) -> tuple[SourceSectorChangeInputs, bool]:
+        """为连续页面筛选复用一份精确绑定的全池只读输入，最多保留10分钟。"""
+        with self.source_sector_change_cache_lock:
+            now = time.monotonic()
+            if (
+                self.source_sector_change_cache_key == cache_key
+                and self.source_sector_change_cache_inputs is not None
+                and now < self.source_sector_change_cache_expires_at
+            ):
+                return self.source_sector_change_cache_inputs, True
+            inputs = factory()
+            self.source_sector_change_cache_key = cache_key
+            self.source_sector_change_cache_inputs = inputs
+            self.source_sector_change_cache_expires_at = time.monotonic() + 600
+            return inputs, False
 
     def snapshot_identity(
         self,
@@ -1131,6 +1165,262 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             },
         }
 
+    def _sector_change_stocks(self, body: Any) -> dict[str, Any]:
+        required = {
+            "target_session",
+            "research_cutoff",
+            "package_sha256",
+            "profile_revision",
+            "industry_snapshot_id",
+            "concept_snapshot_id",
+            "event_window_start",
+            "pg_history_session_count",
+            "board_kind",
+            "changed_only",
+            "sort_by",
+            "direction",
+            "offset",
+            "limit",
+            "detail_board_kind",
+            "detail_board_native_id",
+            "member_state",
+            "member_search",
+            "member_offset",
+            "member_limit",
+            "include_changed_stock_page",
+            "stock_offset",
+            "stock_limit",
+        }
+        if not isinstance(body, dict) or set(body) != required:
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_BODY_INVALID",
+                "行业/GN变化查询请求字段不完整或含未登记字段",
+            )
+
+        target = _iso_date(body["target_session"])
+        cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
+        _require_research_cutoff(target, cutoff)
+        _require_research_cutoff(cutoff, self.preview_server.state.research_cutoff)
+        package_sha = _sha(body["package_sha256"])
+        profile_revision = _sha(body["profile_revision"])
+        event_window_start = _iso_date(body["event_window_start"], "event_window_start")
+        history_session_count = _positive_int(
+            body["pg_history_session_count"], "pg_history_session_count", 75
+        )
+
+        try:
+            industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
+            concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
+        except (ValueError, TypeError, AttributeError) as error:
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_SNAPSHOT_ID_INVALID",
+                "行业与GN快照编号必须为规范UUID",
+            ) from error
+        if (
+            industry_snapshot_id != body["industry_snapshot_id"]
+            or concept_snapshot_id != body["concept_snapshot_id"]
+            or industry_snapshot_id == concept_snapshot_id
+        ):
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_SNAPSHOT_ID_INVALID",
+                "行业与GN快照编号必须规范且互不相同",
+            )
+
+        board_kind = body["board_kind"]
+        if board_kind not in {"ALL", "INDUSTRY", "CONCEPT"}:
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_BOARD_KIND_INVALID",
+                "板块类型只能为ALL、INDUSTRY或GN",
+            )
+        changed_only = body["changed_only"]
+        include_changed_stock_page = body["include_changed_stock_page"]
+        if type(changed_only) is not bool or include_changed_stock_page is not True:
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_FILTER_INVALID",
+                "changed_only必须为布尔值且必须读取全局去重变化个股页",
+            )
+        sort_by = body["sort_by"]
+        if sort_by not in {"changed_stocks", "delta20", "delta5", "ret20", "ret5"}:
+            raise PreviewHttpError(
+                400, "SECTOR_CHANGE_SORT_INVALID", "板块排序字段不在现役合同中"
+            )
+        direction = body["direction"]
+        if direction not in {"STRONGER", "WEAKER"}:
+            raise PreviewHttpError(
+                400, "SECTOR_CHANGE_DIRECTION_INVALID", "方向只能为STRONGER或WEAKER"
+            )
+        detail_board_kind = body["detail_board_kind"]
+        detail_board_native_id = body["detail_board_native_id"]
+        if (detail_board_kind is None) != (detail_board_native_id is None):
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_DETAIL_INVALID",
+                "板块明细必须同时提供类型和原生编号",
+            )
+        if detail_board_kind not in {None, "INDUSTRY", "CONCEPT"}:
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_DETAIL_INVALID",
+                "板块明细类型只能是INDUSTRY或GN概念",
+            )
+        if detail_board_native_id is not None and (
+            not isinstance(detail_board_native_id, str)
+            or not detail_board_native_id.strip()
+            or len(detail_board_native_id) > 128
+        ):
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_DETAIL_INVALID",
+                "原生板块编号必须是1至128个字符",
+            )
+        member_state = body["member_state"]
+        if member_state not in {
+            "ALL",
+            "CHANGED",
+            "UNCHANGED",
+            "UNKNOWN",
+            "NOT_COMPARABLE",
+            "NOT_EVALUABLE",
+        }:
+            raise PreviewHttpError(
+                400, "SECTOR_CHANGE_MEMBER_STATE_INVALID", "板内状态筛选值无效"
+            )
+        member_search = body["member_search"]
+        if member_search is not None:
+            member_search = _symbol_search(member_search)
+        offset = _nonnegative_int(str(body["offset"]), "offset")
+        limit = _positive_int(body["limit"], "limit", 100)
+        member_offset = _nonnegative_int(str(body["member_offset"]), "member_offset")
+        member_limit = body["member_limit"]
+        if detail_board_kind is None:
+            if member_offset != 0 or member_limit != 0 or member_search is not None:
+                raise PreviewHttpError(
+                    400,
+                    "SECTOR_CHANGE_MEMBER_PAGE_INVALID",
+                    "未选择板块时不能提交板内分页或股票搜索",
+                )
+        else:
+            member_limit = _positive_int(member_limit, "member_limit", 100)
+        stock_offset = _nonnegative_int(str(body["stock_offset"]), "stock_offset")
+        stock_limit = _positive_int(body["stock_limit"], "stock_limit", 30)
+
+        config = self.preview_server.state.config
+        try:
+            profile_catalog = source_symbol_price_profile_snapshots(
+                config,
+                max_target_session=cutoff,
+            )
+            exact_profiles = [
+                item
+                for item in profile_catalog["snapshots"]
+                if item.get("target_session") == target.isoformat()
+                and item.get("package_sha256") == package_sha
+                and item.get("profile_revision") == profile_revision
+                and item.get("complete") is True
+            ]
+            if len(exact_profiles) != 1:
+                raise PreviewHttpError(
+                    409,
+                    "SECTOR_CHANGE_PROFILE_REVISION_UNAVAILABLE",
+                    "所选日期、来源包和画像修订没有唯一完整的PG版本",
+                )
+            catalog = read_tdx_sector_source_snapshot_catalog(config)
+            snapshots = {item["snapshot_id"]: item for item in catalog["snapshots"]}
+            industry = snapshots.get(industry_snapshot_id)
+            concept = snapshots.get(concept_snapshot_id)
+            if industry is None or concept is None:
+                raise PreviewHttpError(
+                    404,
+                    "SECTOR_CHANGE_SNAPSHOT_NOT_FOUND",
+                    "所选行业或GN快照不在PG真实目录中",
+                )
+            if (
+                industry.get("source_kind") != "TDX_TDXHY_CFG"
+                or concept.get("source_kind") != "TDX_INFOHARBOR_BLOCK_DAT"
+            ):
+                raise PreviewHttpError(
+                    409,
+                    "SECTOR_CHANGE_SNAPSHOT_KIND_MISMATCH",
+                    "所选快照原生来源类型与行业/GN角色不匹配",
+                )
+
+            cache_key = (
+                target.isoformat(),
+                cutoff.isoformat(),
+                package_sha,
+                profile_revision,
+                industry_snapshot_id,
+                concept_snapshot_id,
+                event_window_start.isoformat(),
+                history_session_count,
+            )
+            inputs, cache_hit = self.preview_server.state.source_sector_change_inputs(
+                cache_key,
+                lambda: prepare_source_sector_change_inputs(
+                    config,
+                    str(self.preview_server.state.config_path),
+                    target_session=target,
+                    research_cutoff=cutoff,
+                    industry_snapshot_id=industry_snapshot_id,
+                    concept_snapshot_id=concept_snapshot_id,
+                    package_sha256=package_sha,
+                    profile_revision=profile_revision,
+                    event_window_start=event_window_start,
+                    pg_history_session_count=history_session_count,
+                ),
+            )
+        except PreviewHttpError:
+            raise
+        except TdxSectorMembersApplicationError as error:
+            if "MISMATCH" in error.code or "INCOMPLETE" in error.code:
+                status = 409
+            elif error.code.endswith("NOT_FOUND"):
+                status = 404
+            elif "INVALID" in error.code:
+                status = 400
+            else:
+                status = 503
+            raise PreviewHttpError(status, error.code, str(error)) from error
+
+        try:
+            result = build_source_sector_change_view(
+                config,
+                inputs,
+                board_kind_filter=None if board_kind == "ALL" else board_kind,
+                detail_board_kind=detail_board_kind,
+                detail_board_native_id=detail_board_native_id,
+                changed_only=changed_only,
+                sort_by=sort_by,
+                direction=direction,
+                offset=offset,
+                limit=limit,
+                member_state=member_state,
+                member_offset=member_offset,
+                member_limit=member_limit,
+                include_changed_stock_page=True,
+                stock_offset=stock_offset,
+                stock_limit=stock_limit,
+                include_source_market_context=False,
+                member_search=member_search,
+            )
+        except TdxSectorMembersApplicationError as error:
+            if "MISMATCH" in error.code or "INCOMPLETE" in error.code:
+                status = 409
+            elif error.code.endswith("NOT_FOUND"):
+                status = 404
+            elif "INVALID" in error.code:
+                status = 400
+            else:
+                status = 503
+            raise PreviewHttpError(status, error.code, str(error)) from error
+        result["cache"] = {"reused_exact_inputs": cache_hit}
+        return result
+
     def do_HEAD(self) -> None:
         self.do_GET()
 
@@ -1160,6 +1450,77 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(400, "PREVIEW_QUERY_INVALID", message)
                 body, content_type = read_static_asset(asset_name)
                 self._send(200, body, content_type)
+                return
+            if parsed.path == "/api/preview/sector-change-context":
+                values = _query(self.path, {"target_session"})
+                if set(values) != {"target_session"}:
+                    raise PreviewHttpError(
+                        400,
+                        "SECTOR_CHANGE_CONTEXT_QUERY_INVALID",
+                        "板块变化目录须显式提供target_session",
+                    )
+                target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
+                try:
+                    _resolved_target, sessions, calendar_revision = (
+                        resolve_pg_history_window(target.isoformat(), 75)
+                    )
+                except ResearchEntryError as error:
+                    raise PreviewHttpError(409, error.code, str(error)) from error
+                catalog = read_tdx_sector_source_snapshot_catalog(
+                    self.preview_server.state.config
+                )
+                snapshots = []
+                for snapshot in catalog["snapshots"]:
+                    observed = datetime.fromisoformat(snapshot["observed_at"])
+                    observed_after = observed.date() > target
+                    snapshots.append(
+                        {
+                            **snapshot,
+                            "observed_after_target": observed_after,
+                            "temporal_relationship": (
+                                "OBSERVED_AFTER_TARGET"
+                                if observed_after
+                                else "OBSERVED_ON_OR_BEFORE_TARGET"
+                            ),
+                        }
+                    )
+                window_options = []
+                for event_session_count in (1, 5, 10):
+                    if len(sessions) < event_session_count + 1:
+                        continue
+                    window_options.append(
+                        {
+                            "event_session_count": event_session_count,
+                            "event_window_start": sessions[
+                                -(event_session_count + 1)
+                            ].isoformat(),
+                            "target_session": target.isoformat(),
+                            "pg_history_session_count": min(
+                                75, event_session_count + 23
+                            ),
+                        }
+                    )
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "namespace_id": catalog["namespace_id"],
+                        "target_session": target.isoformat(),
+                        "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
+                        "official_calendar_revision": calendar_revision,
+                        "window_options": window_options,
+                        "snapshots": snapshots,
+                        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                        "identity_status": "SOURCE_SYMBOL_ONLY",
+                        "pit_status": "NON_PIT_RETROSPECTIVE",
+                        "database_write": False,
+                        "ddl_executed": False,
+                        "dml_executed": False,
+                    },
+                )
                 return
             if parsed.path == "/api/preview/catalog":
                 values = _query(self.path, {"offset", "limit", "year"})
@@ -2053,6 +2414,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "/api/preview/stock",
             "/api/preview/stock-timeline",
             "/api/preview/source-launch-watch",
+            "/api/preview/sector-change-stocks",
         }:
             self._error(
                 PreviewHttpError(
@@ -2128,6 +2490,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 ) from error
             if post_path == "/api/preview/source-launch-watch":
                 self._send_json(200, self._source_launch_watch(body))
+                return
+            if post_path == "/api/preview/sector-change-stocks":
+                self._send_json(200, self._sector_change_stocks(body))
                 return
             expected = {"symbol", "target_session", "package_sha256", "session_count"}
             allowed_timeline = expected | {"namespace_id"}

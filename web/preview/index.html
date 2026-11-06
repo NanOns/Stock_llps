@@ -26,6 +26,236 @@
         >
       </section>
       <section
+        id="sectorChangeExplorer"
+        class="panel sector-change-explorer"
+        aria-labelledby="sectorChangeTitle"
+      >
+        <div class="panel-head">
+          <div>
+            <h2 id="sectorChangeTitle">来源池变化 → 行业 / GN 概念 → 个股</h2>
+            <p>
+              从已保存的PG
+              Raw、Profile与TDX成员快照读取来源级研究。事件窗按官方会话显式选择；板块和成员先全量联算再分页。
+            </p>
+          </div>
+          <span id="sectorChangeCount" class="count">等待精确来源身份</span>
+        </div>
+        <div id="sectorChangeStatus" class="population" role="status">
+          请选择目标日期、来源包、Profile修订、行业快照与GN快照。
+        </div>
+        <div class="sector-controls">
+          <label>
+            目标交易日与来源包
+            <select id="sectorVersionSelect" disabled>
+              <option value="">— 请选择真实PG版本 —</option>
+            </select>
+          </label>
+          <label>
+            精确Profile修订
+            <select id="sectorProfileRevisionSelect" disabled>
+              <option value="">— 请选择完整修订 —</option>
+            </select>
+          </label>
+          <label>
+            行业成员快照
+            <select id="sectorIndustrySnapshotSelect" disabled>
+              <option value="">— 请选择PG行业快照 —</option>
+            </select>
+          </label>
+          <label>
+            GN概念成员快照
+            <select id="sectorConceptSnapshotSelect" disabled>
+              <option value="">— 请选择PG GN快照 —</option>
+            </select>
+          </label>
+          <label>
+            D1事件窗
+            <select id="sectorEventWindowSelect" disabled>
+              <option value="">— 先选择目标日 —</option>
+            </select>
+          </label>
+          <button id="sectorChangeQuery" type="button" disabled>
+            读取变化研究
+          </button>
+        </div>
+        <div
+          id="sectorChangeIdentity"
+          class="population sector-identity"
+          hidden
+        ></div>
+        <div id="sectorMarketSummary" class="sector-metrics" hidden></div>
+        <div id="sectorBoardSection" hidden>
+          <div class="panel-head sector-subhead">
+            <div>
+              <h3>发生D1支撑变化的板块</h3>
+              <p>
+                首页最多15个；排序只供研究阅读，不代表预测或优先级。完整板块数和翻页保留，成员关系为后验NON_PIT。
+              </p>
+            </div>
+            <div class="sector-inline-controls">
+              <label>
+                类型
+                <select id="sectorBoardKindFilter">
+                  <option value="ALL">行业与GN</option>
+                  <option value="INDUSTRY">行业</option>
+                  <option value="CONCEPT">GN概念</option>
+                </select>
+              </label>
+              <label>
+                排序
+                <select id="sectorSortBy">
+                  <option value="changed_stocks">D1变化股票数</option>
+                  <option value="delta20">20会话变化</option>
+                  <option value="delta5">5会话变化</option>
+                  <option value="ret20">20会话收益</option>
+                  <option value="ret5">5会话收益</option>
+                </select>
+              </label>
+              <label>
+                方向
+                <select id="sectorDirection">
+                  <option value="STRONGER">变强排序</option>
+                  <option value="WEAKER">变弱排序</option>
+                </select>
+              </label>
+              <label class="sector-checkbox">
+                <input id="sectorChangedOnly" type="checkbox" checked />
+                只看有变化板块
+              </label>
+            </div>
+          </div>
+          <div id="sectorBoardSummary" class="population" role="status"></div>
+          <div class="table-wrap">
+            <table class="sector-table">
+              <thead>
+                <tr>
+                  <th>板块</th>
+                  <th>类型 / 快照时间</th>
+                  <th>成员分母</th>
+                  <th>D1变化成员</th>
+                  <th>5 / 20会话收益、变化与覆盖</th>
+                  <th>范围</th>
+                </tr>
+              </thead>
+              <tbody id="sectorBoardRows">
+                <tr>
+                  <td colspan="6" class="muted">等待读取真实变化。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button id="sectorBoardPrev" class="quiet" disabled>上一页</button>
+            <span id="sectorBoardPage">—</span>
+            <div class="pager-actions">
+              <button id="sectorBoardNext" class="quiet" disabled>
+                下一页
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="sectorChangedStocksSection" hidden>
+          <div class="panel-head sector-subhead">
+            <div>
+              <h3>全局去重的D1变化股票</h3>
+              <p>同一来源代码即使属于多个GN概念，也只计一次；每页最多30只。</p>
+            </div>
+            <span id="sectorChangedStocksCount" class="count">—</span>
+          </div>
+          <div class="table-wrap">
+            <table class="sector-table">
+              <thead>
+                <tr>
+                  <th>来源代码</th>
+                  <th>变化事件数</th>
+                  <th>查看</th>
+                </tr>
+              </thead>
+              <tbody id="sectorChangedStockRows">
+                <tr>
+                  <td colspan="3" class="muted">等待读取真实变化。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button id="sectorStockPrev" class="quiet" disabled>上一页</button>
+            <span id="sectorStockPage">—</span>
+            <div class="pager-actions">
+              <button id="sectorStockNext" class="quiet" disabled>
+                下一页
+              </button>
+            </div>
+          </div>
+        </div>
+        <div id="sectorBoardDetail" class="sector-detail" hidden>
+          <div class="panel-head sector-subhead">
+            <div>
+              <h3 id="sectorBoardDetailTitle">板内成员</h3>
+              <p id="sectorBoardDetailSummary" class="muted"></p>
+            </div>
+            <div class="sector-inline-controls">
+              <label>
+                D1状态
+                <select id="sectorMemberState">
+                  <option value="ALL">全部成员</option>
+                  <option value="CHANGED">有变化</option>
+                  <option value="UNCHANGED">未变化</option>
+                  <option value="UNKNOWN">未知</option>
+                  <option value="NOT_COMPARABLE">不可比较</option>
+                  <option value="NOT_EVALUABLE">不可评价</option>
+                </select>
+              </label>
+              <label>
+                股票代码
+                <input
+                  id="sectorMemberSearch"
+                  maxlength="9"
+                  placeholder="SH. 或 SZ."
+                />
+              </label>
+              <button id="sectorMemberSearchButton" type="button">
+                筛选成员
+              </button>
+            </div>
+          </div>
+          <div id="sectorMemberSummary" class="population" role="status"></div>
+          <div class="table-wrap">
+            <table class="sector-table">
+              <thead>
+                <tr>
+                  <th>来源代码</th>
+                  <th>D1状态</th>
+                  <th>事件数</th>
+                  <th>本次状态与原因</th>
+                  <th>详情</th>
+                </tr>
+              </thead>
+              <tbody id="sectorMemberRows">
+                <tr>
+                  <td colspan="5" class="muted">选择板块后读取。</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <div class="pager">
+            <button id="sectorMemberPrev" class="quiet" disabled>上一页</button>
+            <span id="sectorMemberPage">—</span>
+            <div class="pager-actions">
+              <button id="sectorMemberNext" class="quiet" disabled>
+                下一页
+              </button>
+            </div>
+          </div>
+          <p class="muted">
+            未列入本次变化视图只表示所选事件窗、成员快照、状态筛选或分页条件下没有展示；不构成正式D0/D1/D2/Priority选股结论。
+          </p>
+        </div>
+        <p class="muted sector-boundary">
+          来源代码池不是官方上市总体；行业和GN成员快照按实际观测时点显示，历史回看一律标记CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT。未变化、UNKNOWN、不可比较、不可评价分别保留原状态和原因。
+        </p>
+      </section>
+      <section
         class="panel comparison-browser"
         aria-labelledby="comparisonTitle"
       >
@@ -884,6 +1114,9 @@
           </form>
           <div id="stockError" class="message" hidden></div>
           <div id="stockResult" hidden>
+            <button id="sectorReturnToBoard" class="quiet" type="button" hidden>
+              返回原板块与筛选条件
+            </button>
             <div class="identity-box">
               <strong id="resultTitle"></strong><span id="resultMode"></span
               ><code id="snapshotId"></code><span id="windowText"></span>

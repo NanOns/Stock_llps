@@ -4,4 +4,5 @@ renderComparisonBasket();
 void (async () => {
   await loadCatalog();
   await loadProfileSnapshots();
+  initializeSectorChangeExplorer();
 })();

@@ -69,6 +69,16 @@ const state = {
   chartMode: "day",
   chartSelection: null,
   chartPeriodContext: null,
+  sectorChange: {
+    context: null,
+    data: null,
+    request: 0,
+    contextRequest: 0,
+    boardOffset: 0,
+    stockOffset: 0,
+    memberOffset: 0,
+    selectedBoard: null,
+  },
 };
 const previewQueryDebounceMs = 160;
 function readinessDetail(parent, label, value) {

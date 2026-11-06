@@ -44,6 +44,7 @@ _D0_CHANGE_TRANSITIONS = {
     "UNKNOWN_TO_UNKNOWN",
 }
 _SOURCE_SYMBOL_PATTERN = re.compile(r"(?:SH|SZ|BJ)\.[0-9]{6}")
+_SOURCE_SYMBOL_SEARCH_PATTERN = re.compile(r"[A-Za-z0-9.]{1,9}\Z")
 
 
 def _fraction_value(value: Any) -> Fraction | None:
@@ -680,6 +681,7 @@ def combine_sector_strength_and_d1_changes(
     stock_limit: int = 30,
     d0_launch_changes: Mapping[str, Any] | None = None,
     d0_new_only: bool = False,
+    member_search: str | None = None,
 ) -> dict[str, Any]:
     """先联接完整来源集合，再过滤、排序及分页板块和板内股票。"""
     if (
@@ -719,6 +721,11 @@ def combine_sector_strength_and_d1_changes(
         or stock_offset < 0
         or type(stock_limit) is not int
         or not 1 <= stock_limit <= 30
+        or member_search is not None
+        and (
+            not isinstance(member_search, str)
+            or _SOURCE_SYMBOL_SEARCH_PATTERN.fullmatch(member_search) is None
+        )
     ):
         raise TdxSectorMembersApplicationError(
             "SECTOR_CHANGE_PAGE_INVALID", "行业概念联动筛选、排序或分页参数无效"
@@ -794,7 +801,9 @@ def combine_sector_strength_and_d1_changes(
             "TDX_TDXHY_CFG" if kind == "INDUSTRY" else "TDX_INFOHARBOR_BLOCK_DAT"
         )
         snapshot = strength.get("snapshot", {})
-        target_source = strength.get("source_version", {})
+        target_source = strength.get(
+            "target_source_version", strength.get("source_version", {})
+        )
         if snapshot.get("source_kind") != expected_source_kind:
             raise TdxSectorMembersApplicationError(
                 "SNAPSHOT_BOARD_KIND_MISMATCH",
@@ -1057,7 +1066,10 @@ def combine_sector_strength_and_d1_changes(
                 ],
                 "d1_history_argv": d1_history_argv,
             }
-            if member_state == "ALL" or member["change_state"] == member_state:
+            if (member_state == "ALL" or member["change_state"] == member_state) and (
+                member_search is None
+                or member_search.upper() in member["source_symbol"]
+            ):
                 members.append(member)
         members.sort(
             key=lambda item: (
@@ -1087,6 +1099,7 @@ def combine_sector_strength_and_d1_changes(
             "member_count": len(detail_board["_member_symbols"]),
             "d1_link": detail_board["d1_link"],
             "member_state_filter": member_state,
+            "member_search": member_search,
             "member_page": {
                 "offset": member_offset,
                 "limit": member_limit,
@@ -1189,6 +1202,7 @@ def combine_sector_strength_and_d1_changes(
             "changed_stocks_only": changed_only,
             "sort_by": sort_by,
             "direction": direction,
+            **({"member_search": member_search} if member_search else {}),
             **({"d0_new_only": True} if d0_new_only else {}),
         },
         "page": {

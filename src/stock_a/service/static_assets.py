@@ -31,6 +31,7 @@ _ASSET_TYPES = {
     "modules/changes/detail.js": "text/javascript; charset=utf-8",
     "modules/changes/price_relations.js": "text/javascript; charset=utf-8",
     "modules/changes/list.js": "text/javascript; charset=utf-8",
+    "modules/sector_change.js": "text/javascript; charset=utf-8",
     "modules/events.js": "text/javascript; charset=utf-8",
     "modules/app.js": "text/javascript; charset=utf-8",
 }
@@ -51,6 +52,7 @@ _LEGACY_APP_MODULES = (
     "modules/changes/detail.js",
     "modules/changes/price_relations.js",
     "modules/changes/list.js",
+    "modules/sector_change.js",
     "modules/events.js",
     "modules/app.js",
 )
