@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from bisect import bisect_left, bisect_right
 from datetime import date
 from fractions import Fraction
 import hashlib
@@ -396,20 +397,59 @@ def _metric(
 def _rank(
     endpoint: ReturnEndpoint, members: tuple[str, ...], target_entity_id: str
 ) -> FieldValue:
-    known = [
-        (entity_id, exact_number(_field(endpoint, entity_id).value))
+    known = sorted(
+        exact_number(_field(endpoint, entity_id).value)
         for entity_id in members
         if _field(endpoint, entity_id).quality == "OBSERVED"
-    ]
+    )
     if len(known) < 2:
         return unknown("INSUFFICIENT_RANK_DENOMINATOR")
     target_field = _field(endpoint, target_entity_id)
     if target_field.quality != "OBSERVED":
         return unknown(target_field.reason or "TARGET_RETURN_UNKNOWN")
     target = exact_number(target_field.value)
-    less = sum(value < target for _, value in known)
-    equal = sum(value == target for _, value in known)
-    return FieldValue(Fraction(100 * (less + Fraction(equal - 1, 2)), len(known) - 1))
+    return _rank_known_values(known, target)
+
+
+def _rank_known_values(ordered: list[Fraction], target: Fraction) -> FieldValue:
+    """对同一已排序可评估横截面计算合同中秩。"""
+    less = bisect_left(ordered, target)
+    equal = bisect_right(ordered, target) - less
+    return FieldValue(Fraction(100 * (less + Fraction(equal - 1, 2)), len(ordered) - 1))
+
+
+def rank_return_endpoint(
+    endpoint: ReturnEndpoint,
+    *,
+    target_date: date,
+    calendar: MarketSessionCalendar,
+    target_coordinates: Mapping[str, PriceCoordinate],
+) -> dict[str, FieldValue]:
+    """对显式完整端点一次排序，返回每个成员的RPS及原有未知原因。"""
+    _validate_calendar(calendar, target_date)
+    members = _validate_endpoint(
+        endpoint,
+        target_date=target_date,
+        calendar=calendar,
+        target_coordinates=target_coordinates,
+        return_period=endpoint.return_period,
+        relative=False,
+    )
+    ordered = sorted(
+        exact_number(_field(endpoint, entity_id).value)
+        for entity_id in members
+        if _field(endpoint, entity_id).quality == "OBSERVED"
+    )
+    result = {}
+    for entity_id in members:
+        field = _field(endpoint, entity_id)
+        if len(ordered) < 2:
+            result[entity_id] = unknown("INSUFFICIENT_RANK_DENOMINATOR")
+        elif field.quality != "OBSERVED":
+            result[entity_id] = unknown(field.reason or "TARGET_RETURN_UNKNOWN")
+        else:
+            result[entity_id] = _rank_known_values(ordered, exact_number(field.value))
+    return result
 
 
 def _delta(first: CrossSectionMetric, second: CrossSectionMetric) -> FieldValue:

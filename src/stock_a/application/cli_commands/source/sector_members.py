@@ -37,6 +37,8 @@ from stock_a.application.source_d0_raw import (
 from stock_a.application.pg_research import (
     PgResearchBindingError,
 )
+from stock_a.application.pg_price_profiles import PgPriceProfileError
+from stock_a.contracts import PriceProfileContractError
 from stock_a.research.entry import (
     CompareBudget,
     ResearchEntryError,
@@ -289,6 +291,17 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
     target = _parse_session_date(args.target_session)
     cutoff = _parse_session_date(args.research_cutoff)
     include_d0_launch_new = getattr(args, "include_d0_launch_new", False)
+    include_seed = getattr(args, "include_source_seed_board", False)
+    if include_seed and (
+        not args.profile_revision
+        or not args.detail_board_kind
+        or not args.detail_board_native_id
+    ):
+        raise DiagnosticError(
+            "SOURCE_SEED_BOARD_IDENTITY_REQUIRED",
+            "Seed汇总须显式选择画像修订和一个板块",
+            _EXIT_ARGUMENT,
+        )
     d0_new_only = getattr(args, "d0_new_only", False)
     if not include_d0_launch_new and (args.sort_by == "d0_launch_new" or d0_new_only):
         raise DiagnosticError(
@@ -447,6 +460,39 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 args, "include_price_safety_facts", False
             ),
         )
+        if include_seed:
+            from stock_a.application.runtime_config import _CONFIG_ROOT
+            from stock_a.application.source_pool_seed import (
+                read_board_seed_facts,
+                read_source_pool_seed,
+            )
+            from stock_a.contracts import load_price_profile_contract
+
+            pool = read_source_pool_seed(
+                config,
+                target_session=target,
+                research_cutoff=cutoff,
+                package_sha256=args.package_sha256,
+                namespace_id=inputs.discovery["source"]["namespace_id"],
+                profile_revision=args.profile_revision,
+                profile_contract=load_price_profile_contract(_CONFIG_ROOT).document,
+                history_session_count=args.pg_history_session_count,
+            )
+            snapshot_id = (
+                industry_snapshot_id
+                if args.detail_board_kind == "INDUSTRY"
+                else concept_snapshot_id
+            )
+            result["source_seed_board"] = read_board_seed_facts(
+                config,
+                pool,
+                snapshot_id=snapshot_id,
+                board_kind=args.detail_board_kind,
+                board_native_id=args.detail_board_native_id,
+            )
+            result["source_seed_pool"] = {
+                key: value for key, value in pool.items() if key != "facts"
+            }
     except (
         TdxSectorMembersApplicationError,
         TdxSectorMembersPgError,
@@ -456,6 +502,8 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
         RawSourcePgError,
         SourceMarketContextError,
         PriceSafetyFactError,
+        PgPriceProfileError,
+        PriceProfileContractError,
     ) as error:
         code = getattr(error, "code", "SECTOR_CHANGE_DISCOVERY_FAILED")
         error_payload = {

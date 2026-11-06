@@ -249,6 +249,11 @@ def register_commands(commands):
     sector_change_stocks.add_argument("--package-sha256", required=True)
     sector_change_stocks.add_argument("--profile-revision")
     sector_change_stocks.add_argument(
+        "--include-source-seed-board",
+        action="store_true",
+        help="只读计算全来源探索性RPS/Seed并汇总指定板块完整成员",
+    )
+    sector_change_stocks.add_argument(
         "--event-window-start", required=True, help="D1历史事件窗口起始官方会话"
     )
     sector_change_stocks.add_argument(
