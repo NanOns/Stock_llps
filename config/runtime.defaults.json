@@ -87,25 +87,25 @@
       },
       {
         "path": "contracts/price-profile.contract.json",
-        "role": "BUSINESS_PARAMETER_CONTRACT",
+        "role": "PRICE_PROFILE_SEMANTICS_CONTRACT",
         "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
         "consumer": "stock_a.contracts.load_price_profile_contract（唯一入口清单）"
       },
       {
         "path": "contracts/price-profile/fields-source.json",
-        "role": "BUSINESS_PARAMETER_CONTRACT",
+        "role": "PRICE_PROFILE_SEMANTICS_MODULE",
         "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
         "consumer": "stock_a.contracts.load_price_profile_contract（fields-source）"
       },
       {
         "path": "contracts/price-profile/fields-core.json",
-        "role": "BUSINESS_PARAMETER_CONTRACT",
+        "role": "PRICE_PROFILE_SEMANTICS_MODULE",
         "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
         "consumer": "stock_a.contracts.load_price_profile_contract（fields-core）"
       },
       {
         "path": "contracts/price-profile/fields-profile.json",
-        "role": "BUSINESS_PARAMETER_CONTRACT",
+        "role": "PRICE_PROFILE_SEMANTICS_MODULE",
         "contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
         "consumer": "stock_a.contracts.load_price_profile_contract（fields-profile）"
       }
@@ -138,10 +138,8 @@
       "target": "127.0.0.1:5432/stock_a",
       "lifecycle": "可选安全环境变量；与stock_a业务连接分离；仅作只读实际簇、存储路径和业务后端绑定核验；缺失时拒绝写入、发布和迁移；不得输出、记录或复制秘密"
     },
-    "unknown_files": "REJECT",
     "outside_root_or_link_escape": "REJECT",
     "recursive_autoload": false,
-    "test_configuration_or_fixture_allowed": false,
     "daily_job_configuration_writes_allowed": false,
     "secrets_via_secure_store_or_secret_environment_allowed": true,
     "environment_or_cli_config_path_outside_root_allowed": false,
@@ -170,7 +168,7 @@
     "deployment_instance_uuid": "ff29a9f9-074e-4e37-b64f-e04db9ec933c",
     "cluster_system_identifier": "7688198230782699460",
     "deployment_applied": true,
-    "migration_digest": "1c881b3b8c39e0f7c7be170bbf95c82bd28ba2d3f4803376cd6c372422f129ee",
+    "migration_digest": "4202e6dc91395a0b5fec53882e577ce0e9f3e2dd02b611d6c011ff36e93aacfa",
     "business_login": "stock_a"
   }
 }

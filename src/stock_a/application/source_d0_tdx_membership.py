@@ -74,10 +74,15 @@ def build_d0_launch_watch_membership_result(
     after_version = after.get("source_version")
     snapshots = membership_read.get("snapshots")
     memberships = membership_read.get("memberships")
+    if not isinstance(before_version, Mapping) or not isinstance(
+        after_version, Mapping
+    ):
+        raise TdxSectorMembersApplicationError(
+            "D0_MEMBERSHIP_SOURCE_IDENTITY_INVALID",
+            "TDX联接需要同namespace、同包的完整D0 Raw端点及后验快照",
+        )
     if (
-        not isinstance(before_version, Mapping)
-        or not isinstance(after_version, Mapping)
-        or not isinstance(snapshots, list)
+        not isinstance(snapshots, list)
         or not isinstance(memberships, list)
         or membership_read.get("membership_mode")
         != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"

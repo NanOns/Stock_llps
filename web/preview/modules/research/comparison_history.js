@@ -156,7 +156,7 @@ function validateComparisonTimeline(data, selection) {
 }
 function validateComparisonRawPeriods(data, selection, timeline) {
   const identity = data?.snapshot_identity;
-  const formalSourceSet = data?.source_version;
+  const sourceVersion = data?.source_version;
   const responseSelection = data?.selection;
   if (
     data?.ok !== true ||
@@ -177,12 +177,10 @@ function validateComparisonRawPeriods(data, selection, timeline) {
     responseSelection?.target_session !== selection.target_session ||
     responseSelection?.package_sha256 !== selection.package_sha256 ||
     responseSelection?.namespace_id !== selection.namespace_id ||
-    responseSelection?.source_set_id !== selection.source_set_id ||
     identity?.identity_sha256 == null ||
     identity.namespace_id !== selection.namespace_id ||
     identity.target_session !== selection.target_session ||
     identity.package_sha256 !== selection.package_sha256 ||
-    identity.source_set_id !== selection.source_set_id ||
     identity.identity_type !== timeline.snapshot_identity.identity_type ||
     identity.application_id !== timeline.snapshot_identity.application_id ||
     identity.preview_mode !== timeline.snapshot_identity.preview_mode ||
@@ -193,9 +191,11 @@ function validateComparisonRawPeriods(data, selection, timeline) {
     identity.profile_contract_sha256 !==
       timeline.snapshot_identity.profile_contract_sha256 ||
     identity.price_coordinate !== "RAW_UNADJUSTED" ||
-    formalSourceSet?.status !== "AVAILABLE" ||
-    formalSourceSet?.source_set_id !== selection.source_set_id ||
-    formalSourceSet?.revision_id !== timeline.source_version?.revision_id ||
+    sourceVersion?.status !== "AVAILABLE" ||
+    sourceVersion?.source_capture_id !==
+      timeline.source_version?.source_capture_id ||
+    sourceVersion?.source_content_id !==
+      timeline.source_version?.source_content_id ||
     !Array.isArray(data.periods?.week) ||
     !Array.isArray(data.periods?.month)
   )
@@ -246,7 +246,7 @@ function comparisonBasketRequestKey(basket) {
   return basket
     .map(
       (item) =>
-        `${item.source_symbol}|${item.target_session}|${item.namespace_id}|${item.source_set_id}|${item.package_sha256}|${item.profile_revision}`,
+        `${item.source_symbol}|${item.target_session}|${item.namespace_id}|${item.package_sha256}|${item.profile_revision}`,
     )
     .join(";");
 }
@@ -283,7 +283,6 @@ async function loadComparisonRawPeriods(entries, requestId, requestKey) {
           package_sha256: entry.selection.package_sha256,
           symbol: entry.selection.source_symbol,
           namespace_id: entry.selection.namespace_id,
-          source_set_id: entry.selection.source_set_id,
         });
         const response = await api(`/api/source-symbol/raw-periods?${query}`);
         return {
@@ -451,7 +450,6 @@ function openComparisonTimeline(sourceSymbol, sessionDate = null) {
     symbol: entry.selection.source_symbol,
     session_count: 75,
     namespace_id: entry.selection.namespace_id,
-    source_set_id: entry.selection.source_set_id,
     origin: "comparison",
   };
   state.chartPeriodContext = chartContextForTimeline(entry.data);

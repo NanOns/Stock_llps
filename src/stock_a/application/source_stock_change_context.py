@@ -79,9 +79,7 @@ def query_source_stock_change_context(
     before_session: date,
     target_session: date,
     research_cutoff: date,
-    before_source_set_id: str | None,
     before_package_sha256: str,
-    source_set_id: str | None,
     package_sha256: str,
     symbol: str,
     before_profile_revision: str | None = None,
@@ -165,10 +163,8 @@ def query_source_stock_change_context(
                 offset=0,
                 limit=1,
                 source_symbol=symbol,
-                before_source_set_id=before_source_set_id,
                 before_package_sha256=before_package_sha256,
                 before_profile_revision=before_profile_revision,
-                after_source_set_id=source_set_id,
                 after_package_sha256=package_sha256,
                 after_profile_revision=after_profile_revision,
                 expected_namespace_id=namespace_id,
@@ -195,14 +191,12 @@ def query_source_stock_change_context(
                 (
                     profile_result.get("before_snapshot"),
                     before_session,
-                    before_source_set_id,
                     before_package_sha256,
                     before_profile_revision,
                 ),
                 (
                     profile_result.get("after_snapshot"),
                     target_session,
-                    source_set_id,
                     package_sha256,
                     after_profile_revision,
                 ),
@@ -210,7 +204,6 @@ def query_source_stock_change_context(
             for (
                 snapshot,
                 session,
-                source_id,
                 package_sha,
                 revision,
             ) in expected_snapshots:
@@ -218,7 +211,6 @@ def query_source_stock_change_context(
                     snapshot.get(key) != expected
                     for key, expected in (
                         ("target_session", session),
-                        ("source_set_id", source_id),
                         ("package_sha256", package_sha),
                         ("profile_revision", revision),
                     )

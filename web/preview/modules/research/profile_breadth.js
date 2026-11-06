@@ -277,10 +277,8 @@ async function loadProfileBreadth(before, after) {
   const params = new URLSearchParams({
     before_session: before.target_session,
     after_session: after.target_session,
-    before_source_set_id: before.source_set_id,
     before_package_sha256: before.package_sha256,
     before_profile_revision: before.profile_revision,
-    after_source_set_id: after.source_set_id,
     after_package_sha256: after.package_sha256,
     after_profile_revision: after.profile_revision,
   });
@@ -433,10 +431,8 @@ async function loadProfileBreadthMembers(query, offset) {
   const params = new URLSearchParams({
     before_session: breadth.before_snapshot.target_session,
     after_session: breadth.after_snapshot.target_session,
-    before_source_set_id: breadth.before_snapshot.source_set_id,
     before_package_sha256: breadth.before_snapshot.package_sha256,
     before_profile_revision: breadth.before_snapshot.profile_revision,
-    after_source_set_id: breadth.after_snapshot.source_set_id,
     after_package_sha256: breadth.after_snapshot.package_sha256,
     after_profile_revision: breadth.after_snapshot.profile_revision,
     mode: query.mode,
@@ -457,14 +453,10 @@ async function loadProfileBreadthMembers(query, offset) {
     if (
       requestId !== state.profileBreadthMemberRequest ||
       binding !== state.profileBreadthBinding ||
-      data.before_snapshot.source_set_id !==
-        breadth.before_snapshot.source_set_id ||
       data.before_snapshot.package_sha256 !==
         breadth.before_snapshot.package_sha256 ||
       data.before_snapshot.profile_revision !==
         breadth.before_snapshot.profile_revision ||
-      data.after_snapshot.source_set_id !==
-        breadth.after_snapshot.source_set_id ||
       data.after_snapshot.package_sha256 !==
         breadth.after_snapshot.package_sha256 ||
       data.after_snapshot.profile_revision !==
@@ -499,10 +491,8 @@ async function openBreadthMemberPair(item) {
     before_session: breadth.before_snapshot.target_session,
     after_session: breadth.after_snapshot.target_session,
     symbol: item.source_symbol,
-    before_source_set_id: breadth.before_snapshot.source_set_id,
     before_package_sha256: breadth.before_snapshot.package_sha256,
     before_profile_revision: breadth.before_snapshot.profile_revision,
-    after_source_set_id: breadth.after_snapshot.source_set_id,
     after_package_sha256: breadth.after_snapshot.package_sha256,
     after_profile_revision: breadth.after_snapshot.profile_revision,
   });
@@ -517,9 +507,10 @@ async function openBreadthMemberPair(item) {
       requestId !== state.pairRequest ||
       memberBinding !== state.profileBreadthBinding ||
       data.source_symbol !== item.source_symbol ||
-      data.before_snapshot.source_set_id !==
-        breadth.before_snapshot.source_set_id ||
-      data.after_snapshot.source_set_id !== breadth.after_snapshot.source_set_id
+      data.before_snapshot.package_sha256 !==
+        breadth.before_snapshot.package_sha256 ||
+      data.after_snapshot.package_sha256 !==
+        breadth.after_snapshot.package_sha256
     )
       return;
     state.changeBinding = {

@@ -207,7 +207,6 @@ def _changed_stock_page(
     source = discovery["source"]
     required_source_fields = (
         "namespace_id",
-        "source_set_id",
         "target_session",
         "package_sha256",
         "source_content_id",
@@ -224,7 +223,6 @@ def _changed_stock_page(
             if (
                 not isinstance(event_source, Mapping)
                 or event_source.get("namespace_id") != source["namespace_id"]
-                or event_source.get("source_set_id") != source["source_set_id"]
                 or event_source.get("package_sha256") != source["package_sha256"]
                 or event_source.get("source_content_id") != source["source_content_id"]
                 or event_source.get("source_raw_digest") != source["source_raw_digest"]
@@ -341,8 +339,6 @@ def _changed_stock_page(
             discovery["target_session"],
             "--research-cutoff",
             discovery["research_cutoff"],
-            "--source-set-id",
-            source["source_set_id"],
             "--package-sha256",
             source["package_sha256"],
             "--symbol",
@@ -771,14 +767,12 @@ def combine_sector_strength_and_d1_changes(
     expected_identity = {
         "target_session": discovery.get("target_session"),
         "research_cutoff": discovery.get("research_cutoff"),
-        "source_set_id": d1_source.get("source_set_id"),
         "package_sha256": d1_source.get("package_sha256"),
         "namespace_id": d1_source.get("namespace_id"),
     }
     if (
         not expected_identity["target_session"]
         or not expected_identity["research_cutoff"]
-        or not expected_identity["source_set_id"]
         or not expected_identity["package_sha256"]
         or not expected_identity["namespace_id"]
     ):
@@ -809,7 +803,6 @@ def combine_sector_strength_and_d1_changes(
         actual_identity = {
             "target_session": strength.get("target_session"),
             "research_cutoff": strength.get("research_cutoff"),
-            "source_set_id": target_source.get("profile_storage_key"),
             "package_sha256": target_source.get("package_sha256"),
             "namespace_id": strength.get("namespace_id"),
         }
@@ -1036,8 +1029,6 @@ def combine_sector_strength_and_d1_changes(
                 expected_identity["target_session"],
                 "--research-cutoff",
                 expected_identity["research_cutoff"],
-                "--source-set-id",
-                expected_identity["source_set_id"],
                 "--package-sha256",
                 expected_identity["package_sha256"],
                 "--symbol",
@@ -1145,7 +1136,6 @@ def combine_sector_strength_and_d1_changes(
         "analysis_scope": "NON_PIT_RETROSPECTIVE_CURRENT_TDX_MEMBER_CORE_RETURN_WITH_D1_SUPPORT_CHANGE",
         "target_session": expected_identity["target_session"],
         "research_cutoff": expected_identity["research_cutoff"],
-        "profile_storage_key": expected_identity["source_set_id"],
         "package_sha256": expected_identity["package_sha256"],
         "namespace_id": expected_identity["namespace_id"],
         "price_coordinate": "RAW_UNADJUSTED",

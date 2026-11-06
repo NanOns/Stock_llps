@@ -112,7 +112,6 @@ def _read_strength_inputs(
     cursor: Any,
     *,
     namespace_id: str,
-    source_set_id: str,
     source_capture_id: str,
     package_sha256: str,
     target_session: date,
@@ -132,7 +131,6 @@ def _read_strength_inputs(
     ordered_symbols = tuple(sorted(set(symbols)))
     cache_key = (
         namespace_id,
-        source_set_id,
         source_capture_id,
         package_sha256,
         target_session,
@@ -186,14 +184,14 @@ def _read_strength_inputs(
        p.ret20::text, p.ret20_exact_numerator::text,
        p.ret20_exact_denominator::text, p.ret20_quality, p.ret20_reason
 FROM stock.source_symbol_price_profiles p
-WHERE p.namespace_id=%s::uuid AND p.source_set_id=%s::uuid
-  AND p.target_session=%s::date AND p.package_sha256=%s
+WHERE p.namespace_id=%s::uuid AND p.target_session=%s::date
+  AND p.source_capture_id=%s::uuid AND p.package_sha256=%s
   AND p.profile_revision=%s AND p.source_symbol=ANY(%s)
 ORDER BY p.source_symbol COLLATE "C" """,
             (
                 namespace_id,
-                source_set_id,
                 target_session,
+                source_capture_id,
                 package_sha256,
                 profile_revision,
                 list(missing_profile_symbols),
@@ -913,17 +911,12 @@ def query_latest_sector_source_observation(
         and profile.get("target_session") == target_session.isoformat()
         and profile.get("package_sha256") == package_sha256
     )
-    source_set_id = profile.get("source_set_id") if has_exact_profile else None
-    source_set_revision = (
-        profile.get("source_set_revision") if has_exact_profile else None
-    )
     source_capture_id = profile.get("source_capture_id") if has_exact_profile else None
     profile_revision = (
         selected_profile.get("profile_revision") if has_exact_profile else None
     )
     try:
         if has_exact_profile:
-            source_set_id = str(uuid.UUID(source_set_id))
             source_capture_id = str(uuid.UUID(source_capture_id))
         with _transaction(config, write=False) as (_connection, cursor, namespace_id):
             cursor.execute(
@@ -982,9 +975,9 @@ LEFT JOIN LATERAL (
            )::bigint AS history_75_session_overlap_symbols
     FROM stock.tdx_sector_members m
     JOIN stock.source_symbol_price_profiles p
-      ON p.namespace_id=%s::uuid AND p.source_set_id=%s::uuid
+      ON p.namespace_id=%s::uuid
      AND p.target_session=%s::date AND p.package_sha256=%s
-     AND p.source_set_revision=%s AND p.source_capture_id=%s::uuid
+     AND p.source_capture_id=%s::uuid
      AND p.profile_revision=%s
      AND p.source_symbol=m.source_symbol
     WHERE m.snapshot_id=s.snapshot_id
@@ -992,10 +985,8 @@ LEFT JOIN LATERAL (
 ORDER BY s.source_kind""",
                 (
                     namespace_id,
-                    source_set_id,
                     target_session,
                     package_sha256,
-                    source_set_revision,
                     source_capture_id,
                     profile_revision,
                 ),
@@ -1696,7 +1687,6 @@ def query_sector_members(
     board_native_id: str,
     target_session: date,
     research_cutoff: date,
-    source_set_id: str,
     package_sha256: str,
     profile_revision: str | None,
     offset: int,
@@ -1704,7 +1694,6 @@ def query_sector_members(
 ) -> dict[str, Any]:
     _validate_page(offset, limit)
     _validate_snapshot_uuid(snapshot_id)
-    _validate_source_set_uuid(source_set_id)
     if board_kind not in {"INDUSTRY", "CONCEPT"}:
         raise TdxSectorMembersPgError(
             "BOARD_KIND_INVALID", "板块类型必须为INDUSTRY或CONCEPT"
@@ -1759,7 +1748,7 @@ JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
 JOIN stock.source_contents s ON s.namespace_id=r.namespace_id
   AND s.content_id=r.source_content_id
 WHERE r.namespace_id=%s::uuid AND r.session_date=%s::date AND r.package_sha256=%s
-ORDER BY r.source_capture_id, r.source_content_id LIMIT 2""",
+ORDER BY r.source_capture_id::text, r.source_content_id LIMIT 2""",
                 (namespace_id, target_session, package_sha256),
             )
             source_version = cursor.fetchall()
@@ -1813,12 +1802,11 @@ FROM stock.source_raw_daily WHERE namespace_id=%s::uuid
             cursor.execute(
                 """SELECT DISTINCT profile_revision COLLATE "C" AS profile_revision
 FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
-  AND source_capture_id=%s::uuid AND target_session=%s::date AND package_sha256=%s
-ORDER BY profile_revision""",
+WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
+  AND target_session=%s::date AND package_sha256=%s
+ORDER BY 1""",
                 (
                     namespace_id,
-                    source_set_id,
                     source_capture_id,
                     target_session,
                     package_sha256,
@@ -1852,7 +1840,7 @@ LEFT JOIN stock.source_raw_daily r ON r.namespace_id=%s::uuid
   AND r.source_capture_id=%s::uuid AND r.source_symbol=m.source_symbol
   AND r.session_date=%s::date AND r.package_sha256=%s
 LEFT JOIN stock.source_symbol_price_profiles p ON p.namespace_id=%s::uuid
-  AND p.source_set_id=%s::uuid AND p.source_capture_id=%s::uuid
+  AND p.source_capture_id=%s::uuid
   AND p.target_session=%s::date AND p.package_sha256=%s
   AND p.source_symbol=m.source_symbol AND p.profile_revision=%s
 WHERE m.snapshot_id=%s::uuid AND m.board_kind=%s AND m.board_native_id=%s""",
@@ -1862,7 +1850,6 @@ WHERE m.snapshot_id=%s::uuid AND m.board_kind=%s AND m.board_native_id=%s""",
                     target_session,
                     package_sha256,
                     namespace_id,
-                    source_set_id,
                     source_capture_id,
                     target_session,
                     package_sha256,
@@ -1910,7 +1897,7 @@ LEFT JOIN stock.source_raw_daily r ON r.namespace_id=%s::uuid
   AND r.source_capture_id=%s::uuid AND r.source_symbol=m.source_symbol
   AND r.session_date=%s::date AND r.package_sha256=%s
 LEFT JOIN stock.source_symbol_price_profiles p ON p.namespace_id=%s::uuid
-  AND p.source_set_id=%s::uuid AND p.source_capture_id=%s::uuid
+  AND p.source_capture_id=%s::uuid
   AND p.target_session=%s::date AND p.package_sha256=%s
   AND p.source_symbol=m.source_symbol AND p.profile_revision=%s
 WHERE m.snapshot_id=%s::uuid AND m.board_kind=%s AND m.board_native_id=%s
@@ -1921,7 +1908,6 @@ ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
                     target_session,
                     package_sha256,
                     namespace_id,
-                    source_set_id,
                     source_capture_id,
                     target_session,
                     package_sha256,
@@ -1961,7 +1947,6 @@ ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         "namespace_id": namespace_id,
         "snapshot": snapshot,
         "source_version": {
-            "profile_storage_key": source_set_id,
             "target_session": target_session.isoformat(),
             "package_sha256": package_sha256,
             "source_content_id": str(source_content_id).strip(),
@@ -2019,7 +2004,6 @@ def _breadth_source_version(
     *,
     namespace_id: str,
     target_session: date,
-    source_set_id: str,
     package_sha256: str,
     profile_revision: str,
 ) -> dict[str, Any]:
@@ -2034,7 +2018,7 @@ JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
 JOIN stock.source_contents s ON s.namespace_id=r.namespace_id
   AND s.content_id=r.source_content_id
 WHERE r.namespace_id=%s::uuid AND r.session_date=%s::date AND r.package_sha256=%s
-ORDER BY r.source_capture_id, r.source_content_id LIMIT 2""",
+ORDER BY r.source_capture_id::text, r.source_content_id LIMIT 2""",
         (namespace_id, target_session, package_sha256),
     )
     rows = cursor.fetchall()
@@ -2088,56 +2072,35 @@ WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
             "capture记录与Raw代码集合分母不一致",
         )
     cursor.execute(
-        """SELECT DISTINCT source_set_revision
-FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
-  AND source_capture_id=%s::uuid AND target_session=%s::date
-  AND package_sha256=%s AND profile_revision=%s
-ORDER BY source_set_revision LIMIT 2""",
-        (
-            namespace_id,
-            source_set_id,
-            source_capture_id,
-            target_session,
-            package_sha256,
-            profile_revision,
-        ),
-    )
-    profile_storage_revisions = cursor.fetchall()
-    if (
-        len(profile_storage_revisions) != 1
-        or type(profile_storage_revisions[0][0]) is not int
-    ):
-        raise TdxSectorMembersPgError(
-            "PROFILE_STORAGE_REVISION_UNAVAILABLE",
-            "画像没有唯一的现存存储版本键",
-        )
-    cursor.execute(
         """SELECT count(*)::bigint,
-       count(*) FILTER (WHERE source_set_revision=%s)::bigint,
+       count(DISTINCT source_symbol)::bigint,
+       count(DISTINCT source_capture_id)::bigint,
        count(*) FILTER (WHERE source_capture_id=%s::uuid)::bigint
 FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
+WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
   AND target_session=%s::date AND package_sha256=%s
   AND profile_revision=%s""",
         (
-            profile_storage_revisions[0][0],
             source_capture_id,
             namespace_id,
-            source_set_id,
+            source_capture_id,
             target_session,
             package_sha256,
             profile_revision,
         ),
     )
     profile_counts = cursor.fetchone()
-    if any(int(value) != raw_count for value in profile_counts):
+    if (
+        int(profile_counts[0]) != raw_count
+        or int(profile_counts[1]) != raw_count
+        or int(profile_counts[2]) != 1
+        or int(profile_counts[3]) != raw_count
+    ):
         raise TdxSectorMembersPgError(
             "PROFILE_SOURCE_IDENTITY_MISMATCH",
-            "画像行分母、存储版本或capture与Raw来源版本不一致",
+            "画像行分母、唯一捕获或capture与Raw来源版本不一致",
         )
     return {
-        "profile_storage_key": source_set_id,
         "target_session": target_session,
         "package_sha256": package_sha256,
         "source_content_id": str(source_content_id).strip(),
@@ -2151,7 +2114,6 @@ WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
         if source_available_at
         else None,
         "source_byte_count": int(source_byte_count),
-        "profile_storage_revision": int(profile_storage_revisions[0][0]),
         "profile_revision": profile_revision,
     }
 
@@ -2213,17 +2175,15 @@ def _validate_breadth_request(
             "BREADTH_SESSION_RANGE_INVALID",
             "对照会话必须递增且结束日不晚于显式研究截止日",
         )
-    if len(identities) != 6 or any(not isinstance(value, str) for value in identities):
+    if len(identities) != 4 or any(not isinstance(value, str) for value in identities):
         raise TdxSectorMembersPgError(
             "BREADTH_PROFILE_IDENTITY_INVALID",
-            "两端必须提供有效source_set UUID、包SHA和profile revision SHA",
+            "两端必须提供package SHA和profile revision SHA",
         )
-    _validate_source_set_uuid(identities[0])
-    _validate_source_set_uuid(identities[3])
-    if any(_SHA256.fullmatch(identities[index]) is None for index in (1, 2, 4, 5)):
+    if any(_SHA256.fullmatch(value) is None for value in identities):
         raise TdxSectorMembersPgError(
             "BREADTH_PROFILE_IDENTITY_INVALID",
-            "两端必须提供有效source_set UUID、包SHA和profile revision SHA",
+            "两端必须提供package SHA和profile revision SHA",
         )
     if (
         type(offset) is not int
@@ -2427,7 +2387,6 @@ def _core_transition_summary(
             def endpoint(side: str, source: dict[str, Any]) -> dict[str, Any]:
                 return {
                     "target_session": source["target_session"].isoformat(),
-                    "source_set_id": source["source_set_id"],
                     "source_capture_id": source["source_capture_id"],
                     "package_sha256": source["package_sha256"],
                     "profile_revision": source["profile_revision"],
@@ -2801,7 +2760,6 @@ def _summarize_sector_breadth_rows(
                     "board_native_id": board["board_native_id"],
                     "target_session": after_source["target_session"].isoformat(),
                     "research_cutoff": after_source["research_cutoff"].isoformat(),
-                    "profile_storage_key": after_source["profile_storage_key"],
                     "package_sha256": after_source["package_sha256"],
                     "profile_revision": after_source["profile_revision"],
                     "offset": 0,
@@ -2826,10 +2784,8 @@ def query_sector_breadth(
     before_session: date,
     after_session: date,
     research_cutoff: date,
-    before_source_set_id: str,
     before_package_sha256: str,
     before_profile_revision: str,
-    after_source_set_id: str,
     after_package_sha256: str,
     after_profile_revision: str,
     official_calendar_id: str,
@@ -2842,10 +2798,8 @@ def query_sector_breadth(
     core_transition_kind: str = "ALL",
 ) -> dict[str, Any]:
     identities = (
-        before_source_set_id,
         before_package_sha256,
         before_profile_revision,
-        after_source_set_id,
         after_package_sha256,
         after_profile_revision,
     )
@@ -2900,7 +2854,6 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                     namespace_id=namespace_id,
                     target_session=before_session,
                     max_target_session=research_cutoff,
-                    source_set_id=before_source_set_id,
                     package_sha256=before_package_sha256,
                     profile_revision=before_profile_revision,
                 )
@@ -2909,7 +2862,6 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                     namespace_id=namespace_id,
                     target_session=after_session,
                     max_target_session=research_cutoff,
-                    source_set_id=after_source_set_id,
                     package_sha256=after_package_sha256,
                     profile_revision=after_profile_revision,
                 )
@@ -2931,7 +2883,6 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                 cursor,
                 namespace_id=namespace_id,
                 target_session=before_session,
-                source_set_id=before_source_set_id,
                 package_sha256=before_package_sha256,
                 profile_revision=before_profile_revision,
             )
@@ -2939,7 +2890,6 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                 cursor,
                 namespace_id=namespace_id,
                 target_session=after_session,
-                source_set_id=after_source_set_id,
                 package_sha256=after_package_sha256,
                 profile_revision=after_profile_revision,
             )
@@ -3169,7 +3119,6 @@ def query_sector_strength(
     board_native_id: str | None,
     target_session: date,
     research_cutoff: date,
-    source_set_id: str,
     package_sha256: str,
     profile_revision: str | None,
     official_calendar_id: str,
@@ -3179,7 +3128,6 @@ def query_sector_strength(
 ) -> dict[str, Any]:
     """在一个只读快照中读取精确板块、目标价格画像与同包Raw历史。"""
     _validate_snapshot_uuid(snapshot_id)
-    _validate_source_set_uuid(source_set_id)
     if board_kind not in {"INDUSTRY", "CONCEPT"}:
         raise TdxSectorMembersPgError(
             "BOARD_KIND_INVALID", "板块类型必须为INDUSTRY或CONCEPT"
@@ -3268,12 +3216,27 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                 )
 
             cursor.execute(
+                """SELECT DISTINCT source_capture_id::text
+FROM stock.source_raw_daily
+WHERE namespace_id=%s::uuid AND session_date=%s::date
+  AND package_sha256=%s
+ORDER BY source_capture_id::text LIMIT 2""",
+                (namespace_id, target_session, package_sha256),
+            )
+            raw_capture_ids = [str(row[0]) for row in cursor.fetchall()]
+            if len(raw_capture_ids) != 1:
+                raise TdxSectorMembersPgError(
+                    "SOURCE_VERSION_NOT_UNIQUE",
+                    "目标日与包SHA没有唯一Raw捕获和内容引用",
+                )
+            source_capture_id = raw_capture_ids[0]
+            cursor.execute(
                 """SELECT DISTINCT profile_revision
 FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND source_set_id=%s::uuid
-  AND target_session=%s::date AND package_sha256=%s
+WHERE namespace_id=%s::uuid AND target_session=%s::date
+  AND source_capture_id=%s::uuid AND package_sha256=%s
 ORDER BY profile_revision""",
-                (namespace_id, source_set_id, target_session, package_sha256),
+                (namespace_id, target_session, source_capture_id, package_sha256),
             )
             profile_revisions = [str(row[0]).strip() for row in cursor.fetchall()]
             selected_profile = profile_revision
@@ -3297,7 +3260,7 @@ ORDER BY profile_revision""",
 
             validation_key = (
                 namespace_id,
-                source_set_id,
+                source_capture_id,
                 package_sha256,
                 target_session,
                 research_cutoff,
@@ -3318,7 +3281,6 @@ ORDER BY profile_revision""",
                         namespace_id=namespace_id,
                         target_session=target_session,
                         max_target_session=research_cutoff,
-                        source_set_id=source_set_id,
                         package_sha256=package_sha256,
                         profile_revision=selected_profile,
                     )
@@ -3347,7 +3309,6 @@ ORDER BY profile_revision""",
                     cursor,
                     namespace_id=namespace_id,
                     target_session=target_session,
-                    source_set_id=source_set_id,
                     package_sha256=package_sha256,
                     profile_revision=selected_profile,
                 )
@@ -3438,7 +3399,6 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
                 ) = _read_strength_inputs(
                     cursor,
                     namespace_id=namespace_id,
-                    source_set_id=source_set_id,
                     source_capture_id=source_version["source_capture_id"],
                     package_sha256=package_sha256,
                     target_session=target_session,
@@ -3718,13 +3678,4 @@ def _validate_snapshot_uuid(value: str) -> None:
     except (AttributeError, ValueError) as error:
         raise TdxSectorMembersPgError(
             "SNAPSHOT_ID_INVALID", "snapshot_id必须是UUID"
-        ) from error
-
-
-def _validate_source_set_uuid(value: str) -> None:
-    try:
-        uuid.UUID(value)
-    except (AttributeError, ValueError) as error:
-        raise TdxSectorMembersPgError(
-            "SOURCE_SET_ID_INVALID", "source_set_id必须是UUID"
         ) from error

@@ -11,6 +11,7 @@ import re
 import stat
 import sys
 from typing import Any
+from uuid import UUID
 from stock_a import __version__
 from stock_a.application.runtime_config import (
     DiagnosticError,
@@ -117,6 +118,8 @@ def _json_default(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, UUID):
         return str(value)
     if isinstance(value, tuple):
         return list(value)

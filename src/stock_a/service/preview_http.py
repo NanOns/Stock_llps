@@ -715,8 +715,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "before_session",
             "target_session",
             "research_cutoff",
-            "before_source_set_id",
-            "source_set_id",
             "package_sha256",
             "namespace_id",
             "industry_snapshot_id",
@@ -761,8 +759,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             )
 
         try:
-            source_set_before = str(UUID(body["before_source_set_id"]))
-            source_set_after = str(UUID(body["source_set_id"]))
             namespace_id = str(UUID(body["namespace_id"]))
             industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
             concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
@@ -770,14 +766,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             raise PreviewHttpError(
                 400,
                 "SOURCE_LAUNCH_WATCH_ID_INVALID",
-                "source_set、namespace和板块快照须使用有效UUID",
+                "namespace和板块快照须使用有效UUID",
             ) from error
-        if source_set_before == source_set_after:
-            raise PreviewHttpError(
-                400,
-                "SOURCE_LAUNCH_WATCH_SOURCE_SETS_NOT_DISTINCT",
-                "前后会话必须绑定不同source_set",
-            )
         if industry_snapshot_id == concept_snapshot_id:
             raise PreviewHttpError(
                 400,
@@ -1037,12 +1027,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "target_session": target_session.isoformat(),
                     "package_sha256": package_sha256,
                     "session_count": 75,
-                    "source_set_id": source_set_after,
                     "namespace_id": namespace_id,
                     "include_source_change_context": True,
                     "research_cutoff": research_cutoff.isoformat(),
                     "before_session": before_session.isoformat(),
-                    "before_source_set_id": source_set_before,
                     "before_package_sha256": package_sha256,
                     "industry_snapshot_id": industry_snapshot_id,
                     "concept_snapshot_id": concept_snapshot_id,
@@ -1056,8 +1044,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "before_session": before_session.isoformat(),
                 "target_session": target_session.isoformat(),
                 "research_cutoff": research_cutoff.isoformat(),
-                "before_source_set_id": source_set_before,
-                "source_set_id": source_set_after,
                 "package_sha256": package_sha256,
                 "namespace_id": namespace_id,
                 "industry_snapshot_id": industry_snapshot_id,
@@ -1304,10 +1290,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_bias20_atr_state", "ALL"
                     ),
                     after_bias20_atr_state=values.get("after_bias20_atr_state", "ALL"),
-                    before_source_set_id=values.get("before_source_set_id"),
                     before_package_sha256=values.get("before_package_sha256"),
                     before_profile_revision=values.get("before_profile_revision"),
-                    after_source_set_id=values.get("after_source_set_id"),
                     after_package_sha256=values.get("after_package_sha256"),
                     after_profile_revision=values.get("after_profile_revision"),
                 )
@@ -1416,10 +1400,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_source_set_id",
                         "before_package_sha256",
                         "before_profile_revision",
-                        "after_source_set_id",
                         "after_package_sha256",
                         "after_profile_revision",
                     },
@@ -1451,10 +1433,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     before_session=before_session,
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    before_source_set_id=values.get("before_source_set_id"),
                     before_package_sha256=_sha(values["before_package_sha256"]),
                     before_profile_revision=_sha(values["before_profile_revision"]),
-                    after_source_set_id=values.get("after_source_set_id"),
                     after_package_sha256=_sha(values["after_package_sha256"]),
                     after_profile_revision=_sha(values["after_profile_revision"]),
                 )
@@ -1476,10 +1456,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_source_set_id",
                         "before_package_sha256",
                         "before_profile_revision",
-                        "after_source_set_id",
                         "after_package_sha256",
                         "after_profile_revision",
                         "mode",
@@ -1494,10 +1472,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 base = {
                     "before_session",
                     "after_session",
-                    "before_source_set_id",
                     "before_package_sha256",
                     "before_profile_revision",
-                    "after_source_set_id",
                     "after_package_sha256",
                     "after_profile_revision",
                     "mode",
@@ -1534,10 +1510,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     before_session=before_session,
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    before_source_set_id=values["before_source_set_id"],
                     before_package_sha256=_sha(values["before_package_sha256"]),
                     before_profile_revision=_sha(values["before_profile_revision"]),
-                    after_source_set_id=values["after_source_set_id"],
                     after_package_sha256=_sha(values["after_package_sha256"]),
                     after_profile_revision=_sha(values["after_profile_revision"]),
                     mode=mode,
@@ -1571,10 +1545,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_session",
                         "after_session",
                         "symbol",
-                        "before_source_set_id",
                         "before_package_sha256",
                         "before_profile_revision",
-                        "after_source_set_id",
                         "after_package_sha256",
                         "after_profile_revision",
                     },
@@ -1583,10 +1555,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "before_session",
                     "after_session",
                     "symbol",
-                    "before_source_set_id",
                     "before_package_sha256",
                     "before_profile_revision",
-                    "after_source_set_id",
                     "after_package_sha256",
                     "after_profile_revision",
                 }
@@ -1594,7 +1564,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_PAIR_QUERY_REQUIRED",
-                        "双日代码对照必须精确提供前后日期、source_set、包SHA、画像修订和来源代码",
+                        "双日代码对照必须精确提供前后日期、包SHA、画像修订和来源代码",
                     )
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
@@ -1610,10 +1580,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
                     source_symbol=_symbol(values["symbol"]),
-                    before_source_set_id=values["before_source_set_id"],
                     before_package_sha256=_sha(values["before_package_sha256"]),
                     before_profile_revision=_sha(values["before_profile_revision"]),
-                    after_source_set_id=values["after_source_set_id"],
                     after_package_sha256=_sha(values["after_package_sha256"]),
                     after_profile_revision=_sha(values["after_profile_revision"]),
                 )
@@ -1635,7 +1603,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.path,
                     {
                         "target_session",
-                        "source_set_id",
                         "package_sha256",
                         "profile_revision",
                         "offset",
@@ -1690,7 +1657,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.config,
                     target_session=target,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    source_set_id=values.get("source_set_id"),
                     package_sha256=package_sha,
                     profile_revision=values["profile_revision"],
                     offset=offset,
@@ -2173,8 +2139,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "concept_snapshot_id",
             }
             source_change_optional = {
-                "source_set_id",
-                "before_source_set_id",
                 "research_cutoff",
                 "before_profile_revision",
                 "after_profile_revision",
@@ -2231,7 +2195,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     )
                 _require_research_cutoff(target, research_cutoff)
             before_target: date | None = None
-            before_source_set_id: str | None = None
             before_package_sha: str | None = None
             industry_snapshot_id: str | None = None
             concept_snapshot_id: str | None = None
@@ -2260,30 +2223,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "前后来源包SHA必须相同",
                     )
                 try:
-                    if "before_source_set_id" in body:
-                        before_source_set_id = str(UUID(body["before_source_set_id"]))
                     industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
                     concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
                 except (ValueError, TypeError, AttributeError) as error:
                     raise PreviewHttpError(
                         400,
                         "PREVIEW_SOURCE_CHANGE_ID_INVALID",
-                        "可选存量画像键及行业/概念快照ID须为有效UUID",
+                        "行业与概念快照ID须为有效UUID",
                     ) from error
                 if source_change_optional <= set(body):
                     before_profile_revision = _sha(body["before_profile_revision"])
                     after_profile_revision = _sha(body["after_profile_revision"])
-            expected_source_set_id = None
             expected_namespace_id = None
-            if "source_set_id" in body:
-                try:
-                    expected_source_set_id = str(UUID(body["source_set_id"]))
-                except (ValueError, TypeError, AttributeError) as error:
-                    raise PreviewHttpError(
-                        400,
-                        "PREVIEW_SOURCE_IDENTITY_INVALID",
-                        "存量画像来源键须使用有效source_set_id",
-                    ) from error
             if "namespace_id" in body:
                 try:
                     expected_namespace_id = str(UUID(body["namespace_id"]))
@@ -2379,9 +2330,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             before_session=before_target,
                             target_session=target,
                             research_cutoff=research_cutoff,
-                            before_source_set_id=before_source_set_id,
                             before_package_sha256=before_package_sha,
-                            source_set_id=expected_source_set_id,
                             package_sha256=package_sha,
                             symbol=symbol,
                             before_profile_revision=before_profile_revision,

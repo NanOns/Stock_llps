@@ -31,7 +31,6 @@ from stock_a.storage.postgres.price_profiles import (
     read_profile_page,
     read_profile_pair,
     read_profile_relation_screen,
-    read_profile_storage_revision,
 )
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
@@ -299,8 +298,6 @@ def _records_for_page(
             source_available_at = datetime.fromisoformat(source_available_at)
         record: dict[str, Any] = {
             "namespace_id": page["namespace_id"],
-            "source_set_id": source_context["source_set_id"],
-            "source_set_revision": int(source_context["revision_id"]),
             "source_capture_id": str(target_row["source_capture_id"]),
             "source_symbol": symbol,
             "market": candidate["market"],
@@ -453,14 +450,13 @@ def run_source_symbol_price_profile(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    source_set_id: str,
     package_sha256: str,
     scope: str,
     session_count: int,
     page_size: int,
     profile_contract: dict[str, Any],
 ) -> dict[str, Any]:
-    """按SQL分页读取已封口Raw，复用现役Core43/Profile11并保存typed摘要。"""
+    """按精确Raw包和捕获读取价格，复用Core43/Profile11并保存typed画像。"""
     if scope != SOURCE_SYMBOL_PROFILE_SCOPE:
         raise PgPriceProfileError(
             "PROFILE_SCOPE_INVALID",
@@ -502,14 +498,6 @@ def run_source_symbol_price_profile(
             target_session=target_session,
             package_sha256=package_sha256,
             namespace_id=None,
-        )
-        source_context["source_set_id"] = source_set_id
-        source_context["revision_id"] = read_profile_storage_revision(
-            config,
-            target_session=target_session,
-            package_sha256=package_sha256,
-            source_set_id=source_set_id,
-            source_capture_id=source_context["source_capture_id"],
         )
         offset = 0
         raw_total: int | None = None
@@ -653,25 +641,17 @@ def read_source_symbol_price_profile_observation(
     *,
     target_session: date,
     package_sha256: str,
-    source_set: Mapping[str, Any],
+    source_capture_id: str,
 ) -> dict[str, Any]:
-    """按Raw捕获和现存画像行键投影已保存Core/Profile画像及质量。"""
-    source_set_id = source_set.get("source_set_id")
-    source_capture_id = source_set.get("source_capture_id")
-    if (
-        source_set.get("status") != "AVAILABLE"
-        or source_set.get("target_session") != target_session.isoformat()
-        or source_set.get("package_sha256") != package_sha256
-        or not isinstance(source_set_id, str)
-        or not isinstance(source_capture_id, str)
-    ):
+    """按Raw捕获、来源包和现存画像修订投影已保存Core/Profile画像及质量。"""
+    if not isinstance(source_capture_id, str):
         return {
             "status": "NOT_COMPUTED",
             "reason_code": "RAW_SOURCE_VERSION_UNAVAILABLE",
             "target_session": target_session.isoformat(),
             "package_sha256": package_sha256,
             "profile_revision_selection": {
-                "rule": "REQUIRES_EXACT_RAW_CAPTURE_AND_STORED_PROFILE_KEY",
+                "rule": "REQUIRES_EXACT_RAW_CAPTURE_AND_STORED_PROFILE_REVISION",
                 "selected_profile_revision": None,
                 "candidate_revision_count": 0,
                 "current_semantics_match_count": 0,
@@ -680,20 +660,11 @@ def read_source_symbol_price_profile_observation(
             "ddl_executed": False,
         }
     try:
-        source_set_revision = read_profile_storage_revision(
-            config,
-            target_session=target_session,
-            package_sha256=package_sha256,
-            source_set_id=source_set_id,
-            source_capture_id=source_capture_id,
-        )
         semantics_sha256 = _profile_semantics_sha256(profile_contract)
         observation = read_source_profile_observability(
             config,
             target_session=target_session,
             package_sha256=package_sha256,
-            source_set_id=source_set_id,
-            source_set_revision=source_set_revision,
             source_capture_id=source_capture_id,
             current_semantics_sha256=semantics_sha256,
         )

@@ -397,7 +397,7 @@ def validate_source_market_context_binding(
         )
 
     for strength in strength_results:
-        strength_source = strength.get("target_source_set")
+        strength_source = strength.get("target_source_version")
         strength_calendar = strength.get("official_calendar")
         if not isinstance(strength_source, Mapping) or not isinstance(
             strength_calendar, Mapping

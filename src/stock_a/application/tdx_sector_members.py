@@ -304,16 +304,15 @@ def refresh_remote_tdx_sector_members(
                     "python -m stock_a source-tdx-sector-members members "
                     f"--snapshot-id {snapshot.snapshot_id} --board-kind <INDUSTRY|CONCEPT> "
                     "--board-native-id <原生板块ID> --target-session <YYYY-MM-DD> "
-                    "--research-cutoff <YYYY-MM-DD> --source-set-id <SOURCE_SET_ID> "
+                    "--research-cutoff <YYYY-MM-DD> "
                     "--package-sha256 <PACKAGE_SHA256> [--profile-revision <REVISION>]"
                 ),
                 "followup_breadth_command_template": (
                     "python -m stock_a source-tdx-sector-members breadth "
                     f"--snapshot-id {snapshot.snapshot_id} --board-kind <INDUSTRY|CONCEPT> "
                     "--before-session <YYYY-MM-DD> --after-session <YYYY-MM-DD> "
-                    "--research-cutoff <YYYY-MM-DD> --before-source-set-id <SOURCE_SET_ID> "
+                    "--research-cutoff <YYYY-MM-DD> "
                     "--before-package-sha256 <PACKAGE_SHA256> --before-profile-revision <REVISION> "
-                    "--after-source-set-id <SOURCE_SET_ID> "
                     "--after-package-sha256 <PACKAGE_SHA256> --after-profile-revision <REVISION>"
                 ),
             }
@@ -542,7 +541,6 @@ def read_tdx_sector_members(
     board_native_id: str,
     target_session: date,
     research_cutoff: date,
-    source_set_id: str,
     package_sha256: str,
     profile_revision: str | None,
     offset: int,
@@ -555,7 +553,6 @@ def read_tdx_sector_members(
         board_native_id=board_native_id,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_set_id=source_set_id,
         package_sha256=package_sha256,
         profile_revision=profile_revision,
         offset=offset,
@@ -572,10 +569,8 @@ def read_tdx_sector_breadth(
     before_session: date,
     after_session: date,
     research_cutoff: date,
-    before_source_set_id: str,
     before_package_sha256: str,
     before_profile_revision: str,
-    after_source_set_id: str,
     after_package_sha256: str,
     after_profile_revision: str,
     offset: int,
@@ -612,10 +607,8 @@ def read_tdx_sector_breadth(
         before_session=before_session,
         after_session=after_session,
         research_cutoff=research_cutoff,
-        before_source_set_id=before_source_set_id,
         before_package_sha256=before_package_sha256,
         before_profile_revision=before_profile_revision,
-        after_source_set_id=after_source_set_id,
         after_package_sha256=after_package_sha256,
         after_profile_revision=after_profile_revision,
         official_calendar_id=str(calendar["calendar_id"]),
@@ -1065,7 +1058,6 @@ def read_tdx_sector_strength(
     board_native_id: str | None,
     target_session: date,
     research_cutoff: date,
-    source_set_id: str,
     package_sha256: str,
     profile_revision: str | None,
     changed_only: bool,
@@ -1139,7 +1131,6 @@ def read_tdx_sector_strength(
         board_native_id=board_native_id,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        source_set_id=source_set_id,
         package_sha256=package_sha256,
         profile_revision=profile_revision,
         official_calendar_id=str(calendar["calendar_id"]),
@@ -1155,8 +1146,8 @@ def read_tdx_sector_strength(
             "SNAPSHOT_BOARD_KIND_MISMATCH",
             "TDX成员快照原始来源类型与板块类型不匹配",
         )
-    source_set = data["source_set"]
-    target_capture_id = source_set["source_capture_id"]
+    source_version = data["source_version"]
+    target_capture_id = source_version["source_capture_id"]
     raw_by_key = {
         (str(row["source_symbol"]), row["session_date"]): row
         for row in data["raw_rows"]
@@ -1344,7 +1335,7 @@ def read_tdx_sector_strength(
             },
             "research_mode": snapshot["research_mode"],
         },
-        "target_source_set": source_set,
+        "target_source_version": source_version,
         "namespace_id": data["namespace_id"],
         "target_profile_snapshot": data["profile_snapshot"],
         "official_calendar": data["official_calendar"],

@@ -151,7 +151,6 @@ def register_commands(commands):
     sector_query.add_argument("--board-native-id", required=True)
     sector_query.add_argument("--target-session", required=True)
     sector_query.add_argument("--research-cutoff", required=True)
-    sector_query.add_argument("--source-set-id", required=True)
     sector_query.add_argument("--package-sha256", required=True)
     sector_query.add_argument("--profile-revision")
     sector_query.add_argument("--offset", type=int, default=0)
@@ -169,10 +168,8 @@ def register_commands(commands):
     sector_breadth.add_argument("--before-session", required=True)
     sector_breadth.add_argument("--after-session", required=True)
     sector_breadth.add_argument("--research-cutoff", required=True)
-    sector_breadth.add_argument("--before-source-set-id", required=True)
     sector_breadth.add_argument("--before-package-sha256", required=True)
     sector_breadth.add_argument("--before-profile-revision", required=True)
-    sector_breadth.add_argument("--after-source-set-id", required=True)
     sector_breadth.add_argument("--after-package-sha256", required=True)
     sector_breadth.add_argument("--after-profile-revision", required=True)
     sector_breadth.add_argument("--offset", type=int, default=0)
@@ -209,7 +206,6 @@ def register_commands(commands):
     )
     sector_strength.add_argument("--target-session", required=True)
     sector_strength.add_argument("--research-cutoff", required=True)
-    sector_strength.add_argument("--source-set-id", required=True)
     sector_strength.add_argument("--package-sha256", required=True)
     sector_strength.add_argument("--profile-revision")
     sector_strength.add_argument(
@@ -250,7 +246,6 @@ def register_commands(commands):
     sector_change_stocks.add_argument(
         "--research-cutoff", required=True, help="显式研究截止会话YYYY-MM-DD"
     )
-    sector_change_stocks.add_argument("--source-set-id", required=True)
     sector_change_stocks.add_argument("--package-sha256", required=True)
     sector_change_stocks.add_argument("--profile-revision")
     sector_change_stocks.add_argument(
@@ -334,10 +329,6 @@ def register_commands(commands):
     sector_change_stocks.add_argument(
         "--d0-before-session",
         help="启用D0新增启动联动时的前一官方会话YYYY-MM-DD",
-    )
-    sector_change_stocks.add_argument(
-        "--d0-before-source-set-id",
-        help="启用D0新增启动联动时，提供前一会话存量Profile来源UUID",
     )
     sector_change_stocks.add_argument(
         "--stock-offset",

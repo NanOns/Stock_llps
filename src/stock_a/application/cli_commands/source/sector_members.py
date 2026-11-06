@@ -169,7 +169,6 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 board_native_id=args.board_native_id,
                 target_session=_parse_session_date(args.target_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
-                source_set_id=args.source_set_id,
                 package_sha256=args.package_sha256,
                 profile_revision=args.profile_revision,
                 offset=args.offset,
@@ -184,10 +183,8 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 before_session=_parse_session_date(args.before_session),
                 after_session=_parse_session_date(args.after_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
-                before_source_set_id=args.before_source_set_id,
                 before_package_sha256=args.before_package_sha256,
                 before_profile_revision=args.before_profile_revision,
-                after_source_set_id=args.after_source_set_id,
                 after_package_sha256=args.after_package_sha256,
                 after_profile_revision=args.after_profile_revision,
                 offset=args.offset,
@@ -205,7 +202,6 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 board_native_id=args.board_native_id,
                 target_session=_parse_session_date(args.target_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
-                source_set_id=args.source_set_id,
                 package_sha256=args.package_sha256,
                 profile_revision=args.profile_revision,
                 changed_only=args.changed_only,
@@ -297,12 +293,11 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             _EXIT_ARGUMENT,
         )
     d0_before_session = None
-    d0_before_source_set_id = None
     if include_d0_launch_new:
-        if not args.d0_before_session or not args.d0_before_source_set_id:
+        if not args.d0_before_session:
             raise DiagnosticError(
                 "D0_BEFORE_IDENTITY_REQUIRED",
-                "启用D0新增启动联动时必须提供--d0-before-session与--d0-before-source-set-id",
+                "启用D0新增启动联动时必须提供--d0-before-session",
                 _EXIT_ARGUMENT,
             )
         d0_before_session = _parse_session_date(args.d0_before_session)
@@ -312,24 +307,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 "D0前一官方会话必须早于目标会话且不晚于显式研究截止",
                 _EXIT_ARGUMENT,
             )
-        try:
-            d0_before_source_set_id = str(uuid.UUID(args.d0_before_source_set_id))
-        except (ValueError, TypeError, AttributeError) as error:
-            raise DiagnosticError(
-                "D0_BEFORE_SOURCE_SET_ID_INVALID",
-                "D0前一会话source_set编号必须为规范UUID",
-                _EXIT_ARGUMENT,
-            ) from error
-        if d0_before_source_set_id != args.d0_before_source_set_id:
-            raise DiagnosticError(
-                "D0_BEFORE_SOURCE_SET_ID_INVALID",
-                "D0前一会话source_set编号必须为规范UUID",
-                _EXIT_ARGUMENT,
-            )
-    elif (
-        getattr(args, "d0_before_session", None) is not None
-        or getattr(args, "d0_before_source_set_id", None) is not None
-    ):
+    elif getattr(args, "d0_before_session", None) is not None:
         raise DiagnosticError(
             "D0_BEFORE_IDENTITY_REQUIRES_FLAG",
             "D0前一会话身份参数只能与--include-d0-launch-new一起使用",
@@ -360,23 +338,21 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             _EXIT_ARGUMENT,
         )
     try:
-        source_set_id = str(uuid.UUID(args.source_set_id))
         industry_snapshot_id = str(uuid.UUID(args.industry_snapshot_id))
         concept_snapshot_id = str(uuid.UUID(args.concept_snapshot_id))
     except (ValueError, TypeError, AttributeError) as error:
         raise DiagnosticError(
             "SECTOR_CHANGE_SOURCE_ID_INVALID",
-            "source set与快照编号必须为规范UUID",
+            "快照编号必须为规范UUID",
             _EXIT_ARGUMENT,
         ) from error
     if (
-        source_set_id != args.source_set_id
-        or industry_snapshot_id != args.industry_snapshot_id
+        industry_snapshot_id != args.industry_snapshot_id
         or concept_snapshot_id != args.concept_snapshot_id
     ):
         raise DiagnosticError(
             "SECTOR_CHANGE_SOURCE_ID_INVALID",
-            "source set与快照编号必须为规范UUID",
+            "快照编号必须为规范UUID",
             _EXIT_ARGUMENT,
         )
     if not 1 <= args.pg_history_session_count <= 75:
@@ -457,7 +433,6 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                     board_native_id=None,
                     target_session=target,
                     research_cutoff=cutoff,
-                    source_set_id=source_set_id,
                     package_sha256=args.package_sha256,
                     profile_revision=args.profile_revision,
                     changed_only=False,

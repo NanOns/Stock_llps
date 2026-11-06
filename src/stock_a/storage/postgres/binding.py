@@ -78,6 +78,12 @@ _MIGRATIONS = (
         ("migrations", "0011_r02_source_native_amount_volume_ratios.sql"),
         "43e8ef668ea896775f9c6c83e4fee7fdf8198d17299732633649e54342ca04dd",
     ),
+    (
+        12,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0012_r02_profile_direct_key_drop_old_control_tables.sql"),
+        "e06cbc351651017be8607dc41a4ba43e405df04bbc6a6ffed96e06b001af575d",
+    ),
 )
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
@@ -87,6 +93,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R03_TDX_REAL_SECTOR_MEMBERS_TO_PG_R1": frozenset({9}),
     "R02_R04_CORE_DAMAGE_SLOPE_POOL_QUERY_R1": frozenset({10}),
     "R02_SOURCE_NATIVE_AMOUNT_VOLUME_RATIO_PROFILE_R1": frozenset({11}),
+    "R02_R03_R04_PROFILE_DIRECT_KEY_PG_OLD_CONTROL_CLEANUP_R1": frozenset({12}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -106,24 +113,45 @@ _RELATIONS_BY_MIGRATION_COUNT = {
     2: _BASE_TABLES,
     3: _R01_TABLES,
     4: _R01_TABLES | {"source_raw_daily"},
-    5: _R01_TABLES | {"source_raw_daily"},
-    6: _R01_TABLES | {"source_raw_daily", "source_sets"},
+    5: _R01_TABLES
+    | {
+        "source_raw_daily",
+        "source_set_candidates",
+        "source_set_candidate_inputs",
+    },
+    6: _R01_TABLES
+    | {
+        "source_raw_daily",
+        "source_set_candidates",
+        "source_set_candidate_inputs",
+        "source_sets",
+        "source_set_capabilities",
+    },
     7: _R01_TABLES
     | {
         "source_raw_daily",
+        "source_set_candidates",
+        "source_set_candidate_inputs",
         "source_sets",
+        "source_set_capabilities",
         "source_symbol_price_profiles",
     },
     8: _R01_TABLES
     | {
         "source_raw_daily",
+        "source_set_candidates",
+        "source_set_candidate_inputs",
         "source_sets",
+        "source_set_capabilities",
         "source_symbol_price_profiles",
     },
     9: _R01_TABLES
     | {
         "source_raw_daily",
+        "source_set_candidates",
+        "source_set_candidate_inputs",
         "source_sets",
+        "source_set_capabilities",
         "source_symbol_price_profiles",
         "tdx_sector_source_snapshots",
         "tdx_sector_catalog",
@@ -132,6 +160,13 @@ _RELATIONS_BY_MIGRATION_COUNT = {
 }
 _RELATIONS_BY_MIGRATION_COUNT[10] = _RELATIONS_BY_MIGRATION_COUNT[9]
 _RELATIONS_BY_MIGRATION_COUNT[11] = _RELATIONS_BY_MIGRATION_COUNT[10]
+_RELATIONS_BY_MIGRATION_COUNT[12] = _R01_TABLES | {
+    "source_raw_daily",
+    "source_symbol_price_profiles",
+    "tdx_sector_source_snapshots",
+    "tdx_sector_catalog",
+    "tdx_sector_members",
+}
 
 
 class BindingRefused(Exception):

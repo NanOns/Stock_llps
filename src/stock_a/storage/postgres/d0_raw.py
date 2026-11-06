@@ -46,7 +46,7 @@ JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
 JOIN stock.source_contents s ON s.namespace_id=r.namespace_id
   AND s.content_id=r.source_content_id
 WHERE r.namespace_id=%s::uuid AND r.session_date=%s AND r.package_sha256=%s
-ORDER BY r.source_capture_id, r.source_content_id
+ORDER BY r.source_capture_id::text, r.source_content_id
 LIMIT 2""",
         (namespace_id, target_session, package_sha256),
     )

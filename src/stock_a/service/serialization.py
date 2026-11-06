@@ -4,6 +4,7 @@ from datetime import date, datetime
 from decimal import Decimal
 from collections.abc import Mapping
 from typing import Any
+from uuid import UUID
 import hashlib
 import json
 
@@ -12,6 +13,8 @@ def _json_value(value: Any) -> Any:
     if isinstance(value, (date, datetime)):
         return value.isoformat()
     if isinstance(value, Decimal):
+        return str(value)
+    if isinstance(value, UUID):
         return str(value)
     if isinstance(value, Mapping):
         return {str(key): _json_value(item) for key, item in value.items()}

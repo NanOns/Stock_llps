@@ -158,7 +158,7 @@ async function openProfileTimeline(item) {
   const option = Array.from($("versionSelect").options).find(
     (candidate) => candidate.value === value,
   );
-  if (!version || !option || !item.namespace_id || !item.source_set_id) {
+  if (!version || !option || !item.namespace_id) {
     appendText(
       root,
       "p",
@@ -183,13 +183,11 @@ async function openProfileTimeline(item) {
   const persistedProfileSnapshot = {
     target_session: item.target_session,
     namespace_id: item.namespace_id,
-    source_set_id: item.source_set_id,
     package_sha256: item.package_sha256,
     profile_revision: item.profile_revision,
   };
   await queryTimeline({
     namespace_id: item.namespace_id,
-    source_set_id: item.source_set_id,
     origin: "profile",
     persistedProfileSnapshot,
   });

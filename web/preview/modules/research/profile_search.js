@@ -297,7 +297,6 @@ async function loadProfilePage() {
   }
   const params = new URLSearchParams({
     target_session: snapshot.target_session,
-    source_set_id: snapshot.source_set_id,
     package_sha256: snapshot.package_sha256,
     profile_revision: snapshot.profile_revision,
     offset: String(state.profileOffset),
@@ -323,7 +322,7 @@ async function loadProfilePage() {
   const symbol = $("profileSymbolInput").value.trim();
   if (symbol) params.set("symbol", symbol);
   $("profileMessage").textContent =
-    "正在按精确日期、来源集、包SHA和窗口修订读取PG分页…";
+    "正在按精确日期、来源包和画像修订读取PG分页…";
   try {
     const data = await api(`/api/source-symbol-price-profiles?${params}`);
     if (requestId !== state.profileRequest) return;
@@ -357,7 +356,6 @@ async function loadProfilePage() {
     if (
       data.target_session !== snapshot.target_session ||
       data.namespace_id !== snapshot.namespace_id ||
-      data.source_set_id !== snapshot.source_set_id ||
       data.package_sha256 !== snapshot.package_sha256 ||
       data.profile_revision !== snapshot.profile_revision ||
       data.bias20_atr_band !== bias20AtrBand ||
@@ -524,7 +522,6 @@ async function loadProfilePage() {
           source_symbol: item.source_symbol,
           target_session: item.target_session,
           namespace_id: item.namespace_id,
-          source_set_id: item.source_set_id,
           package_sha256: item.package_sha256,
           profile_revision: item.profile_revision,
           origin_label: "完整PG价格画像",

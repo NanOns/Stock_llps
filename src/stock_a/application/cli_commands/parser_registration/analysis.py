@@ -172,17 +172,11 @@ def register_commands(commands):
     price_profile.add_argument("--before-session", help="变化查询的前一画像日期")
     price_profile.add_argument("--after-session", help="变化查询的后一画像日期")
     price_profile.add_argument(
-        "--before-source-set-id", help="changes前态画像的精确存储行键"
-    )
-    price_profile.add_argument(
         "--before-package-sha256", help="changes前态画像的精确来源包SHA-256"
     )
     price_profile.add_argument(
         "--before-profile-revision",
         help="changes前态画像的精确profile_revision SHA-256",
-    )
-    price_profile.add_argument(
-        "--after-source-set-id", help="changes后态画像的精确存储行键"
     )
     price_profile.add_argument(
         "--after-package-sha256", help="changes后态画像的精确来源包SHA-256"
@@ -223,7 +217,6 @@ def register_commands(commands):
         help="按Core MA20/ATR斜率精确符号变化筛选完整来源集合",
     )
     price_profile.add_argument("--target-session", help="精确目标交易会话YYYY-MM-DD")
-    price_profile.add_argument("--source-set-id", help="现存画像行的精确存储键")
     price_profile.add_argument("--package-sha256", help="精确TDX来源包SHA-256")
     price_profile.add_argument(
         "--scope",

@@ -188,10 +188,8 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 change_type=args.change_type,
                 price_damage_transition=args.price_damage_transition,
                 ma_slope20_transition=args.ma_slope20_transition,
-                before_source_set_id=args.before_source_set_id,
                 before_package_sha256=args.before_package_sha256,
                 before_profile_revision=args.before_profile_revision,
-                after_source_set_id=args.after_source_set_id,
                 after_package_sha256=args.after_package_sha256,
                 after_profile_revision=args.after_profile_revision,
             )
@@ -199,14 +197,13 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
             if not all(
                 (
                     args.target_session,
-                    args.source_set_id,
                     args.package_sha256,
                     args.profile_revision,
                 )
             ):
                 raise DiagnosticError(
                     "PROFILE_QUERY_KEY_REQUIRED",
-                    "画像查询必须显式指定目标日期、来源键、包SHA和profile_revision",
+                    "画像查询必须显式指定目标日期、包SHA和profile_revision",
                     _EXIT_ARGUMENT,
                 )
             if args.core_field is None and args.core_quality is not None:
@@ -219,7 +216,6 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 config,
                 target_session=_parse_session_date(args.target_session),
                 max_target_session=max_target_session,
-                source_set_id=args.source_set_id,
                 package_sha256=args.package_sha256,
                 profile_revision=args.profile_revision,
                 offset=args.offset,
@@ -242,14 +238,13 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
             if not all(
                 (
                     args.target_session,
-                    args.source_set_id,
                     args.package_sha256,
                     args.scope,
                 )
             ):
                 raise DiagnosticError(
                     "PROFILE_COMPUTE_KEY_REQUIRED",
-                    "画像计算必须显式指定目标日期、已存在画像来源键、包SHA与计算scope",
+                    "画像计算必须显式指定目标日期、Raw来源包SHA与计算scope",
                     _EXIT_ARGUMENT,
                 )
             if re.fullmatch(r"[0-9a-f]{64}", args.package_sha256) is None:
@@ -267,7 +262,6 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
             result = run_source_symbol_price_profile(
                 config,
                 target_session=target_session,
-                source_set_id=args.source_set_id,
                 package_sha256=args.package_sha256,
                 scope=args.scope,
                 session_count=args.session_count,
@@ -306,7 +300,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
             page = result.get("page", {})
             sys.stdout.write(
                 f"PG画像查询 target={result.get('target_session')} "
-                f"source_set={result.get('source_set_id')} offset={page.get('offset')} "
+                f"package={result.get('package_sha256')} offset={page.get('offset')} "
                 f"limit={page.get('limit')} rows={page.get('count')} total={page.get('total')} "
                 f"next={page.get('next_offset')} status={result.get('status')}\n"
             )
@@ -323,7 +317,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
         elif args.action == "compute":
             sys.stdout.write(
                 f"PG画像批次 target={result.get('target_session')} "
-                f"source_set={result.get('source_set_id')} "
+                f"package={result.get('package_sha256')} "
                 f"scope={result.get('scope')} candidates={result.get('source_candidate_count')} "
                 f"inserted={result.get('inserted_count')} "
                 f"existing_same_content={result.get('existing_same_content_count')} "
@@ -333,7 +327,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
         else:
             for item in result.get("snapshots", ()):
                 sys.stdout.write(
-                    f"target={item['target_session']} source_set={item['source_set_id']} "
+                    f"target={item['target_session']} package={item['package_sha256']} "
                     f"revision={item['profile_revision']} "
                     f"rows={item['source_symbol_count']}/{item['expected_source_symbol_count']} "
                     f"complete={item['complete']}\n"

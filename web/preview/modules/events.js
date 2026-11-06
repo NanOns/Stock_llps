@@ -126,7 +126,6 @@ $("profileBreadthOpenFull").addEventListener("click", () => {
   const exact = state.profileSnapshots.find(
     (item) =>
       item.target_session === snapshot.target_session &&
-      item.source_set_id === snapshot.source_set_id &&
       item.package_sha256 === snapshot.package_sha256 &&
       item.profile_revision === snapshot.profile_revision,
   );

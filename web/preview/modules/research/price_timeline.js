@@ -53,17 +53,12 @@ function renderPersistedProfileObservation(point) {
   const rows = $("priceStructureProfileRows");
   rows.replaceChildren();
   const snapshot = state.timelineContext?.persistedProfileSnapshot;
-  const selectedSourceSet =
-    state.timeline?.selection?.source_set_id ||
-    state.timeline?.source_version?.source_set_id ||
-    null;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-      snapshot.target_session === point.session_date &&
-      snapshot.package_sha256 === point.package_sha256 &&
-      snapshot.namespace_id === point.namespace_id &&
-      snapshot.source_set_id === selectedSourceSet &&
-      snapshot.field_ids?.length,
+    snapshot.target_session === point.session_date &&
+    snapshot.package_sha256 === point.package_sha256 &&
+    snapshot.namespace_id === point.namespace_id &&
+    snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
@@ -451,10 +446,6 @@ function openTimelineSession(point) {
         symbol: context.symbol,
         session_count: context.session_count,
         namespace_id: context.namespace_id || state.timeline.namespace_id,
-        source_set_id:
-          context.source_set_id ||
-          state.timeline.selection?.source_set_id ||
-          null,
       },
     };
   }
@@ -465,7 +456,6 @@ function openTimelineSession(point) {
     package_sha256: context.package_sha256,
     symbol: context.symbol,
     namespace_id: state.timeline.namespace_id,
-    source_set_id: state.timeline.selection?.source_set_id || null,
   };
   state.timeline = null;
   renderTimeline(null);
@@ -489,7 +479,6 @@ function returnToTimelineCutoff() {
     package_sha256: selection.package_sha256,
     symbol: selection.symbol || context.symbol,
     namespace_id: selection.namespace_id || state.timeline?.namespace_id,
-    source_set_id: selection.source_set_id || null,
   };
   $("symbolInput").value = selection.symbol || context.symbol;
   $("windowInput").value = String(

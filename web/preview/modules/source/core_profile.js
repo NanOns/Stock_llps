@@ -144,7 +144,6 @@ async function queryStock(event) {
     ) {
       await queryTimeline({
         namespace_id: b.namespace_id,
-        source_set_id: previousTimelineContext?.source_set_id || null,
         origin: previousTimelineContext?.origin || "manual",
         returnSelection: previousTimelineContext?.returnSelection || null,
         returnBinding: previousTimelineContext?.returnBinding || null,

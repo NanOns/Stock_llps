@@ -27,7 +27,6 @@ function comparisonIdentityOf(item) {
   return {
     target_session: item.target_session,
     namespace_id: item.namespace_id,
-    source_set_id: item.source_set_id,
     package_sha256: item.package_sha256,
     profile_revision: item.profile_revision,
   };
@@ -37,7 +36,6 @@ function sameComparisonIdentity(left, right) {
   return [
     "target_session",
     "namespace_id",
-    "source_set_id",
     "package_sha256",
     "profile_revision",
   ].every((key) => left[key] === right[key]);
@@ -50,7 +48,6 @@ function relationComparisonCandidate(item) {
     source_symbol: item.source_symbol,
     target_session: snapshot.target_session,
     namespace_id: data.namespace_id,
-    source_set_id: item.after_source_set_id,
     package_sha256: item.after_package_sha256,
     profile_revision: item.after_profile_revision,
     origin_label: "两日RAW结构结果",
@@ -61,7 +58,6 @@ function addComparisonCandidate(candidate) {
     !candidate?.source_symbol ||
     !candidate.target_session ||
     !candidate.namespace_id ||
-    !candidate.source_set_id ||
     !/^[0-9a-f]{64}$/.test(candidate.package_sha256 || "") ||
     !/^[0-9a-f]{64}$/.test(candidate.profile_revision || "") ||
     !/^(SH|SZ)\.[0-9]{6}$/.test(candidate.source_symbol)

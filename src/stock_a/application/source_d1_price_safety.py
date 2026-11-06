@@ -294,14 +294,12 @@ def _validate_source_binding(
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
         "package_sha256": result.get("package_sha256"),
-        "source_set_id": result.get("source_set_id"),
         "namespace_id": result.get("namespace_id"),
     }
     actual = {
         "target_session": source.get("target_session"),
         "research_cutoff": result.get("research_cutoff"),
         "package_sha256": source.get("package_sha256"),
-        "source_set_id": source.get("source_set_id"),
         "namespace_id": source.get("namespace_id"),
     }
     if (
@@ -495,8 +493,6 @@ def _facts_payload(
         "target_session": source["target_session"],
         "research_cutoff": research_cutoff.isoformat(),
         "namespace_id": str(source["namespace_id"]),
-        "source_set_id": str(source["source_set_id"]),
-        "source_revision_id": source["revision_id"],
         "target_source_capture_id": str(source["source_capture_id"]),
         "source_content_id": str(source["source_content_id"]),
         "package_sha256": source["package_sha256"],

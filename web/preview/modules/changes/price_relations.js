@@ -4,7 +4,6 @@ function relationDetailQueryKey(query, relationData, sourceSymbol) {
   if (!query || !relationData || !sourceSymbol) return null;
   const snapshotIdentity = (snapshot) => ({
     target_session: snapshot?.target_session,
-    source_set_id: snapshot?.source_set_id,
     package_sha256: snapshot?.package_sha256,
     profile_revision: snapshot?.profile_revision,
   });
@@ -12,11 +11,9 @@ function relationDetailQueryKey(query, relationData, sourceSymbol) {
   const after = snapshotIdentity(query.after);
   if (
     !before.target_session ||
-    !before.source_set_id ||
     !before.package_sha256 ||
     !before.profile_revision ||
     !after.target_session ||
-    !after.source_set_id ||
     !after.package_sha256 ||
     !after.profile_revision ||
     !relationData.namespace_id
@@ -64,7 +61,6 @@ function relationDetailResponseMatches(
 ) {
   const sameSnapshot = (actual, expected) =>
     actual?.target_session === expected?.target_session &&
-    actual?.source_set_id === expected?.source_set_id &&
     actual?.package_sha256 === expected?.package_sha256 &&
     actual?.profile_revision === expected?.profile_revision;
   return (

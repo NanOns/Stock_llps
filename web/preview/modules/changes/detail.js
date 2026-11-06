@@ -11,7 +11,6 @@ function exactPairComparisonCandidate(item) {
     item.after_present !== true ||
     (binding.origin === "exact-symbol" &&
       item.source_symbol !== binding.symbol) ||
-    item.after_source_set_id !== snapshot.source_set_id ||
     item.after_package_sha256 !== snapshot.package_sha256 ||
     item.after_profile_revision !== snapshot.profile_revision
   )
@@ -20,7 +19,6 @@ function exactPairComparisonCandidate(item) {
     source_symbol: item.source_symbol,
     target_session: snapshot.target_session,
     namespace_id: binding.namespace_id,
-    source_set_id: snapshot.source_set_id,
     package_sha256: snapshot.package_sha256,
     profile_revision: snapshot.profile_revision,
     origin_label:
@@ -113,12 +111,10 @@ function openChangeTimeline(item, side) {
   state.timeline = null;
   queryTimeline({
     origin: state.changeBinding?.origin || "change",
-    source_set_id: snapshot.source_set_id,
     namespace_id: state.changeBinding.namespace_id,
     persistedProfileSnapshot: {
       target_session: snapshot.target_session,
       package_sha256: snapshot.package_sha256,
-      source_set_id: snapshot.source_set_id,
       namespace_id: state.changeBinding.namespace_id,
       profile_revision: item[`${side}_profile_revision`],
       field_ids: item[`${side}_profile_field_ids`] || [],
@@ -351,7 +347,7 @@ function showChangeDetail(item) {
     appendText(
       root,
       "p",
-      "需在同一结束日、namespace、source_set、完整包SHA和profile_revision下选2–3只；这是临时来源版对照，不代表正式Focus或选股名单。",
+      "需在同一结束日、namespace、完整包SHA和profile_revision下选2–3只；这是临时来源版对照，不代表正式Focus或选股名单。",
       "muted",
     );
   }
@@ -555,10 +551,8 @@ async function compareSourceProfilePair(notice = null) {
     before_session: before.target_session,
     after_session: after.target_session,
     symbol,
-    before_source_set_id: before.source_set_id,
     before_package_sha256: before.package_sha256,
     before_profile_revision: before.profile_revision,
-    after_source_set_id: after.source_set_id,
     after_package_sha256: after.package_sha256,
     after_profile_revision: after.profile_revision,
   });
@@ -642,7 +636,7 @@ function populateChangeSnapshots(snapshots) {
     .sort(
       (a, b) =>
         a.target_session.localeCompare(b.target_session) ||
-        a.source_set_id.localeCompare(b.source_set_id) ||
+        a.package_sha256.localeCompare(b.package_sha256) ||
         a.profile_revision.localeCompare(b.profile_revision),
     );
   state.changeSnapshots = complete;
