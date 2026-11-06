@@ -130,3 +130,4 @@ DROP TABLE stock.source_set_candidate_inputs;
 DROP TABLE stock.source_set_capabilities;
 DROP TABLE stock.source_sets;
 DROP TABLE stock.source_set_candidates;
+
