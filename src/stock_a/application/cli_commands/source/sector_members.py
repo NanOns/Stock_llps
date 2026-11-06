@@ -489,6 +489,11 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 snapshot_id=snapshot_id,
                 board_kind=args.detail_board_kind,
                 board_native_id=args.detail_board_native_id,
+                peer_members=next(
+                    item["all_member_symbols_for_linkage"]
+                    for item in inputs.strength_results
+                    if item["filter"]["board_kind"] == args.detail_board_kind
+                ),
             )
             result["source_seed_pool"] = {
                 key: value for key, value in pool.items() if key != "facts"
