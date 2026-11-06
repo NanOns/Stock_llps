@@ -101,6 +101,86 @@ def _timeline_raw_ohlc(row: Mapping[str, Any] | None) -> dict[str, Any]:
     } | {"quality": quality, "reason": reason}
 
 
+def post_signal_price_facts(
+    sessions: Sequence[date], rows: Sequence[Mapping[str, Any]], requested: int
+) -> dict[str, Any]:
+    """逐官方会话投影原始价格；缺行不借用相邻会话。"""
+    by_date = {row["session_date"]: row for row in rows}
+    if len(by_date) != len(rows) or any(day not in sessions for day in by_date):
+        raise ResearchEntryError("POST_SIGNAL_ROWS_INVALID", "后续行情会话重复或越界")
+    base_row = by_date.get(sessions[0])
+    base = _timeline_raw_ohlc(base_row)
+    points = []
+    for index, session in enumerate(sessions[1:], 1):
+        row = by_date.get(session)
+        ohlc = _timeline_raw_ohlc(row)
+        comparison = {
+            "quality": "UNKNOWN",
+            "reason": "T0_OR_ENDPOINT_BAR_UNKNOWN",
+            "value": None,
+        }
+        if base["quality"] == ohlc["quality"] == "OBSERVED":
+            if (
+                base_row.get("price_coordinate") != "RAW_UNADJUSTED"
+                or row.get("price_coordinate") != "RAW_UNADJUSTED"
+            ):
+                comparison["reason"] = "PRICE_COORDINATE_MISMATCH"
+            else:
+                value = (
+                    exact_number(row["raw_close"]) / exact_number(base_row["raw_close"])
+                    - 1
+                )
+                comparison = _render_field(FieldValue(value))
+        points.append(
+            {
+                "offset": index,
+                "session": session.isoformat(),
+                "bar_status": row.get("bar_status")
+                if row
+                else "HISTORY_ROW_NOT_STORED",
+                "ohlc": ohlc,
+                "raw_close_relative_change": comparison,
+            }
+        )
+    available = len(points)
+    valid_bars = sum(point["ohlc"]["quality"] == "OBSERVED" for point in points)
+    for index in range(available + 1, requested + 1):
+        reason = "NO_FUTURE_SESSION_IN_SAVED_WINDOW"
+        unavailable = {"value": None, "quality": "NOT_AVAILABLE", "reason": reason}
+        points.append(
+            {
+                "offset": index,
+                "session": None,
+                "bar_status": "NOT_AVAILABLE",
+                "ohlc": {
+                    key: dict(unavailable) for key in ("open", "high", "low", "close")
+                }
+                | {"quality": "NOT_AVAILABLE", "reason": reason},
+                "raw_close_relative_change": dict(unavailable),
+            }
+        )
+    return {
+        "t0": {"session": sessions[0].isoformat(), "ohlc": base},
+        "points": points,
+        "requested_session_count": requested,
+        "available_session_count": available,
+        "not_available_session_count": requested - available,
+        "valid_bar_count": valid_bars,
+        "unknown_bar_count": available - valid_bars,
+        "status": "NO_FUTURE_SESSION_IN_SAVED_WINDOW"
+        if not available
+        else (
+            "TRUNCATED_AT_RESEARCH_CUTOFF"
+            if available < requested
+            else "PARTIAL_UNKNOWN"
+            if valid_bars < available
+            else "AVAILABLE"
+        ),
+        "price_coordinate": "RAW_UNADJUSTED",
+        "pit_status": "HISTORICAL_NON_PIT_EXPLORATION",
+    }
+
+
 def _timeline_transition(
     previous: Mapping[str, Any] | None,
     current: Mapping[str, Any],

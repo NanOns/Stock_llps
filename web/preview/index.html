@@ -95,6 +95,40 @@
           </button>
         </div>
         <div id="sectorSymbolObservation" class="population" hidden></div>
+        <section id="postSignalPanel" class="population" hidden>
+          <h3>后续价格事实</h3>
+          <p>
+            HISTORICAL_NON_PIT_EXPLORATION ·
+            RAW_UNADJUSTED：后验已取得事实，未经复权或交易可实现性验证；缺Bar不等于停牌。
+          </p>
+          <label
+            >观察官方交易会话数 N（1–10）
+            <input
+              id="postSignalCount"
+              type="number"
+              min="1"
+              max="10"
+              value="5"
+          /></label>
+          <button id="postSignalRefresh" type="button">读取后续事实</button>
+          <button id="postSignalReturn" type="button">
+            返回单股解释与原列表
+          </button>
+          <p id="postSignalStatus"></p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>会话</th>
+                  <th>Raw OHLC</th>
+                  <th>质量/缺失原因</th>
+                  <th>相对T0原始收盘价变动</th>
+                </tr>
+              </thead>
+              <tbody id="postSignalRows"></tbody>
+            </table>
+          </div>
+        </section>
         <div
           id="sectorChangeIdentity"
           class="population sector-identity"

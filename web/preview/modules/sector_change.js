@@ -20,6 +20,91 @@ const sectorChangeStateOrder = [
   "NOT_EVALUABLE",
 ];
 let sectorObservationMode = "D1";
+let postSignalRequest = 0;
+let postSignalSelection = null;
+
+function clearPostSignal() {
+  postSignalRequest++;
+  postSignalSelection = null;
+  $("postSignalPanel").hidden = true;
+  $("postSignalRows").replaceChildren();
+}
+
+function postSignalButton(symbol) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.textContent = "查看后续价格事实";
+  button.addEventListener("click", () => {
+    const version = sectorSelectedVersion();
+    if (!version || !state.sectorChange.context) return;
+    postSignalSelection = {
+      symbol,
+      ...version,
+      namespace_id: state.sectorChange.context.namespace_id,
+      research_cutoff: state.sectorChange.context.research_cutoff,
+    };
+    loadPostSignal();
+  });
+  return button;
+}
+
+async function loadPostSignal() {
+  const selected = postSignalSelection;
+  if (!selected) return;
+  const request = ++postSignalRequest;
+  const count = Number($("postSignalCount").value);
+  $("postSignalPanel").hidden = false;
+  $("postSignalRows").replaceChildren();
+  $("postSignalStatus").textContent = "正在读取精确来源包的后续价格事实。";
+  if (!Number.isInteger(count) || count < 1 || count > 10) {
+    $("postSignalStatus").textContent = "N必须为1至10的整数。";
+    return;
+  }
+  try {
+    const data = await api("/api/preview/stock-timeline", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        post_signal_price_facts: true,
+        ...selected,
+        session_count: count,
+      }),
+    });
+    if (
+      request !== postSignalRequest ||
+      selected !== postSignalSelection ||
+      Number($("postSignalCount").value) !== count
+    )
+      return;
+    const base = data.t0.ohlc;
+    $("postSignalStatus").textContent =
+      `${data.symbol} · T0 ${data.target_session} · 截止 ${data.research_cutoff} · 已存来源行范围 ${data.saved_session_range.join(" 至 ")}（范围内不保证每个会话有合法Bar） · ${data.status}；官方会话 ${data.available_session_count}/${data.requested_session_count}，合法Bar ${data.valid_bar_count}，未知Bar ${data.unknown_bar_count}，超出截止 ${data.not_available_session_count}；T0原始收盘 ${sectorMetric(base.close.value)}（${base.quality} ${base.reason || ""}）。后验事实，不是可交易收益。`;
+    for (const point of data.points) {
+      const row = document.createElement("tr");
+      const price = point.ohlc;
+      cell(row, `T+${point.offset} ${point.session || "未可得"}`);
+      cell(
+        row,
+        ["open", "high", "low", "close"]
+          .map((key) => `${key} ${sectorMetric(price[key].value)}`)
+          .join(" · "),
+      );
+      cell(row, `${point.bar_status} · ${price.quality} ${price.reason || ""}`);
+      const change = point.raw_close_relative_change;
+      cell(
+        row,
+        change.quality === "OBSERVED"
+          ? `${change.value.decimal}（${change.value.exact}）`
+          : `${change.quality} ${change.reason}`,
+      );
+      $("postSignalRows").append(row);
+    }
+    $("postSignalPanel").scrollIntoView({ block: "start" });
+  } catch (error) {
+    if (request === postSignalRequest)
+      $("postSignalStatus").textContent = `读取失败：${error.message}`;
+  }
+}
 const sectorD1ViewSettings = {
   sortBy: "changed_stocks",
   direction: "STRONGER",
@@ -55,6 +140,7 @@ function sectorMetric(value) {
 }
 
 function sectorClearOutput(message = "请先选择完整身份和D1事件窗。") {
+  clearPostSignal();
   const sector = state.sectorChange;
   sector.request++;
   sector.data = null;
@@ -383,12 +469,24 @@ function sectorSelectBoard(board) {
 }
 
 function sectorStockButton(symbol, row, target) {
+  const actions = document.createElement("span");
   const button = document.createElement("button");
   button.type = "button";
   button.className = "row-select";
   button.textContent = "打开Core / Profile / 历史";
   button.addEventListener("click", () => openSectorStock(symbol, row, target));
-  return button;
+  const explain = document.createElement("button");
+  explain.type = "button";
+  explain.className = "row-select";
+  explain.textContent = "解释单股变化";
+  explain.addEventListener("click", async () => {
+    clearPostSignal();
+    $("sectorExplainSymbol").value = symbol;
+    await loadSectorChangeView();
+    $("sectorSymbolObservation").scrollIntoView({ block: "start" });
+  });
+  actions.append(button, explain);
+  return actions;
 }
 
 function sectorCellButton(row, label, callback) {
@@ -672,6 +770,7 @@ function renderSectorChange(data) {
 }
 
 async function loadSectorChangeView() {
+  clearPostSignal();
   if (!sectorInputsReady()) {
     if (
       sectorSelectedVersion() &&
@@ -786,6 +885,7 @@ async function loadSectorSingleD0() {
     if (data.d0_change?.after) {
       root.append(document.createTextNode(" "));
       root.append(sectorStockButton(symbol, {}, version.target_session));
+      root.append(postSignalButton(symbol));
     }
     state.sectorChange.singleD0Available = true;
     root.hidden = false;
@@ -906,10 +1006,12 @@ function renderSectorSymbolObservation(data) {
     root.append(
       sectorStockButton(item.source_symbol, item, data.target_session),
     );
+    root.append(postSignalButton(item.source_symbol));
   }
 }
 
 async function openSectorStock(symbol, row, targetSession) {
+  clearPostSignal();
   const version = sectorSelectedVersion();
   const chosenVersion = state.versions.find(
     (item) =>
@@ -1017,9 +1119,22 @@ function initializeSectorChangeExplorer() {
     $("sectorChangeQuery").addEventListener("click", loadSectorChangeView);
     $("sectorExplainButton").addEventListener("click", loadSectorChangeView);
     $("sectorExplainSymbol").addEventListener("input", () => {
+      clearPostSignal();
       state.sectorChange.request++;
       $("sectorSymbolObservation").hidden = true;
     });
+    $("postSignalRefresh").addEventListener("click", loadPostSignal);
+    $("postSignalCount").addEventListener("input", () => {
+      postSignalRequest++;
+      $("postSignalRows").replaceChildren();
+      $("postSignalStatus").textContent = "观察长度已改变，请重新读取。";
+    });
+    $("postSignalReturn").addEventListener("click", () => {
+      clearPostSignal();
+      $("sectorSymbolObservation").scrollIntoView({ block: "start" });
+    });
+    $("symbolInput").addEventListener("input", clearPostSignal);
+    $("versionSelect").addEventListener("change", clearPostSignal);
     $("sectorBoardKindFilter").addEventListener(
       "change",
       sectorChangeFilterChanged,

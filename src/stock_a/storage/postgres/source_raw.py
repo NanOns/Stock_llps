@@ -1562,6 +1562,7 @@ def _validate_history_query(
     target_session: date,
     package_sha256: str,
     sessions: Sequence[date],
+    starts_at_target: bool = False,
 ) -> tuple[date, ...]:
     if source_symbol is not None and (
         not isinstance(source_symbol, str) or _SYMBOL.fullmatch(source_symbol) is None
@@ -1579,14 +1580,14 @@ def _validate_history_query(
         )
     if (
         not isinstance(sessions, (tuple, list))
-        or not 1 <= len(sessions) <= 75
+        or not 1 <= len(sessions) <= (11 if starts_at_target else 75)
         or any(type(day) is not date for day in sessions)
         or tuple(sorted(set(sessions))) != tuple(sessions)
-        or sessions[-1] != target_session
+        or (sessions[0] if starts_at_target else sessions[-1]) != target_session
     ):
         raise RawSourcePgError(
             "HISTORY_SESSION_WINDOW_INVALID",
-            "PG历史查询会话须为1至75个递增会话并以目标日结束",
+            "PG会话窗口须递增；历史最多75个并以目标日结束，后续最多11个并以目标日开始",
         )
     return tuple(sessions)
 
@@ -1664,6 +1665,8 @@ def read_raw_daily_history_stock(
     package_sha256: str,
     sessions: Sequence[date],
     expected_namespace_id: str | None = None,
+    starts_at_target: bool = False,
+    research_cutoff: date | None = None,
 ) -> dict[str, Any]:
     """从固定PG namespace读取单证券的精确包版本与官方会话窗口。"""
     selected_sessions = _validate_history_query(
@@ -1671,7 +1674,14 @@ def read_raw_daily_history_stock(
         target_session=target_session,
         package_sha256=package_sha256,
         sessions=sessions,
+        starts_at_target=starts_at_target,
     )
+    if starts_at_target and (
+        type(research_cutoff) is not date or selected_sessions[-1] > research_cutoff
+    ):
+        raise RawSourcePgError(
+            "RESEARCH_CUTOFF_INVALID", "后续窗口必须绑定不早于窗口结束的研究截止"
+        )
     if expected_namespace_id is not None:
         try:
             canonical_namespace_id = str(uuid.UUID(expected_namespace_id))
@@ -1711,6 +1721,14 @@ def read_raw_daily_history_stock(
             sessions=selected_sessions,
             package_sha256=package_sha256,
         )
+        saved_range = None
+        if starts_at_target:
+            cursor.execute(
+                "SELECT min(session_date), max(session_date) FROM stock.source_raw_daily "
+                "WHERE namespace_id=%s::uuid AND source_symbol=%s AND package_sha256=%s AND session_date<=%s",
+                (namespace_id, source_symbol, package_sha256, research_cutoff),
+            )
+            saved_range = cursor.fetchone()
     actual_sessions = tuple(row["session_date"] for row in rows)
     if actual_sessions != tuple(sorted(set(actual_sessions))) or len(
         actual_sessions
@@ -1734,6 +1752,11 @@ def read_raw_daily_history_stock(
         "session_end": selected_sessions[-1].isoformat(),
         "session_count": len(selected_sessions),
         "history_rows": rows,
+        "saved_session_range": (
+            [day.isoformat() if day else None for day in saved_range]
+            if saved_range is not None
+            else None
+        ),
         "history_complete": not missing,
         "history_status": "COMPLETE" if not missing else "UNKNOWN_HISTORY",
         "missing_history_sessions": [day.isoformat() for day in missing],

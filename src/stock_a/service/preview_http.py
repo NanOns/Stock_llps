@@ -76,6 +76,7 @@ from stock_a.storage.postgres.source_raw import (
 from stock_a.research import core as research_core
 from stock_a.research import entry as research_entry
 from stock_a.research import raw_periods as research_raw_periods
+from stock_a.research.entry_history.history_timeline import post_signal_price_facts
 from stock_a.research.raw_periods import (
     build_source_symbol_raw_periods,
     evaluate_raw_period_trend,
@@ -2589,6 +2590,80 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 return
             if post_path == "/api/preview/sector-change-stocks":
                 self._send_json(200, self._sector_change_stocks(body))
+                return
+            if (
+                post_path == "/api/preview/stock-timeline"
+                and isinstance(body, dict)
+                and body.get("post_signal_price_facts") is True
+            ):
+                required = {
+                    "post_signal_price_facts",
+                    "symbol",
+                    "target_session",
+                    "package_sha256",
+                    "namespace_id",
+                    "research_cutoff",
+                    "session_count",
+                }
+                if set(body) != required:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_BODY_FIELDS_INVALID",
+                        "后续价格事实请求字段不完整或含额外字段",
+                    )
+                symbol = _symbol(body["symbol"])
+                target = _iso_date(body["target_session"])
+                cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
+                _require_research_cutoff(target, cutoff)
+                _require_research_cutoff(
+                    cutoff, self.preview_server.state.research_cutoff
+                )
+                package = _sha(body["package_sha256"])
+                count = _positive_int(body["session_count"], "session_count", 10)
+                try:
+                    namespace = str(UUID(body["namespace_id"]))
+                except (ValueError, TypeError, AttributeError) as error:
+                    raise PreviewHttpError(
+                        400,
+                        "PREVIEW_SOURCE_IDENTITY_INVALID",
+                        "namespace_id须为有效UUID",
+                    ) from error
+                calendar = _official_calendar(cutoff)
+                all_sessions = calendar["sessions"]
+                if target not in all_sessions:
+                    raise PreviewHttpError(
+                        400, "TARGET_DATE_INVALID", "目标日不在官方交易日历中"
+                    )
+                sessions = tuple(
+                    day for day in all_sessions if target <= day <= cutoff
+                )[: count + 1]
+                history = read_raw_daily_history_stock(
+                    self.preview_server.state.config,
+                    source_symbol=symbol,
+                    target_session=target,
+                    package_sha256=package,
+                    sessions=sessions,
+                    expected_namespace_id=namespace,
+                    starts_at_target=True,
+                    research_cutoff=cutoff,
+                )
+                result = post_signal_price_facts(
+                    sessions, history["history_rows"], count
+                )
+                result.update(
+                    {
+                        "symbol": symbol,
+                        "target_session": target.isoformat(),
+                        "research_cutoff": cutoff.isoformat(),
+                        "namespace_id": namespace,
+                        "package_sha256": package,
+                        "calendar_revision": calendar["calendar_revision_chain"],
+                        "saved_session_range": history["saved_session_range"],
+                        "database_write": False,
+                        "ddl_executed": False,
+                    }
+                )
+                self._send_json(200, result)
                 return
             if (
                 post_path == "/api/preview/stock-timeline"
