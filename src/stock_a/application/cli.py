@@ -20,6 +20,9 @@ from stock_a.application.cli_commands.research.d1_preview import (
     _run_source_d1_breakout_preview,
 )
 from stock_a.application.cli_commands.research.d0_raw import _run_source_d0_raw
+from stock_a.application.cli_commands.research.market_observation import (
+    _run_source_market_observation,
+)
 from stock_a.application.cli_commands.research.market_research import (
     _run_source_market_breadth,
     _run_source_symbol_price_profile,
@@ -98,6 +101,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_market_breadth(args)
         if args.command == "source-d0-raw":
             return _run_source_d0_raw(args)
+        if args.command == "source-market-observation":
+            return _run_source_market_observation(args)
         if args.command == "source-d1-breakout-preview":
             return _run_source_d1_breakout_preview(args)
         if args.command == "preview-serve":

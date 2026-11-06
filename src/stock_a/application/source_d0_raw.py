@@ -111,7 +111,9 @@ def diagnostic_admission(result, *, target, package_sha256):
     )
 
 
-def attach_stock_risk_readiness(config, result, *, target, cutoff, package_sha256):
+def attach_stock_risk_readiness(
+    config, result, *, target, cutoff, package_sha256, rps_read=None
+):
     """将同股同日PG历史事实交给现役风险归并，保留正式结构未知。"""
     item = result["results"][0]
     symbol = item["source_symbol"]
@@ -165,14 +167,22 @@ def attach_stock_risk_readiness(config, result, *, target, cutoff, package_sha25
         shallow_breach=fact(missing),
         capability_state="READY",
     )
-    rps = read_source_pool_rps(
-        config,
-        target_session=target,
-        research_cutoff=cutoff,
-        package_sha256=package_sha256,
-        expected_namespace_id=namespace,
-    )
-    metric_field = rps["facts"].get(symbol, {}).get("rps5_delta3_pp") or unknown(
+    if rps_read is None:
+        rps_read = read_source_pool_rps(
+            config,
+            target_session=target,
+            research_cutoff=cutoff,
+            package_sha256=package_sha256,
+            expected_namespace_id=namespace,
+        )
+    if (
+        rps_read["namespace_id"] != namespace
+        or rps_read["target_session"] != target
+        or rps_read["research_cutoff"] != cutoff
+        or rps_read["package_sha256"] != package_sha256
+    ):
+        raise ValueError("风险输入RPS与目标来源身份不一致")
+    metric_field = rps_read["facts"].get(symbol, {}).get("rps5_delta3_pp") or unknown(
         "RPS5_DELTA3_UNAVAILABLE"
     )
     prior = research_stock_pg_history_preview(

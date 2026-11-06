@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from copy import deepcopy
 from datetime import date
 from fractions import Fraction
 from math import sqrt
@@ -10,6 +11,7 @@ from statistics import median
 from typing import Any, Mapping
 
 from stock_a.application.pg_price_profiles import (
+    PgPriceProfileError,
     SOURCE_SYMBOL_PROFILE_SCOPE,
     _profile_revision,
     _profile_semantics_sha256,
@@ -26,6 +28,7 @@ from stock_a.research.entry_history.history_preview import (
     research_stock_pg_history_preview,
 )
 from stock_a.research.entry_context.errors import ResearchEntryError
+from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.storage.postgres.source_raw import read_raw_daily_history_page
 
 
@@ -164,6 +167,8 @@ def read_source_pool_seed(
     profile_contract: dict[str, Any],
     history_session_count: int,
     selected_symbols: frozenset[str] | None = None,
+    include_rps_read: bool = False,
+    allow_raw_profile_recompute: bool = False,
 ) -> dict[str, Any]:
     """读取精确已存画像并复用现役Core/Profile计算未持久的Seed输入。"""
     if selected_symbols is not None and (
@@ -183,16 +188,28 @@ def read_source_pool_seed(
     )
     profile_offset = 0
     profiles = {}
+    profile_snapshot_missing = False
     while True:
-        profile_page = query_source_symbol_price_profiles(
-            config,
-            target_session=target_session,
-            max_target_session=research_cutoff,
-            package_sha256=package_sha256,
-            profile_revision=profile_revision,
-            offset=profile_offset,
-            limit=100,
-        )
+        try:
+            profile_page = query_source_symbol_price_profiles(
+                config,
+                target_session=target_session,
+                max_target_session=research_cutoff,
+                package_sha256=package_sha256,
+                profile_revision=profile_revision,
+                offset=profile_offset,
+                limit=100,
+            )
+        except PgPriceProfileError as error:
+            if (
+                not allow_raw_profile_recompute
+                or profile_offset != 0
+                or error.code != "PROFILE_CHANGE_SNAPSHOT_MISSING"
+            ):
+                raise
+            profile_snapshot_missing = True
+            profiles = {symbol: {} for symbol in rps["facts"]}
+            break
         if (
             profile_page["namespace_id"] != namespace_id
             or profile_page["source_pool_total"] != len(rps["facts"])
@@ -209,10 +226,15 @@ def read_source_pool_seed(
             break
     if set(profiles) != set(rps["facts"]):
         raise ValueError("画像没有覆盖完整来源池")
+    calendar_id = (
+        _load_calendar(target_session)[0]["calendar_id"]
+        if profile_snapshot_missing
+        else profile_page["rows"][0]["history_calendar_id"]
+    )
     runtime_revision = _profile_revision(
         scope=SOURCE_SYMBOL_PROFILE_SCOPE,
         semantics_sha256=_profile_semantics_sha256(profile_contract),
-        calendar_id=profile_page["rows"][0]["history_calendar_id"],
+        calendar_id=calendar_id,
         calendar_revision=revision,
         history_session_count=history_session_count,
     )
@@ -356,8 +378,12 @@ def read_source_pool_seed(
             seed["saved_profile_core"] = {
                 name: {
                     "value": str(saved[name]) if saved.get(name) is not None else None,
-                    "quality": saved.get(f"{name}_quality"),
-                    "reason": saved.get(f"{name}_reason"),
+                    "quality": "UNKNOWN"
+                    if profile_snapshot_missing
+                    else saved.get(f"{name}_quality"),
+                    "reason": "PROFILE_SNAPSHOT_MISSING"
+                    if profile_snapshot_missing
+                    else saved.get(f"{name}_reason"),
                 }
                 for name in ("bias20_atr", "ma20", "price_damage")
             }
@@ -387,7 +413,7 @@ def read_source_pool_seed(
     if set(seed_facts) != expected_symbols:
         raise ValueError("Seed事实没有覆盖完整来源池")
     seed_counts = Counter(fact["seed"]["state"] for fact in seed_facts.values())
-    return {
+    result = {
         "target_session": target_session,
         "research_cutoff": research_cutoff,
         "namespace_id": namespace_id,
@@ -396,7 +422,14 @@ def read_source_pool_seed(
         "runtime_profile_revision": runtime_revision,
         "profile_revision_matches_runtime": runtime_revision == profile_revision,
         "history_session_count": history_session_count,
-        "profile_input_note": "所选PG画像用于身份与已存字段读取；Seed分项由当前Core/Profile合同从同包Raw即时计算，并非声称该修订保存了这些分项数值。",
+        "profile_input_note": (
+            "该日无已存画像；以同包Raw和现役Core/Profile合同即时计算，标明实际运行修订，未生成画像快照。"
+            if profile_snapshot_missing
+            else "所选PG画像用于身份与已存字段读取；Seed分项由当前Core/Profile合同从同包Raw即时计算，并非声称该修订保存了这些分项数值。"
+        ),
+        "stored_profile_status": "MISSING_RAW_RECOMPUTED"
+        if profile_snapshot_missing
+        else "AVAILABLE",
         "scope": rps["scope"],
         "price_coordinate": rps["coordinate"],
         "corporate_action_continuity": rps["corporate_action_continuity"],
@@ -412,9 +445,12 @@ def read_source_pool_seed(
         },
         "facts": seed_facts,
     }
+    if include_rps_read:
+        result["rps_read"] = rps
+    return result
 
 
-def _board_native(pool, symbols, peer_members, board_id):
+def _board_native(pool, symbols, peer_members, board_id, *, peer_cache=None):
     """以完整成员槽位计算非PIT板块事实，缺失值不缩减质量分母。"""
     facts = pool["facts"]
 
@@ -478,8 +514,13 @@ def _board_native(pool, symbols, peer_members, board_id):
         }
         return out
 
-    peers = {key: metrics(members) for key, members in peer_members.items()}
-    result = peers[board_id]
+    if peer_cache is not None and "peers" in peer_cache:
+        peers = peer_cache["peers"]
+    else:
+        peers = {key: metrics(members) for key, members in peer_members.items()}
+        if peer_cache is not None:
+            peer_cache["peers"] = peers
+    result = deepcopy(peers[board_id])
     for period in (5, 20):
         key = f"ret{period}"
         values = sorted(

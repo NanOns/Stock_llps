@@ -46,7 +46,11 @@ from stock_a.application.source_d1_price_safety import (
     attach_source_d1_price_safety_facts,
 )
 from stock_a.research.entry import ResearchEntryError
-from stock_a.research.core import MarketSessionCalendar, calculate_core_return
+from stock_a.research.core import (
+    MarketSessionCalendar,
+    calculate_core,
+    calculate_core_return,
+)
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
@@ -401,6 +405,7 @@ def read_retrospective_rotation(
     profile_revision: str | None = None,
     profile_contract: dict[str, Any] | None = None,
     profile_history_session_count: int = 75,
+    peer_target_only: bool = False,
 ) -> dict[str, Any]:
     """固定后验同类成员，逐会话计算pulse并追踪每个触发日的等权篮子。"""
     if (
@@ -411,6 +416,12 @@ def read_retrospective_rotation(
     ):
         raise TdxSectorMembersApplicationError(
             "ROTATION_REQUEST_INVALID", "Rotation窗口必须绑定不晚于研究截止的官方会话"
+        )
+    if type(peer_target_only) is not bool or (
+        peer_target_only and start_session != target_session
+    ):
+        raise TdxSectorMembersApplicationError(
+            "ROTATION_PEER_TARGET_INVALID", "完整同类板块单日读取要求起止为同一会话"
         )
     if profile_revision is not None and (
         not isinstance(profile_contract, dict)
@@ -430,12 +441,13 @@ def read_retrospective_rotation(
         raise TdxSectorMembersApplicationError(
             "ROTATION_SESSION_INVALID", "Rotation窗口端点不是官方会话"
         ) from error
-    if start_index < 8 or not 1 <= end_index - start_index + 1 <= 15:
+    lookback = 23 if peer_target_only else 8
+    if start_index < lookback or not 1 <= end_index - start_index + 1 <= 15:
         raise TdxSectorMembersApplicationError(
             "ROTATION_WINDOW_INVALID",
             "Rotation候选窗须为1至15个会话，且至少有8个前态会话",
         )
-    sessions = tuple(all_sessions[start_index - 8 : end_index + 1])
+    sessions = tuple(all_sessions[start_index - lookback : end_index + 1])
     snapshot = read_rotation_snapshot_members(
         config, snapshot_id=snapshot_id, board_kind=board_kind
     )
@@ -538,7 +550,12 @@ def read_retrospective_rotation(
         return all(entries) and len(set(entries)) == 1
 
     endpoints = {}
-    for i in range(5, len(sessions)):
+    endpoint_indices = (
+        (len(sessions) - 4, len(sessions) - 2, len(sessions) - 1)
+        if peer_target_only
+        else range(5, len(sessions))
+    )
+    for i in endpoint_indices:
         per_symbol = {}
         for symbol in wanted:
             current = quote(symbol, i)
@@ -567,12 +584,44 @@ def read_retrospective_rotation(
                 )
                 if result.quality == "OBSERVED":
                     ret5 = result.value
+            ret20 = None
+            above_ma20 = None
+            entry_versions = (
+                {
+                    row.get("source_entry_sha256")
+                    for row in raw_by_symbol.get(symbol, {}).values()
+                    if row.get("source_entry_sha256")
+                }
+                if peer_target_only
+                else set()
+            )
+            if (
+                peer_target_only
+                and history is not None
+                and current is not None
+                and len(entry_versions) <= 1
+                and matching_entries(symbol, range(i - 20, i + 1))
+            ):
+                history_window = history[i - 20 : i + 1]
+                history_calendar = MarketSessionCalendar(
+                    str(calendar["calendar_id"]), revision, sessions[i - 20 : i + 1]
+                )
+                long_return = calculate_core_return(
+                    history_window, periods=20, official_calendar=history_calendar
+                )
+                if long_return.quality == "OBSERVED":
+                    ret20 = long_return.value
+                ma20 = calculate_core(
+                    history_window, official_calendar=history_calendar
+                )["core.ma20"]
+                if ma20.quality == "OBSERVED":
+                    above_ma20 = current > Fraction(ma20.value)
             per_symbol[symbol] = {
                 "actual_quote": current is not None,
                 "ret1": ret1,
                 "ret5": ret5,
-                "ret20": None,
-                "above_ma20": None,
+                "ret20": ret20,
+                "above_ma20": above_ma20,
             }
         endpoints[i] = per_symbol
 
@@ -636,7 +685,10 @@ def read_retrospective_rotation(
                 )
         return seed_by_session[index]
 
-    for i in range(8, len(sessions)):
+    candidate_indices = (
+        (len(sessions) - 1,) if peer_target_only else range(8, len(sessions))
+    )
+    for i in candidate_indices:
         inputs = {
             symbol: {
                 "mapped": symbol in observations,
@@ -647,6 +699,17 @@ def read_retrospective_rotation(
             for symbol in wanted
         }
         all_rotations = _cross_period_boards(peer_members, inputs)
+        if peer_target_only:
+            return {
+                "namespace_id": snapshot["namespace_id"],
+                "snapshot": snapshot["snapshot"],
+                "target_session": target_session.isoformat(),
+                "board_kind": board_kind,
+                "package_sha256": package_sha256,
+                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                "peer_target": all_rotations,
+                "database_write_attempted": False,
+            }
         rotation = all_rotations[board_native_id]["rotation"]
         peer_pulses.append(
             {

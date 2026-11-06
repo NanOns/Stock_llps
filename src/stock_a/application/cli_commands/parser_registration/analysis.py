@@ -15,6 +15,46 @@ from stock_a.application.pg_price_profiles import (
 
 
 def register_commands(commands):
+    observation = commands.add_parser(
+        "source-market-observation", help="只读研究来源池变化、板块归属及后续价格"
+    )
+    observation.add_argument("--start-session", required=True, help="起始官方交易会话")
+    observation.add_argument("--end-session", required=True, help="结束官方交易会话")
+    observation.add_argument("--research-cutoff", required=True, help="研究数据截止日")
+    observation.add_argument(
+        "--package-sha256", required=True, help="精确来源包SHA-256"
+    )
+    observation.add_argument("--profile-revision", required=True, help="精确画像修订")
+    observation.add_argument(
+        "--industry-snapshot-id", required=True, help="行业成员快照UUID"
+    )
+    observation.add_argument(
+        "--concept-snapshot-id", required=True, help="GN成员快照UUID"
+    )
+    observation.add_argument(
+        "--event-window-start", required=True, help="D1历史事件窗起始会话"
+    )
+    observation.add_argument(
+        "--history-session-count", type=int, default=75, help="画像历史会话数"
+    )
+    observation.add_argument(
+        "--d1-history-session-count", type=int, default=40, help="D1历史会话数"
+    )
+    observation.add_argument(
+        "--horizon",
+        type=int,
+        action="append",
+        required=True,
+        help="后继官方会话数，可重复指定",
+    )
+    observation.add_argument("--symbol", help="仅筛选该来源代码的观察明细")
+    observation.add_argument(
+        "--board-kind", choices=("INDUSTRY", "CONCEPT"), help="精确板块类型"
+    )
+    observation.add_argument("--board-id", help="精确板块原生编号")
+    observation.add_argument("--rotation-start", help="板块Rotation窗口起始会话")
+    observation.add_argument("--offset", type=int, default=0, help="观察明细分页偏移")
+    observation.add_argument("--limit", type=int, default=30, help="观察明细分页条数")
     d0_raw = commands.add_parser(
         "source-d0-raw",
         help="只读计算Raw来源池D0启动、恢复诊断及启动相邻变化",
