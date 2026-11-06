@@ -1,6 +1,10 @@
 /* Stock A预览页面events职责模块；保持原业务逻辑和交互。 */
 "use strict";
 $("reloadCatalog").addEventListener("click", async () => {
+  state.sectorChange.contextRequest++;
+  $("sectorVersionSelect").disabled = true;
+  $("sectorVersionSelect").value = "";
+  sectorInvalidate("正在刷新PG目录；旧板块、成员、股票结果和异步请求已失效。");
   await loadCatalog();
   await loadProfileSnapshots();
   initializeSectorChangeExplorer();

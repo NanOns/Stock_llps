@@ -19,6 +19,12 @@ const sectorChangeStateOrder = [
   "NOT_COMPARABLE",
   "NOT_EVALUABLE",
 ];
+let sectorObservationMode = "D1";
+const sectorD1ViewSettings = {
+  sortBy: "changed_stocks",
+  direction: "STRONGER",
+  changedOnly: true,
+};
 
 function sectorSelectedVersion() {
   const value = $("sectorVersionSelect").value;
@@ -62,11 +68,73 @@ function sectorClearOutput(message = "请先选择完整身份和D1事件窗。"
   $("sectorBoardSection").hidden = true;
   $("sectorChangedStocksSection").hidden = true;
   $("sectorBoardDetail").hidden = true;
+  $("sectorReturnToBoard").hidden = true;
   $("sectorBoardRows").replaceChildren();
   $("sectorChangedStockRows").replaceChildren();
   $("sectorMemberRows").replaceChildren();
   $("sectorChangeCount").textContent = "等待精确来源身份";
   $("sectorChangeQuery").disabled = !sectorInputsReady();
+}
+
+function sectorSetObservationMode() {
+  const nextMode = $("sectorObservationMode").value;
+  if (nextMode === sectorObservationMode) return;
+  if (sectorObservationMode === "D1") {
+    sectorD1ViewSettings.sortBy = $("sectorSortBy").value;
+    sectorD1ViewSettings.direction = $("sectorDirection").value;
+    sectorD1ViewSettings.changedOnly = $("sectorChangedOnly").checked;
+  }
+  sectorObservationMode = nextMode;
+  const isD0 = sectorObservationMode === "D0";
+  $("sectorSortBy").value = isD0
+    ? "d0_launch_new"
+    : sectorD1ViewSettings.sortBy;
+  $("sectorDirection").value = isD0
+    ? "STRONGER"
+    : sectorD1ViewSettings.direction;
+  $("sectorChangedOnly").checked = isD0
+    ? false
+    : sectorD1ViewSettings.changedOnly;
+  $("sectorSortBy").disabled = isD0;
+  $("sectorDirection").disabled = isD0;
+  $("sectorChangedOnly").disabled = isD0;
+  $("sectorMemberStateControl").hidden = isD0;
+  $("sectorMemberSearchControl").hidden = isD0;
+  $("sectorBoardHeading").textContent = isD0
+    ? "D0新增启动成员板块"
+    : "发生D1支撑变化的板块";
+  $("sectorBoardDescription").textContent = isD0
+    ? "仅显示有FALSE_TO_TRUE新增对象的板块，按新增成员数排序；首页最多15个，完整分母与分页保留。成员快照为当前观测后验NON_PIT，不代表正式选股资格。"
+    : "首页最多15个；排序只供研究阅读，不代表预测或优先级。完整板块数和翻页保留，成员关系为后验NON_PIT。";
+  $("sectorBoardChangeHeader").textContent = isD0
+    ? "D0新增启动成员"
+    : "D1变化成员";
+  $("sectorChangedOnlyText").textContent = isD0
+    ? "仅有D0新增板块"
+    : "只看有变化板块";
+  $("sectorStockHeading").textContent = isD0
+    ? "全局去重的D0新增启动股票"
+    : "全局去重的D1变化股票";
+  $("sectorStockDescription").textContent = isD0
+    ? "按来源市场与代码全局去重；板块成员人数不能相加代替全局人数；每页最多30只。D0结果为诊断观察，不是正式选股。"
+    : "同一来源代码即使属于多个GN概念，也只计一次；每页最多30只。";
+  $("sectorStockStateHeader").textContent = isD0
+    ? "相邻会话状态"
+    : "变化事件数";
+  $("sectorMemberStateHeader").textContent = isD0 ? "D0新增状态" : "D1状态";
+  $("sectorMemberEventsHeader").textContent = isD0 ? "转移" : "事件数";
+  $("sectorMemberExplainHeader").textContent = isD0
+    ? "来源谓词前后态"
+    : "本次状态与原因";
+  $("sectorEventWindowLabel").textContent = isD0
+    ? "D1历史上下文窗（D0不按此过滤）"
+    : "D1事件窗";
+  state.sectorChange.boardOffset = 0;
+  state.sectorChange.stockOffset = 0;
+  state.sectorChange.selectedBoard = null;
+  state.sectorChange.memberOffset = 0;
+  sectorInvalidate("观察模式已切换；旧板块、成员与个股结果已清除。");
+  if (sectorInputsReady()) loadSectorChangeView();
 }
 
 function sectorInputsReady() {
@@ -211,7 +279,9 @@ function sectorCurrentRequest() {
   const version = sectorSelectedVersion();
   const windowParts = $("sectorEventWindowSelect").value.split("|");
   const board = state.sectorChange.selectedBoard;
+  const isD0 = sectorObservationMode === "D0";
   return {
+    observation_mode: sectorObservationMode,
     target_session: version.target_session,
     research_cutoff: state.sectorChange.context.research_cutoff,
     package_sha256: version.package_sha256,
@@ -221,15 +291,16 @@ function sectorCurrentRequest() {
     event_window_start: windowParts[0],
     pg_history_session_count: Number(windowParts[2]),
     board_kind: $("sectorBoardKindFilter").value,
-    changed_only: $("sectorChangedOnly").checked,
-    sort_by: $("sectorSortBy").value,
-    direction: $("sectorDirection").value,
+    changed_only: isD0 ? false : $("sectorChangedOnly").checked,
+    sort_by: isD0 ? "d0_launch_new" : $("sectorSortBy").value,
+    direction: isD0 ? "STRONGER" : $("sectorDirection").value,
     offset: state.sectorChange.boardOffset,
     limit: 15,
     detail_board_kind: board?.board_kind || null,
     detail_board_native_id: board?.board_native_id || null,
-    member_state: board ? $("sectorMemberState").value : "ALL",
-    member_search: board ? $("sectorMemberSearch").value.trim() || null : null,
+    member_state: board && !isD0 ? $("sectorMemberState").value : "ALL",
+    member_search:
+      board && !isD0 ? $("sectorMemberSearch").value.trim() || null : null,
     member_offset: board ? state.sectorChange.memberOffset : 0,
     member_limit: board ? 30 : 0,
     include_changed_stock_page: true,
@@ -252,17 +323,39 @@ function renderSectorMetrics(data) {
   const d1 = data.d1_discovery || {};
   const stateCounts =
     d1.support_event_counts || counts.d1_support_event_counts || {};
-  const cards = [
-    ["Raw来源池分母", counts.d1_source_pool_count],
-    ["D1原始事件", counts.d1_raw_event_count],
-    ["D1变化去重来源代码", counts.d1_unique_changed_source_symbol_count],
-    ["行业 / GN完整板块", counts.legal_board_total_count],
-    ["支撑变化事件 CHANGED", stateCounts.CHANGED],
-    [
-      "未变化 / 未知 / 不可比较",
-      `${stateCounts.UNCHANGED ?? 0} / ${stateCounts.UNKNOWN ?? 0} / ${stateCounts.NOT_COMPARABLE ?? 0}`,
-    ],
-  ];
+  const launch = data.d0_launch_new || {};
+  const transitions = launch.transition_counts || {};
+  const unknownTransitions = Object.entries(transitions)
+    .filter(([transition]) => transition.includes("UNKNOWN"))
+    .reduce((total, [, count]) => total + count, 0);
+  const isD0 = data.observation_mode === "D0";
+  const cards = isD0
+    ? [
+        [
+          "官方相邻会话",
+          `${launch.before?.target_session || "—"} → ${launch.after?.target_session || data.target_session}`,
+        ],
+        ["可比较双端Raw分母", launch.source_pool_count],
+        ["前后来源键并集", launch.source_union_count],
+        ["FALSE_TO_TRUE新增", launch.false_to_true_count],
+        ["含UNKNOWN转移", unknownTransitions],
+        ["行业 / GN完整板块", counts.legal_board_total_count],
+        [
+          "当前板块映射 / 未映射",
+          `${launch.mapped_distinct_source_symbol_count ?? 0} / ${launch.unmapped_distinct_source_symbol_count ?? 0}`,
+        ],
+      ]
+    : [
+        ["Raw来源池分母", counts.d1_source_pool_count],
+        ["D1原始事件", counts.d1_raw_event_count],
+        ["D1变化去重来源代码", counts.d1_unique_changed_source_symbol_count],
+        ["行业 / GN完整板块", counts.legal_board_total_count],
+        ["支撑变化事件 CHANGED", stateCounts.CHANGED],
+        [
+          "未变化 / 未知 / 不可比较",
+          `${stateCounts.UNCHANGED ?? 0} / ${stateCounts.UNKNOWN ?? 0} / ${stateCounts.NOT_COMPARABLE ?? 0}`,
+        ],
+      ];
   const root = $("sectorMarketSummary");
   root.replaceChildren();
   for (const [label, value] of cards) {
@@ -308,11 +401,14 @@ function sectorCellButton(row, label, callback) {
 }
 
 function renderSectorBoards(data) {
+  const isD0 = data.observation_mode === "D0";
   const root = $("sectorBoardRows");
   root.replaceChildren();
   if (!data.boards?.length) {
     tableRow(root, [
-      "无符合本次视图条件的变化板块；请检查目标日、事件窗、板块类型与“只看有变化板块”筛选。",
+      isD0
+        ? "当前输入没有可展示的D0新增启动板块（NO_MATCH）；完整来源分母仍在摘要中。"
+        : "无符合本次视图条件的变化板块；请检查目标日、事件窗、板块类型与“只看有变化板块”筛选。",
       "",
       "",
       "",
@@ -335,7 +431,9 @@ function renderSectorBoards(data) {
     const stateCounts = board.d1_link?.member_state_counts || {};
     cell(
       row,
-      `${board.d1_link?.changed_member_count ?? 0} 变化 / ${stateCounts.UNKNOWN ?? 0} 未知 / ${stateCounts.NOT_COMPARABLE ?? 0} 不可比较`,
+      isD0
+        ? `${board.d0_launch_new_member_count ?? 0} 个D0新增启动成员`
+        : `${board.d1_link?.changed_member_count ?? 0} 变化 / ${stateCounts.UNKNOWN ?? 0} 未知 / ${stateCounts.NOT_COMPARABLE ?? 0} 不可比较`,
     );
     cell(
       row,
@@ -349,7 +447,7 @@ function renderSectorBoards(data) {
   }
   const page = data.page || {};
   $("sectorBoardSummary").textContent =
-    `完整板块分母 ${page.filtered_total ?? 0}；本页 ${page.count ?? 0}/15。` +
+    `${isD0 ? "有D0新增对象的完整板块数" : "完整板块分母"} ${page.filtered_total ?? 0}；本页 ${page.count ?? 0}/15。` +
     `所有板块先全量联算、排序和过滤后再分页。缺历史或质量不够的指标显示“不可计算”。`;
   $("sectorBoardPage").textContent =
     `偏移 ${page.offset ?? 0} · ${page.filtered_total ?? 0} 个符合筛选的板块`;
@@ -360,7 +458,15 @@ function renderSectorBoards(data) {
 }
 
 function renderSectorStocks(data) {
-  const page = data.changed_stock_page || {};
+  const isD0 = data.observation_mode === "D0";
+  const launch = data.d0_launch_new || {};
+  const page = isD0
+    ? {
+        stocks: launch.stocks || [],
+        total_count: launch.false_to_true_count,
+        page: launch.pagination,
+      }
+    : data.changed_stock_page || {};
   const root = $("sectorChangedStockRows");
   root.replaceChildren();
   for (const stock of page.stocks || []) {
@@ -368,7 +474,9 @@ function renderSectorStocks(data) {
     cell(row, stock.source_symbol);
     cell(
       row,
-      `${stock.changed_anchor_event_count ?? 0} 次变化 / ${stock.raw_d1_event_count ?? 0} 个事件`,
+      isD0
+        ? `${stock.before?.scenario_raw || "UNKNOWN"} → ${stock.after?.scenario_raw || "UNKNOWN"} · ${stock.transition || "—"}`
+        : `${stock.changed_anchor_event_count ?? 0} 次变化 / ${stock.raw_d1_event_count ?? 0} 个事件`,
     );
     const action = document.createElement("td");
     action.append(
@@ -378,9 +486,16 @@ function renderSectorStocks(data) {
     root.append(row);
   }
   if (!page.stocks?.length)
-    tableRow(root, ["所选事件窗没有可展示的CHANGED来源代码。", "", ""]);
-  $("sectorChangedStocksCount").textContent =
-    `去重总数 ${page.total_count ?? 0}`;
+    tableRow(root, [
+      isD0
+        ? "当前相邻会话没有可展示的FALSE_TO_TRUE新增代码。"
+        : "所选事件窗没有可展示的CHANGED来源代码。",
+      "",
+      "",
+    ]);
+  $("sectorChangedStocksCount").textContent = isD0
+    ? `D0全局去重 ${page.total_count ?? 0} · 可比较分母 ${launch.source_pool_count ?? 0}`
+    : `去重总数 ${page.total_count ?? 0}`;
   $("sectorStockPage").textContent =
     `偏移 ${page.page?.offset ?? 0} · 总数 ${page.total_count ?? 0}`;
   $("sectorStockPrev").disabled = (page.page?.offset ?? 0) === 0;
@@ -398,6 +513,50 @@ function renderSectorMemberDetail(data) {
   $("sectorBoardDetail").hidden = false;
   $("sectorBoardDetailTitle").textContent =
     `${detail.board_name} · 板内来源成员`;
+  if (data.observation_mode === "D0") {
+    const d0Page = detail.d0_launch_new_member_page || {};
+    const page = d0Page.page || {};
+    const members = d0Page.members || [];
+    const root = $("sectorMemberRows");
+    root.replaceChildren();
+    for (const member of members) {
+      const row = document.createElement("tr");
+      cell(row, member.source_symbol);
+      cell(row, "新增启动");
+      cell(row, member.transition || "FALSE_TO_TRUE");
+      const before = member.before?.scenario_raw || "UNKNOWN";
+      const after = member.after?.scenario_raw || "UNKNOWN";
+      cell(
+        row,
+        `${before} → ${after} · CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT`,
+      );
+      const action = document.createElement("td");
+      action.append(
+        sectorStockButton(member.source_symbol, member, data.target_session),
+      );
+      row.append(action);
+      root.append(row);
+    }
+    if (!members.length)
+      tableRow(root, [
+        "该板块本次没有D0新增成员；板块成员完整分母仍保留。",
+        "",
+        "",
+        "",
+        "",
+      ]);
+    $("sectorBoardDetailSummary").textContent =
+      `成员完整分母 ${detail.member_count}；D0新增启动成员 ${d0Page.total_count ?? 0}；成员归属来自当前观测快照，历史回看为NON_PIT。`;
+    $("sectorMemberSummary").textContent =
+      `D0新增成员总数 ${d0Page.total_count ?? 0}；本页 ${page.count ?? 0}/30。` +
+      `其余成员不因此构成正式选股未入选；UNKNOWN转移和未映射分母见上方D0来源池摘要。`;
+    $("sectorMemberPage").textContent =
+      `偏移 ${page.offset ?? 0} · D0新增成员 ${d0Page.total_count ?? 0}`;
+    $("sectorMemberPrev").disabled = (page.offset ?? 0) === 0;
+    $("sectorMemberNext").disabled =
+      page.next_offset === null || page.next_offset === undefined;
+    return;
+  }
   const counts = detail.d1_link?.member_state_counts || {};
   $("sectorBoardDetailSummary").textContent =
     `快照 ${detail.snapshot_id} · ${detail.source_kind} · 观测 ${data.strength_sources?.find((item) => item.board_kind === detail.board_kind)?.snapshot?.observed_at || "见来源目录"} · ` +
@@ -449,6 +608,7 @@ function renderSectorMemberDetail(data) {
 
 function renderSectorChange(data) {
   state.sectorChange.data = data;
+  const isD0 = data.observation_mode === "D0";
   const identity = $("sectorChangeIdentity");
   identity.hidden = false;
   identity.textContent =
@@ -459,11 +619,21 @@ function renderSectorChange(data) {
   renderSectorStocks(data);
   renderSectorMemberDetail(data);
   const discovery = data.d1_discovery || {};
-  $("sectorChangeCount").textContent =
-    `${data.source_counts?.d1_unique_changed_source_symbol_count ?? 0} 个全局去重变化代码`;
-  $("sectorChangeStatus").textContent =
-    `D1事件窗 ${discovery.event_window_start || "—"} → ${data.target_session}；Raw历史 ${discovery.execution?.history_session_count ?? sectorCurrentRequest().pg_history_session_count} 个官方会话。` +
-    `板块成员快照为当前观测快照，历史归属NON_PIT。所有API与CLI读取PG，不写业务表。`;
+  if (isD0) {
+    const launch = data.d0_launch_new || {};
+    $("sectorChangeCount").textContent =
+      `${launch.false_to_true_count ?? 0} 个D0全局去重新增`;
+    $("sectorChangeStatus").textContent =
+      `D0相邻官方会话 ${launch.before?.target_session || "—"} → ${launch.after?.target_session || data.target_session}；` +
+      `FALSE_TO_TRUE ${launch.false_to_true_count ?? 0}/${launch.source_pool_count ?? 0} 个可比较来源；` +
+      `含UNKNOWN转移的来源分母单列在摘要。成员快照为当前观测后验NON_PIT；D0仅为来源诊断，不代表正式资格。API仅读取PG。`;
+  } else {
+    $("sectorChangeCount").textContent =
+      `${data.source_counts?.d1_unique_changed_source_symbol_count ?? 0} 个全局去重变化代码`;
+    $("sectorChangeStatus").textContent =
+      `D1事件窗 ${discovery.event_window_start || "—"} → ${data.target_session}；Raw历史 ${discovery.execution?.history_session_count ?? sectorCurrentRequest().pg_history_session_count} 个官方会话。` +
+      `板块成员快照为当前观测快照，历史归属NON_PIT。所有API与CLI读取PG，不写业务表。`;
+  }
 }
 
 async function loadSectorChangeView() {
@@ -474,6 +644,7 @@ async function loadSectorChangeView() {
   const request = ++state.sectorChange.request;
   const payload = sectorCurrentRequest();
   const identity = [
+    payload.observation_mode,
     payload.target_session,
     payload.package_sha256,
     payload.profile_revision,
@@ -493,6 +664,7 @@ async function loadSectorChangeView() {
     });
     const currentVersion = sectorSelectedVersion();
     const currentIdentity = [
+      $("sectorObservationMode").value,
       currentVersion?.target_session,
       currentVersion?.package_sha256,
       $("sectorProfileRevisionSelect").value,
@@ -568,6 +740,11 @@ function returnToSectorBoard() {
 }
 
 function sectorChangeFilterChanged() {
+  if (sectorObservationMode === "D1") {
+    sectorD1ViewSettings.sortBy = $("sectorSortBy").value;
+    sectorD1ViewSettings.direction = $("sectorDirection").value;
+    sectorD1ViewSettings.changedOnly = $("sectorChangedOnly").checked;
+  }
   state.sectorChange.boardOffset = 0;
   state.sectorChange.stockOffset = 0;
   state.sectorChange.selectedBoard = null;
@@ -577,6 +754,7 @@ function sectorChangeFilterChanged() {
 
 let sectorChangeExplorerInitialized = false;
 function initializeSectorChangeExplorer() {
+  state.sectorChange.contextRequest++;
   const select = $("sectorVersionSelect");
   select.replaceChildren(new Option("— 请选择真实PG目标日期与来源包 —", ""));
   for (const version of state.versions) {
@@ -587,8 +765,25 @@ function initializeSectorChangeExplorer() {
     select.append(option);
   }
   select.disabled = !state.versions.length;
+  for (const [id, placeholder] of [
+    ["sectorProfileRevisionSelect", "— 请选择完整修订 —"],
+    ["sectorIndustrySnapshotSelect", "— 请选择PG行业快照 —"],
+    ["sectorConceptSnapshotSelect", "— 请选择PG GN快照 —"],
+    ["sectorEventWindowSelect", "— 先选择目标日 —"],
+  ]) {
+    const dependent = $(id);
+    dependent.replaceChildren(new Option(placeholder, ""));
+    dependent.disabled = true;
+  }
+  sectorInvalidate(
+    "PG目录已读取；请选择精确身份后重新读取。旧板块结果已失效。",
+  );
   if (!sectorChangeExplorerInitialized) {
     select.addEventListener("change", loadSectorChangeContext);
+    $("sectorObservationMode").addEventListener(
+      "change",
+      sectorSetObservationMode,
+    );
     for (const id of [
       "sectorProfileRevisionSelect",
       "sectorIndustrySnapshotSelect",

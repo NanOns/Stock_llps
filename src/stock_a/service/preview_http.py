@@ -28,6 +28,7 @@ from stock_a.application.runtime_config import (
     load_runtime_config,
 )
 from stock_a.application.research_window import resolve_pg_history_window
+from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.application.pg_research import (
     PgResearchBindingError,
     read_source_version_context,
@@ -124,7 +125,11 @@ def _source_context_preview_error(error: Exception) -> PreviewHttpError | None:
     }
     if code.startswith("PG_"):
         status = 503
-    elif category == "ARGUMENT" or code in request_errors:
+    elif (
+        category == "ARGUMENT"
+        or code in request_errors
+        or (code.startswith("D0_") and code.endswith(("INVALID", "_REJECTED")))
+    ):
         status = 400
     elif code.endswith("NOT_FOUND") or code.endswith("NOT_IN_PAIR"):
         status = 404
@@ -1191,13 +1196,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "stock_offset",
             "stock_limit",
         }
-        if not isinstance(body, dict) or set(body) != required:
+        allowed_fields = (required, required | {"observation_mode"})
+        if not isinstance(body, dict) or set(body) not in allowed_fields:
             raise PreviewHttpError(
                 400,
                 "SECTOR_CHANGE_BODY_INVALID",
                 "行业/GN变化查询请求字段不完整或含未登记字段",
             )
 
+        observation_mode = body.get("observation_mode", "D1")
+        if not isinstance(observation_mode, str) or observation_mode not in {
+            "D1",
+            "D0",
+        }:
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_MODE_INVALID",
+                "观察模式只能为D1或D0",
+            )
+        include_d0_launch_new = observation_mode == "D0"
         target = _iso_date(body["target_session"])
         cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
         _require_research_cutoff(target, cutoff)
@@ -1208,6 +1225,28 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         history_session_count = _positive_int(
             body["pg_history_session_count"], "pg_history_session_count", 75
         )
+        d0_before_session = None
+        if include_d0_launch_new:
+            try:
+                resolved_target, adjacent_sessions, _ = resolve_pg_history_window(
+                    target.isoformat(), 2
+                )
+            except ResearchEntryError as error:
+                raise PreviewHttpError(
+                    400, "D0_OFFICIAL_CALENDAR_INVALID", str(error)
+                ) from error
+            if (
+                resolved_target != target
+                or len(adjacent_sessions) != 2
+                or adjacent_sessions[-1] != target
+            ):
+                raise PreviewHttpError(
+                    400,
+                    "D0_BEFORE_SESSION_INVALID",
+                    "D0目标日没有可用的前一官方交易会话",
+                )
+            d0_before_session = adjacent_sessions[-2]
+            _require_research_cutoff(d0_before_session, cutoff)
 
         try:
             industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
@@ -1244,8 +1283,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "SECTOR_CHANGE_FILTER_INVALID",
                 "changed_only必须为布尔值且必须读取全局去重变化个股页",
             )
+        if include_d0_launch_new and changed_only:
+            raise PreviewHttpError(
+                400,
+                "SECTOR_CHANGE_MODE_FILTER_INVALID",
+                "D0观察模式不能叠加D1 changed_only筛选",
+            )
         sort_by = body["sort_by"]
-        if sort_by not in {"changed_stocks", "delta20", "delta5", "ret20", "ret5"}:
+        valid_sorts = {"changed_stocks", "delta20", "delta5", "ret20", "ret5"}
+        if include_d0_launch_new:
+            valid_sorts.add("d0_launch_new")
+        if sort_by not in valid_sorts or (
+            include_d0_launch_new and sort_by != "d0_launch_new"
+        ):
             raise PreviewHttpError(
                 400, "SECTOR_CHANGE_SORT_INVALID", "板块排序字段不在现役合同中"
             )
@@ -1358,6 +1408,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 concept_snapshot_id,
                 event_window_start.isoformat(),
                 history_session_count,
+                include_d0_launch_new,
+                d0_before_session.isoformat() if d0_before_session else None,
             )
             inputs, cache_hit = self.preview_server.state.source_sector_change_inputs(
                 cache_key,
@@ -1372,10 +1424,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     profile_revision=profile_revision,
                     event_window_start=event_window_start,
                     pg_history_session_count=history_session_count,
+                    include_d0_launch_new=include_d0_launch_new,
+                    d0_before_session=d0_before_session,
                 ),
             )
         except PreviewHttpError:
             raise
+        except SourceD0RawError as error:
+            mapped = _source_context_preview_error(error)
+            if mapped is None:
+                raise
+            raise mapped from error
         except TdxSectorMembersApplicationError as error:
             if "MISMATCH" in error.code or "INCOMPLETE" in error.code:
                 status = 409
@@ -1407,6 +1466,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 stock_limit=stock_limit,
                 include_source_market_context=False,
                 member_search=member_search,
+                d0_new_only=include_d0_launch_new,
             )
         except TdxSectorMembersApplicationError as error:
             if "MISMATCH" in error.code or "INCOMPLETE" in error.code:
@@ -1418,6 +1478,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             else:
                 status = 503
             raise PreviewHttpError(status, error.code, str(error)) from error
+        result["observation_mode"] = observation_mode
         result["cache"] = {"reused_exact_inputs": cache_hit}
         return result
 

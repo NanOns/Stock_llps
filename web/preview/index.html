@@ -45,6 +45,13 @@
         </div>
         <div class="sector-controls">
           <label>
+            观察模式
+            <select id="sectorObservationMode">
+              <option value="D1" selected>D1历史支撑变化</option>
+              <option value="D0">D0相邻会话新增启动</option>
+            </select>
+          </label>
+          <label>
             目标交易日与来源包
             <select id="sectorVersionSelect" disabled>
               <option value="">— 请选择真实PG版本 —</option>
@@ -69,7 +76,7 @@
             </select>
           </label>
           <label>
-            D1事件窗
+            <span id="sectorEventWindowLabel">D1事件窗</span>
             <select id="sectorEventWindowSelect" disabled>
               <option value="">— 先选择目标日 —</option>
             </select>
@@ -87,8 +94,8 @@
         <div id="sectorBoardSection" hidden>
           <div class="panel-head sector-subhead">
             <div>
-              <h3>发生D1支撑变化的板块</h3>
-              <p>
+              <h3 id="sectorBoardHeading">发生D1支撑变化的板块</h3>
+              <p id="sectorBoardDescription">
                 首页最多15个；排序只供研究阅读，不代表预测或优先级。完整板块数和翻页保留，成员关系为后验NON_PIT。
               </p>
             </div>
@@ -109,6 +116,7 @@
                   <option value="delta5">5会话变化</option>
                   <option value="ret20">20会话收益</option>
                   <option value="ret5">5会话收益</option>
+                  <option value="d0_launch_new">D0新增启动成员数</option>
                 </select>
               </label>
               <label>
@@ -118,9 +126,9 @@
                   <option value="WEAKER">变弱排序</option>
                 </select>
               </label>
-              <label class="sector-checkbox">
+              <label class="sector-checkbox" id="sectorChangedOnlyLabel">
                 <input id="sectorChangedOnly" type="checkbox" checked />
-                只看有变化板块
+                <span id="sectorChangedOnlyText">只看有变化板块</span>
               </label>
             </div>
           </div>
@@ -132,7 +140,7 @@
                   <th>板块</th>
                   <th>类型 / 快照时间</th>
                   <th>成员分母</th>
-                  <th>D1变化成员</th>
+                  <th id="sectorBoardChangeHeader">D1变化成员</th>
                   <th>5 / 20会话收益、变化与覆盖</th>
                   <th>范围</th>
                 </tr>
@@ -157,8 +165,10 @@
         <div id="sectorChangedStocksSection" hidden>
           <div class="panel-head sector-subhead">
             <div>
-              <h3>全局去重的D1变化股票</h3>
-              <p>同一来源代码即使属于多个GN概念，也只计一次；每页最多30只。</p>
+              <h3 id="sectorStockHeading">全局去重的D1变化股票</h3>
+              <p id="sectorStockDescription">
+                同一来源代码即使属于多个GN概念，也只计一次；每页最多30只。
+              </p>
             </div>
             <span id="sectorChangedStocksCount" class="count">—</span>
           </div>
@@ -167,7 +177,7 @@
               <thead>
                 <tr>
                   <th>来源代码</th>
-                  <th>变化事件数</th>
+                  <th id="sectorStockStateHeader">变化事件数</th>
                   <th>查看</th>
                 </tr>
               </thead>
@@ -195,7 +205,7 @@
               <p id="sectorBoardDetailSummary" class="muted"></p>
             </div>
             <div class="sector-inline-controls">
-              <label>
+              <label id="sectorMemberStateControl">
                 D1状态
                 <select id="sectorMemberState">
                   <option value="ALL">全部成员</option>
@@ -206,7 +216,7 @@
                   <option value="NOT_EVALUABLE">不可评价</option>
                 </select>
               </label>
-              <label>
+              <label id="sectorMemberSearchControl">
                 股票代码
                 <input
                   id="sectorMemberSearch"
@@ -225,9 +235,9 @@
               <thead>
                 <tr>
                   <th>来源代码</th>
-                  <th>D1状态</th>
-                  <th>事件数</th>
-                  <th>本次状态与原因</th>
+                  <th id="sectorMemberStateHeader">D1状态</th>
+                  <th id="sectorMemberEventsHeader">事件数</th>
+                  <th id="sectorMemberExplainHeader">本次状态与原因</th>
                   <th>详情</th>
                 </tr>
               </thead>
