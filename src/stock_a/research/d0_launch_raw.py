@@ -490,6 +490,14 @@ def calculate_d0_launch_confirm_raw(
         "quality": "OBSERVED" if state != "UNKNOWN" else "UNKNOWN",
         "main_reason": main_reason or "ALL_FIVE_PREDICATES_TRUE",
         "predicates": predicates,
+        "failure_line_candidate": {
+            "value": predicates["close_above_phc20"].get("inputs", {}).get("PHC20")
+            if state == "TRUE"
+            else None,
+            "source": "T0_PHC20" if state == "TRUE" else None,
+            "evaluation_starts": "NEXT_OFFICIAL_SESSION",
+            "role": "DIAGNOSTIC_ONLY_NOT_D2",
+        },
         "session_contract": _SESSION_CONTRACT,
         "strict_official_sessions": [session.isoformat() for session in window],
         "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",

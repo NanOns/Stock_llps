@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections import Counter
+from dataclasses import asdict
 from datetime import date, datetime
 from fractions import Fraction
 import re
@@ -18,8 +19,20 @@ from stock_a.research.d0_launch_raw import (
     fraction_payload,
 )
 from stock_a.application.source_pool_factors import read_source_pool_rps
+from stock_a.application.source_pool_seed import source_seed_predicates
 from stock_a.application.tdx_sector_members import _raw_window_observation
 from stock_a.research.core import MarketSessionCalendar, calculate_core
+from stock_a.domain import FieldValue, unknown
+from stock_a.research.admission import admit, line_breached
+from stock_a.research.facts import Fact
+from stock_a.research.risk import compose, priority_status
+from stock_a.research.state import CONTRACT as STATE_CONTRACT, Rules, health
+from stock_a.application.research_window import resolve_pg_history_window
+from stock_a.application.runtime_config import _CONFIG_ROOT
+from stock_a.contracts import load_price_profile_contract
+from stock_a.research.entry_history.history_preview import (
+    research_stock_pg_history_preview,
+)
 from stock_a.storage.postgres.d0_raw import (
     MAX_SOURCE_SYMBOLS,
     D0RawPgError,
@@ -56,6 +69,176 @@ class SourceD0RawError(ValueError):
         self.code = code
         self.category = category
         super().__init__(message)
+
+
+def diagnostic_admission(result, *, target, package_sha256):
+    """应用来源诊断角色，不生成正式事件。"""
+    item = result["results"][0]
+    symbol = item["source_symbol"]
+    source = f"{result['namespace_id']}:{package_sha256}"
+    missing = unknown("FORMAL_EPISODE_NOT_ESTABLISHED")
+    raw = (
+        FieldValue(item["scenario_raw"] == "TRUE")
+        if item["scenario_raw"] != "UNKNOWN"
+        else unknown("RAW_SCENARIO_UNKNOWN")
+    )
+    ordinal = _official_calendar(target)["sessions"].index(target)
+    return asdict(
+        admit(
+            entity_id=symbol,
+            ordinal=ordinal,
+            next_ordinal=ordinal + 1,
+            coordinate_id=f"RAW:TDX_SOURCE_SYMBOL:{symbol}",
+            scenario=result["scenario"],
+            role="DIAGNOSTIC",
+            raw=raw,
+            gates=(),
+            close=missing,
+            phc20=missing,
+            ma5=missing,
+            ma20=missing,
+            r5=missing,
+            r20=missing,
+            prior_episode_id=None,
+            prior_episode_valid=missing,
+            support_anchor_id=None,
+            support_lower=missing,
+            support_valid=missing,
+            evidence_ref=source,
+            window_ref=source,
+            capability_state="READY",
+        )
+    )
+
+
+def attach_stock_risk_readiness(config, result, *, target, cutoff, package_sha256):
+    """将同股同日PG历史事实交给现役风险归并，保留正式结构未知。"""
+    item = result["results"][0]
+    symbol = item["source_symbol"]
+    namespace = result["namespace_id"]
+    _, sessions, _ = resolve_pg_history_window(target.isoformat(), 75)
+    history = read_raw_daily_history_stock(
+        config,
+        source_symbol=symbol,
+        target_session=target,
+        package_sha256=package_sha256,
+        sessions=sessions,
+        expected_namespace_id=namespace,
+        research_cutoff=cutoff,
+    )
+    preview = research_stock_pg_history_preview(
+        symbol=symbol,
+        target_session=target.isoformat(),
+        package_sha256=package_sha256,
+        session_dates=sessions,
+        history_rows=history["history_rows"],
+        namespace_id=namespace,
+        profile_contract=load_price_profile_contract(_CONFIG_ROOT).document,
+    )
+    damage_data = preview["core"]["fields"]["core.price_damage"]
+    extension_data = next(
+        x
+        for x in preview["profile_preview"]["components"]
+        if x["field_id"] == "profile.extension"
+    )
+
+    def field(data):
+        if data.get("quality") == "OBSERVED":
+            return FieldValue(data["value"])
+        return unknown(data.get("reason") or "SOURCE_FIELD_UNKNOWN")
+
+    damage, extension = field(damage_data), field(extension_data)
+    missing = unknown("FORMAL_EPISODE_NOT_ESTABLISHED")
+    coordinate = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
+    source = f"{namespace}:{package_sha256}"
+    fact = lambda value: Fact(value, symbol, target, coordinate, source)
+    risk = compose(
+        entity_id=symbol,
+        session=target,
+        coordinate_id=coordinate,
+        selected_episode_id=None,
+        structure_applicability="UNKNOWN",
+        support_applicability="UNKNOWN",
+        damage=fact(damage),
+        extension=fact(extension),
+        invalidated=fact(missing),
+        shallow_breach=fact(missing),
+        capability_state="READY",
+    )
+    rps = read_source_pool_rps(
+        config,
+        target_session=target,
+        research_cutoff=cutoff,
+        package_sha256=package_sha256,
+        expected_namespace_id=namespace,
+    )
+    metric_field = rps["facts"].get(symbol, {}).get("rps5_delta3_pp") or unknown(
+        "RPS5_DELTA3_UNAVAILABLE"
+    )
+    prior = research_stock_pg_history_preview(
+        symbol=symbol,
+        target_session=sessions[-2].isoformat(),
+        package_sha256=package_sha256,
+        session_dates=sessions[:-1],
+        history_rows=[
+            row for row in history["history_rows"] if row["session_date"] < target
+        ],
+        namespace_id=namespace,
+        profile_contract=load_price_profile_contract(_CONFIG_ROOT).document,
+        include_profile_preview=False,
+        allow_missing_target_row=True,
+    )
+    previous_close = prior["raw"]["close"]
+    previous_ma = prior["core"]["fields"]["core.ma20"]
+    current_close = preview["raw"]["close"]
+    current_ma = preview["core"]["fields"]["core.ma20"]
+    if all(
+        x.get("quality") == "OBSERVED"
+        for x in (previous_close, previous_ma, current_close, current_ma)
+    ):
+        crossed = Fraction(previous_close["value"]) <= Fraction(
+            previous_ma["value"]["exact"]
+        ) and Fraction(current_close["value"]) > Fraction(current_ma["value"]["exact"])
+        cross = {"state": "TRUE" if crossed else "FALSE", "reason": None}
+    else:
+        cross = {"state": "UNKNOWN", "reason": "PREVIOUS_MA20_CROSS_INPUT_UNKNOWN"}
+    seed = source_seed_predicates(preview, metric_field, cross)
+    health_field = health(
+        damage, extension, metric_field, Rules(STATE_CONTRACT, 2, 10, 3, 3)
+    )
+    eligibility = unknown("FORMAL_QUALIFICATION_NOT_EVALUATED")
+    item["risk_priority_readiness"] = {
+        "source": source,
+        "coordinate": coordinate,
+        "session": target.isoformat(),
+        "pit_status": "NON_PIT_RETROSPECTIVE",
+        "source_seed": seed,
+        "core_damage": damage_data,
+        "profile_extension": extension_data,
+        "structure_applicability": "UNKNOWN",
+        "diagnostic_admission": diagnostic_admission(
+            result, target=target, package_sha256=package_sha256
+        ),
+        "risk": asdict(risk),
+        "health_input_rps5_delta3_pp": fraction_payload(Fraction(metric_field.value))
+        if metric_field.quality == "OBSERVED"
+        else None,
+        "health_direction": asdict(health_field),
+        "health_direction_scope": "SOURCE_INPUTS_ONLY_NOT_FORMAL_EPISODE_HEALTH",
+        "formal_episode": "NOT_EVALUATED",
+        "formal_eligibility": "UNKNOWN",
+        "priority": priority_status(eligibility, risk, other_keys_ready=False),
+        "missing": [
+            "HISTORICAL_RESEARCH_UNIVERSE",
+            "FORMAL_EVENT_CLOCK",
+            "CORPORATE_ACTION_COORDINATE",
+            "LIQUIDITY_CNY_UNIT",
+            "STABLE_SECURITY_ID",
+            "FORMAL_EPISODE",
+            "FORMAL_ELIGIBILITY",
+            "PRIORITY_KEYS",
+        ],
+    }
 
 
 def attach_source_d1_prior_reference(
@@ -191,9 +374,7 @@ def attach_recovery_failure_followup(
         row = by_date.get(session)
         reason = None
         close = None
-        if line is None:
-            reason = "FAILURE_LINE_CANDIDATE_UNAVAILABLE"
-        elif row is None:
+        if row is None:
             saved_end = (history.get("saved_session_range") or [None, None])[1]
             reason = (
                 "NOT_AVAILABLE_AFTER_SAVED_RANGE"
@@ -234,11 +415,21 @@ def attach_recovery_failure_followup(
                     reason, close = "FOLLOWUP_OHLC_INVALID", None
             except (TypeError, ValueError, ZeroDivisionError):
                 reason = "FOLLOWUP_OHLC_INVALID"
+        if reason is None and line is None:
+            reason = "FAILURE_LINE_CANDIDATE_UNAVAILABLE"
         result.append(
             {
                 "session": session.isoformat(),
                 "close": fraction_payload(close),
-                "close_at_or_below_line": None if reason else close <= line,
+                "close_quality": "OBSERVED" if close is not None else "UNKNOWN",
+                "close_at_or_below_line": None
+                if reason
+                else line_breached(
+                    FieldValue(close),
+                    FieldValue(line),
+                    ordinal=calendar.index(session),
+                    effective_ordinal=start + 1,
+                ).value,
                 "quality": "UNKNOWN" if reason else "OBSERVED",
                 "reason": reason,
             }

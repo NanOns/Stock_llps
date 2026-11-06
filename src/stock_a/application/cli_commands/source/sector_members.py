@@ -32,7 +32,10 @@ from stock_a.application.source_d1_support_changes import (
 )
 from stock_a.application.source_d0_raw import (
     SourceD0RawError,
+    attach_recovery_failure_followup,
+    attach_stock_risk_readiness,
     attach_source_d1_prior_reference,
+    diagnostic_admission,
     query_source_d0_raw_launch,
 )
 from stock_a.application.pg_research import (
@@ -529,7 +532,62 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                     "D0_D1_SYMBOL_NOT_FOUND", "目标来源池不含指定股票。"
                 )
             attach_source_d1_prior_reference(d0["results"][0], inputs.discovery)
+            if args.d0_followup_session:
+                attach_recovery_failure_followup(
+                    config,
+                    d0["results"][0],
+                    target=target,
+                    followup=_parse_session_date(args.d0_followup_session),
+                    cutoff=cutoff,
+                    package_sha256=args.package_sha256,
+                    namespace_id=d0["namespace_id"],
+                )
+            if args.d0_risk_readiness:
+                attach_stock_risk_readiness(
+                    config,
+                    d0,
+                    target=target,
+                    cutoff=cutoff,
+                    package_sha256=args.package_sha256,
+                )
+                launch = query_source_d0_raw_launch(
+                    config,
+                    scenario="LAUNCH_CONFIRM",
+                    target_session=target,
+                    research_cutoff=cutoff,
+                    package_sha256=args.package_sha256,
+                    symbol=args.d0_structure_symbol,
+                    limit=1,
+                    expected_namespace_id=d0["namespace_id"],
+                )
+                if len(launch["results"]) != 1:
+                    raise SourceD0RawError(
+                        "D0_D1_SYMBOL_NOT_FOUND", "目标来源池不含指定股票。"
+                    )
+                launch["results"][0]["d1_prior_structure_reference"] = d0["results"][0][
+                    "d1_prior_structure_reference"
+                ]
+                launch["results"][0]["diagnostic_admission"] = diagnostic_admission(
+                    launch, target=target, package_sha256=args.package_sha256
+                )
+                if args.d0_followup_session:
+                    attach_recovery_failure_followup(
+                        config,
+                        launch["results"][0],
+                        target=target,
+                        followup=_parse_session_date(args.d0_followup_session),
+                        cutoff=cutoff,
+                        package_sha256=args.package_sha256,
+                        namespace_id=launch["namespace_id"],
+                    )
+                result["d0_launch_diagnostic"] = launch
             result["d0_d1_structure_diagnostic"] = d0
+        elif args.d0_followup_session or args.d0_risk_readiness:
+            raise SourceD0RawError(
+                "D0_STRUCTURE_SYMBOL_REQUIRED",
+                "风险或后继观察要求指定D0结构来源代码。",
+                category="ARGUMENT",
+            )
         if include_seed:
             from stock_a.application.runtime_config import _CONFIG_ROOT
             from stock_a.application.source_pool_seed import (

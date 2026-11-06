@@ -71,7 +71,11 @@ def register_commands(commands):
     )
     d0_raw.add_argument("--symbol", help="可选精确来源代码SH./SZ.加六位数字")
     d0_raw.add_argument(
-        "--followup-session", help="恢复诊断候选线后继观察终点；须指定单只来源代码"
+        "--risk-readiness", action="store_true", help="单股读取同日风险与资格研究事实"
+    )
+    d0_raw.add_argument(
+        "--followup-session",
+        help="启动或恢复诊断候选线后继观察终点；须指定单只来源代码",
     )
     d0_raw.add_argument("--offset", type=int, default=0, help="稳定分页偏移，默认0")
     d0_raw.add_argument(

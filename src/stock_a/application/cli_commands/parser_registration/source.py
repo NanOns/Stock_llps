@@ -256,6 +256,12 @@ def register_commands(commands):
         "--d0-structure-symbol", help="对一个来源代码联接D0恢复诊断和前态D1支撑参考"
     )
     sector_change_stocks.add_argument(
+        "--d0-risk-readiness", action="store_true", help="联接该股风险和正式资格可用性"
+    )
+    sector_change_stocks.add_argument(
+        "--d0-followup-session", help="诊断冻结线的后继官方会话终点"
+    )
+    sector_change_stocks.add_argument(
         "--include-source-seed-board",
         action="store_true",
         help="只读计算全来源探索性RPS/Seed并汇总指定板块完整成员",

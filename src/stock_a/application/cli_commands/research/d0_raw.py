@@ -19,6 +19,7 @@ from stock_a.application.runtime_config import (
 from stock_a.application.source_d0_raw import (
     SourceD0RawError,
     attach_recovery_failure_followup,
+    attach_stock_risk_readiness,
     query_source_d0_raw_launch,
 )
 
@@ -45,16 +46,33 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
             before_package_sha256=args.before_package_sha256,
             transition=args.transition,
         )
+        if args.risk_readiness:
+            if (
+                args.action != "current"
+                or not args.symbol
+                or len(result["results"]) != 1
+            ):
+                raise SourceD0RawError(
+                    "D0_RISK_SCOPE_INVALID",
+                    "风险研究读取要求单股当前查询。",
+                    category="ARGUMENT",
+                )
+            attach_stock_risk_readiness(
+                config,
+                result,
+                target=_parse_session_date(args.target_session),
+                cutoff=_parse_session_date(args.research_cutoff),
+                package_sha256=args.package_sha256,
+            )
         if getattr(args, "followup_session", None):
             if (
-                args.scenario != "RECOVERY_TURN"
-                or args.action != "current"
+                args.action != "current"
                 or not args.symbol
                 or len(result["results"]) != 1
             ):
                 raise SourceD0RawError(
                     "D0_FOLLOWUP_SCOPE_INVALID",
-                    "后继观察要求单只股票的恢复诊断当前查询。",
+                    "后继观察要求单只股票的启动或恢复诊断当前查询。",
                     category="ARGUMENT",
                 )
             attach_recovery_failure_followup(
