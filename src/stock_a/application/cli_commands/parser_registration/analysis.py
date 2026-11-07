@@ -16,7 +16,7 @@ from stock_a.application.pg_price_profiles import (
 
 def register_commands(commands):
     observation = commands.add_parser(
-        "source-market-observation", help="只读研究来源池变化、板块归属及后续价格"
+        "source-market-observation", help="研究来源池变化、板块归属及后续价格"
     )
     observation.add_argument("--start-session", required=True, help="起始官方交易会话")
     observation.add_argument("--end-session", required=True, help="结束官方交易会话")
@@ -48,9 +48,29 @@ def register_commands(commands):
     )
     observation.add_argument(
         "--view",
-        choices=("full", "summary", "cohort"),
+        choices=("full", "summary", "cohort", "persisted", "persisted-changes"),
         default="full",
         help="完整研究、盘后变化摘要或单日全来源独立研究组",
+    )
+    observation.add_argument("--rule-id", help="持久研究读取的精确规则标识")
+    observation.add_argument("--before-session", help="持久规则对照的前一日期")
+    observation.add_argument(
+        "--before-event-window-start", help="前一日期的D1事件窗口起点"
+    )
+    observation.add_argument(
+        "--risk-readiness",
+        action="store_true",
+        help="计算所选来源代码的风险分量和资格边界",
+    )
+    observation.add_argument(
+        "--persist-research-facts",
+        action="store_true",
+        help="将本次完整来源池研究事实写入PG",
+    )
+    observation.add_argument(
+        "--persist-research-events",
+        action="store_true",
+        help="同时保存来源D1独立锚事件",
     )
     observation.add_argument("--symbol", help="仅筛选该来源代码的观察明细")
     observation.add_argument(

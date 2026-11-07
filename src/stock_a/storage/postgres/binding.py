@@ -84,6 +84,18 @@ _MIGRATIONS = (
         ("migrations", "0012_r02_profile_direct_key_drop_old_control_tables.sql"),
         "e06cbc351651017be8607dc41a4ba43e405df04bbc6a6ffed96e06b001af575d",
     ),
+    (
+        13,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0013_source_research_facts.sql"),
+        "6fa10c3a278a2ab462d53ced60cea0c10436b327b4b29b15771d69b26731f7b2",
+    ),
+    (
+        14,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0014_source_research_events.sql"),
+        "cba9dc57698ac74487221ee30f097636ab2cfd502bdad20137732da0e80e45f8",
+    ),
 )
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
@@ -94,6 +106,8 @@ _TASK_SCOPE_MIGRATIONS = {
     "R02_R04_CORE_DAMAGE_SLOPE_POOL_QUERY_R1": frozenset({10}),
     "R02_SOURCE_NATIVE_AMOUNT_VOLUME_RATIO_PROFILE_R1": frozenset({11}),
     "R02_R03_R04_PROFILE_DIRECT_KEY_PG_OLD_CONTROL_CLEANUP_R1": frozenset({12}),
+    "R04_R05_RESEARCH_FACTS_R2": frozenset({13}),
+    "R04_R05_SOURCE_D1_EVENTS_R2": frozenset({14}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -166,6 +180,13 @@ _RELATIONS_BY_MIGRATION_COUNT[12] = _R01_TABLES | {
     "tdx_sector_source_snapshots",
     "tdx_sector_catalog",
     "tdx_sector_members",
+}
+_RELATIONS_BY_MIGRATION_COUNT[13] = _RELATIONS_BY_MIGRATION_COUNT[12] | {
+    "source_rule_evaluations",
+    "source_forward_path_facts",
+}
+_RELATIONS_BY_MIGRATION_COUNT[14] = _RELATIONS_BY_MIGRATION_COUNT[13] | {
+    "source_research_events",
 }
 
 

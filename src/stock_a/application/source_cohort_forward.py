@@ -112,9 +112,16 @@ def _read_t0_d1(config, day, package_sha256, history_count):
             state = predicate["state"]
             if state not in {"TRUE", "FALSE", "UNKNOWN"}:
                 raise SourceObservationError("D1谓词状态无效")
+            reasons = list(predicate.get("dependency_reasons", []))
+            if state == "FALSE":
+                reasons.extend(
+                    f"D1_{name.upper()}_FALSE"
+                    for name in ("p1", "p2")
+                    if preview["predicates"][name]["state"] == "FALSE"
+                )
             states[symbol] = {
                 "state": state,
-                "reasons": predicate.get("dependency_reasons", []),
+                "reasons": reasons,
                 "predicate": preview,
                 "source_mismatch_sessions": mismatches,
                 "source_identity_bound": bool(birth.get("source_entry_sha256")),
@@ -165,7 +172,7 @@ def _frozen_line_followup(item, facts):
         Fraction(int(value["numerator"]), int(value["denominator"])) if value else None
     )
     first = upper = None
-    unknown_before = False
+    unknown_before = line is None
     observations = []
     for point in facts["points"]:
         close = point["ohlc"]["close"]
@@ -198,6 +205,15 @@ def _frozen_line_followup(item, facts):
     }
 
 
+def _anchor_window_fact(anchors, unknowns):
+    """已匹配与其他会话未知可以同时成立，保留两者。"""
+    state = "TRUE" if anchors else "UNKNOWN" if unknowns else "FALSE"
+    reasons = ["ANCHOR_WINDOW_HAS_UNKNOWN"] if unknowns else []
+    if state == "FALSE":
+        reasons.append("NO_ANCHOR_IN_COMPLETE_WINDOW")
+    return {"state": state, "reasons": reasons}
+
+
 def read_source_cohort_forward(
     config: Mapping[str, Any],
     day: Mapping[str, Any],
@@ -210,6 +226,7 @@ def read_source_cohort_forward(
     symbol: str | None = None,
     offset: int = 0,
     limit: int = 30,
+    facts_consumer=None,
 ) -> dict[str, Any]:
     """先冻结全部T0规则，再对同一代码池逐期限描述后验事实。"""
     if not horizons or any(
@@ -254,11 +271,44 @@ def read_source_cohort_forward(
             if name in indexes:
                 reasons = [indexes[name][code].get("main_reason")]
             else:
-                reasons = day["seed"]["facts"][code][name].get("reasons", [])
+                seed_fact = day["seed"]["facts"][code]
+                reasons = list(seed_fact[name].get("reasons", []))
+                dependencies = {
+                    "s1": ("bias_below_3", "compression", "rps5_delta3_at_least_3"),
+                    "s2": ("bias_below_3", "rps5_delta3_at_least_10"),
+                    "seed": (
+                        "research_universe",
+                        "actual_bar",
+                        "coordinate_ready",
+                        "liquidity_mean20",
+                        "no_damage",
+                        "no_severe_extension",
+                    ),
+                }
+                if state == "FALSE" and name in dependencies:
+                    predicates = seed_fact.get("predicates", {})
+                    reasons.extend(
+                        f"PREDICATE_FALSE:{key}"
+                        for key in dependencies[name]
+                        if predicates.get(key, {}).get("state") == "FALSE"
+                    )
+                    if name == "s2" and all(
+                        predicates.get(key, {}).get("state") == "FALSE"
+                        for key in ("bull_transition", "previous_ma20_cross")
+                    ):
+                        reasons.append("BULL_TRANSITION_AND_MA20_CROSS_FALSE")
+                    if name == "seed" and all(
+                        seed_fact[key]["state"] == "FALSE" for key in ("s1", "s2")
+                    ):
+                        reasons.append("BOTH_S1_S2_FALSE")
             rules[name] = {
                 "state": state,
                 "reasons": [reason for reason in reasons if reason],
             }
+            if name in indexes:
+                rules[name]["frozen_line"] = indexes[name][code].get(
+                    "failure_line_candidate", {}
+                )
         rules["D1_T0"] = {
             key: d1[code][key]
             for key in ("state", "reasons", "source_mismatch_sessions")
@@ -300,12 +350,7 @@ def read_source_cohort_forward(
                     "dependency_reasons": ["T0_SOURCE_IDENTITY_UNPROVED"],
                 }
             )
-        rules["D1_ANCHOR_WINDOW"] = {
-            "state": "TRUE" if anchors else "UNKNOWN" if unknowns else "FALSE",
-            "reasons": ["ANCHOR_WINDOW_HAS_UNKNOWN"]
-            if unknowns and not anchors
-            else [],
-        }
+        rules["D1_ANCHOR_WINDOW"] = _anchor_window_fact(anchors, unknowns)
         shape_fact = diagnostic_shapes["facts"][code]
         for rule in ("STRONG_PULLBACK_DIAGNOSTIC", "TREND_CONTINUE_DIAGNOSTIC"):
             rules[rule] = shape_fact[rule]
@@ -491,6 +536,17 @@ def read_source_cohort_forward(
         )
         for code in symbols
     )
+    written = None
+    if facts_consumer is not None:
+        written = facts_consumer(
+            target=target,
+            source=source,
+            namespace_id=day["namespace_id"],
+            calendar_revision=calendar_revision,
+            session_versions=forward_pool["session_versions"],
+            frozen=frozen,
+            outcomes=outcomes,
+        )
     return {
         "ok": True,
         "scope": "NON_PIT_EXPLORATORY",
@@ -551,6 +607,7 @@ def read_source_cohort_forward(
             "next_offset": offset + limit if offset + limit < len(selected) else None,
         },
         "results": page,
-        "database_transaction": "READ_ONLY",
-        "database_write_attempted": False,
+        "database_transaction": "READ_ONLY" if written is None else "WRITE_COMMITTED",
+        "database_write_attempted": written is not None,
+        "persisted": written,
     }

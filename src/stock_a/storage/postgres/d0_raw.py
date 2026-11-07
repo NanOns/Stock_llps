@@ -195,8 +195,12 @@ def _read_history_grid(
     cells = len(source_symbols) * len(sessions)
     if not 1 <= cells <= _MAX_HISTORY_CELLS:
         raise D0RawPgError("D0_HISTORY_SCOPE_EXCEEDED", "严格RAW历史读取超过有界上限。")
-    cursor.execute(
-        """SELECT p.source_symbol, d.session_date,
+    fetched = []
+    # 保持同一快照和完整网格，将单次冷盘随机读取限制在有界代码块。
+    chunk_size = max(1, min(100, 1500 // len(sessions)))
+    for start in range(0, len(source_symbols), chunk_size):
+        cursor.execute(
+            """SELECT p.source_symbol, d.session_date,
        r.namespace_id::text AS namespace_id, r.package_sha256, r.source_content_id,
        r.source_capture_id::text AS source_capture_id, r.source_entry_sha256,
        r.bar_status, r.bar_reason, r.raw_open, r.raw_high, r.raw_low, r.raw_close,
@@ -215,10 +219,15 @@ LEFT JOIN stock.source_captures c
 LEFT JOIN stock.source_contents s
   ON s.namespace_id=r.namespace_id AND s.content_id=r.source_content_id
 ORDER BY p.source_symbol COLLATE "C", d.session_date""",
-        (list(source_symbols), list(sessions), namespace_id, package_sha256),
-    )
-    column_names = [column.name for column in cursor.description]
-    fetched = cursor.fetchall()
+            (
+                list(source_symbols[start : start + chunk_size]),
+                list(sessions),
+                namespace_id,
+                package_sha256,
+            ),
+        )
+        column_names = [column.name for column in cursor.description]
+        fetched.extend(cursor.fetchall())
     if len(fetched) != cells:
         raise D0RawPgError(
             "D0_HISTORY_GRID_INCOMPLETE", "RAW历史查询没有返回完整的来源代码×会话网格。"
@@ -306,7 +315,7 @@ def read_source_d0_raw_window(
         )
 
     started = time.perf_counter()
-    with source_raw._transaction(config, write=False) as (
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _connection,
         cursor,
         namespace_id,

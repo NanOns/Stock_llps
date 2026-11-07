@@ -370,14 +370,42 @@ def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
                             f"{group}.{name}:{predicate.get('reason') or predicate.get('reason_code') or 'UNKNOWN'}"
                         )
             shape_reasons = list(dict.fromkeys(shape_reasons))
+            pullback_false_reasons = [
+                f"PREDICATE_FALSE:{key}"
+                for key in (
+                    "prior_ols_slope_positive",
+                    "prior_ols_r2_at_least_040",
+                    "close_not_below_previous",
+                    "clv",
+                    "no_shadow_rejection",
+                )
+                if partial[key]["state"] == "FALSE"
+            ]
+            if all(value == "FALSE" for value in alternatives):
+                pullback_false_reasons.append("RECLAIM_AND_RETEST_FALSE")
+            if pullback == "FALSE" and not pullback_false_reasons:
+                pullback_false_reasons.append("NO_MATCHING_DIAGNOSTIC_PARENT")
+            continuation_false_reasons = [
+                f"PREDICATE_FALSE:{key}"
+                for key, value in shape["continuation_shape"]["components"].items()
+                if value == "FALSE"
+            ]
             output[symbol] = {
                 "STRONG_PULLBACK_DIAGNOSTIC": {
                     "state": pullback,
-                    "reasons": shape_reasons if pullback == "UNKNOWN" else [],
+                    "reasons": shape_reasons
+                    if pullback == "UNKNOWN"
+                    else pullback_false_reasons
+                    if pullback == "FALSE"
+                    else [],
                 },
                 "TREND_CONTINUE_DIAGNOSTIC": {
                     "state": continuation,
-                    "reasons": shape_reasons if continuation == "UNKNOWN" else [],
+                    "reasons": shape_reasons
+                    if continuation == "UNKNOWN"
+                    else continuation_false_reasons
+                    if continuation == "FALSE"
+                    else [],
                 },
                 "matched_parent_count": sum(state == "TRUE" for state in parent_states),
                 "parent_count": len(parents),

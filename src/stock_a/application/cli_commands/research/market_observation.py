@@ -29,6 +29,15 @@ from stock_a.application.source_market_observation import (
     read_observation_d1,
 )
 from stock_a.application.source_cohort_forward import read_source_cohort_forward
+from stock_a.application.source_persisted_research import (
+    compare_persisted_cohorts,
+    read_persisted_cohort,
+)
+from stock_a.storage.postgres.research_facts import (
+    prepare_research_rows,
+    write_research_rows,
+)
+from stock_a.storage.postgres.research_events import prepare_source_events
 from stock_a.application.source_d0_raw import (
     SourceD0RawError,
     attach_stock_risk_readiness,
@@ -64,17 +73,87 @@ def _run_source_market_observation(args) -> int:
         if args.relative_position and not args.board_id:
             raise ValueError("相对位置研究需要精确板块")
         horizons = sorted(set(args.horizon or []))
-        if not horizons and args.view in {"full", "cohort"}:
+        if not horizons and args.view in {"full", "cohort", "persisted"}:
             raise ValueError("完整研究必须指定至少一个后继会话数")
-        if args.view != "cohort" and any(not 1 <= value <= 10 for value in horizons):
+        if args.view not in {"cohort", "persisted"} and any(
+            not 1 <= value <= 10 for value in horizons
+        ):
             raise ValueError("后续会话数须为1至10")
         if args.view == "cohort" and (start != end or args.board_id or args.signal):
             raise ValueError("独立研究组须指定单个T0，不接受板块或信号筛选")
+        if args.persist_research_facts and args.view != "cohort":
+            raise ValueError("持久化只接受完整来源池cohort计算")
+        if args.persist_research_events and not args.persist_research_facts:
+            raise ValueError("来源锚事件必须与完整来源规则及路径一同写入")
+        if args.risk_readiness and (args.view != "persisted" or not args.symbol):
+            raise ValueError("风险分量只接受指定代码的持久研究读取")
+        if args.view == "persisted" and (
+            start != end
+            or len(horizons) != 1
+            or not args.rule_id
+            or args.board_id
+            or args.signal
+        ):
+            raise ValueError("持久读取须指定单个T0、规则及期限，不接受板块或信号筛选")
+        if args.view == "persisted-changes" and (
+            start != end
+            or not args.rule_id
+            or not args.before_session
+            or not args.before_event_window_start
+            or args.board_id
+            or args.signal
+            or horizons
+        ):
+            raise ValueError("持久跨日对照须指定两个日期、各自事件窗及规则")
         _, _, _, calendar = _load_calendar(end)
         if start not in calendar or end not in calendar:
             raise ValueError("研究范围端点必须是官方会话")
         sessions = tuple(day for day in calendar if start <= day <= end)
         config, config_path = load_runtime_config()
+        if args.view == "persisted-changes":
+            _emit(
+                compare_persisted_cohorts(
+                    config,
+                    before=_parse_session_date(args.before_session),
+                    after=end,
+                    research_cutoff=cutoff,
+                    package_sha256=args.package_sha256,
+                    profile_revision=args.profile_revision,
+                    history_session_count=args.history_session_count,
+                    d1_history_session_count=args.d1_history_session_count,
+                    before_event_window_start=_parse_session_date(
+                        args.before_event_window_start
+                    ),
+                    after_event_window_start=event_start,
+                    rule=args.rule_id,
+                    industry_snapshot_id=args.industry_snapshot_id,
+                    concept_snapshot_id=args.concept_snapshot_id,
+                    symbol=args.symbol,
+                    offset=args.offset,
+                    limit=args.limit,
+                )
+            )
+            return _EXIT_OK
+        if args.view == "persisted":
+            _emit(
+                read_persisted_cohort(
+                    config,
+                    target=start,
+                    research_cutoff=cutoff,
+                    package_sha256=args.package_sha256,
+                    profile_revision=args.profile_revision,
+                    history_session_count=args.history_session_count,
+                    d1_history_session_count=args.d1_history_session_count,
+                    event_window_start=event_start,
+                    rule=args.rule_id,
+                    horizon=horizons[0],
+                    offset=args.offset,
+                    limit=args.limit,
+                    symbol=args.symbol,
+                    include_risk=args.risk_readiness,
+                )
+            )
+            return _EXIT_OK
         contract = load_price_profile_contract(_CONFIG_ROOT).document
         days = read_market_observation_sessions(
             config,
@@ -95,6 +174,40 @@ def _run_source_market_observation(args) -> int:
             history_session_count=args.d1_history_session_count,
         )
         if args.view == "cohort":
+
+            def persist(**facts):
+                revision = days[0]["seed"].get("runtime_profile_revision")
+                if not revision:
+                    raise ValueError("即时画像修订缺失，拒绝持久化")
+                rules, paths = prepare_research_rows(
+                    **facts,
+                    package_sha256=args.package_sha256,
+                    profile_revision=revision,
+                    history_session_count=args.history_session_count,
+                    d1_history_session_count=args.d1_history_session_count,
+                    event_window_start=event_start,
+                )
+                events = None
+                if args.persist_research_events:
+                    events = prepare_source_events(
+                        target=facts["target"],
+                        source=facts["source"],
+                        namespace_id=facts["namespace_id"],
+                        calendar_revision=facts["calendar_revision"],
+                        frozen=facts["frozen"],
+                        package_sha256=args.package_sha256,
+                        d1_history_session_count=args.d1_history_session_count,
+                    )
+                result = write_research_rows(
+                    config, rules=rules, paths=paths, events=events
+                )
+                return {
+                    **result,
+                    "profile_revision": revision,
+                    "rule_facts": len(rules),
+                    "due_path_facts": len(paths),
+                }
+
             output = read_source_cohort_forward(
                 config,
                 days[0],
@@ -106,6 +219,7 @@ def _run_source_market_observation(args) -> int:
                 symbol=args.symbol,
                 offset=args.offset,
                 limit=args.limit,
+                facts_consumer=persist if args.persist_research_facts else None,
             )
             _emit(output)
             return _EXIT_OK
@@ -790,7 +904,9 @@ def _run_source_market_observation(args) -> int:
                 "ok": False,
                 "code": error.code,
                 "message": str(error),
-                "database_write_attempted": False,
+                "database_write_attempted": "UNKNOWN"
+                if args.persist_research_facts
+                else False,
             },
             error=True,
         )

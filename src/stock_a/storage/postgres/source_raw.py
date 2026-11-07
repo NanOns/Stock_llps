@@ -154,15 +154,20 @@ def _connection_parameters() -> dict[str, Any]:
 
 @contextmanager
 def _transaction(
-    config: Mapping[str, Any], *, write: bool
+    config: Mapping[str, Any], *, write: bool, statement_timeout_ms: int = 10000
 ) -> Iterator[tuple[Any, Any, str]]:
     import psycopg
 
+    if (
+        type(statement_timeout_ms) is not int
+        or not 1000 <= statement_timeout_ms <= 30000
+    ):
+        raise ValueError("PG语句超时必须在1至30秒之间")
     parameters = _connection_parameters()
     parameters.update(
         connect_timeout=5,
         options=(
-            "-c search_path=stock,pg_catalog -c statement_timeout=10000 -c lock_timeout=1000"
+            f"-c search_path=stock,pg_catalog -c statement_timeout={statement_timeout_ms} -c lock_timeout=1000"
         ),
     )
     try:
@@ -175,6 +180,11 @@ def _transaction(
                         "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY"
                     )
                 namespace_id = _validate_connection(cursor, connection, config)
+                # 身份核验临时按其总预算缩短超时；业务语句须恢复调用者的有界预算。
+                cursor.execute(
+                    "SELECT set_config('statement_timeout', %s, true)",
+                    (str(statement_timeout_ms),),
+                )
                 yield connection, cursor, namespace_id
     except RawSourcePgError:
         raise
@@ -183,7 +193,9 @@ def _transaction(
             raise
         sqlstate = getattr(error, "sqlstate", None)
         failure_code = (
-            "PG_READ_PERMISSION_DENIED"
+            "PG_TIMEOUT"
+            if sqlstate == "57014"
+            else "PG_READ_PERMISSION_DENIED"
             if not write and sqlstate == "42501"
             else "PG_WRITE_FAILED"
             if write
@@ -1603,8 +1615,14 @@ def _read_history_rows(
 ) -> list[dict[str, Any]]:
     if not source_symbols:
         return []
-    cursor.execute(
-        f"""SELECT r.*, c.read_started_at AS capture_read_started_at,
+    # 每次读取的代码数随历史长度缩小，避免冷盘上单条查询跨越过多随机页。
+    # 分块仍在同一只读快照内，并按代码排序，不能改变调用者的分母或输出次序。
+    symbols = sorted(set(source_symbols))
+    chunk_size = max(1, min(100, 1500 // max(1, len(sessions))))
+    result = []
+    for start in range(0, len(symbols), chunk_size):
+        cursor.execute(
+            f"""SELECT r.*, c.read_started_at AS capture_read_started_at,
        c.validated_at AS capture_validated_at, c.source_time_quality AS capture_time_quality,
        c.source_clock_role AS capture_clock_role, c.canonical_digest AS capture_digest,
        c.normalized_count AS capture_normalized_count{", c.parser_contract" if include_parser_contract else ""}, s.dataset_id, s.byte_sha, s.byte_count,
@@ -1615,10 +1633,17 @@ JOIN stock.source_contents s ON s.namespace_id=r.namespace_id AND s.content_id=r
 WHERE r.namespace_id=%s::uuid AND r.source_symbol=ANY(%s) AND r.session_date=ANY(%s::date[])
   AND r.package_sha256=%s
 ORDER BY r.source_symbol, r.session_date""",
-        (namespace_id, list(source_symbols), list(sessions), package_sha256),
-    )
-    names = [item.name for item in cursor.description]
-    result = [dict(zip(names, values, strict=True)) for values in cursor.fetchall()]
+            (
+                namespace_id,
+                symbols[start : start + chunk_size],
+                list(sessions),
+                package_sha256,
+            ),
+        )
+        names = [item.name for item in cursor.description]
+        result.extend(
+            dict(zip(names, values, strict=True)) for values in cursor.fetchall()
+        )
     for row in result:
         if (
             row["byte_sha"] != package_sha256
@@ -1689,7 +1714,11 @@ def read_raw_daily_forward_pool(
         or not expected_namespace_id
     ):
         raise RawSourcePgError("FORWARD_POOL_INPUT_INVALID", "后继来源池或会话绑定无效")
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+    with _transaction(config, write=False, statement_timeout_ms=30000) as (
+        _connection,
+        cursor,
+        namespace_id,
+    ):
         if namespace_id != expected_namespace_id:
             raise RawSourcePgError(
                 "FORWARD_NAMESPACE_MISMATCH", "后继来源namespace不一致"
@@ -2227,7 +2256,11 @@ def read_raw_daily_history_page(
         )
     if market not in {"ALL", "SH", "SZ"} or board not in {"ALL", "MAIN_BOARD", "GEM"}:
         raise RawSourcePgError("PG_FILTER_INVALID", "PG历史分页市场或板别过滤无效")
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+    with _transaction(config, write=False, statement_timeout_ms=30000) as (
+        _connection,
+        cursor,
+        namespace_id,
+    ):
         version_status, version_rows, expected_rows = _page_version_status(
             cursor,
             namespace_id,
