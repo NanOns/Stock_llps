@@ -79,14 +79,18 @@ def _run_source_market_observation(args) -> int:
             not 1 <= value <= 10 for value in horizons
         ):
             raise ValueError("后续会话数须为1至10")
-        if args.view == "cohort" and (start != end or args.board_id or args.signal):
-            raise ValueError("独立研究组须指定单个T0，不接受板块或信号筛选")
+        if args.view == "cohort" and (args.board_id or args.signal):
+            raise ValueError("独立研究组不接受板块或信号筛选")
         if args.persist_research_facts and args.view != "cohort":
             raise ValueError("持久化只接受完整来源池cohort计算")
+        if args.persist_research_facts and start != end:
+            raise ValueError("多会话研究只支持只读计算")
         if args.persist_research_events and not args.persist_research_facts:
             raise ValueError("来源锚事件必须与完整来源规则及路径一同写入")
-        if args.risk_readiness and (args.view != "persisted" or not args.symbol):
-            raise ValueError("风险分量只接受指定代码的持久研究读取")
+        if args.risk_readiness and (
+            args.view not in {"persisted", "cohort"} or not args.symbol
+        ):
+            raise ValueError("风险分量须指定代码和独立研究组或持久读取")
         if args.view == "persisted" and (
             start != end
             or len(horizons) != 1
@@ -208,20 +212,57 @@ def _run_source_market_observation(args) -> int:
                     "due_path_facts": len(paths),
                 }
 
-            output = read_source_cohort_forward(
-                config,
-                days[0],
-                d1[start],
-                research_cutoff=cutoff,
-                package_sha256=args.package_sha256,
-                horizons=tuple(horizons),
-                d1_history_count=args.d1_history_session_count,
-                symbol=args.symbol,
-                offset=args.offset,
-                limit=args.limit,
-                facts_consumer=persist if args.persist_research_facts else None,
+            outputs = []
+            for day in days:
+                target = day["session"]
+                output = read_source_cohort_forward(
+                    config,
+                    day,
+                    d1[target],
+                    research_cutoff=cutoff,
+                    package_sha256=args.package_sha256,
+                    horizons=tuple(horizons),
+                    d1_history_count=args.d1_history_session_count,
+                    symbol=args.symbol,
+                    offset=args.offset,
+                    limit=args.limit,
+                    facts_consumer=persist if args.persist_research_facts else None,
+                )
+                if args.risk_readiness and output["results"]:
+                    launch = next(
+                        row
+                        for row in day["scenarios"]["LAUNCH_CONFIRM"]["results"]
+                        if row["source_symbol"] == args.symbol
+                    )
+                    diagnostic = {
+                        "namespace_id": day["namespace_id"],
+                        "scenario": "LAUNCH_CONFIRM",
+                        "results": [deepcopy(launch)],
+                    }
+                    attach_stock_risk_readiness(
+                        config,
+                        diagnostic,
+                        target=target,
+                        cutoff=cutoff,
+                        package_sha256=args.package_sha256,
+                        rps_read=day["seed"].get("rps_read"),
+                    )
+                    output["results"][0]["risk_priority_readiness"] = diagnostic[
+                        "results"
+                    ][0]["risk_priority_readiness"]
+                outputs.append(output)
+            _emit(
+                outputs[0]
+                if len(outputs) == 1
+                else {
+                    "ok": True,
+                    "scope": "NON_PIT_EXPLORATORY",
+                    "research_cutoff": cutoff.isoformat(),
+                    "cohorts": outputs,
+                    "database_transaction": "READ_ONLY",
+                    "database_write_attempted": False,
+                }
             )
-            _emit(output)
             return _EXIT_OK
         result = assemble_observation_changes(
             config,

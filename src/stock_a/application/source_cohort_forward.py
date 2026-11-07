@@ -214,6 +214,35 @@ def _anchor_window_fact(anchors, unknowns):
     return {"state": state, "reasons": reasons}
 
 
+def _anchor_lower_followups(anchors, facts):
+    """保留每个已绑定锚的冻结平台，后继触及只作来源诊断。"""
+    followups = []
+    for anchor in anchors:
+        lower = (anchor.get("platform_generation") or {}).get("lower")
+        exact = lower.get("exact") if isinstance(lower, dict) else lower
+        value = Fraction(exact) if exact is not None else None
+        followups.append(
+            {
+                "anchor_session": anchor["support_anchor_session"],
+                "lower_touch_followup": _frozen_line_followup(
+                    {
+                        "failure_line_candidate": {
+                            "value": {
+                                "numerator": value.numerator,
+                                "denominator": value.denominator,
+                            }
+                            if value is not None
+                            else None,
+                            "source": "D1_PLATFORM_LOWER",
+                        }
+                    },
+                    facts,
+                ),
+            }
+        )
+    return followups
+
+
 def read_source_cohort_forward(
     config: Mapping[str, Any],
     day: Mapping[str, Any],
@@ -467,6 +496,9 @@ def read_source_cohort_forward(
     selected = [code for code in symbols if symbol is None or code == symbol]
     page = []
     for code in selected[offset : offset + limit]:
+        anchor_followups = _anchor_lower_followups(
+            frozen[code]["anchors"], outcomes[code][max(horizons)]
+        )
         followups = {
             rule: _frozen_line_followup(
                 indexes[rule][code], outcomes[code][max(horizons)]
@@ -501,6 +533,7 @@ def read_source_cohort_forward(
                 "source_symbol": code,
                 **frozen[code],
                 "forward": outcomes[code],
+                "d1_anchor_lower_followups": anchor_followups,
                 "frozen_candidate_followup": followups,
                 "t0_prior_shape_observation": shape if code == symbol else None,
                 "frozen_diagnostic_parent_followup": frozen_shapes,

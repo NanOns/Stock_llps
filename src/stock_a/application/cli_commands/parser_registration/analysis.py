@@ -50,7 +50,7 @@ def register_commands(commands):
         "--view",
         choices=("full", "summary", "cohort", "persisted", "persisted-changes"),
         default="full",
-        help="完整研究、盘后变化摘要或单日全来源独立研究组",
+        help="完整研究、盘后变化摘要或按官方会话计算全来源独立研究组",
     )
     observation.add_argument("--rule-id", help="持久研究读取的精确规则标识")
     observation.add_argument("--before-session", help="持久规则对照的前一日期")

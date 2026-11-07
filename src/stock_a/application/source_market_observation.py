@@ -72,6 +72,22 @@ def _first_known_event(points, *, state_key, event_state, unknown_states):
     return None, None
 
 
+def _source_recovery_after_false(points, *, false_at_t0=False):
+    """来源谓词转回真仅是诊断；未知间隔只能证明恢复的上界。"""
+    false_seen = false_at_t0
+    unknown_before_recovery = False
+    for point in points:
+        state = point["state"]
+        if state == "FALSE":
+            false_seen = True
+        elif state in {"UNKNOWN", "NOT_AVAILABLE"}:
+            unknown_before_recovery = True
+        elif false_seen and state == "TRUE":
+            session = point["session"]
+            return (None if unknown_before_recovery else session), session
+    return None, None
+
+
 def read_market_observation_sessions(
     config: Mapping[str, Any],
     *,
@@ -667,6 +683,9 @@ def attach_observation_state_followup(
                 event_state="FALSE",
                 unknown_states={"UNKNOWN", "NOT_AVAILABLE"},
             )
+        first_recovery, recovery_upper = _source_recovery_after_false(
+            points, false_at_t0=event["transition"] == "TRUE_TO_FALSE"
+        )
         first_unknown = next(
             (point["session"] for point in points if point["state"] == "UNKNOWN"), None
         )
@@ -690,6 +709,9 @@ def attach_observation_state_followup(
             "consecutive_true_session_count_including_t0": consecutive_true,
             "first_proved_false_session": first_false,
             "first_proved_false_upper_bound": first_false_upper_bound,
+            "first_proved_recovery_session": first_recovery,
+            "first_proved_recovery_upper_bound": recovery_upper,
+            "recovery_scope": "SOURCE_PREDICATE_NOT_FORMAL_REENTRY",
             "first_unknown_session": first_unknown,
             "first_unknown_reason": next(
                 (point["reason"] for point in points if point["state"] == "UNKNOWN"),
