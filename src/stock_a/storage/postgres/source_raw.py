@@ -1599,6 +1599,7 @@ def _read_history_rows(
     source_symbols: Sequence[str],
     sessions: Sequence[date],
     package_sha256: str,
+    include_parser_contract: bool = False,
 ) -> list[dict[str, Any]]:
     if not source_symbols:
         return []
@@ -1606,7 +1607,7 @@ def _read_history_rows(
         f"""SELECT r.*, c.read_started_at AS capture_read_started_at,
        c.validated_at AS capture_validated_at, c.source_time_quality AS capture_time_quality,
        c.source_clock_role AS capture_clock_role, c.canonical_digest AS capture_digest,
-       c.normalized_count AS capture_normalized_count, s.dataset_id, s.byte_sha, s.byte_count,
+       c.normalized_count AS capture_normalized_count{", c.parser_contract" if include_parser_contract else ""}, s.dataset_id, s.byte_sha, s.byte_count,
        c.content_id AS capture_content_id
 FROM stock.source_raw_daily r
 JOIN stock.source_captures c ON c.namespace_id=r.namespace_id AND c.capture_id=r.source_capture_id
@@ -1667,6 +1668,7 @@ def read_raw_daily_history_stock(
     expected_namespace_id: str | None = None,
     starts_at_target: bool = False,
     research_cutoff: date | None = None,
+    include_parser_contract: bool = False,
 ) -> dict[str, Any]:
     """从固定PG namespace读取单证券的精确包版本与官方会话窗口。"""
     selected_sessions = _validate_history_query(
@@ -1720,6 +1722,7 @@ def read_raw_daily_history_stock(
             source_symbols=(source_symbol,),
             sessions=selected_sessions,
             package_sha256=package_sha256,
+            include_parser_contract=include_parser_contract,
         )
         saved_range = None
         if starts_at_target:

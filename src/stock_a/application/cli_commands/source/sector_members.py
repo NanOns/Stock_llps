@@ -32,6 +32,7 @@ from stock_a.application.source_d1_support_changes import (
 )
 from stock_a.application.source_d0_raw import (
     SourceD0RawError,
+    attach_continuation_observation,
     attach_recovery_failure_followup,
     attach_stock_risk_readiness,
     attach_source_d1_prior_reference,
@@ -526,6 +527,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 symbol=args.d0_structure_symbol,
                 limit=1,
                 expected_namespace_id=inputs.discovery["source"]["namespace_id"],
+                _include_shape_observation=True,
             )
             if len(d0["results"]) != 1:
                 raise SourceD0RawError(
@@ -636,6 +638,32 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             result["source_seed_pool"] = {
                 key: value for key, value in pool.items() if key != "facts"
             }
+            if (
+                getattr(args, "d0_structure_symbol", None)
+                and args.loo_source_symbol == args.d0_structure_symbol
+            ):
+                loo = result["source_seed_board"].get("loo", {})
+                if loo.get("state") == "APPLIED":
+                    qualification = loo.get("after", {}).get("raw_qualification", {})
+                    confirmed = qualification.get("confirmed_raw", {})
+                    state = confirmed.get("state", "UNKNOWN")
+                    result["d0_d1_structure_diagnostic"]["results"][0][
+                        "other_scenario_partial_predicates"
+                    ]["TREND_CONTINUE"]["loo_confirmed_raw"] = {
+                        "state": "TRUE" if state == "TRUE" else "UNKNOWN",
+                        "quality": "OBSERVED" if state == "TRUE" else "UNKNOWN",
+                        "reason": None
+                        if state == "TRUE"
+                        else "OTHER_MEMBER_BOARDS_NOT_EVALUATED",
+                        "selected_board_state": state,
+                        "selected_board": args.detail_board_native_id,
+                        "board_kind": args.detail_board_kind,
+                        "selected_board_qualification": confirmed,
+                        "membership": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                    }
+                    attach_continuation_observation(
+                        result["d0_d1_structure_diagnostic"]["results"][0]
+                    )
     except (
         TdxSectorMembersApplicationError,
         TdxSectorMembersPgError,

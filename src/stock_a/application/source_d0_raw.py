@@ -18,6 +18,7 @@ from stock_a.research.d0_launch_raw import (
     calculate_d0_recovery_turn_raw,
     fraction_payload,
 )
+from stock_a.research.d0_prior_observation import observe_prior_shapes
 from stock_a.application.source_pool_factors import read_source_pool_rps
 from stock_a.application.source_pool_seed import source_seed_predicates
 from stock_a.application.tdx_sector_members import _raw_window_observation
@@ -33,6 +34,7 @@ from stock_a.contracts import load_price_profile_contract
 from stock_a.research.entry_history.history_preview import (
     research_stock_pg_history_preview,
 )
+from stock_a.research.entry_history.history_timeline import post_signal_price_facts
 from stock_a.storage.postgres.d0_raw import (
     MAX_SOURCE_SYMBOLS,
     D0RawPgError,
@@ -69,6 +71,36 @@ class SourceD0RawError(ValueError):
         self.code = code
         self.category = category
         super().__init__(message)
+
+
+def attach_continuation_observation(item):
+    """归约来源续强子条件，不把诊断父观察升级为正式父事件。"""
+    obs = item["prior_shape_observation"]
+    parts = item["other_scenario_partial_predicates"]["TREND_CONTINUE"]
+    keys = (
+        "ma_order",
+        "positive_ret1",
+        "clv",
+        "rps20_at_least_70",
+        "amr_range",
+        "core_slope_positive",
+        "close_above_core_prior_high20",
+        "loo_confirmed_raw",
+    )
+    states = {key: parts[key]["state"] for key in keys}
+    states["diagnostic_prior"] = (
+        "TRUE" if obs["diagnostic_parent_candidates"] else "UNKNOWN"
+    )
+    values = states.values()
+    state = (
+        "FALSE" if "FALSE" in values else "UNKNOWN" if "UNKNOWN" in values else "TRUE"
+    )
+    obs["continuation_shape"] = {
+        "state": state,
+        "components": states,
+        "scope": "EXPLORATORY_DIAGNOSTIC_PARENT_NON_PIT",
+        "formal_raw": "NOT_EVALUATED_FORMAL_PARENT_UNPROVEN",
+    }
 
 
 def diagnostic_admission(result, *, target, package_sha256):
@@ -448,6 +480,277 @@ def attach_recovery_failure_followup(
         "role": "DIAGNOSTIC_ONLY_NOT_D2",
         "observations": result,
     }
+    if "prior_shape_observation" in item:
+        parent_line_observations = []
+        for parent in item["prior_shape_observation"]["diagnostic_parent_candidates"]:
+            candidate_line = parent.get("diagnostic_failure_line", {})
+            line_value = candidate_line.get("value")
+            frozen = (
+                Fraction(int(line_value["numerator"]), int(line_value["denominator"]))
+                if line_value is not None
+                else None
+            )
+            comparisons = []
+            for point in result:
+                close_value = point["close"]
+                close = (
+                    Fraction(
+                        int(close_value["numerator"]), int(close_value["denominator"])
+                    )
+                    if close_value is not None
+                    else None
+                )
+                known = frozen is not None and close is not None
+                comparisons.append(
+                    {
+                        "session": point["session"],
+                        "state": "UNKNOWN"
+                        if not known
+                        else "TRUE"
+                        if close <= frozen
+                        else "FALSE",
+                        "reason": None
+                        if known
+                        else "DIAGNOSTIC_LINE_OR_FOLLOWUP_CLOSE_UNAVAILABLE",
+                    }
+                )
+            parent_line_observations.append(
+                {
+                    "birth_session": parent["birth_session"],
+                    "birth_scenario": parent["birth_scenario"],
+                    "line": candidate_line,
+                    "role": "DIAGNOSTIC_ONLY_NOT_D2_INVALIDATION",
+                    "observations": comparisons,
+                }
+            )
+        item["prior_shape_observation"]["parent_line_followup"] = (
+            parent_line_observations
+        )
+        safe_rows = []
+        for session in sessions:
+            row = by_date.get(session)
+            if (
+                row is not None
+                and birth is not None
+                and (
+                    row.get("source_entry_sha256")
+                    and row.get("source_entry_sha256")
+                    == birth.get("source_entry_sha256")
+                    and row.get("source_content_id") == birth.get("source_content_id")
+                    and row.get("price_coordinate") == "RAW_UNADJUSTED"
+                )
+            ):
+                safe_rows.append(row)
+            else:
+                safe_rows.append(
+                    {
+                        "session_date": session,
+                        "bar_status": "FOLLOWUP_COORDINATE_OR_SOURCE_MISMATCH",
+                    }
+                )
+        item["prior_shape_observation"]["post_signal_price_facts"] = {
+            "role": "NON_PIT_DESCRIPTIVE_NOT_FORMAL_FORWARD",
+            "selection": "T0_STATES_COMPUTED_WITHOUT_FOLLOWUP_INPUT",
+            "facts": post_signal_price_facts(sessions, safe_rows, len(sessions) - 1),
+        }
+
+
+def attach_shape_state_followup(
+    config, result, *, target, followup, cutoff, package_sha256
+):
+    """逐会话追踪T0已选诊断父，不用后继行情选择T0对象。"""
+    item = result["results"][0]
+    initial = item["prior_shape_observation"]
+    parents = initial["diagnostic_parent_candidates"]
+    calendar = _official_calendar(followup)["sessions"]
+    start, end = calendar.index(target), calendar.index(followup)
+    if not 1 <= end - start <= 10 or followup > cutoff:
+        raise SourceD0RawError(
+            "D0_SHAPE_FOLLOWUP_INVALID", "形态后继须为截止内的1至10个官方会话。"
+        )
+    observations = []
+    for session in calendar[start + 1 : end + 1]:
+        try:
+            later = query_source_d0_raw_launch(
+                config,
+                scenario="RECOVERY_TURN",
+                target_session=session,
+                research_cutoff=cutoff,
+                package_sha256=package_sha256,
+                symbol=item["source_symbol"],
+                limit=1,
+                expected_namespace_id=result["namespace_id"],
+                _include_shape_observation=True,
+            )
+        except SourceD0RawError as error:
+            if error.code != "D0_SOURCE_VERSION_NOT_UNIQUE":
+                raise
+            observations.append(
+                {
+                    "session": session.isoformat(),
+                    "state": "UNKNOWN",
+                    "reason": error.code,
+                    "parents": [],
+                }
+            )
+            continue
+        if (
+            len(later["results"]) != 1
+            or later["source_version"]["source_content_id"]
+            != result["source_version"]["source_content_id"]
+        ):
+            observations.append(
+                {
+                    "session": session.isoformat(),
+                    "state": "UNKNOWN",
+                    "reason": "SOURCE_SYMBOL_OR_CONTENT_MISMATCH",
+                    "parents": [],
+                }
+            )
+            continue
+        later_obs = later["results"][0]["prior_shape_observation"]
+        later_launch = query_source_d0_raw_launch(
+            config,
+            scenario="LAUNCH_CONFIRM",
+            target_session=session,
+            research_cutoff=cutoff,
+            package_sha256=package_sha256,
+            symbol=item["source_symbol"],
+            limit=1,
+            expected_namespace_id=result["namespace_id"],
+        )
+        if (
+            len(later_launch["results"]) != 1
+            or later_launch["source_version"]["source_content_id"]
+            != result["source_version"]["source_content_id"]
+        ):
+            source_states = {"LAUNCH_CONFIRM": "UNKNOWN", "RECOVERY_TURN": "UNKNOWN"}
+        else:
+            source_states = {
+                "LAUNCH_CONFIRM": later_launch["results"][0]["scenario_raw"],
+                "RECOVERY_TURN": later["results"][0]["scenario_raw"],
+            }
+        lookup = {
+            (p["birth_session"], p["birth_scenario"]): p
+            for p in later_obs["diagnostic_parent_candidates"]
+        }
+        parent_states = []
+        for parent in parents:
+            key = (parent["birth_session"], parent["birth_scenario"])
+            candidate = lookup.get(key)
+            parent_states.append(
+                {
+                    "birth_session": key[0],
+                    "birth_scenario": key[1],
+                    "state": candidate.get("source_shape_state", "UNKNOWN")
+                    if candidate
+                    else "UNKNOWN",
+                    "reason": None
+                    if candidate
+                    else "PRIOR_DIAGNOSTIC_PARENT_NOT_REOBSERVED_OR_EXPIRED",
+                    "peak_session": candidate.get("peak_session")
+                    if candidate
+                    else None,
+                }
+            )
+        states = [p["state"] for p in parent_states]
+        state = (
+            "TRUE"
+            if "TRUE" in states
+            else "UNKNOWN"
+            if not states or "UNKNOWN" in states
+            else "FALSE"
+        )
+        observations.append(
+            {
+                "session": session.isoformat(),
+                "state": state,
+                "parents": parent_states,
+                "source_scenario_states": source_states,
+                "later_continuation_diagnostic_unbound_to_t0_parent": later_obs[
+                    "continuation_shape"
+                ],
+            }
+        )
+    earlier_unknown = False
+    first_false = None
+    first_proved = None
+    for row in observations:
+        if row["state"] == "UNKNOWN":
+            earlier_unknown = True
+        elif row["state"] == "FALSE" and first_proved is None:
+            first_proved = row["session"]
+            if not earlier_unknown:
+                first_false = row["session"]
+    initial["shape_state_followup"] = {
+        "scope": "T0_DIAGNOSTIC_PARENTS_NON_PIT_NOT_D2",
+        "observations": observations,
+        "first_false_session": first_false,
+        "first_false_status": "OBSERVED"
+        if first_false
+        else "UNKNOWN"
+        if earlier_unknown
+        else "NOT_OBSERVED_IN_WINDOW",
+        "first_proved_false_upper_bound": first_proved,
+    }
+    parent_summaries = []
+    for parent in parents:
+        unknown_earlier = False
+        first = None
+        upper = None
+        for row in observations:
+            matching = next(
+                (
+                    candidate
+                    for candidate in row.get("parents", ())
+                    if candidate["birth_session"] == parent["birth_session"]
+                    and candidate["birth_scenario"] == parent["birth_scenario"]
+                ),
+                None,
+            )
+            state = matching["state"] if matching else "UNKNOWN"
+            if state == "UNKNOWN":
+                unknown_earlier = True
+            elif state == "FALSE" and upper is None:
+                upper = row["session"]
+                if not unknown_earlier:
+                    first = row["session"]
+        parent_summaries.append(
+            {
+                "birth_session": parent["birth_session"],
+                "birth_scenario": parent["birth_scenario"],
+                "first_false_session": first,
+                "first_false_status": "OBSERVED"
+                if first
+                else "UNKNOWN"
+                if unknown_earlier
+                else "NOT_OBSERVED_IN_WINDOW",
+                "first_proved_false_upper_bound": upper,
+            }
+        )
+    initial["shape_state_followup"]["parent_first_false"] = parent_summaries
+    source_first_false = {}
+    for scenario in ("LAUNCH_CONFIRM", "RECOVERY_TURN"):
+        unknown_earlier = False
+        first = upper = None
+        for row in observations:
+            state = row.get("source_scenario_states", {}).get(scenario, "UNKNOWN")
+            if state == "UNKNOWN":
+                unknown_earlier = True
+            elif state == "FALSE" and upper is None:
+                upper = row["session"]
+                if not unknown_earlier:
+                    first = row["session"]
+        source_first_false[scenario] = {
+            "first_false_session": first,
+            "first_false_status": "OBSERVED"
+            if first
+            else "UNKNOWN"
+            if unknown_earlier
+            else "NOT_OBSERVED_IN_WINDOW",
+            "first_proved_false_upper_bound": upper,
+        }
+    initial["shape_state_followup"]["source_scenario_first_false"] = source_first_false
 
 
 def _fraction(value: Any) -> dict[str, str] | None:
@@ -680,6 +983,7 @@ def query_source_d0_raw_launch(
     transition: str | None = None,
     expected_namespace_id: str | None = None,
     _history_symbol: str | None = None,
+    _include_shape_observation: bool = False,
 ) -> dict[str, Any]:
     """读取启动或恢复原始状态，或联结启动相邻官方会话的三态变化。"""
     expected_namespace_id = _canonical_expected_namespace(expected_namespace_id)
@@ -888,6 +1192,144 @@ def query_source_d0_raw_launch(
                 target_capture_id=source_version["source_capture_id"],
                 parser_contract=source_version["parser_contract"],
             )
+            if _include_shape_observation:
+                extended_sessions = calendar["sessions"][
+                    max(0, target_index - 44) : target_index + 1
+                ]
+                history = read_raw_daily_history_stock(
+                    config,
+                    source_symbol=item["source_symbol"],
+                    target_session=target_session,
+                    package_sha256=package_sha256,
+                    sessions=extended_sessions,
+                    expected_namespace_id=pg_result["namespace_id"],
+                    include_parser_contract=True,
+                )
+                history_target = next(
+                    (
+                        row
+                        for row in history["history_rows"]
+                        if row["session_date"] == target_session
+                    ),
+                    None,
+                )
+                if (
+                    history_target is None
+                    or history_target.get("source_capture_id")
+                    != source_version["source_capture_id"]
+                    or history_target.get("source_content_id")
+                    != source_version["source_content_id"]
+                    or history_target.get("parser_contract")
+                    != source_version["parser_contract"]
+                ):
+                    raise SourceD0RawError(
+                        "D0_PRIOR_HISTORY_TARGET_BINDING_MISMATCH",
+                        "单股历史与目标日来源捕获或解析合同不一致。",
+                    )
+                item["prior_shape_observation"] = observe_prior_shapes(
+                    sessions=extended_sessions,
+                    rows=history["history_rows"],
+                    symbol=item["source_symbol"],
+                    package=package_sha256,
+                    namespace=pg_result["namespace_id"],
+                    content=source_version["source_content_id"],
+                    parser=source_version["parser_contract"],
+                )
+                historical_rps = {}
+                rps_errors = {}
+                rps_denominators = {}
+                for prior in item["prior_shape_observation"]["historical_states"]:
+                    if not prior.get("recovery_needs_rps"):
+                        continue
+                    prior_day = date.fromisoformat(prior["session"])
+                    try:
+                        prior_rps = read_source_pool_rps(
+                            config,
+                            target_session=prior_day,
+                            research_cutoff=research_cutoff,
+                            package_sha256=package_sha256,
+                            expected_namespace_id=pg_result["namespace_id"],
+                        )
+                        historical_rps[prior_day] = (
+                            prior_rps["facts"]
+                            .get(item["source_symbol"], {})
+                            .get("rps5_delta3_pp")
+                        )
+                        rps_denominators[prior["session"]] = prior_rps[
+                            "endpoint_counts"
+                        ]
+                    except RawSourcePgError as error:
+                        if error.code != "PG_SOURCE_NO_MATCH":
+                            raise
+                        rps_errors[prior["session"]] = error.code
+                    except ValueError as error:
+                        if str(error) != "目标日没有精确来源池":
+                            raise
+                        rps_errors[prior["session"]] = (
+                            "HISTORICAL_RPS_SOURCE_POOL_EMPTY"
+                        )
+                if historical_rps:
+                    item["prior_shape_observation"] = observe_prior_shapes(
+                        sessions=extended_sessions,
+                        rows=history["history_rows"],
+                        symbol=item["source_symbol"],
+                        package=package_sha256,
+                        namespace=pg_result["namespace_id"],
+                        content=source_version["source_content_id"],
+                        parser=source_version["parser_contract"],
+                        historical_rps=historical_rps,
+                    )
+                item["prior_shape_observation"]["historical_rps_errors"] = rps_errors
+                item["prior_shape_observation"]["historical_rps_denominators"] = (
+                    rps_denominators
+                )
+                partial = item["other_scenario_partial_predicates"]
+                partial["TREND_CONTINUE"]["loo_confirmed_raw"] = {
+                    "state": "UNKNOWN",
+                    "quality": "UNKNOWN",
+                    "reason": "BOARD_LOO_NOT_REQUESTED_OR_FORMAL_INPUT_UNPROVED",
+                }
+                for candidate in item["prior_shape_observation"][
+                    "diagnostic_parent_candidates"
+                ]:
+                    if "predicates" not in candidate:
+                        continue
+                    pb = partial["STRONG_PULLBACK"]
+                    states = [
+                        value["state"] for value in candidate["predicates"].values()
+                    ]
+                    states.extend(
+                        pb[key]["state"]
+                        for key in (
+                            "prior_ols_slope_positive",
+                            "prior_ols_r2_at_least_040",
+                            "close_not_below_previous",
+                            "clv",
+                            "no_shadow_rejection",
+                        )
+                    )
+                    alternatives = (
+                        pb["reclaim_ma5"]["state"],
+                        pb["retest_previous_ma10"]["state"],
+                    )
+                    states.append(
+                        "TRUE"
+                        if "TRUE" in alternatives
+                        else "UNKNOWN"
+                        if "UNKNOWN" in alternatives
+                        else "FALSE"
+                    )
+                    candidate["source_shape_state"] = (
+                        "FALSE"
+                        if "FALSE" in states
+                        else "UNKNOWN"
+                        if "UNKNOWN" in states
+                        else "TRUE"
+                    )
+                    candidate["source_shape_scope"] = (
+                        "NON_PIT_DIAGNOSTIC_NOT_FORMAL_RAW"
+                    )
+                attach_continuation_observation(item)
     elif scenario == "RECOVERY_TURN":
         for item in page:
             item["other_scenario_partial_predicates"]["TREND_CONTINUE"][
@@ -922,8 +1364,16 @@ def query_source_d0_raw_launch(
             "RECOVERY_TURN": "AVAILABLE_VIA_SEPARATE_REQUEST"
             if scenario == "LAUNCH_CONFIRM"
             else "CURRENT",
-            "STRONG_PULLBACK": "NOT_IMPLEMENTED",
-            "TREND_CONTINUE": "NOT_IMPLEMENTED",
+            "STRONG_PULLBACK": "SOURCE_SHAPE_COMPONENTS_AVAILABLE_FORMAL_NOT_EVALUATED"
+            if scenario == "RECOVERY_TURN"
+            and symbol is not None
+            and _include_shape_observation
+            else "NOT_IMPLEMENTED",
+            "TREND_CONTINUE": "SOURCE_SHAPE_COMPONENTS_AVAILABLE_FORMAL_NOT_EVALUATED"
+            if scenario == "RECOVERY_TURN"
+            and symbol is not None
+            and _include_shape_observation
+            else "NOT_IMPLEMENTED",
         },
         "session_contract": "D0_SESSION_R2",
         "target_session": target_session.isoformat(),

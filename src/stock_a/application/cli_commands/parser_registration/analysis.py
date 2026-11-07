@@ -139,6 +139,16 @@ def register_commands(commands):
         "--followup-session",
         help="启动或恢复诊断候选线后继观察终点；须指定单只来源代码",
     )
+    d0_raw.add_argument(
+        "--shape-control-symbol",
+        action="append",
+        help="目标日前指定同日同源探索性比较代码，可重复；须同时指定后继会话",
+    )
+    d0_raw.add_argument(
+        "--shape-followup-states",
+        action="store_true",
+        help="逐会话追踪T0诊断父对应的形态状态，须指定后继会话",
+    )
     d0_raw.add_argument("--offset", type=int, default=0, help="稳定分页偏移，默认0")
     d0_raw.add_argument(
         "--limit", type=int, default=30, help="稳定分页条数，默认30，最多5000"

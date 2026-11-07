@@ -19,9 +19,11 @@ from stock_a.application.runtime_config import (
 from stock_a.application.source_d0_raw import (
     SourceD0RawError,
     attach_recovery_failure_followup,
+    attach_shape_state_followup,
     attach_stock_risk_readiness,
     query_source_d0_raw_launch,
 )
+from stock_a.research.d0_shape_comparison import compare_shape_observations
 
 
 def _run_source_d0_raw(args: argparse.Namespace) -> int:
@@ -45,6 +47,11 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
             ),
             before_package_sha256=args.before_package_sha256,
             transition=args.transition,
+            _include_shape_observation=(
+                args.action == "current"
+                and args.scenario == "RECOVERY_TURN"
+                and bool(args.symbol)
+            ),
         )
         if args.risk_readiness:
             if (
@@ -84,6 +91,71 @@ def _run_source_d0_raw(args: argparse.Namespace) -> int:
                 package_sha256=args.package_sha256,
                 namespace_id=result["namespace_id"],
             )
+        if getattr(args, "shape_followup_states", False):
+            if (
+                args.action != "current"
+                or args.scenario != "RECOVERY_TURN"
+                or not args.followup_session
+                or len(result["results"]) != 1
+                or not args.symbol
+            ):
+                raise SourceD0RawError(
+                    "D0_SHAPE_FOLLOWUP_SCOPE_INVALID",
+                    "形态后继需要单股恢复诊断及后继会话。",
+                    category="ARGUMENT",
+                )
+            attach_shape_state_followup(
+                config,
+                result,
+                target=_parse_session_date(args.target_session),
+                followup=_parse_session_date(args.followup_session),
+                cutoff=_parse_session_date(args.research_cutoff),
+                package_sha256=args.package_sha256,
+            )
+        if getattr(args, "shape_control_symbol", None):
+            if (
+                args.action != "current"
+                or args.scenario != "RECOVERY_TURN"
+                or not args.symbol
+                or not args.followup_session
+                or len(result["results"]) != 1
+                or len(args.shape_control_symbol) > 10
+                or len(set([args.symbol, *args.shape_control_symbol]))
+                != len(args.shape_control_symbol) + 1
+            ):
+                raise SourceD0RawError(
+                    "D0_SHAPE_COMPARISON_SCOPE_INVALID",
+                    "形态比较须指定单股恢复诊断、后继会话和最多十个不同的预选来源代码。",
+                    category="ARGUMENT",
+                )
+            samples = [result]
+            for comparison_symbol in args.shape_control_symbol:
+                comparison = query_source_d0_raw_launch(
+                    config,
+                    scenario="RECOVERY_TURN",
+                    target_session=_parse_session_date(args.target_session),
+                    research_cutoff=_parse_session_date(args.research_cutoff),
+                    package_sha256=args.package_sha256,
+                    symbol=comparison_symbol,
+                    limit=1,
+                    expected_namespace_id=result["namespace_id"],
+                    _include_shape_observation=True,
+                )
+                if len(comparison["results"]) != 1:
+                    raise SourceD0RawError(
+                        "D0_SHAPE_COMPARISON_SYMBOL_MISSING", "来源池缺少比较股票。"
+                    )
+                attach_recovery_failure_followup(
+                    config,
+                    comparison["results"][0],
+                    target=_parse_session_date(args.target_session),
+                    followup=_parse_session_date(args.followup_session),
+                    cutoff=_parse_session_date(args.research_cutoff),
+                    package_sha256=args.package_sha256,
+                    namespace_id=result["namespace_id"],
+                )
+                samples.append(comparison)
+            result["shape_source_comparison"] = compare_shape_observations(samples)
     except DiagnosticError as error:
         _emit(
             {"ok": False, "code": error.code, "message": str(error)},
