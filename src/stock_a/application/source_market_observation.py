@@ -59,6 +59,19 @@ def classify_source_transition(before: str | None, after: str | None) -> str:
     return f"{before}_TO_{after}"
 
 
+def _first_known_event(points, *, state_key, event_state, unknown_states):
+    """未知会话之前发生过的事件不能从后来的首次证明倒推。"""
+    unknown_before = False
+    for point in points:
+        state = point[state_key]
+        if state in unknown_states:
+            unknown_before = True
+        elif state == event_state:
+            session = point["session"]
+            return (None if unknown_before else session), session
+    return None, None
+
+
 def read_market_observation_sessions(
     config: Mapping[str, Any],
     *,
@@ -560,6 +573,31 @@ def attach_observation_state_followup(
                 ),
                 None,
             )
+            break_points = []
+            for point in points:
+                support = (point.get("observation") or {}).get(
+                    "support_observation"
+                ) or {}
+                observed = (
+                    point["classification"] in {"CHANGED", "UNCHANGED"}
+                    and support.get("quality") == "OBSERVED"
+                )
+                break_points.append(
+                    {
+                        "session": point["session"],
+                        "state": "UNKNOWN"
+                        if not observed
+                        else "TRUE"
+                        if support.get("state") == "BROKEN"
+                        else "FALSE",
+                    }
+                )
+            first_broken, first_broken_upper_bound = _first_known_event(
+                break_points,
+                state_key="state",
+                event_state="TRUE",
+                unknown_states={"UNKNOWN"},
+            )
             event["source_state_followup"] = {
                 "status": "COMPUTED"
                 if any(point["session"] for point in points)
@@ -572,23 +610,8 @@ def attach_observation_state_followup(
                 if first_unknown
                 else None,
                 "consecutive_observable_session_count": observable,
-                "first_broken_session": next(
-                    (
-                        point["session"]
-                        for point in points
-                        if (
-                            (point.get("observation") or {}).get("support_observation")
-                            or {}
-                        ).get("state")
-                        == "BROKEN"
-                        and (
-                            (point.get("observation") or {}).get("support_observation")
-                            or {}
-                        ).get("quality")
-                        == "OBSERVED"
-                    ),
-                    None,
-                ),
+                "first_broken_session": first_broken,
+                "first_broken_upper_bound": first_broken_upper_bound,
                 "formal_exit_status": "NOT_EVALUATED",
             }
             continue
@@ -635,14 +658,15 @@ def attach_observation_state_followup(
                         "reason": "NO_FUTURE_SESSION_IN_SAVED_WINDOW",
                     }
                 )
-        first_false = (
-            event["session"]
-            if event["transition"] == "TRUE_TO_FALSE"
-            else next(
-                (point["session"] for point in points if point["state"] == "FALSE"),
-                None,
+        if event["transition"] == "TRUE_TO_FALSE":
+            first_false = first_false_upper_bound = event["session"]
+        else:
+            first_false, first_false_upper_bound = _first_known_event(
+                points,
+                state_key="state",
+                event_state="FALSE",
+                unknown_states={"UNKNOWN", "NOT_AVAILABLE"},
             )
-        )
         first_unknown = next(
             (point["session"] for point in points if point["state"] == "UNKNOWN"), None
         )
@@ -665,6 +689,7 @@ def attach_observation_state_followup(
             "points": points,
             "consecutive_true_session_count_including_t0": consecutive_true,
             "first_proved_false_session": first_false,
+            "first_proved_false_upper_bound": first_false_upper_bound,
             "first_unknown_session": first_unknown,
             "first_unknown_reason": next(
                 (point["reason"] for point in points if point["state"] == "UNKNOWN"),
@@ -1094,16 +1119,18 @@ def attach_observation_outcomes(
             )
         event["post_signal_price_facts"] = facts
         event["failure_line_comparisons"] = comparisons
-        event["first_proved_failure_session"] = next(
-            (point["session"] for point in comparisons if point["state"] == "TRUE"),
-            None,
+        first_touch, first_touch_upper_bound = _first_known_event(
+            comparisons,
+            state_key="state",
+            event_state="TRUE",
+            unknown_states={"UNKNOWN", "NOT_AVAILABLE"},
         )
-        event["first_candidate_line_touch_session"] = event[
-            "first_proved_failure_session"
-        ]
+        event["first_proved_failure_session"] = first_touch
+        event["first_candidate_line_touch_session"] = first_touch
+        event["first_candidate_line_touch_upper_bound"] = first_touch_upper_bound
         event["failure_line_status"] = (
             "TRUE"
-            if event["first_proved_failure_session"] is not None
+            if first_touch_upper_bound is not None
             else "UNKNOWN"
             if not comparisons
             or any(

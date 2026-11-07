@@ -1658,6 +1658,75 @@ ORDER BY r.source_symbol, r.session_date""",
     return result
 
 
+def read_raw_daily_forward_pool(
+    config: Mapping[str, Any],
+    *,
+    source_symbols: Sequence[str],
+    sessions: Sequence[date],
+    research_cutoff: date,
+    package_sha256: str,
+    expected_namespace_id: str,
+) -> dict[str, Any]:
+    """一次只读事务批量读取已冻结来源池的T0及后继Raw行。"""
+    days = tuple(sessions)
+    symbols = tuple(source_symbols)
+    if (
+        not days
+        or len(days) > 21
+        or tuple(sorted(set(days))) != days
+        or any(type(day) is not date for day in days)
+        or type(research_cutoff) is not date
+        or days[-1] > research_cutoff
+        or not symbols
+        or len(set(symbols)) != len(symbols)
+        or any(
+            not isinstance(symbol, str) or _SYMBOL.fullmatch(symbol) is None
+            for symbol in symbols
+        )
+        or not isinstance(package_sha256, str)
+        or _SHA256.fullmatch(package_sha256) is None
+        or not isinstance(expected_namespace_id, str)
+        or not expected_namespace_id
+    ):
+        raise RawSourcePgError("FORWARD_POOL_INPUT_INVALID", "后继来源池或会话绑定无效")
+    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        if namespace_id != expected_namespace_id:
+            raise RawSourcePgError(
+                "FORWARD_NAMESPACE_MISMATCH", "后继来源namespace不一致"
+            )
+        rows = _read_history_rows(
+            cursor,
+            namespace_id=namespace_id,
+            source_symbols=symbols,
+            sessions=days,
+            package_sha256=package_sha256,
+        )
+        session_versions = {}
+        for day in days:
+            status, actual, expected = _page_version_status(
+                cursor, namespace_id, day, package_sha256
+            )
+            session_versions[day.isoformat()] = {
+                "status": status,
+                "row_count": actual,
+                "expected_count": expected,
+            }
+        cursor.execute(
+            "SELECT max(session_date) FROM stock.source_raw_daily "
+            "WHERE namespace_id=%s::uuid AND package_sha256=%s AND session_date<=%s",
+            (namespace_id, package_sha256, research_cutoff),
+        )
+        saved_through = cursor.fetchone()[0]
+    grouped: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in symbols}
+    for row in rows:
+        grouped[row["source_symbol"]].append(row)
+    return {
+        "rows_by_symbol": grouped,
+        "saved_through": saved_through,
+        "session_versions": session_versions,
+    }
+
+
 def read_raw_daily_history_stock(
     config: Mapping[str, Any],
     *,
@@ -2138,6 +2207,7 @@ def read_raw_daily_history_page(
     market: str,
     board: str,
     source_symbol: str | None = None,
+    include_parser_contract: bool = False,
 ) -> dict[str, Any]:
     """SQL过滤并分页选候选，再以单个只读PG事务批量读取本页历史。"""
     selected_sessions = _validate_history_query(
@@ -2212,6 +2282,7 @@ ORDER BY source_symbol LIMIT %s OFFSET %s""",
             source_symbols=symbols,
             sessions=selected_sessions,
             package_sha256=package_sha256,
+            include_parser_contract=include_parser_contract,
         )
     grouped: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in symbols}
     for row in history_rows:

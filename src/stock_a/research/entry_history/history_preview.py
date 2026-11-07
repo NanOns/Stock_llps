@@ -320,7 +320,7 @@ def research_stock_pg_d1_history_previews(
         or any(type(day) is not date for day in sessions)
         or tuple(sorted(set(sessions))) != sessions
         or followup_session != sessions[-1]
-        or any(day not in sessions or day >= followup_session for day in events)
+        or any(day not in sessions or day > followup_session for day in events)
     ):
         raise ResearchEntryError(
             "PG_HISTORY_CALENDAR_INVALID", "D1批量预览会话范围无效"
@@ -421,7 +421,7 @@ def research_stock_pg_d1_history_previews(
         )
         for day in events
     }
-    if any(
+    if followup_session not in result and any(
         preview["raw_d1_breakout_predicate"]["predicates"]["result"]["state"] == "TRUE"
         for preview in result.values()
     ):

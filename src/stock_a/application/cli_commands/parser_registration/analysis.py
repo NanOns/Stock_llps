@@ -48,9 +48,9 @@ def register_commands(commands):
     )
     observation.add_argument(
         "--view",
-        choices=("full", "summary"),
+        choices=("full", "summary", "cohort"),
         default="full",
-        help="完整研究或盘后变化摘要",
+        help="完整研究、盘后变化摘要或单日全来源独立研究组",
     )
     observation.add_argument("--symbol", help="仅筛选该来源代码的观察明细")
     observation.add_argument(

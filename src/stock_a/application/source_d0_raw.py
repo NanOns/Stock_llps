@@ -42,6 +42,7 @@ from stock_a.storage.postgres.d0_raw import (
 )
 from stock_a.storage.postgres.source_raw import (
     RawSourcePgError,
+    read_raw_daily_history_page,
     read_raw_daily_history_stock,
 )
 
@@ -100,6 +101,301 @@ def attach_continuation_observation(item):
         "components": states,
         "scope": "EXPLORATORY_DIAGNOSTIC_PARENT_NON_PIT",
         "formal_raw": "NOT_EVALUATED_FORMAL_PARENT_UNPROVEN",
+    }
+
+
+def finalize_prior_shape_observation(item):
+    """以同一实现归约单股或全池的非正式回踩、续强诊断。"""
+    partial = item["other_scenario_partial_predicates"]
+    partial["TREND_CONTINUE"]["loo_confirmed_raw"] = {
+        "state": "UNKNOWN",
+        "quality": "UNKNOWN",
+        "reason": "BOARD_LOO_NOT_REQUESTED_OR_FORMAL_INPUT_UNPROVED",
+    }
+    for candidate in item["prior_shape_observation"]["diagnostic_parent_candidates"]:
+        if "predicates" not in candidate:
+            continue
+        pb = partial["STRONG_PULLBACK"]
+        states = [value["state"] for value in candidate["predicates"].values()]
+        states.extend(
+            pb[key]["state"]
+            for key in (
+                "prior_ols_slope_positive",
+                "prior_ols_r2_at_least_040",
+                "close_not_below_previous",
+                "clv",
+                "no_shadow_rejection",
+            )
+        )
+        alternatives = (pb["reclaim_ma5"]["state"], pb["retest_previous_ma10"]["state"])
+        states.append(
+            "TRUE"
+            if "TRUE" in alternatives
+            else "UNKNOWN"
+            if "UNKNOWN" in alternatives
+            else "FALSE"
+        )
+        candidate["source_shape_state"] = (
+            "FALSE"
+            if "FALSE" in states
+            else "UNKNOWN"
+            if "UNKNOWN" in states
+            else "TRUE"
+        )
+        candidate["source_shape_scope"] = "NON_PIT_DIAGNOSTIC_NOT_FORMAL_RAW"
+    attach_continuation_observation(item)
+
+
+def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
+    """对完整T0来源池复用回踩、续强诊断；历史RPS按会话共享。"""
+    target = day["session"]
+    namespace = day["namespace_id"]
+    source = day["scenarios"]["RECOVERY_TURN"]["source_version"]
+    expected = set(day["states"])
+    calendar = _official_calendar(target)
+    end = calendar["sessions"].index(target)
+    sessions = calendar["sessions"][max(0, end - 44) : end + 1]
+    short_sessions = sessions[-25:]
+    unavailable_messages = {
+        "目标日没有精确来源池": "HISTORICAL_RPS_SOURCE_POOL_EMPTY",
+        "来源池分母不完整": "RPS_SOURCE_POOL_INCOMPLETE",
+        "来源池分页分母发生变化": "RPS_SOURCE_POOL_INCOMPLETE",
+    }
+    target_rps_error = None
+    target_rps = day["seed"].get("rps_read")
+    if target_rps is None:
+        try:
+            target_rps = read_source_pool_rps(
+                config,
+                target_session=target,
+                research_cutoff=research_cutoff,
+                package_sha256=package_sha256,
+                expected_namespace_id=namespace,
+            )
+        except RawSourcePgError as error:
+            if error.code != "PG_SOURCE_NO_MATCH":
+                raise
+            target_rps_error = error.code
+        except ValueError as error:
+            if str(error) not in unavailable_messages:
+                raise
+            target_rps_error = unavailable_messages[str(error)]
+        if target_rps_error:
+            target_rps = {"facts": {symbol: {} for symbol in expected}}
+    if set(target_rps["facts"]) != expected:
+        target_rps_error = "D0_SHAPE_RPS_POOL_MISMATCH"
+        target_rps = {"facts": {symbol: {} for symbol in expected}}
+    rps_cache = {}
+    rps_errors = {}
+    output = {}
+    offset = 0
+    while True:
+        page = read_raw_daily_history_page(
+            config,
+            target_session=target,
+            package_sha256=package_sha256,
+            sessions=sessions,
+            offset=offset,
+            limit=100,
+            market="ALL",
+            board="ALL",
+            include_parser_contract=True,
+        )
+        if (
+            page["namespace_id"] != namespace
+            or page["total_count"] != len(expected)
+            or page["version_status"] != "CLOSED"
+            or not page["partition_closed"]
+        ):
+            raise SourceD0RawError(
+                "D0_SHAPE_POOL_MISMATCH", "诊断形态来源池或版本不完整。"
+            )
+        for candidate in page["candidates"]:
+            symbol = candidate["source_symbol"]
+            rows = candidate["history_rows"]
+            by_date = {row["session_date"]: row for row in rows}
+            birth = by_date.get(target)
+            if (
+                symbol not in expected
+                or symbol in output
+                or birth is None
+                or birth.get("source_capture_id") != source["source_capture_id"]
+                or birth.get("source_content_id") != source["source_content_id"]
+                or birth.get("parser_contract") != source["parser_contract"]
+            ):
+                raise SourceD0RawError(
+                    "D0_SHAPE_TARGET_MISMATCH", "诊断形态T0来源捕获不一致。"
+                )
+            args = {
+                "sessions": sessions,
+                "rows": rows,
+                "symbol": symbol,
+                "package": package_sha256,
+                "namespace": namespace,
+                "content": source["source_content_id"],
+                "parser": source["parser_contract"],
+            }
+            shape = observe_prior_shapes(**args)
+            needed = [
+                date.fromisoformat(item["session"])
+                for item in shape["historical_states"]
+                if item.get("recovery_needs_rps")
+            ]
+            for prior in needed:
+                if prior in rps_cache or prior in rps_errors:
+                    continue
+                try:
+                    rps_cache[prior] = read_source_pool_rps(
+                        config,
+                        target_session=prior,
+                        research_cutoff=research_cutoff,
+                        package_sha256=package_sha256,
+                        expected_namespace_id=namespace,
+                    )["facts"]
+                except RawSourcePgError as error:
+                    if error.code != "PG_SOURCE_NO_MATCH":
+                        raise
+                    rps_errors[prior] = error.code
+                except ValueError as error:
+                    if str(error) not in unavailable_messages:
+                        raise
+                    rps_errors[prior] = unavailable_messages[str(error)]
+            historical_rps = {
+                prior: rps_cache[prior].get(symbol, {}).get("rps5_delta3_pp")
+                for prior in needed
+                if prior in rps_cache
+            }
+            if historical_rps:
+                shape = observe_prior_shapes(**args, historical_rps=historical_rps)
+            rps = target_rps["facts"][symbol]
+            item = calculate_d0_recovery_turn_raw(
+                target_session=target,
+                official_sessions=short_sessions,
+                history_rows_by_session=by_date,
+                source_symbol=symbol,
+                package_sha256=package_sha256,
+                namespace_id=namespace,
+                source_content_id=source["source_content_id"],
+                target_capture_id=source["source_capture_id"],
+                parser_contract=source["parser_contract"],
+                rps5_delta3=rps.get("rps5_delta3_pp"),
+                rps20=rps.get("rps20"),
+                include_prior_ols=True,
+            )
+            _attach_continuation_core(
+                item,
+                rows={session: by_date.get(session) for session in short_sessions},
+                sessions=short_sessions,
+                calendar=calendar,
+                namespace_id=namespace,
+                source_content_id=source["source_content_id"],
+                target_capture_id=source["source_capture_id"],
+                parser_contract=source["parser_contract"],
+            )
+            item["prior_shape_observation"] = shape
+            finalize_prior_shape_observation(item)
+            parents = shape["diagnostic_parent_candidates"]
+            parent_states = [
+                parent.get("source_shape_state", "UNKNOWN") for parent in parents
+            ]
+            history_unknown = len(shape["historical_states"]) < 20 or any(
+                row["launch"] == "UNKNOWN" or row["recovery"] == "UNKNOWN"
+                for row in shape["historical_states"]
+            )
+            partial = item["other_scenario_partial_predicates"]["STRONG_PULLBACK"]
+            independent = [
+                partial[key]["state"]
+                for key in (
+                    "prior_ols_slope_positive",
+                    "prior_ols_r2_at_least_040",
+                    "close_not_below_previous",
+                    "clv",
+                    "no_shadow_rejection",
+                )
+            ]
+            alternatives = [
+                partial["reclaim_ma5"]["state"],
+                partial["retest_previous_ma10"]["state"],
+            ]
+            independent.append(
+                "TRUE"
+                if "TRUE" in alternatives
+                else "UNKNOWN"
+                if "UNKNOWN" in alternatives
+                else "FALSE"
+            )
+            pullback = (
+                "TRUE"
+                if "TRUE" in parent_states
+                else "FALSE"
+                if "FALSE" in independent
+                else "UNKNOWN"
+                if history_unknown or "UNKNOWN" in parent_states
+                else "FALSE"
+            )
+            continuation = shape["continuation_shape"]["state"]
+            shape_reasons = []
+            if target_rps_error:
+                shape_reasons.append(f"T0_RPS:{target_rps_error}")
+            if len(shape["historical_states"]) < 20:
+                shape_reasons.append("DIAGNOSTIC_PARENT_WINDOW_TRUNCATED")
+            for history in shape["historical_states"]:
+                if history["launch"] == "UNKNOWN" or history["recovery"] == "UNKNOWN":
+                    reason = (
+                        history.get("reason")
+                        or history.get("recovery_reason")
+                        or "UNKNOWN_PARENT_STATE"
+                    )
+                    shape_reasons.append(f"{history['session']}:{reason}")
+            for parent in parents:
+                if parent.get("source_shape_state", "UNKNOWN") == "UNKNOWN":
+                    if parent.get("reason"):
+                        shape_reasons.append(
+                            f"{parent['birth_session']}:{parent['reason']}"
+                        )
+                    for name, predicate in parent.get("predicates", {}).items():
+                        if predicate["state"] == "UNKNOWN":
+                            shape_reasons.append(
+                                f"{name}:{predicate.get('reason') or 'UNKNOWN'}"
+                            )
+            for group in ("STRONG_PULLBACK", "TREND_CONTINUE"):
+                for name, predicate in item["other_scenario_partial_predicates"][
+                    group
+                ].items():
+                    if (
+                        isinstance(predicate, dict)
+                        and predicate.get("state") == "UNKNOWN"
+                    ):
+                        shape_reasons.append(
+                            f"{group}.{name}:{predicate.get('reason') or predicate.get('reason_code') or 'UNKNOWN'}"
+                        )
+            shape_reasons = list(dict.fromkeys(shape_reasons))
+            output[symbol] = {
+                "STRONG_PULLBACK_DIAGNOSTIC": {
+                    "state": pullback,
+                    "reasons": shape_reasons if pullback == "UNKNOWN" else [],
+                },
+                "TREND_CONTINUE_DIAGNOSTIC": {
+                    "state": continuation,
+                    "reasons": shape_reasons if continuation == "UNKNOWN" else [],
+                },
+                "matched_parent_count": sum(state == "TRUE" for state in parent_states),
+                "parent_count": len(parents),
+                "history_unknown": history_unknown,
+            }
+        offset = page["next_offset"]
+        if offset is None:
+            break
+    if set(output) != expected:
+        raise SourceD0RawError("D0_SHAPE_POOL_MISMATCH", "诊断形态来源代码集合不完整。")
+    return {
+        "facts": output,
+        "target_rps_error": target_rps_error,
+        "historical_rps_days": [day.isoformat() for day in sorted(rps_cache)],
+        "historical_rps_errors": {
+            day.isoformat(): reason for day, reason in rps_errors.items()
+        },
+        "scope": "DIAGNOSTIC_SHAPE_NON_PIT_NOT_FORMAL_D0",
     }
 
 
@@ -558,7 +854,7 @@ def attach_recovery_failure_followup(
 def attach_shape_state_followup(
     config, result, *, target, followup, cutoff, package_sha256
 ):
-    """逐会话追踪T0已选诊断父，不用后继行情选择T0对象。"""
+    """追踪T0已选诊断父；各后继会话形态与峰为滚动重算。"""
     item = result["results"][0]
     initial = item["prior_shape_observation"]
     parents = initial["diagnostic_parent_candidates"]
@@ -684,6 +980,7 @@ def attach_shape_state_followup(
                 first_false = row["session"]
     initial["shape_state_followup"] = {
         "scope": "T0_DIAGNOSTIC_PARENTS_NON_PIT_NOT_D2",
+        "shape_semantics": "ROLLING_DIAGNOSTIC_PEAK_MAY_CHANGE_NOT_T0_FROZEN_INVALIDATION",
         "observations": observations,
         "first_false_session": first_false,
         "first_false_status": "OBSERVED"
@@ -1283,53 +1580,7 @@ def query_source_d0_raw_launch(
                 item["prior_shape_observation"]["historical_rps_denominators"] = (
                     rps_denominators
                 )
-                partial = item["other_scenario_partial_predicates"]
-                partial["TREND_CONTINUE"]["loo_confirmed_raw"] = {
-                    "state": "UNKNOWN",
-                    "quality": "UNKNOWN",
-                    "reason": "BOARD_LOO_NOT_REQUESTED_OR_FORMAL_INPUT_UNPROVED",
-                }
-                for candidate in item["prior_shape_observation"][
-                    "diagnostic_parent_candidates"
-                ]:
-                    if "predicates" not in candidate:
-                        continue
-                    pb = partial["STRONG_PULLBACK"]
-                    states = [
-                        value["state"] for value in candidate["predicates"].values()
-                    ]
-                    states.extend(
-                        pb[key]["state"]
-                        for key in (
-                            "prior_ols_slope_positive",
-                            "prior_ols_r2_at_least_040",
-                            "close_not_below_previous",
-                            "clv",
-                            "no_shadow_rejection",
-                        )
-                    )
-                    alternatives = (
-                        pb["reclaim_ma5"]["state"],
-                        pb["retest_previous_ma10"]["state"],
-                    )
-                    states.append(
-                        "TRUE"
-                        if "TRUE" in alternatives
-                        else "UNKNOWN"
-                        if "UNKNOWN" in alternatives
-                        else "FALSE"
-                    )
-                    candidate["source_shape_state"] = (
-                        "FALSE"
-                        if "FALSE" in states
-                        else "UNKNOWN"
-                        if "UNKNOWN" in states
-                        else "TRUE"
-                    )
-                    candidate["source_shape_scope"] = (
-                        "NON_PIT_DIAGNOSTIC_NOT_FORMAL_RAW"
-                    )
-                attach_continuation_observation(item)
+                finalize_prior_shape_observation(item)
     elif scenario == "RECOVERY_TURN":
         for item in page:
             item["other_scenario_partial_predicates"]["TREND_CONTINUE"][

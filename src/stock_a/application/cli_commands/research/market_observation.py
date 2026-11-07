@@ -28,6 +28,7 @@ from stock_a.application.source_market_observation import (
     read_observation_board_details,
     read_observation_d1,
 )
+from stock_a.application.source_cohort_forward import read_source_cohort_forward
 from stock_a.application.source_d0_raw import (
     SourceD0RawError,
     attach_stock_risk_readiness,
@@ -63,10 +64,12 @@ def _run_source_market_observation(args) -> int:
         if args.relative_position and not args.board_id:
             raise ValueError("相对位置研究需要精确板块")
         horizons = sorted(set(args.horizon or []))
-        if not horizons and args.view == "full":
+        if not horizons and args.view in {"full", "cohort"}:
             raise ValueError("完整研究必须指定至少一个后继会话数")
-        if any(not 1 <= value <= 10 for value in horizons):
+        if args.view != "cohort" and any(not 1 <= value <= 10 for value in horizons):
             raise ValueError("后续会话数须为1至10")
+        if args.view == "cohort" and (start != end or args.board_id or args.signal):
+            raise ValueError("独立研究组须指定单个T0，不接受板块或信号筛选")
         _, _, _, calendar = _load_calendar(end)
         if start not in calendar or end not in calendar:
             raise ValueError("研究范围端点必须是官方会话")
@@ -91,6 +94,21 @@ def _run_source_market_observation(args) -> int:
             event_window_start=event_start,
             history_session_count=args.d1_history_session_count,
         )
+        if args.view == "cohort":
+            output = read_source_cohort_forward(
+                config,
+                days[0],
+                d1[start],
+                research_cutoff=cutoff,
+                package_sha256=args.package_sha256,
+                horizons=tuple(horizons),
+                d1_history_count=args.d1_history_session_count,
+                symbol=args.symbol,
+                offset=args.offset,
+                limit=args.limit,
+            )
+            _emit(output)
+            return _EXIT_OK
         result = assemble_observation_changes(
             config,
             days,
