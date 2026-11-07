@@ -191,9 +191,72 @@ def _run_source_market_observation(args) -> int:
             )
             attach_comparison_continuity(comparisons, result)
         comparisons.sort(key=lambda row: row["horizon"])
+        # D0转FALSE只作为摘要变化，不加入自动观察组或同源对照。
+        summary_changes = list(result["events"])
+        if args.view == "summary":
+            for day in days:
+                for symbol, states in day["states"].items():
+                    for signal in ("LAUNCH_CONFIRM", "RECOVERY_TURN"):
+                        if (
+                            classify_source_transition(
+                                day["prior_states"].get(symbol, {}).get(signal),
+                                states[signal],
+                            )
+                            == "TRUE_TO_FALSE"
+                        ):
+                            scenario = day["scenarios"][signal]
+                            summary_changes.append(
+                                {
+                                    "session": day["session"],
+                                    "source_symbol": symbol,
+                                    "signal": signal,
+                                    "transition": "TRUE_TO_FALSE",
+                                    "change_scope": "SUMMARY_TRANSITION_NOT_AUTOMATIC_EVENT",
+                                    "source_binding": {
+                                        "namespace_id": day["namespace_id"],
+                                        "package_sha256": scenario["source_version"][
+                                            "package_sha256"
+                                        ],
+                                        "source_content_id": scenario["source_version"][
+                                            "source_content_id"
+                                        ],
+                                        "profile_revision": day["seed"].get(
+                                            "profile_revision"
+                                        ),
+                                        "runtime_profile_revision": day["seed"].get(
+                                            "runtime_profile_revision"
+                                        ),
+                                        "stored_profile_status": day["seed"].get(
+                                            "stored_profile_status"
+                                        ),
+                                    },
+                                    "algorithm_contract": scenario[
+                                        "algorithm_contract"
+                                    ],
+                                    "producer_version": scenario["producer_version"],
+                                    "memberships": result["memberships_by_symbol"].get(
+                                        symbol, []
+                                    ),
+                                    "membership_reason": None
+                                    if symbol in result["memberships_by_symbol"]
+                                    else "NO_PROVED_MEMBERSHIP",
+                                    "formal_eligibility": "UNKNOWN",
+                                    "formal_authorization": "FORMAL_NOT_AUTHORIZED",
+                                    "formal_eligibility_reason": "FORMAL_EPISODE_AND_QUALIFICATION_UNPROVED",
+                                    "source_state_followup": "NOT_REQUESTED"
+                                    if not horizons
+                                    else "NOT_COMPUTED_TRANSITION_ONLY",
+                                    "first_proved_failure_session": "NOT_REQUESTED"
+                                    if not horizons
+                                    else "NOT_COMPUTED_TRANSITION_ONLY",
+                                    "first_candidate_line_touch_session": "NOT_REQUESTED"
+                                    if not horizons
+                                    else "NOT_COMPUTED_TRANSITION_ONLY",
+                                }
+                            )
         selected = [
             event
-            for event in result["events"]
+            for event in summary_changes
             if (not args.symbol or event["source_symbol"] == args.symbol)
             and (not args.signal or event["signal"] == args.signal)
             and (
@@ -213,7 +276,7 @@ def _run_source_market_observation(args) -> int:
             (event["session"], event["source_symbol"]) for event in page_events
         }
         stock_observations = {}
-        for event in result["events"]:
+        for event in summary_changes:
             key = (event["session"], event["source_symbol"])
             if key not in page_keys:
                 continue
@@ -407,7 +470,9 @@ def _run_source_market_observation(args) -> int:
         if args.relative_position:
             relative_position = relative_position_view(
                 days,
-                result,
+                {**result, "events": summary_changes}
+                if args.view == "summary"
+                else result,
                 board_kind=args.board_kind,
                 board_id=args.board_id,
                 symbol=args.symbol,
@@ -419,6 +484,14 @@ def _run_source_market_observation(args) -> int:
             ]
             for session_view in relative_position["sessions"]:
                 for stock in session_view["stocks"]:
+                    if stock["events"] and all(
+                        event.get("change_scope")
+                        == "SUMMARY_TRANSITION_NOT_AUTOMATIC_EVENT"
+                        for event in stock["events"]
+                    ):
+                        stock["observation_reason"] = (
+                            "PROVED_D0_TRUE_TO_FALSE_NOT_AUTOMATIC_EVENT"
+                        )
                     key = (session_view["session"], stock["source_symbol"])
                     history = history_cache.get(key)
                     stock["price_followup"] = (
@@ -492,40 +565,6 @@ def _run_source_market_observation(args) -> int:
                     "formal_pb_continue_d2": "NOT_EVALUATED",
                 }
             )
-        # D0转FALSE是可证状态变化，但不是现役自动观察事件；只在摘要中补充，
-        # 不改变事件、后继对照或冻结算法的定义。
-        summary_changes = list(result["events"])
-        if args.view == "summary":
-            for day in days:
-                for symbol, states in day["states"].items():
-                    for signal in ("LAUNCH_CONFIRM", "RECOVERY_TURN"):
-                        if (
-                            classify_source_transition(
-                                day["prior_states"].get(symbol, {}).get(signal),
-                                states[signal],
-                            )
-                            == "TRUE_TO_FALSE"
-                        ):
-                            summary_changes.append(
-                                {
-                                    "session": day["session"],
-                                    "source_symbol": symbol,
-                                    "signal": signal,
-                                    "transition": "TRUE_TO_FALSE",
-                                    "memberships": result["memberships_by_symbol"].get(
-                                        symbol, []
-                                    ),
-                                    "source_state_followup": "NOT_REQUESTED"
-                                    if not horizons
-                                    else "NOT_COMPUTED_TRANSITION_ONLY",
-                                    "first_proved_failure_session": "NOT_REQUESTED"
-                                    if not horizons
-                                    else "NOT_COMPUTED_TRANSITION_ONLY",
-                                    "first_candidate_line_touch_session": "NOT_REQUESTED"
-                                    if not horizons
-                                    else "NOT_COMPUTED_TRANSITION_ONLY",
-                                }
-                            )
         board_changes_by_key = {}
         market_change_symbols = {}
         for event in summary_changes:
