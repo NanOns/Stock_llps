@@ -35,6 +35,11 @@ from stock_a.application.source_pool_factors import read_source_pool_rps
 from stock_a.application.pg_price_profiles import PgPriceProfileError
 from stock_a.application.pg_research import PgResearchBindingError
 from stock_a.application.source_market_context import SourceMarketContextError
+from stock_a.application.source_relative_position import (
+    board_changes,
+    market_changes,
+    relative_position_view,
+)
 from stock_a.storage.postgres.source_raw import RawSourcePgError
 from stock_a.storage.postgres.tdx_sector_members import TdxSectorMembersPgError
 from stock_a.contracts import load_price_profile_contract
@@ -54,6 +59,8 @@ def _run_source_market_observation(args) -> int:
             raise ValueError("板块类型和编号必须同时提供")
         if bool(args.rotation_start) != bool(args.board_id):
             raise ValueError("精确板块与Rotation起始会话必须同时提供")
+        if args.relative_position and not args.board_id:
+            raise ValueError("相对位置研究需要精确板块")
         horizons = sorted(set(args.horizon))
         if any(not 1 <= value <= 10 for value in horizons):
             raise ValueError("后续会话数须为1至10")
@@ -348,6 +355,36 @@ def _run_source_market_observation(args) -> int:
                 profile_contract=contract,
                 loo_symbol=args.symbol,
             )
+        relative_position = None
+        if args.relative_position:
+            relative_position = relative_position_view(
+                days,
+                result,
+                board_kind=args.board_kind,
+                board_id=args.board_id,
+                symbol=args.symbol,
+                d1_by_session=d1,
+            )
+            board_group = f"|BOARD:{args.board_kind}:{args.board_id}"
+            relative_position["outcome_comparisons"] = [
+                row for row in comparisons if row["group"].endswith(board_group)
+            ]
+            for session_view in relative_position["sessions"]:
+                for stock in session_view["stocks"]:
+                    key = (session_view["session"], stock["source_symbol"])
+                    history = history_cache.get(key)
+                    stock["price_followup"] = (
+                        [history["points"][n - 1] for n in horizons]
+                        if history is not None
+                        else None
+                    )
+                    stock["risk_priority_readiness"] = (
+                        stock_detail(key).get(
+                            "risk_priority_readiness", stock_detail(key)
+                        )
+                        if args.symbol
+                        else "NOT_EVALUATED_SELECT_SYMBOL"
+                    )
         day_summaries = []
         for day in days:
             seed_reasons = {}
@@ -409,6 +446,15 @@ def _run_source_market_observation(args) -> int:
                 "membership_snapshots": result["snapshot_metadata"],
                 "boards": result["boards"],
                 "board_details": board_details,
+                **(
+                    {
+                        "relative_position": relative_position,
+                        "market_changes": market_changes(days),
+                        "board_changes": board_changes(days, result["boards"]),
+                    }
+                    if args.relative_position
+                    else {}
+                ),
                 "stock_summary": stock_summary,
                 "comparisons": comparisons,
                 "observation_event_count": result["event_count"],

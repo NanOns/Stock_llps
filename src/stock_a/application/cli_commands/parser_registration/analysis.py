@@ -65,6 +65,11 @@ def register_commands(commands):
     )
     observation.add_argument("--board-id", help="精确板块原生编号")
     observation.add_argument("--rotation-start", help="板块Rotation窗口起始会话")
+    observation.add_argument(
+        "--relative-position",
+        action="store_true",
+        help="输出所选板块的跨日相对位置研究",
+    )
     observation.add_argument("--offset", type=int, default=0, help="观察明细分页偏移")
     observation.add_argument("--limit", type=int, default=30, help="观察明细分页条数")
     d0_raw = commands.add_parser(
