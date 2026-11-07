@@ -76,6 +76,8 @@ def observe_frozen_scenario(
             "observations": [],
             "first_false": None,
             "first_false_upper_bound": None,
+            "first_recovery_after_false": None,
+            "first_recovery_after_false_upper_bound": None,
             "status": "UNKNOWN_T0_SOURCE_IDENTITY",
             "formal_episode": "NOT_CREATED",
         }
