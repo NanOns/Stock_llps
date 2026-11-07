@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections import Counter
 from copy import deepcopy
+from fractions import Fraction
 import time
 
 from stock_a.application.cli_commands.common import _emit, _parse_session_date
@@ -61,7 +62,9 @@ def _run_source_market_observation(args) -> int:
             raise ValueError("精确板块与Rotation起始会话必须同时提供")
         if args.relative_position and not args.board_id:
             raise ValueError("相对位置研究需要精确板块")
-        horizons = sorted(set(args.horizon))
+        horizons = sorted(set(args.horizon or []))
+        if not horizons and args.view == "full":
+            raise ValueError("完整研究必须指定至少一个后继会话数")
         if any(not 1 <= value <= 10 for value in horizons):
             raise ValueError("后续会话数须为1至10")
         _, _, _, calendar = _load_calendar(end)
@@ -108,7 +111,7 @@ def _run_source_market_observation(args) -> int:
         _, _, _, cutoff_calendar = _load_calendar(cutoff)
         followup_sessions = tuple(
             day for day in cutoff_calendar if end < day <= cutoff
-        )[: max(horizons)]
+        )[: max(horizons, default=0)]
         followup_days = []
         if followup_sessions:
             followup_days = read_market_observation_sessions(
@@ -143,9 +146,15 @@ def _run_source_market_observation(args) -> int:
                     history_session_count=args.d1_history_session_count,
                 )
             )
-        attach_observation_state_followup(
-            days + followup_days, result, d1_by_session=d1, horizon=max(horizons)
-        )
+        if horizons:
+            attach_observation_state_followup(
+                days + followup_days, result, d1_by_session=d1, horizon=max(horizons)
+            )
+        else:
+            for event in result["events"]:
+                event["source_state_followup"] = "NOT_REQUESTED"
+                event["first_proved_failure_session"] = "NOT_REQUESTED"
+                event["first_candidate_line_touch_session"] = "NOT_REQUESTED"
         history_cache = {}
         read_metrics = {
             "comparison_pool_scans": 0,
@@ -169,17 +178,18 @@ def _run_source_market_observation(args) -> int:
                 read_metrics=read_metrics,
             )
         ]
-        attach_observation_outcomes(
-            config,
-            days,
-            result,
-            research_cutoff=cutoff,
-            package_sha256=args.package_sha256,
-            horizon=max(horizons),
-            history_cache=history_cache,
-            read_metrics=read_metrics,
-        )
-        attach_comparison_continuity(comparisons, result)
+        if horizons:
+            attach_observation_outcomes(
+                config,
+                days,
+                result,
+                research_cutoff=cutoff,
+                package_sha256=args.package_sha256,
+                horizon=max(horizons),
+                history_cache=history_cache,
+                read_metrics=read_metrics,
+            )
+            attach_comparison_continuity(comparisons, result)
         comparisons.sort(key=lambda row: row["horizon"])
         selected = [
             event
@@ -195,7 +205,10 @@ def _run_source_market_observation(args) -> int:
                 )
             )
         ]
-        page_events = selected[args.offset : args.offset + args.limit]
+        page_limit = min(args.limit, 30) if args.view == "summary" else args.limit
+        page_events = selected[args.offset : args.offset + page_limit]
+        if args.view == "summary" and not (args.symbol or args.board_id or args.signal):
+            page_events = []
         page_keys = {
             (event["session"], event["source_symbol"]) for event in page_events
         }
@@ -290,6 +303,17 @@ def _run_source_market_observation(args) -> int:
         stock_summary = None
         if args.symbol:
             memberships = result["memberships_by_symbol"].get(args.symbol, [])
+            d1_stock = {
+                day["session"]: next(
+                    (
+                        row
+                        for row in d1[day["session"]]["complete_symbol_details"]
+                        if row["source_symbol"] == args.symbol
+                    ),
+                    {"status": "UNKNOWN_DATA", "reason": "SOURCE_SYMBOL_NOT_IN_POOL"},
+                )
+                for day in days
+            }
             stock_summary = [
                 {
                     "session": day["session"],
@@ -321,7 +345,27 @@ def _run_source_market_observation(args) -> int:
                             and event["source_symbol"] == args.symbol
                             for event in result["events"]
                         )
-                        else "NO_PROVED_SELECTED_TRANSITION_OR_D1_CHANGE",
+                        else "NO_PROVED_SELECTED_TRANSITION_OR_D1_CHANGE"
+                        if args.view == "full"
+                        else "SOURCE_SYMBOL_NOT_IN_POOL"
+                        if args.symbol not in day["states"]
+                        else "PROVED_D0_TRUE_TO_FALSE_NOT_AUTOMATIC_EVENT"
+                        if any(
+                            classify_source_transition(
+                                day["prior_states"].get(args.symbol, {}).get(signal),
+                                day["states"][args.symbol][signal],
+                            )
+                            == "TRUE_TO_FALSE"
+                            for signal in ("LAUNCH_CONFIRM", "RECOVERY_TURN")
+                        )
+                        else "UNKNOWN_DATA_NO_PROVED_CHANGE"
+                        if "UNKNOWN" in day["states"][args.symbol].values()
+                        or d1_stock[day["session"]].get("summary_state") == "UNKNOWN"
+                        else "D1_NOT_EVALUABLE_NO_PROVED_CHANGE"
+                        if d1_stock[day["session"]].get("summary_state")
+                        in {"NOT_COMPARABLE", "NOT_EVALUABLE"}
+                        else "CALCULATED_NO_PROVED_CHANGE",
+                        "states": day["states"].get(args.symbol),
                         "state_transitions": {
                             name: classify_source_transition(
                                 day["prior_states"].get(args.symbol, {}).get(name),
@@ -333,6 +377,10 @@ def _run_source_market_observation(args) -> int:
                         },
                     },
                     "detail": stock_detail((day["session"], args.symbol)),
+                    "d1": d1_stock[day["session"]],
+                    "formal_eligibility": "UNKNOWN",
+                    "formal_eligibility_reason": "FORMAL_EPISODE_AND_QUALIFICATION_UNPROVED",
+                    "formal_authorization": "FORMAL_NOT_AUTHORIZED",
                 }
                 for day in days
             ]
@@ -376,6 +424,8 @@ def _run_source_market_observation(args) -> int:
                     stock["price_followup"] = (
                         [history["points"][n - 1] for n in horizons]
                         if history is not None
+                        else "NOT_REQUESTED"
+                        if not horizons
                         else None
                     )
                     stock["risk_priority_readiness"] = (
@@ -401,6 +451,16 @@ def _run_source_market_observation(args) -> int:
                 {
                     "session": day["session"],
                     "source_pool_count": len(day["states"]),
+                    "observation_event_count": sum(
+                        event["session"] == day["session"] for event in result["events"]
+                    ),
+                    "observation_event_symbol_count": len(
+                        {
+                            event["source_symbol"]
+                            for event in result["events"]
+                            if event["session"] == day["session"]
+                        }
+                    ),
                     "market": day["market"],
                     "d0": {
                         name: row["source_pool"]
@@ -432,55 +492,232 @@ def _run_source_market_observation(args) -> int:
                     "formal_pb_continue_d2": "NOT_EVALUATED",
                 }
             )
-        _emit(
-            {
-                "ok": True,
-                "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
-                "configuration_path": str(config_path),
-                "namespace_id": days[0]["namespace_id"],
-                "package_sha256": args.package_sha256,
-                "profile_revision": args.profile_revision,
-                "research_cutoff": cutoff,
-                "sessions": day_summaries,
-                "membership_status": result["membership_status"],
-                "membership_snapshots": result["snapshot_metadata"],
-                "boards": result["boards"],
-                "board_details": board_details,
-                **(
+        # D0转FALSE是可证状态变化，但不是现役自动观察事件；只在摘要中补充，
+        # 不改变事件、后继对照或冻结算法的定义。
+        summary_changes = list(result["events"])
+        if args.view == "summary":
+            for day in days:
+                for symbol, states in day["states"].items():
+                    for signal in ("LAUNCH_CONFIRM", "RECOVERY_TURN"):
+                        if (
+                            classify_source_transition(
+                                day["prior_states"].get(symbol, {}).get(signal),
+                                states[signal],
+                            )
+                            == "TRUE_TO_FALSE"
+                        ):
+                            summary_changes.append(
+                                {
+                                    "session": day["session"],
+                                    "source_symbol": symbol,
+                                    "signal": signal,
+                                    "transition": "TRUE_TO_FALSE",
+                                    "memberships": result["memberships_by_symbol"].get(
+                                        symbol, []
+                                    ),
+                                    "source_state_followup": "NOT_REQUESTED"
+                                    if not horizons
+                                    else "NOT_COMPUTED_TRANSITION_ONLY",
+                                    "first_proved_failure_session": "NOT_REQUESTED"
+                                    if not horizons
+                                    else "NOT_COMPUTED_TRANSITION_ONLY",
+                                    "first_candidate_line_touch_session": "NOT_REQUESTED"
+                                    if not horizons
+                                    else "NOT_COMPUTED_TRANSITION_ONLY",
+                                }
+                            )
+        board_changes_by_key = {}
+        market_change_symbols = {}
+        for event in summary_changes:
+            market_change_symbols.setdefault(event["session"], set()).add(
+                event["source_symbol"]
+            )
+            for member in event["memberships"]:
+                key = (
+                    event["session"],
+                    member["board_kind"],
+                    member["board_native_id"],
+                )
+                group = board_changes_by_key.setdefault(
+                    key, {"events": 0, "symbols": set()}
+                )
+                group["events"] += 1
+                group["symbols"].add(event["source_symbol"])
+        summary_boards = []
+        for row in result["boards"]:
+            key = (row["session"], row["board_kind"], row["board_native_id"])
+            group = board_changes_by_key.get(key)
+            if group:
+                summary_boards.append(
                     {
-                        "relative_position": relative_position,
-                        "market_changes": market_changes(days),
-                        "board_changes": board_changes(days, result["boards"]),
+                        **row,
+                        "proved_change_count": group["events"],
+                        "proved_change_symbol_count": len(group["symbols"]),
+                        "market_proved_change_symbol_denominator": len(
+                            market_change_symbols[row["session"]]
+                        ),
+                        "share_of_market_proved_change_symbols": str(
+                            Fraction(
+                                len(group["symbols"]),
+                                len(market_change_symbols[row["session"]]),
+                            )
+                        ),
                     }
-                    if args.relative_position
-                    else {}
-                ),
-                "stock_summary": stock_summary,
-                "comparisons": comparisons,
-                "observation_event_count": result["event_count"],
-                "observation_distinct_symbol_count": result["distinct_symbol_count"],
-                "page": {
-                    "offset": args.offset,
-                    "limit": args.limit,
-                    "matched_count": len(selected),
-                    "next_offset": args.offset + args.limit
-                    if args.offset + args.limit < len(selected)
-                    else None,
-                },
-                "events": page_events,
-                "page_stock_observations": list(stock_observations.values()),
-                "page_stock_observations_scope": "PAGE_KEYS_ALL_SAME_SESSION_SYMBOL_EVENTS",
-                "formal_eligibility": "UNKNOWN",
-                "formal_authorization": "FORMAL_NOT_AUTHORIZED",
-                "formal_eligibility_reason": "FORMAL_EPISODE_AND_QUALIFICATION_UNPROVED",
-                "database_write_attempted": False,
-                "execution": {
-                    "elapsed_seconds": time.perf_counter() - started,
-                    "database_mode": "READ_ONLY",
-                    "followup_read_metrics": read_metrics,
-                },
-            }
+                )
+        changed_boards = sorted(
+            summary_boards,
+            key=lambda row: (
+                -row["proved_change_symbol_count"],
+                str(row["session"]),
+                row["board_kind"],
+                row["board_native_id"],
+            ),
         )
+        changed_stocks = {}
+        for event in summary_changes:
+            key = (event["session"], event["source_symbol"])
+            row = changed_stocks.setdefault(
+                key,
+                {
+                    "session": key[0],
+                    "source_symbol": key[1],
+                    "memberships": event["memberships"],
+                    "signals": [],
+                },
+            )
+            row["signals"].append(
+                {
+                    "signal": event["signal"],
+                    "transition": event["transition"],
+                    "source_state_followup": event["source_state_followup"],
+                    "first_proved_failure_session": event[
+                        "first_proved_failure_session"
+                    ],
+                    "first_candidate_line_touch_session": event[
+                        "first_candidate_line_touch_session"
+                    ],
+                }
+            )
+        stock_rows = sorted(
+            changed_stocks.values(),
+            key=lambda row: (str(row["session"]), row["source_symbol"]),
+        )
+        distinct_stocks = sorted({row["source_symbol"] for row in stock_rows})
+        shown_symbols = set(distinct_stocks[:30])
+        output = {
+            "ok": True,
+            "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
+            "configuration_path": str(config_path),
+            "namespace_id": days[0]["namespace_id"],
+            "package_sha256": args.package_sha256,
+            "profile_revision": args.profile_revision,
+            "research_cutoff": cutoff,
+            "sessions": day_summaries,
+            "membership_status": result["membership_status"],
+            "membership_snapshots": result["snapshot_metadata"],
+            "boards": changed_boards[:15]
+            if args.view == "summary"
+            else result["boards"],
+            "board_details": board_details,
+            **(
+                {
+                    "relative_position": relative_position,
+                    "market_changes": market_changes(days),
+                    "board_changes": board_changes(days, result["boards"]),
+                }
+                if args.relative_position
+                else {}
+            ),
+            "stock_summary": stock_summary,
+            "comparisons": comparisons,
+            "observation_event_count": result["event_count"],
+            "observation_distinct_symbol_count": result["distinct_symbol_count"],
+            "page": {
+                "offset": args.offset,
+                "limit": page_limit,
+                "matched_count": len(selected),
+                "next_offset": args.offset + page_limit
+                if args.offset + page_limit < len(selected)
+                else None,
+            },
+            "events": page_events,
+            "page_stock_observations": list(stock_observations.values()),
+            "page_stock_observations_scope": "PAGE_KEYS_ALL_SAME_SESSION_SYMBOL_EVENTS",
+            "formal_eligibility": "UNKNOWN",
+            "formal_authorization": "FORMAL_NOT_AUTHORIZED",
+            "formal_eligibility_reason": "FORMAL_EPISODE_AND_QUALIFICATION_UNPROVED",
+            "database_write_attempted": False,
+            "execution": {
+                "elapsed_seconds": time.perf_counter() - started,
+                "database_mode": "READ_ONLY",
+                "followup_read_metrics": read_metrics,
+            },
+        }
+        if args.view == "summary":
+            drilldown_requested = bool(args.symbol or args.board_id or args.signal)
+            if not drilldown_requested:
+                output["page"] = {"status": "NOT_REQUESTED"}
+            for day_summary in day_summaries:
+                changes = [
+                    event
+                    for event in summary_changes
+                    if event["session"] == day_summary["session"]
+                ]
+                day_summary["proved_change_count"] = len(changes)
+                day_summary["proved_change_symbol_count"] = len(
+                    {event["source_symbol"] for event in changes}
+                )
+            board_keys = {
+                (row["board_kind"], row["board_native_id"]) for row in changed_boards
+            }
+            shown_board_keys = {
+                (row["board_kind"], row["board_native_id"])
+                for row in changed_boards[:15]
+            }
+            output["summary"] = {
+                "ordering": "DESCRIPTIVE_ONLY_NOT_PRIORITY",
+                "changed_board_session_count": len(changed_boards),
+                "omitted_board_session_count": max(0, len(changed_boards) - 15),
+                "changed_distinct_board_count": len(board_keys),
+                "omitted_distinct_board_count": len(board_keys - shown_board_keys),
+                "changed_distinct_symbol_count": len(distinct_stocks),
+                "stock_list_scope": "DRILLDOWN_HOME_LIST_NOT_DISPLAYED"
+                if drilldown_requested
+                else "HOME_CHANGE_LIST",
+                "omitted_distinct_symbol_count": len(distinct_stocks)
+                if drilldown_requested
+                else max(0, len(distinct_stocks) - 30),
+                "proved_change_count": len(summary_changes),
+                "automatic_observation_event_count": result["event_count"],
+                "change_scope": "现役自动观察事件及D0已证TRUE转FALSE；后者不改变自动观察组和对照",
+                "stocks": []
+                if drilldown_requested
+                else [
+                    row for row in stock_rows if row["source_symbol"] in shown_symbols
+                ],
+                "followup": "REQUESTED" if horizons else "NOT_REQUESTED",
+                "drilldown": "使用相同来源参数并指定 --symbol，或指定 --board-kind、--board-id、--rotation-start 和 --relative-position",
+            }
+            if horizons:
+                board_group = (
+                    f"|BOARD:{args.board_kind}:{args.board_id}"
+                    if args.board_id
+                    else None
+                )
+                displayed_comparisons = [
+                    row
+                    for row in comparisons
+                    if "|BOARD:" not in row["group"]
+                    or (board_group and row["group"].endswith(board_group))
+                ]
+                output["comparisons"] = displayed_comparisons
+                output["summary"]["comparison_group_count"] = len(comparisons)
+                output["summary"]["omitted_comparison_group_count"] = len(
+                    comparisons
+                ) - len(displayed_comparisons)
+            else:
+                output["comparisons"] = "NOT_REQUESTED"
+        _emit(output)
         return _EXIT_OK
     except (
         RawSourcePgError,

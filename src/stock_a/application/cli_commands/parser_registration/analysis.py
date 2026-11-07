@@ -44,8 +44,13 @@ def register_commands(commands):
         "--horizon",
         type=int,
         action="append",
-        required=True,
         help="后继官方会话数，可重复指定",
+    )
+    observation.add_argument(
+        "--view",
+        choices=("full", "summary"),
+        default="full",
+        help="完整研究或盘后变化摘要",
     )
     observation.add_argument("--symbol", help="仅筛选该来源代码的观察明细")
     observation.add_argument(
