@@ -173,6 +173,9 @@ def _frozen_line_followup(item, facts):
     )
     first = upper = None
     unknown_before = line is None
+    recovery = recovery_upper = None
+    recovery_unknown = line is None
+    touched = False
     observations = []
     for point in facts["points"]:
         close = point["ohlc"]["close"]
@@ -180,6 +183,8 @@ def _frozen_line_followup(item, facts):
             state = "UNKNOWN"
             if upper is None:
                 unknown_before = True
+            if recovery_upper is None:
+                recovery_unknown = True
         else:
             amount = close["value"]
             close_value = Fraction(
@@ -190,6 +195,12 @@ def _frozen_line_followup(item, facts):
                 upper = point["session"]
                 if not unknown_before:
                     first = upper
+            if state == "TRUE":
+                touched = True
+            elif touched and recovery_upper is None:
+                recovery_upper = point["session"]
+                if not recovery_unknown:
+                    recovery = recovery_upper
         observations.append({"session": point["session"], "state": state})
     return {
         "role": "FROZEN_T0_CANDIDATE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
@@ -202,6 +213,14 @@ def _frozen_line_followup(item, facts):
         else "UNKNOWN"
         if unknown_before
         else "NOT_OBSERVED",
+        "first_proved_return_above": recovery,
+        "first_proved_return_above_upper_bound": recovery_upper,
+        "first_return_above_status": "OBSERVED"
+        if recovery
+        else "UNKNOWN"
+        if recovery_unknown
+        else "NOT_OBSERVED",
+        "return_above_scope": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_REENTRY",
     }
 
 

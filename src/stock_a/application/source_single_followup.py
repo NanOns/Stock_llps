@@ -31,6 +31,8 @@ def observe_frozen_scenario(
             "observations": [],
             "first_false": None,
             "first_false_upper_bound": None,
+            "first_recovery_after_false": None,
+            "first_recovery_after_false_upper_bound": None,
             "status": "NO_FOLLOWUP_SESSION",
             "formal_episode": "NOT_CREATED",
         }
@@ -85,7 +87,8 @@ def observe_frozen_scenario(
         for day, row in rows.items()
     }
     unknown_before = False
-    first = upper = recovery = None
+    first = upper = recovery = recovery_upper = None
+    unknown_before_recovery = False
     observations = []
     for day in future:
         position = calendar.index(day)
@@ -116,12 +119,16 @@ def observe_frozen_scenario(
             state, reason = result["scenario_raw"], result["main_reason"]
         if upper is None and state == "UNKNOWN":
             unknown_before = True
+        if recovery_upper is None and state == "UNKNOWN":
+            unknown_before_recovery = True
         if state == "FALSE" and upper is None:
             upper = day.isoformat()
             if not unknown_before:
                 first = upper
-        if upper is not None and recovery is None and state == "TRUE":
-            recovery = day.isoformat()
+        if upper is not None and recovery_upper is None and state == "TRUE":
+            recovery_upper = day.isoformat()
+            if not unknown_before_recovery:
+                recovery = recovery_upper
         observations.append(
             {"session": day.isoformat(), "state": state, "reason": reason}
         )
@@ -140,5 +147,6 @@ def observe_frozen_scenario(
         if unknown_before
         else "NOT_OBSERVED",
         "first_recovery_after_false": recovery,
+        "first_recovery_after_false_upper_bound": recovery_upper,
         "formal_episode": "NOT_CREATED",
     }
