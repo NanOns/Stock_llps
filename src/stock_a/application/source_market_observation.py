@@ -486,16 +486,24 @@ def attach_observation_state_followup(
     observation: dict[str, Any],
     *,
     d1_by_session: Mapping[date, Mapping[str, Any]] | None = None,
+    horizon: int | None = None,
 ) -> None:
-    """仅投影请求中已经计算的后续三态，不推造正式退出状态。"""
+    """仅投影请求中已经计算的后续状态，不推造正式退出状态。"""
+    unknown_reasons = {}
+    for day in days:
+        for signal, scenario in day.get("scenarios", {}).items():
+            unknown_reasons[(day["session"], signal)] = {
+                row["source_symbol"]: row.get("main_reason") or "SOURCE_STATE_UNKNOWN"
+                for row in scenario["results"]
+                if row["scenario_raw"] == "UNKNOWN"
+            }
     for event in observation["events"]:
         signal = event["signal"]
         if signal == "D1_SUPPORT_CHANGE":
             points = []
             if d1_by_session is not None:
-                for day in days:
-                    if day["session"] <= event["session"]:
-                        continue
+                future_days = [day for day in days if day["session"] > event["session"]]
+                for day in future_days[:horizon]:
                     details = d1_by_session[day["session"]]["complete_symbol_details"]
                     detail = next(
                         (
@@ -528,35 +536,141 @@ def attach_observation_state_followup(
                             else "D1_ANCHOR_NOT_AVAILABLE",
                         }
                     )
+            if horizon is not None:
+                for _ in range(len(points), horizon):
+                    points.append(
+                        {
+                            "session": None,
+                            "classification": "NOT_AVAILABLE",
+                            "observation": None,
+                            "reason": "NO_FUTURE_SESSION_IN_SAVED_WINDOW",
+                        }
+                    )
+            observable = 0
+            for point in points:
+                if point["classification"] not in {"CHANGED", "UNCHANGED"}:
+                    break
+                observable += 1
+            first_unknown = next(
+                (
+                    point
+                    for point in points
+                    if point["classification"]
+                    in {"UNKNOWN", "NOT_COMPARABLE", "NOT_EVALUABLE", "OTHER_EXPLAINED"}
+                ),
+                None,
+            )
             event["source_state_followup"] = {
-                "status": "COMPUTED" if points else "NOT_EVALUATED",
+                "status": "COMPUTED"
+                if any(point["session"] for point in points)
+                else "NOT_EVALUATED",
                 "points": points,
+                "first_unknown_session": first_unknown["session"]
+                if first_unknown
+                else None,
+                "first_unknown_reason": first_unknown["reason"]
+                if first_unknown
+                else None,
+                "consecutive_observable_session_count": observable,
+                "first_broken_session": next(
+                    (
+                        point["session"]
+                        for point in points
+                        if (
+                            (point.get("observation") or {}).get("support_observation")
+                            or {}
+                        ).get("state")
+                        == "BROKEN"
+                        and (
+                            (point.get("observation") or {}).get("support_observation")
+                            or {}
+                        ).get("quality")
+                        == "OBSERVED"
+                    ),
+                    None,
+                ),
                 "formal_exit_status": "NOT_EVALUATED",
             }
             continue
         points = []
-        for day in days:
-            if day["session"] <= event["session"]:
-                continue
-            state = day["states"].get(event["source_symbol"], {}).get(signal)
+        future_days = [day for day in days if day["session"] > event["session"]]
+        for day in future_days[:horizon]:
+            symbol = event["source_symbol"]
+            state = day["states"].get(symbol, {}).get(signal)
+            if state is None:
+                reason = "SOURCE_SYMBOL_NOT_IN_POOL"
+            elif state == "FALSE":
+                reason = "SOURCE_SIGNAL_FALSE_NOT_FORMAL_EXIT"
+            elif state == "UNKNOWN":
+                reason = unknown_reasons.get((day["session"], signal), {}).get(symbol)
+                if reason is None:
+                    fact = (
+                        day.get("seed", {})
+                        .get("facts", {})
+                        .get(symbol, {})
+                        .get(signal, {})
+                    )
+                    reasons = fact.get("reasons") or (
+                        [fact["reason"]] if fact.get("reason") else []
+                    )
+                    reason = (
+                        ";".join(str(item) for item in reasons)
+                        or "SOURCE_STATE_UNKNOWN"
+                    )
+            else:
+                reason = "SOURCE_SIGNAL_TRUE"
             points.append(
                 {
                     "session": day["session"],
                     "state": state or "UNKNOWN",
-                    "reason": (
-                        "SOURCE_SYMBOL_NOT_IN_POOL"
-                        if state is None
-                        else "SOURCE_SIGNAL_FALSE_NOT_FORMAL_EXIT"
-                        if state == "FALSE"
-                        else "SOURCE_STATE_UNKNOWN"
-                        if state == "UNKNOWN"
-                        else "SOURCE_SIGNAL_TRUE"
-                    ),
+                    "reason": reason,
                 }
             )
+        if horizon is not None:
+            for _ in range(len(points), horizon):
+                points.append(
+                    {
+                        "session": None,
+                        "state": "NOT_AVAILABLE",
+                        "reason": "NO_FUTURE_SESSION_IN_SAVED_WINDOW",
+                    }
+                )
+        first_false = (
+            event["session"]
+            if event["transition"] == "TRUE_TO_FALSE"
+            else next(
+                (point["session"] for point in points if point["state"] == "FALSE"),
+                None,
+            )
+        )
+        first_unknown = next(
+            (point["session"] for point in points if point["state"] == "UNKNOWN"), None
+        )
+        observable = 0
+        for point in points:
+            if point["state"] not in {"TRUE", "FALSE"}:
+                break
+            observable += 1
+        consecutive_true = 1 if event["transition"] == "FALSE_TO_TRUE" else 0
+        if consecutive_true:
+            for point in points:
+                if point["state"] != "TRUE":
+                    break
+                consecutive_true += 1
         event["source_state_followup"] = {
-            "status": "COMPUTED" if points else "NOT_EVALUATED",
+            "status": "COMPUTED"
+            if any(point["session"] for point in points)
+            else "NOT_EVALUATED",
+            "t0_state": "TRUE" if event["transition"] == "FALSE_TO_TRUE" else "FALSE",
             "points": points,
+            "consecutive_true_session_count_including_t0": consecutive_true,
+            "first_proved_false_session": first_false,
+            "first_unknown_session": first_unknown,
+            "first_unknown_reason": next(
+                (point["reason"] for point in points if point["state"] == "UNKNOWN"),
+                None,
+            ),
+            "consecutive_observable_session_count": observable,
             "formal_exit_status": "NOT_EVALUATED",
         }
 
@@ -871,6 +985,8 @@ def attach_observation_outcomes(
     research_cutoff: date,
     package_sha256: str,
     horizon: int,
+    history_cache: Mapping[tuple[date, str], dict[str, Any]] | None = None,
+    read_metrics: dict[str, int] | None = None,
 ) -> None:
     """对完整事件组读取同包后继；后继不参与事件选择。"""
     if type(horizon) is not int or not 1 <= horizon <= 10:
@@ -882,7 +998,13 @@ def attach_observation_outcomes(
     for event in observation["events"]:
         target, symbol = event["session"], event["source_symbol"]
         key = (target, symbol)
+        if key not in histories and history_cache is not None and key in history_cache:
+            histories[key] = history_cache[key]
+            if read_metrics is not None:
+                read_metrics["event_cache_hits"] += 1
         if key not in histories:
+            if read_metrics is not None:
+                read_metrics["event_stock_reads"] += 1
             start = available.index(target)
             sessions = available[start : start + horizon + 1]
             history = read_raw_daily_history_stock(
@@ -929,12 +1051,29 @@ def attach_observation_outcomes(
         comparisons = []
         for point in facts["points"]:
             close = point["ohlc"]["close"]
+            if point["session"] is None:
+                comparisons.append(
+                    {
+                        "session": None,
+                        "state": "NOT_AVAILABLE",
+                        "reason": "NO_FUTURE_SESSION_IN_SAVED_WINDOW",
+                    }
+                )
+                continue
             if line is None or close["quality"] != "OBSERVED":
                 comparisons.append(
                     {
                         "session": point["session"],
                         "state": "UNKNOWN",
-                        "reason": "FAILURE_LINE_OR_CLOSE_UNKNOWN",
+                        "reason": (
+                            (
+                                "FAILURE_LINE_UNAVAILABLE"
+                                if signal in {"LAUNCH_CONFIRM", "RECOVERY_TURN"}
+                                else "FAILURE_LINE_NOT_DEFINED_FOR_SIGNAL"
+                            )
+                            if line is None
+                            else close.get("reason") or "FOLLOWUP_CLOSE_UNKNOWN"
+                        ),
                     }
                 )
                 continue
@@ -959,14 +1098,144 @@ def attach_observation_outcomes(
             (point["session"] for point in comparisons if point["state"] == "TRUE"),
             None,
         )
+        event["first_candidate_line_touch_session"] = event[
+            "first_proved_failure_session"
+        ]
         event["failure_line_status"] = (
             "TRUE"
             if event["first_proved_failure_session"] is not None
             else "UNKNOWN"
             if not comparisons
-            or any(point["state"] == "UNKNOWN" for point in comparisons)
+            or any(
+                point["state"] in {"UNKNOWN", "NOT_AVAILABLE"} for point in comparisons
+            )
             else "FALSE"
         )
+
+
+def attach_comparison_continuity(
+    comparisons: list[dict[str, Any]], observation: Mapping[str, Any]
+) -> None:
+    """按同一事件组汇总后续状态；组间可重叠，锚点仍各自计权。"""
+    grouped: dict[tuple[date, str], list[dict[str, Any]]] = {}
+    for event in observation["events"]:
+        base = f"{event['signal']}:{event['transition']}"
+        names = {base}
+        for membership in event.get("memberships", []):
+            kind = membership["board_kind"]
+            names.add(f"{base}|{kind}_MAPPED_NON_PIT")
+            names.add(f"{base}|BOARD:{kind}:{membership['board_native_id']}")
+        for name in names:
+            grouped.setdefault((event["session"], name), []).append(event)
+    for comparison in comparisons:
+        events = grouped.get((comparison["session"], comparison["group"]))
+        if events is None:
+            continue
+        n = comparison["horizon"]
+        states: Counter[str] = Counter()
+        state_unknown_reasons: Counter[str] = Counter()
+        support_states: Counter[str] = Counter()
+        lines: Counter[str] = Counter()
+        line_unknown_reasons: Counter[str] = Counter()
+        joint: Counter[str] = Counter()
+        joint_signs: Counter[str] = Counter()
+        first_false_by_horizon = 0
+        line_touched_by_horizon = 0
+        for event in events:
+            points = event["source_state_followup"]["points"]
+            point = points[n - 1] if len(points) >= n else {}
+            state = point.get("state") or point.get("classification") or "NOT_AVAILABLE"
+            states[state] += 1
+            if state in {
+                "UNKNOWN",
+                "NOT_COMPARABLE",
+                "NOT_EVALUABLE",
+                "OTHER_EXPLAINED",
+            }:
+                state_unknown_reasons[
+                    point.get("reason") or "SOURCE_STATE_UNKNOWN"
+                ] += 1
+            if event["signal"] == "D1_SUPPORT_CHANGE":
+                support = (point.get("observation") or {}).get(
+                    "support_observation"
+                ) or {}
+                support_state = (
+                    support.get("state")
+                    if support.get("quality") == "OBSERVED"
+                    else None
+                )
+                support_states[
+                    "NOT_AVAILABLE"
+                    if state == "NOT_AVAILABLE"
+                    else support_state or "UNKNOWN"
+                ] += 1
+            if event["transition"] == "TRUE_TO_FALSE" or any(
+                row.get("state") == "FALSE" for row in points[:n]
+            ):
+                first_false_by_horizon += 1
+            line_points = event["failure_line_comparisons"]
+            if any(row["state"] == "TRUE" for row in line_points[:n]):
+                line_touched_by_horizon += 1
+            line = (
+                line_points[n - 1]["state"]
+                if len(line_points) >= n
+                else "NOT_AVAILABLE"
+            )
+            lines[line] += 1
+            if line == "UNKNOWN":
+                line_unknown_reasons[
+                    line_points[n - 1].get("reason") or "FAILURE_LINE_UNKNOWN"
+                ] += 1
+            facts = event["post_signal_price_facts"]["points"]
+            change = (
+                facts[n - 1]["raw_close_relative_change"] if len(facts) >= n else {}
+            )
+            if change.get("quality") == "OBSERVED" and state in {
+                "TRUE",
+                "FALSE",
+                "CHANGED",
+                "UNCHANGED",
+            }:
+                value = Fraction(change["value"]["exact"])
+                joint[f"{state}_{'POSITIVE' if value > 0 else 'NON_POSITIVE'}"] += 1
+                sign = "POSITIVE" if value > 0 else "NEGATIVE" if value < 0 else "ZERO"
+                joint_signs[f"{state}_{sign}"] += 1
+        comparison["event_continuity"] = {
+            "state_counts": dict(states),
+            "state_unknown_reasons": dict(state_unknown_reasons),
+            "d1_support_state_counts": dict(support_states),
+            "candidate_line_touch_counts": dict(lines),
+            "candidate_line_unknown_reasons": dict(line_unknown_reasons),
+            "state_and_price_counts": dict(joint),
+            "state_and_price_sign_counts": dict(joint_signs),
+            "source_false_by_horizon_count": (
+                None
+                if events[0]["signal"] == "D1_SUPPORT_CHANGE"
+                else first_false_by_horizon
+            ),
+            "source_false_reason": (
+                "D1_SUPPORT_IS_NOT_BOOLEAN"
+                if events[0]["signal"] == "D1_SUPPORT_CHANGE"
+                else None
+            ),
+            "candidate_line_touched_by_horizon_count": line_touched_by_horizon,
+            "scope": "EVENT_WEIGHTED_NOT_FORMAL_EXIT",
+        }
+
+
+def _comparison_price_point(facts: Mapping[str, Any], horizon: int) -> dict[str, Any]:
+    point = facts["points"][horizon - 1]
+    value = dict(point["raw_close_relative_change"])
+    if value.get("reason") == "T0_OR_ENDPOINT_BAR_UNKNOWN":
+        base = facts["t0"]["ohlc"]
+        endpoint = point["ohlc"]
+        if base.get("quality") != "OBSERVED":
+            value["reason"] = "T0:" + str(base.get("reason") or "RAW_BAR_UNKNOWN")
+        elif endpoint.get("quality") != "OBSERVED":
+            value["reason"] = "FOLLOWUP:" + str(
+                endpoint.get("reason") or "RAW_BAR_UNKNOWN"
+            )
+    return value
 
 
 def compare_source_outcomes(
@@ -977,6 +1246,8 @@ def compare_source_outcomes(
     research_cutoff: date,
     package_sha256: str,
     horizon: int,
+    history_cache: dict[tuple[date, str], dict[str, Any]] | None = None,
+    read_metrics: dict[str, int] | None = None,
 ) -> list[dict[str, Any]]:
     """对同日事件与双D0已知未触发对象描述后验价格，不用于筛选T0。"""
     if type(horizon) is not int or not 1 <= horizon <= 10:
@@ -989,8 +1260,17 @@ def compare_source_outcomes(
         start = available.index(target)
         sessions = available[start : start + horizon + 1]
         histories = {}
+        cached = history_cache is not None and all(
+            (target, symbol) in history_cache for symbol in day["states"]
+        )
         offset = 0
-        while True:
+        if read_metrics is not None:
+            read_metrics[
+                "comparison_cache_reuses" if cached else "comparison_pool_scans"
+            ] += 1
+        while not cached:
+            if read_metrics is not None:
+                read_metrics["comparison_page_reads"] += 1
             page = read_raw_daily_history_page(
                 config,
                 target_session=sessions[-1],
@@ -1028,12 +1308,55 @@ def compare_source_outcomes(
                         )
                     else:
                         safe.append(row)
-                histories[symbol] = post_signal_price_facts(sessions, safe, horizon)[
-                    "points"
-                ][-1]["raw_close_relative_change"]
+                facts = post_signal_price_facts(sessions, safe, horizon)
+                histories[symbol] = _comparison_price_point(facts, horizon)
+                if history_cache is not None:
+                    history_cache[(target, symbol)] = facts
             offset = page["next_offset"]
             if offset is None:
                 break
+        if history_cache is not None:
+            for symbol in day["states"]:
+                facts = history_cache.get((target, symbol))
+                if facts is None:
+                    # 最新会话可能没有T0代码；补读该代码，不能把其T0误判为缺失。
+                    if read_metrics is not None:
+                        read_metrics["comparison_missing_stock_reads"] += 1
+                    history = read_raw_daily_history_stock(
+                        config,
+                        source_symbol=symbol,
+                        target_session=target,
+                        package_sha256=package_sha256,
+                        sessions=sessions,
+                        expected_namespace_id=day["namespace_id"],
+                        starts_at_target=True,
+                        research_cutoff=research_cutoff,
+                    )
+                    rows = history["history_rows"]
+                    birth = next(
+                        (row for row in rows if row["session_date"] == target), None
+                    )
+                    safe = [
+                        row
+                        if row["session_date"] == target
+                        or (
+                            birth is not None
+                            and birth.get("source_entry_sha256")
+                            and row.get("source_entry_sha256")
+                            == birth.get("source_entry_sha256")
+                            and row.get("source_content_id")
+                            == birth.get("source_content_id")
+                            and row.get("price_coordinate") == "RAW_UNADJUSTED"
+                        )
+                        else {
+                            "session_date": row["session_date"],
+                            "bar_status": "FOLLOWUP_COORDINATE_OR_SOURCE_MISMATCH",
+                        }
+                        for row in rows
+                    ]
+                    facts = post_signal_price_facts(sessions, safe, horizon)
+                    history_cache[(target, symbol)] = facts
+                histories[symbol] = _comparison_price_point(facts, horizon)
         groups: dict[str, list[str]] = {}
         for name in ("LAUNCH_CONFIRM", "RECOVERY_TURN", "s1", "s2", "seed"):
             groups[f"{name}:FALSE_TO_TRUE"] = []
@@ -1096,16 +1419,35 @@ def compare_source_outcomes(
                         symbol
                     )
         for group, symbols in groups.items():
-            values = []
-            reasons: Counter[str] = Counter()
-            for symbol in symbols:
-                fact = histories.get(symbol)
-                if fact is None or fact["quality"] != "OBSERVED":
-                    reasons[
-                        (fact or {}).get("reason") or "FOLLOWUP_POOL_SYMBOL_MISSING"
-                    ] += 1
-                else:
-                    values.append(Fraction(fact["value"]["exact"]))
+
+            def summarize(items):
+                values = []
+                reasons: Counter[str] = Counter()
+                for symbol in items:
+                    fact = histories.get(symbol)
+                    if fact is None or fact["quality"] != "OBSERVED":
+                        reasons[
+                            (fact or {}).get("reason") or "FOLLOWUP_POOL_SYMBOL_MISSING"
+                        ] += 1
+                    else:
+                        values.append(Fraction(fact["value"]["exact"]))
+                positive = sum(value > 0 for value in values)
+                return {
+                    "count": len(items),
+                    "known_count": len(values),
+                    "unknown_count": len(items) - len(values),
+                    "unknown_reasons": dict(reasons),
+                    "median": str(median(values)) if values else None,
+                    "positive_count": positive,
+                    "non_positive_count": len(values) - positive,
+                    "positive_fraction": str(Fraction(positive, len(values)))
+                    if values
+                    else None,
+                }
+
+            event_stats = summarize(symbols)
+            stock_stats = summarize(list(dict.fromkeys(symbols)))
+            values_count = event_stats["known_count"]
             output.append(
                 {
                     "session": target,
@@ -1113,16 +1455,15 @@ def compare_source_outcomes(
                     "horizon": horizon,
                     "event_or_control_count": len(symbols),
                     "distinct_symbol_count": len(set(symbols)),
-                    "known_count": len(values),
-                    "unknown_count": len(symbols) - len(values),
-                    "unknown_reasons": dict(reasons),
-                    "median": str(median(values)) if values else None,
-                    "positive_fraction": str(
-                        Fraction(sum(value > 0 for value in values), len(values))
-                    )
-                    if values
-                    else None,
-                    "status": "COMPUTED" if values else "NOT_EVALUABLE",
+                    "known_count": event_stats["known_count"],
+                    "unknown_count": event_stats["unknown_count"],
+                    "unknown_reasons": event_stats["unknown_reasons"],
+                    "median": event_stats["median"],
+                    "positive_fraction": event_stats["positive_fraction"],
+                    "event_weighted": event_stats,
+                    "distinct_stock_weighted": stock_stats,
+                    "weighting_note": "事件级按事件计权；股票级按同日来源代码去重；各组允许重叠",
+                    "status": "COMPUTED" if values_count else "NOT_EVALUABLE",
                     "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
                     "control_definition": (
                         "D0两场景均已知FALSE；可与其他事件类别重叠"

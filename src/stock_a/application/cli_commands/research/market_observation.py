@@ -18,9 +18,11 @@ from stock_a.application.source_market_observation import (
     SourceObservationError,
     assemble_observation_changes,
     attach_board_strengths,
+    attach_comparison_continuity,
     attach_observation_outcomes,
     attach_observation_state_followup,
     compare_source_outcomes,
+    classify_source_transition,
     read_market_observation_sessions,
     read_observation_board_details,
     read_observation_d1,
@@ -135,19 +137,20 @@ def _run_source_market_observation(args) -> int:
                 )
             )
         attach_observation_state_followup(
-            days + followup_days, result, d1_by_session=d1
+            days + followup_days, result, d1_by_session=d1, horizon=max(horizons)
         )
-        attach_observation_outcomes(
-            config,
-            days,
-            result,
-            research_cutoff=cutoff,
-            package_sha256=args.package_sha256,
-            horizon=max(horizons),
-        )
+        history_cache = {}
+        read_metrics = {
+            "comparison_pool_scans": 0,
+            "comparison_page_reads": 0,
+            "comparison_cache_reuses": 0,
+            "comparison_missing_stock_reads": 0,
+            "event_stock_reads": 0,
+            "event_cache_hits": 0,
+        }
         comparisons = [
             row
-            for horizon in horizons
+            for horizon in reversed(horizons)
             for row in compare_source_outcomes(
                 config,
                 days,
@@ -155,12 +158,27 @@ def _run_source_market_observation(args) -> int:
                 research_cutoff=cutoff,
                 package_sha256=args.package_sha256,
                 horizon=horizon,
+                history_cache=history_cache,
+                read_metrics=read_metrics,
             )
         ]
+        attach_observation_outcomes(
+            config,
+            days,
+            result,
+            research_cutoff=cutoff,
+            package_sha256=args.package_sha256,
+            horizon=max(horizons),
+            history_cache=history_cache,
+            read_metrics=read_metrics,
+        )
+        attach_comparison_continuity(comparisons, result)
+        comparisons.sort(key=lambda row: row["horizon"])
         selected = [
             event
             for event in result["events"]
             if (not args.symbol or event["source_symbol"] == args.symbol)
+            and (not args.signal or event["signal"] == args.signal)
             and (
                 not args.board_id
                 or any(
@@ -171,6 +189,36 @@ def _run_source_market_observation(args) -> int:
             )
         ]
         page_events = selected[args.offset : args.offset + args.limit]
+        page_keys = {
+            (event["session"], event["source_symbol"]) for event in page_events
+        }
+        stock_observations = {}
+        for event in result["events"]:
+            key = (event["session"], event["source_symbol"])
+            if key not in page_keys:
+                continue
+            summary = stock_observations.setdefault(
+                key,
+                {"session": key[0], "source_symbol": key[1], "events": []},
+            )
+            summary["events"].append(
+                {
+                    "signal": event["signal"],
+                    "transition": event["transition"],
+                    "d1_anchor_session": event.get("d1_source_event", {}).get(
+                        "support_anchor_session"
+                    ),
+                    "source_state_followup": event["source_state_followup"],
+                    "first_proved_failure_session": event[
+                        "first_proved_failure_session"
+                    ],
+                    "first_candidate_line_touch_session": event[
+                        "first_candidate_line_touch_session"
+                    ],
+                }
+            )
+        for summary in stock_observations.values():
+            summary["event_count"] = len(summary["events"])
         by_session = {day["session"]: day for day in days}
         detail_cache = {}
         rps_by_session = {}
@@ -254,6 +302,29 @@ def _run_source_market_observation(args) -> int:
                         if args.board_id
                         else "NOT_REQUESTED"
                     ),
+                    "observation_selection": {
+                        "event_count": sum(
+                            event["session"] == day["session"]
+                            and event["source_symbol"] == args.symbol
+                            for event in result["events"]
+                        ),
+                        "reason": "DISCOVERED_EVENT"
+                        if any(
+                            event["session"] == day["session"]
+                            and event["source_symbol"] == args.symbol
+                            for event in result["events"]
+                        )
+                        else "NO_PROVED_SELECTED_TRANSITION_OR_D1_CHANGE",
+                        "state_transitions": {
+                            name: classify_source_transition(
+                                day["prior_states"].get(args.symbol, {}).get(name),
+                                state,
+                            )
+                            for name, state in day["states"]
+                            .get(args.symbol, {})
+                            .items()
+                        },
+                    },
                     "detail": stock_detail((day["session"], args.symbol)),
                 }
                 for day in days
@@ -351,6 +422,8 @@ def _run_source_market_observation(args) -> int:
                     else None,
                 },
                 "events": page_events,
+                "page_stock_observations": list(stock_observations.values()),
+                "page_stock_observations_scope": "PAGE_KEYS_ALL_SAME_SESSION_SYMBOL_EVENTS",
                 "formal_eligibility": "UNKNOWN",
                 "formal_authorization": "FORMAL_NOT_AUTHORIZED",
                 "formal_eligibility_reason": "FORMAL_EPISODE_AND_QUALIFICATION_UNPROVED",
@@ -358,6 +431,7 @@ def _run_source_market_observation(args) -> int:
                 "execution": {
                     "elapsed_seconds": time.perf_counter() - started,
                     "database_mode": "READ_ONLY",
+                    "followup_read_metrics": read_metrics,
                 },
             }
         )

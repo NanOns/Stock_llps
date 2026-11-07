@@ -49,6 +49,18 @@ def register_commands(commands):
     )
     observation.add_argument("--symbol", help="仅筛选该来源代码的观察明细")
     observation.add_argument(
+        "--signal",
+        choices=(
+            "LAUNCH_CONFIRM",
+            "RECOVERY_TURN",
+            "s1",
+            "s2",
+            "seed",
+            "D1_SUPPORT_CHANGE",
+        ),
+        help="完整计算后按事件类别筛选观察明细",
+    )
+    observation.add_argument(
         "--board-kind", choices=("INDUSTRY", "CONCEPT"), help="精确板块类型"
     )
     observation.add_argument("--board-id", help="精确板块原生编号")
