@@ -17,6 +17,10 @@ from stock_a.storage.postgres.research_facts import (
 from stock_a.storage.postgres.source_raw import read_raw_daily_forward_pool
 
 
+class ResearchSymbolNotFound(ValueError):
+    """所选来源代码不在指定的冻结来源池中。"""
+
+
 def read_persisted_cohort(
     config,
     *,
@@ -111,7 +115,7 @@ def read_persisted_cohort(
     if symbol is not None:
         selected = next((row for row in rows if row[0] == symbol), None)
         if selected is None:
-            raise ValueError("所选代码不在冻结来源池中")
+            raise ResearchSymbolNotFound("所选代码不在冻结来源池中")
         line = (
             {"numerator": str(selected[18]), "denominator": str(selected[19])}
             if selected[18] is not None

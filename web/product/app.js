@@ -1408,6 +1408,12 @@ async function loadExtra(page) {
         ["研究截止", context.research_cutoff],
         ["PG 命名空间", context.namespace_id],
         [
+          "本次服务进程最近响应错误",
+          context.last_service_error
+            ? `${context.last_service_error.observed_at} · ${context.last_service_error.route} · HTTP ${context.last_service_error.status} · ${context.last_service_error.code}`
+            : "本次进程未记录；重启前历史不可用",
+        ],
+        [
           "本页会话最近读取错误",
           lastApiError
             ? `${lastApiError.time} · ${lastApiError.route} · ${lastApiError.reason}`

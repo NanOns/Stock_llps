@@ -22,7 +22,10 @@ from stock_a.application.source_market_context import (
     read_source_market_context,
     source_market_context_payload,
 )
-from stock_a.application.source_persisted_research import read_persisted_cohort
+from stock_a.application.source_persisted_research import (
+    ResearchSymbolNotFound,
+    read_persisted_cohort,
+)
 from stock_a.storage.postgres.research_facts import (
     ResearchFactNotFound,
     read_research_keys,
@@ -113,6 +116,29 @@ _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _SYMBOL_SEARCH = re.compile(r"^[A-Za-z0-9.]{1,9}$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+_DIAGNOSTIC_ROUTES = frozenset(
+    {
+        "/api/preview/catalog",
+        "/api/preview/raw",
+        "/api/preview/sector-change-context",
+        "/api/preview/sector-change-stocks",
+        "/api/preview/source-launch-watch",
+        "/api/preview/source-page",
+        "/api/preview/stock-timeline",
+        "/api/preview/stock",
+        "/api/product/cohort-keys",
+        "/api/product/cohort",
+        "/api/product/market",
+        "/api/source-symbol-price-profile-breadth-members",
+        "/api/source-symbol-price-profile-breadth",
+        "/api/source-symbol-price-profile-changes",
+        "/api/source-symbol-price-profile-pair",
+        "/api/source-symbol-price-profile-relation-screen",
+        "/api/source-symbol-price-profiles",
+        "/api/source-symbol-price-profiles/snapshots",
+        "/api/source-symbol/raw-periods",
+    }
+)
 # 只登记运行代码当前实际提供的能力边界。阶段名称、输入、产物和消费者始终来自机器合同。
 
 
@@ -436,6 +462,8 @@ class _PreviewState:
         if type(research_cutoff) is not date:
             raise DiagnosticError("RESEARCH_CUTOFF_REQUIRED", "必须显式绑定研究截止日")
         self.research_cutoff = research_cutoff
+        # 仅保存本服务进程最近一次实际响应错误，重启即清空。
+        self.last_service_error: dict[str, Any] | None = None
         self.config, self.config_path = load_runtime_config()
         services = self.config.get("services")
         development = (
@@ -783,6 +811,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         self._send(status, body, "application/json; charset=utf-8")
 
     def _error(self, error: PreviewHttpError) -> None:
+        route = str(getattr(self, "path", "")).split("?", 1)[0]
+        if self._host_allowed() and route in _DIAGNOSTIC_ROUTES:
+            self.preview_server.state.last_service_error = {
+                "observed_at": datetime.now(timezone.utc).isoformat(),
+                "route": route,
+                "status": error.status,
+                "code": error.code,
+            }
         payload = {"ok": False, "code": error.code, "message": error.message}
         request_context = getattr(self, "_raw_period_request_context", None)
         if request_context is not None:
@@ -878,20 +914,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         # 仅记录调用位置，不记录异常文本、局部变量、SQL或请求体。
         frames = traceback.extract_tb(error.__traceback__)
         route = str(getattr(self, "path", "")).split("?", 1)[0]
-        known_routes = {
-            "/api/preview/catalog",
-            "/api/preview/raw",
-            "/api/preview/source-launch-watch",
-            "/api/preview/source-page",
-            "/api/preview/stock-timeline",
-            "/api/preview/stock",
-        }
         method = getattr(self, "command", "")
         diagnostic = {
             "time": datetime.now(timezone.utc).isoformat(),
             "request_id": uuid4().hex,
             "method": method if method in {"GET", "HEAD", "POST"} else "UNKNOWN",
-            "route": route if route in known_routes else "UNKNOWN_ROUTE",
+            "route": route if route in _DIAGNOSTIC_ROUTES else "UNKNOWN_ROUTE",
             "exception_type": type(error).__name__,
             "stack": [
                 {
@@ -1997,6 +2025,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         limit=30,
                         symbol=symbol,
                     )
+                except ResearchSymbolNotFound as error:
+                    raise PreviewHttpError(
+                        404, "COHORT_SYMBOL_NOT_FOUND", str(error)
+                    ) from error
                 except ResearchFactNotFound:
                     self._send_json(
                         200,
@@ -2075,6 +2107,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "target_session": target.isoformat(),
                         "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
                         "official_calendar_revision": calendar_revision,
+                        "last_service_error": self.preview_server.state.last_service_error,
                         "window_options": window_options,
                         "snapshots": snapshots,
                         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
