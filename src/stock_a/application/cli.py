@@ -105,7 +105,7 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_market_observation(args)
         if args.command == "source-d1-breakout-preview":
             return _run_source_d1_breakout_preview(args)
-        if args.command == "preview-serve":
+        if args.command in ("product-serve", "preview-serve"):
             from stock_a.service.preview_http import run_preview_server
 
             return run_preview_server(

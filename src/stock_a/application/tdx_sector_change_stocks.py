@@ -683,6 +683,7 @@ def combine_sector_strength_and_d1_changes(
     d0_new_only: bool = False,
     member_search: str | None = None,
     explain_symbol: str | None = None,
+    board_search: str | None = None,
 ) -> dict[str, Any]:
     """先联接完整来源集合，再过滤、排序及分页板块和板内股票。"""
     if (
@@ -727,6 +728,8 @@ def combine_sector_strength_and_d1_changes(
             not isinstance(member_search, str)
             or _SOURCE_SYMBOL_SEARCH_PATTERN.fullmatch(member_search) is None
         )
+        or board_search is not None
+        and (not isinstance(board_search, str) or not 1 <= len(board_search) <= 64)
     ):
         raise TdxSectorMembersApplicationError(
             "SECTOR_CHANGE_PAGE_INVALID", "行业概念联动筛选、排序或分页参数无效"
@@ -978,6 +981,14 @@ def combine_sector_strength_and_d1_changes(
     if board_kind_filter is not None:
         board_rows = [
             row for row in board_rows if row["board_kind"] == board_kind_filter
+        ]
+    if board_search is not None:
+        needle = board_search.casefold()
+        board_rows = [
+            row
+            for row in board_rows
+            if needle in row["board_name"].casefold()
+            or needle in row["board_native_id"].casefold()
         ]
     if detail_board_native_id is not None:
         detail_matches = [

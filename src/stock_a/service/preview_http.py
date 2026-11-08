@@ -1227,7 +1227,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "stock_limit",
         }
         if not isinstance(body, dict) or not required <= set(body) <= (
-            required | {"observation_mode", "explain_symbol"}
+            required
+            | {
+                "observation_mode",
+                "explain_symbol",
+                "board_search",
+                "d1_only_explanation",
+            }
         ):
             raise PreviewHttpError(
                 400,
@@ -1249,7 +1255,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         explain_symbol = (
             _symbol(body["explain_symbol"]) if "explain_symbol" in body else None
         )
-        read_d0 = include_d0_launch_new or explain_symbol is not None
+        d1_only = body.get("d1_only_explanation", False)
+        if type(d1_only) is not bool or (
+            d1_only and (include_d0_launch_new or explain_symbol is None)
+        ):
+            raise PreviewHttpError(
+                400, "SECTOR_CHANGE_EXPLANATION_INVALID", "仅D1解释须指定代码与D1模式"
+            )
+        read_d0 = include_d0_launch_new or (explain_symbol is not None and not d1_only)
         target = _iso_date(body["target_session"])
         cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
         _require_research_cutoff(target, cutoff)
@@ -1378,6 +1391,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         member_search = body["member_search"]
         if member_search is not None:
             member_search = _symbol_search(member_search)
+        board_search = body.get("board_search")
+        if board_search is not None:
+            if (
+                not isinstance(board_search, str)
+                or not 1 <= len(board_search.strip()) <= 64
+            ):
+                raise PreviewHttpError(
+                    400, "SECTOR_BOARD_SEARCH_INVALID", "板块搜索须为1至64个字符"
+                )
+            board_search = board_search.strip()
         offset = _nonnegative_int(str(body["offset"]), "offset")
         limit = _positive_int(body["limit"], "limit", 100)
         member_offset = _nonnegative_int(str(body["member_offset"]), "member_offset")
@@ -1501,6 +1524,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 stock_limit=stock_limit,
                 include_source_market_context=False,
                 member_search=member_search,
+                board_search=board_search,
                 explain_symbol=explain_symbol,
                 d0_new_only=include_d0_launch_new,
             )
@@ -2679,9 +2703,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "research_cutoff",
                 }
                 membership_fields = {"industry_snapshot_id", "concept_snapshot_id"}
-                if set(body) not in (
-                    required_observation_fields,
-                    required_observation_fields | membership_fields,
+                optional_observation_fields = membership_fields | {"diagnostic_scope"}
+                if not required_observation_fields <= set(body) <= (
+                    required_observation_fields | optional_observation_fields
+                ) or (
+                    bool(membership_fields & set(body))
+                    and not membership_fields <= set(body)
                 ):
                     raise PreviewHttpError(
                         400,
@@ -2696,6 +2723,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     cutoff, self.preview_server.state.research_cutoff
                 )
                 package = _sha(body["package_sha256"])
+                diagnostic_scope = body.get("diagnostic_scope", "LAUNCH")
+                if not isinstance(diagnostic_scope, str) or diagnostic_scope not in {
+                    "BOTH",
+                    "LAUNCH",
+                    "RECOVERY",
+                }:
+                    raise PreviewHttpError(
+                        400, "SOURCE_DIAGNOSTIC_SCOPE_INVALID", "来源诊断范围无效"
+                    )
                 try:
                     namespace = str(UUID(body["namespace_id"]))
                 except (ValueError, TypeError, AttributeError) as error:
@@ -2704,30 +2740,46 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_IDENTITY_INVALID",
                         "namespace_id须为有效UUID",
                     ) from error
-                _, pair, _ = resolve_pg_history_window(target.isoformat(), 2)
-                try:
-                    rows = self.preview_server.state.single_d0_rows(
-                        (namespace, pair[0], target, cutoff, package),
-                        lambda: query_source_d0_raw_launch(
-                            self.preview_server.state.config,
-                            scenario="LAUNCH_CONFIRM",
-                            action="changes",
-                            before_session=pair[0],
-                            target_session=target,
-                            research_cutoff=cutoff,
-                            before_package_sha256=package,
-                            package_sha256=package,
-                            expected_namespace_id=namespace,
-                            transition="ALL",
-                            offset=0,
-                            limit=5000,
-                        ),
+                rows = {}
+                if diagnostic_scope != "RECOVERY":
+                    _, pair, _ = resolve_pg_history_window(target.isoformat(), 2)
+                    try:
+                        rows = self.preview_server.state.single_d0_rows(
+                            (namespace, pair[0], target, cutoff, package),
+                            lambda: query_source_d0_raw_launch(
+                                self.preview_server.state.config,
+                                scenario="LAUNCH_CONFIRM",
+                                action="changes",
+                                before_session=pair[0],
+                                target_session=target,
+                                research_cutoff=cutoff,
+                                before_package_sha256=package,
+                                package_sha256=package,
+                                expected_namespace_id=namespace,
+                                transition="ALL",
+                                offset=0,
+                                limit=5000,
+                            ),
+                        )
+                    except (SourceD0RawError, SourceStockChangeContextError) as error:
+                        mapped = _source_context_preview_error(error)
+                        if mapped is None:
+                            raise
+                        raise mapped from error
+                recovery = None
+                if diagnostic_scope != "LAUNCH":
+                    recovery = query_source_d0_raw_launch(
+                        self.preview_server.state.config,
+                        scenario="RECOVERY_TURN",
+                        action="current",
+                        target_session=target,
+                        research_cutoff=cutoff,
+                        package_sha256=package,
+                        expected_namespace_id=namespace,
+                        symbol=symbol,
+                        offset=0,
+                        limit=1,
                     )
-                except (SourceD0RawError, SourceStockChangeContextError) as error:
-                    mapped = _source_context_preview_error(error)
-                    if mapped is None:
-                        raise
-                    raise mapped from error
                 membership = {
                     "status": "NOT_EVALUATED",
                     "reason": "未同时选择行业与GN快照",
@@ -2758,6 +2810,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "source_symbol": symbol,
                         "target_session": target.isoformat(),
                         "d0_change": rows.get(symbol),
+                        "recovery": next(iter(recovery["results"]), None)
+                        if recovery
+                        else None,
+                        "diagnostic_scope": diagnostic_scope,
                         "d1_status": "NOT_EVALUATED",
                         "membership_status": membership["status"],
                         "current_tdx_membership": membership,

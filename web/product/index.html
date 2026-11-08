@@ -1,0 +1,352 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Stock A · 研究工作台</title>
+    <link rel="stylesheet" href="/app.css" />
+    <script src="/app.js" defer></script>
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar" aria-label="主导航">
+        <div class="brand">
+          <div class="brand-mark">S<span>•</span></div>
+          <div><strong>Stock A</strong><small>市场结构研究</small></div>
+        </div>
+        <p class="nav-caption">研究工作台</p>
+        <nav class="navigation">
+          <button class="nav-item active" data-page="overview">
+            <span class="nav-icon">◫</span><span>今日总览</span
+            ><span class="nav-arrow">›</span>
+          </button>
+          <button class="nav-item" data-page="sectors">
+            <span class="nav-icon">▦</span><span>板块研究</span
+            ><span class="nav-arrow">›</span>
+          </button>
+          <button class="nav-item" data-page="stocks">
+            <span class="nav-icon">⌁</span><span>个股研究</span
+            ><span class="nav-arrow">›</span>
+          </button>
+        </nav>
+        <div class="sidebar-note">
+          <span class="status-dot"></span>
+          <div>
+            <b>只读研究环境</b>
+            <p>来源数据与成员关系按实际质量展示，不构成交易建议。</p>
+          </div>
+        </div>
+        <div class="sidebar-foot">STOCK A <span> / </span> RESEARCH</div>
+      </aside>
+      <main class="workspace">
+        <header class="topbar">
+          <div class="breadcrumbs">
+            研究工作台 <span>/</span> <strong id="breadcrumb">今日总览</strong>
+          </div>
+          <div class="top-actions">
+            <span class="environment"><i></i> 开发环境</span
+            ><button class="context-button" id="openContext">
+              <span>研究日期</span><strong id="currentDate">请选择</strong
+              ><span>⌄</span>
+            </button>
+          </div>
+        </header>
+        <div class="content">
+          <div class="page-heading">
+            <div>
+              <div class="eyebrow">
+                MARKET RESEARCH <span> / </span>
+                <span id="headingIndex">01</span>
+              </div>
+              <h1 id="pageTitle">今日总览</h1>
+              <p id="pageSubtitle">从真实变化出发，了解市场中正在发生什么。</p>
+            </div>
+            <button id="refreshResearch" class="button primary">
+              更新研究结果 <span>↗</span>
+            </button>
+          </div>
+          <div id="contextNotice" class="context-notice">
+            <span class="notice-icon">i</span
+            ><span id="contextText"
+              >请选择真实交易日、来源版本、画像与成员快照，然后读取研究结果。</span
+            ><button id="configureContext">选择研究范围 <span>→</span></button>
+          </div>
+          <section id="overview" class="page active" aria-label="今日总览">
+            <div class="section-heading">
+              <div>
+                <span class="section-kicker">MARKET PULSE</span>
+                <h2>市场变化</h2>
+              </div>
+              <span class="muted" id="observationLabel">等待选择研究范围</span>
+            </div>
+            <div class="metrics" id="metrics">
+              <article>
+                <span>来源代码池</span><strong>—</strong
+                ><small>等待研究结果</small>
+              </article>
+              <article>
+                <span>变化代码</span><strong>—</strong
+                ><small>按来源代码去重</small>
+              </article>
+              <article>
+                <span>变化事件</span><strong>—</strong
+                ><small>所选观察窗口</small>
+              </article>
+              <article>
+                <span>行业 / GN 板块</span><strong>—</strong
+                ><small>当前快照，非历史成员</small>
+              </article>
+            </div>
+            <div class="grid-two">
+              <section class="card">
+                <div class="card-head">
+                  <div>
+                    <span class="section-kicker">SECTOR MOVES</span>
+                    <h3>发生变化的板块</h3>
+                    <p>按可证变化成员数展示，最多 15 个。</p>
+                  </div>
+                  <button class="text-button" data-goto="sectors">
+                    查看板块 <span>→</span>
+                  </button>
+                </div>
+                <div id="overviewBoards" class="list-empty">
+                  选择研究范围后查看真实变化。
+                </div>
+              </section>
+              <section class="card">
+                <div class="card-head">
+                  <div>
+                    <span class="section-kicker">STOCK MOVES</span>
+                    <h3>独立个股变化</h3>
+                    <p>跨板块按来源代码去重，最多 30 只。</p>
+                  </div>
+                  <button class="text-button" data-goto="stocks">
+                    搜索个股 <span>→</span>
+                  </button>
+                </div>
+                <div id="overviewStocks" class="list-empty">
+                  变化对象将在这里显示。
+                </div>
+              </section>
+            </div>
+            <div class="footnote">
+              研究结果为来源代码级、RAW_UNADJUSTED、NON_PIT。正式 D2、Risk /
+              Priority、Focus 尚未计算，不等同于“无信号”。
+            </div>
+          </section>
+          <section id="sectors" class="page" aria-label="板块研究">
+            <div class="section-heading">
+              <div>
+                <span class="section-kicker">SECTOR EXPLORER</span>
+                <h2>行业与 GN 概念</h2>
+                <p>查看变化板块，并打开成员明细。</p>
+              </div>
+              <div class="filters">
+                <label class="sr-only" for="boardSearch">搜索板块</label>
+                <input id="boardSearch" placeholder="搜索板块名称或编号" />
+                <button id="searchBoards" class="button subtle">搜索</button>
+                <label class="sr-only" for="boardKind">板块类型</label
+                ><select id="boardKind">
+                  <option value="ALL">全部类型</option>
+                  <option value="INDUSTRY">行业</option>
+                  <option value="CONCEPT">GN 概念</option></select
+                ><label class="checkbox"
+                  ><input type="checkbox" id="changedOnly" checked />
+                  只看有变化</label
+                >
+              </div>
+            </div>
+            <section class="card table-card">
+              <div class="table-caption">
+                <span id="boardSummary">等待研究结果</span
+                ><span>当前成员快照 · NON_PIT</span>
+              </div>
+              <div class="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>板块名称</th>
+                      <th>类型</th>
+                      <th>成员总数</th>
+                      <th>映射 / 未映射</th>
+                      <th>变化成员</th>
+                      <th></th>
+                    </tr>
+                  </thead>
+                  <tbody id="boardRows">
+                    <tr>
+                      <td colspan="6" class="empty">请选择研究范围。</td>
+                    </tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="pagination">
+                <button id="boardPrev" class="button subtle" disabled>
+                  上一页</button
+                ><span id="boardPage">—</span
+                ><button id="boardNext" class="button subtle" disabled>
+                  下一页
+                </button>
+              </div>
+            </section>
+          </section>
+          <section id="stocks" class="page" aria-label="个股研究">
+            <div class="section-heading">
+              <div>
+                <span class="section-kicker">STOCK RESEARCH</span>
+                <h2>搜索来源代码</h2>
+                <p>
+                  使用 SH. / SZ. 加六位代码，查看同日价格、画像和来源规则解释。
+                </p>
+              </div>
+            </div>
+            <div class="card search-card">
+              <form id="stockSearch">
+                <label for="stockSymbol">来源股票代码</label>
+                <div class="search-line">
+                  <input
+                    id="stockSymbol"
+                    autocomplete="off"
+                    placeholder="输入 SH. 或 SZ. 来源代码"
+                  /><button class="button primary" type="submit">
+                    查看个股 <span>↗</span>
+                  </button>
+                </div>
+              </form>
+              <p class="muted">
+                名称与稳定证券身份尚未可靠绑定；请使用来源代码。数据缺失时会保留
+                UNKNOWN 原因。
+              </p>
+            </div>
+            <div class="section-heading lower">
+              <div>
+                <span class="section-kicker">OBSERVED CHANGES</span>
+                <h2>本窗口变化代码</h2>
+              </div>
+              <span class="muted">按来源代码去重</span>
+            </div>
+            <section class="card">
+              <div id="stockList" class="list-empty">读取变化研究后显示。</div>
+              <div class="pagination">
+                <button id="stockPrev" class="button subtle" disabled>
+                  上一页</button
+                ><span id="stockPage">—</span
+                ><button id="stockNext" class="button subtle" disabled>
+                  下一页
+                </button>
+              </div>
+            </section>
+          </section>
+        </div>
+      </main>
+    </div>
+    <dialog id="contextDialog" class="modal">
+      <div class="dialog-head">
+        <div>
+          <span class="section-kicker">RESEARCH CONTEXT</span>
+          <h2>选择研究范围</h2>
+          <p>所有选项均来自已保存的 PG 目录；不会自动回退其他版本。</p>
+        </div>
+        <button
+          class="icon-button"
+          data-close="contextDialog"
+          aria-label="关闭"
+        >
+          ×
+        </button>
+      </div>
+      <div class="dialog-body form-grid">
+        <label
+          >交易日与来源包<select id="versionSelect">
+            <option value="">正在读取目录…</option>
+          </select></label
+        ><label
+          >画像修订<select id="profileSelect" disabled>
+            <option value="">先选择交易日</option>
+          </select></label
+        ><label
+          >行业成员快照<select id="industrySelect" disabled>
+            <option value="">先选择交易日</option>
+          </select></label
+        ><label
+          >GN 概念快照<select id="conceptSelect" disabled>
+            <option value="">先选择交易日</option>
+          </select></label
+        ><label
+          >观察窗口<select id="windowSelect" disabled>
+            <option value="">先选择交易日</option>
+          </select></label
+        ><label
+          >观察模式<select id="modeSelect">
+            <option value="D1">D1 支撑变化</option>
+            <option value="D0">D0 新增启动</option>
+          </select></label
+        >
+        <div class="form-note">
+          成员快照为实际观测时点的当前关系，历史回看为
+          NON_PIT；来源代码池并非官方上市总体。
+        </div>
+      </div>
+      <div class="dialog-actions">
+        <span id="contextStatus" role="status">正在读取目录…</span
+        ><button class="button subtle" data-close="contextDialog">取消</button
+        ><button id="applyContext" class="button primary">应用并读取</button>
+      </div>
+    </dialog>
+    <dialog id="boardDialog" class="drawer">
+      <div class="dialog-head">
+        <div>
+          <span class="section-kicker">SECTOR DETAIL</span>
+          <h2 id="boardTitle">板块成员</h2>
+          <p id="boardMeta">当前快照 · NON_PIT</p>
+        </div>
+        <button class="icon-button" data-close="boardDialog" aria-label="关闭">
+          ×
+        </button>
+      </div>
+      <div class="drawer-body">
+        <div id="boardCoverage" class="coverage">—</div>
+        <div class="drawer-tools">
+          <label class="sr-only" for="memberSearch">搜索成员代码</label
+          ><input id="memberSearch" placeholder="搜索成员来源代码" /><button
+            id="searchMembers"
+            class="button subtle"
+          >
+            搜索</button
+          ><select id="memberState">
+            <option value="ALL">全部状态</option>
+            <option value="CHANGED">有变化</option>
+            <option value="UNCHANGED">未变化</option>
+            <option value="UNKNOWN">未知</option>
+            <option value="NOT_COMPARABLE">不可比较</option>
+            <option value="NOT_EVALUABLE">不可评价</option>
+          </select>
+        </div>
+        <div id="memberList" class="list-empty">正在读取成员…</div>
+        <div class="pagination">
+          <button id="memberPrev" class="button subtle">上一页</button
+          ><span id="memberPage">—</span
+          ><button id="memberNext" class="button subtle">下一页</button>
+        </div>
+      </div>
+    </dialog>
+    <dialog id="stockDialog" class="modal stock-modal">
+      <div class="dialog-head">
+        <div>
+          <span class="section-kicker">STOCK DETAIL</span>
+          <h2 id="stockTitle">个股研究</h2>
+          <p id="stockMeta">来源代码 · RAW_UNADJUSTED · NON_PIT</p>
+        </div>
+        <button class="icon-button" data-close="stockDialog" aria-label="关闭">
+          ×
+        </button>
+      </div>
+      <div class="dialog-body stock-body">
+        <div id="stockStatus" class="inline-status" role="status">
+          正在读取…
+        </div>
+        <div id="stockContent"></div>
+      </div>
+    </dialog>
+  </body>
+</html>

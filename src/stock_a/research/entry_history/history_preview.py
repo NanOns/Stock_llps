@@ -18,6 +18,7 @@ from stock_a.research.core import (
     _extreme_column,
     _known,
     _known_ohlc_error,
+    _number,
     _validate_history,
     calculate_core,
 )
@@ -99,14 +100,14 @@ def _calculate_core_d1_inputs(
     if not atr_reason:
         true_ranges = []
         for previous, current in zip(rows, rows[1:]):
-            highs, high_reason = _extreme_column([current], "high")
-            lows, low_reason = _extreme_column([current], "low")
-            closes, close_reason = _column([previous], "close")
+            # 窗口已逐行检查坐标及已知OHLC；此处只读取实际依赖字段。
+            cur_high, high_reason = _number(current.high, "DATA_INVALID_HIGH")
+            cur_low, low_reason = _number(current.low, "DATA_INVALID_LOW")
+            prev_close, close_reason = _number(previous.close, "DATA_INVALID_CLOSE")
             dependency_error = high_reason or low_reason or close_reason
             if dependency_error:
                 atr_reason = dependency_error
                 break
-            cur_high, cur_low, prev_close = highs[0], lows[0], closes[0]
             true_ranges.append(
                 max(
                     cur_high - cur_low,

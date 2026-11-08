@@ -430,9 +430,10 @@ def register_commands(commands):
         help="输出摘要或完整JSON",
     )
     preview_serve = commands.add_parser(
-        "preview-serve",
-        help="显式启动本机PG来源级研究预览页面（仅127.0.0.1:28766）",
-        description="仅用于开发研究预览；只读现有PG Raw，非正式发布、非PIT。",
+        "product-serve",
+        aliases=["preview-serve"],
+        help="启动本机正式产品研究页面（开发环境仅127.0.0.1:28766）",
+        description="只读现有PG，研究截止日由调用者指定；不代表生产发布。",
     )
     preview_serve.add_argument(
         "--host", default="127.0.0.1", help="固定127.0.0.1，不允许远程监听"

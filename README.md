@@ -187,14 +187,15 @@ JSON和短摘要另提供`coverage_summary`中的当前页实际目标Bar、目�
 
 可选`--include-profile-preview`在当前请求页复用一次价格画像字段合同，在原有Raw/Core计算上附加11项Profile组件；不额外扫描来源，也不逐股重载合同。分页JSON保留组件来源、质量、原因和规则身份，并提供紧凑页级摘要。失败和预算未评价对象不伪造组件。预览范围仍按请求日期与来源包显式披露。
 
-## 本机PG研究预览
+## 本机市场与个股研究
 
-在开发环境中，研究预览服务仅监听`127.0.0.1:28766`，页面从固定`stock_a.stock`读取Raw和画像；单股查询按日期和来源版本读取PG历史并调用现役Core/Profile。服务不写PG、不扫描来源ZIP、不联网、不保存结果；结果按实际数据范围和NON_PIT质量展示，不表示官方上市总体或正式选股。
+在开发环境中，产品研究服务仅监听`127.0.0.1:28766`，页面从固定`stock_a.stock`读取Raw和画像；单股查询按日期和来源版本读取PG历史并调用现役Core/Profile。服务不写PG、不扫描来源ZIP、不联网、不保存结果；结果按实际数据范围和NON_PIT质量展示，不表示官方上市总体或正式选股。
 
 页面按明确日期、来源包SHA和代码筛选Raw与画像结果；没有可用数据时显示对应缺失或质量信息。
 
 ```powershell
-stock-a preview-serve --host 127.0.0.1 --port 28766
+$researchCutoff = Read-Host '输入研究截止日（YYYY-MM-DD）'
+stock-a product-serve --host 127.0.0.1 --port 28766 --research-cutoff $researchCutoff
 ```
 
 按`Ctrl+C`安全停止。服务拒绝其它主机、端口28765或已被占用的28766；不会接管或终止现有进程。
