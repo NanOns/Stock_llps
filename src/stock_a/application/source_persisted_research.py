@@ -7,11 +7,13 @@ from statistics import median
 from stock_a.application.source_cohort_forward import _frozen_line_followup
 from stock_a.application.source_d0_raw import attach_stock_risk_readiness
 from stock_a.application.source_single_followup import observe_frozen_scenario
+from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.source_forward_path import exploratory_raw_path
 from stock_a.storage.postgres.research_events import read_source_events
 from stock_a.storage.postgres.research_facts import (
     read_board_members,
+    read_research_keys,
     read_research_rows,
 )
 from stock_a.storage.postgres.source_raw import read_raw_daily_forward_pool
@@ -19,6 +21,18 @@ from stock_a.storage.postgres.source_raw import read_raw_daily_forward_pool
 
 class ResearchSymbolNotFound(ValueError):
     """所选来源代码不在指定的冻结来源池中。"""
+
+
+def read_persisted_cohort_keys(config, *, target, research_cutoff, package_sha256):
+    """目录和结果使用同一个截止日所绑定的规则与日历修订。"""
+    if target > research_cutoff:
+        raise ValueError("目标日不得晚于研究截止日")
+    _, _, revision, calendar = _load_calendar(research_cutoff)
+    if target not in calendar:
+        raise ResearchEntryError("TARGET_NOT_TRADING_SESSION", "目标日不在官方日历中")
+    return read_research_keys(
+        config, target=target, package_sha256=package_sha256, calendar_revision=revision
+    )
 
 
 def read_persisted_cohort(
@@ -43,7 +57,7 @@ def read_persisted_cohort(
         raise ValueError("目标日、截止日或分页参数无效")
     _, _, revision, calendar = _load_calendar(research_cutoff)
     if target not in calendar:
-        raise ValueError("目标日不在官方日历中")
+        raise ResearchEntryError("TARGET_NOT_TRADING_SESSION", "目标日不在官方日历中")
     index = calendar.index(target) + horizon
     endpoint_day = calendar[index] if index < len(calendar) else None
     due = endpoint_day is not None and endpoint_day <= research_cutoff

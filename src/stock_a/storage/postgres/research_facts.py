@@ -372,8 +372,12 @@ def read_research_rows(
         rows = cursor.fetchall()
     if not rows:
         raise ResearchFactNotFound("未找到精确输入版本的持久规则事实")
-    if len({row[0] for row in rows}) != len(rows):
-        raise ValueError("精确规则版本存在多个来源捕获，必须先消除歧义")
+    if len({row[22] for row in rows}) != 1 or len({row[0] for row in rows}) != len(
+        rows
+    ):
+        raise ResearchFactConflict(
+            "精确规则版本存在多个来源捕获或重复代码，必须先消除歧义"
+        )
     return rows
 
 
@@ -406,16 +410,18 @@ def read_board_members(config, *, industry_snapshot_id, concept_snapshot_id):
     return snapshots, members
 
 
-def read_research_keys(config, *, target, package_sha256):
-    """列出所选来源日期已保存的规则与冻结窗口，超过上限由调用方拒绝。"""
+def read_research_keys(config, *, target, package_sha256, calendar_revision):
+    """列出与现行读取器规则版本和日历修订一致的冻结键。"""
     with _transaction(config, write=False) as (_, cursor, namespace):
         cursor.execute(
             """SELECT rule_id, history_session_count, d1_history_session_count,
-                      event_window_start, profile_revision, count(*)
+                      event_window_start, profile_revision, count(*),
+                      count(DISTINCT source_capture_id), min(source_capture_id::text)
                FROM stock.source_rule_evaluations
                WHERE namespace_id=%s AND target_session=%s AND package_sha256=%s
+                 AND rule_version=%s AND calendar_revision=%s
                GROUP BY 1,2,3,4,5 ORDER BY 1,2,3,4,5 LIMIT 101""",
-            (namespace, target, package_sha256),
+            (namespace, target, package_sha256, RULE_VERSION, calendar_revision),
         )
         return [
             {
@@ -425,6 +431,10 @@ def read_research_keys(config, *, target, package_sha256):
                 "window": row[3].isoformat(),
                 "profile_revision": row[4],
                 "count": row[5],
+                "capture_count": row[6],
+                "source_capture_id": row[7] if row[6] == 1 else None,
+                "rule_version": RULE_VERSION,
+                "calendar_revision": calendar_revision,
             }
             for row in cursor.fetchall()
         ]

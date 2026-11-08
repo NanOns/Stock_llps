@@ -1347,7 +1347,7 @@ async function loadExtra(page) {
       for (const key of data.keys)
         select.add(
           new Option(
-            `${key.rule} · ${key.window} · ${key.history}/${key.d1_history} · ${key.profile_revision.slice(0, 12)} · ${key.count}`,
+            `${key.rule} · ${key.window} · ${key.history}/${key.d1_history} · 画像 ${key.profile_revision.slice(0, 12)} · 捕获 ${key.source_capture_id} · ${key.count}`,
             JSON.stringify(key),
           ),
         );
@@ -1472,6 +1472,10 @@ async function readCohort() {
       `${d.storage_status} · ${d.scope} · ${d.target_session} → ${d.endpoint_session || "未知"} · ${d.due ? "已到期" : "未到期"}`,
     );
     detailRows($("cohortSummary"), [
+      ["规则版本", key.rule_version],
+      ["日历修订", key.calendar_revision],
+      ["画像修订", key.profile_revision],
+      ["来源捕获", key.source_capture_id],
       ["完整来源分母", d.source_pool_count],
       ...d.groups.map((g) => [
         `${g.group} · ${g.weighting === "stock" ? "按代码" : "按事件"}`,

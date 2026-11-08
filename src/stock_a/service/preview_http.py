@@ -25,10 +25,11 @@ from stock_a.application.source_market_context import (
 from stock_a.application.source_persisted_research import (
     ResearchSymbolNotFound,
     read_persisted_cohort,
+    read_persisted_cohort_keys,
 )
 from stock_a.storage.postgres.research_facts import (
+    ResearchFactConflict,
     ResearchFactNotFound,
-    read_research_keys,
 )
 from stock_a.contracts import PriceProfileContractError, load_price_profile_contract
 from stock_a.application.runtime_config import (
@@ -1948,11 +1949,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     target, self.preview_server.state.research_cutoff
                 )
                 package = _sha(values["package_sha256"])
-                keys = read_research_keys(
+                keys = read_persisted_cohort_keys(
                     self.preview_server.state.config,
                     target=target,
+                    research_cutoff=self.preview_server.state.research_cutoff,
                     package_sha256=package,
                 )
+                if any(key["capture_count"] != 1 for key in keys):
+                    raise PreviewHttpError(
+                        409,
+                        "COHORT_CAPTURE_AMBIGUOUS",
+                        "精确规则键含多个来源捕获，不能合并分母",
+                    )
                 if len(keys) > 100:
                     raise PreviewHttpError(
                         409,
@@ -2025,6 +2033,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         limit=30,
                         symbol=symbol,
                     )
+                except ResearchFactConflict as error:
+                    raise PreviewHttpError(
+                        409, "COHORT_CAPTURE_AMBIGUOUS", str(error)
+                    ) from error
                 except ResearchSymbolNotFound as error:
                     raise PreviewHttpError(
                         404, "COHORT_SYMBOL_NOT_FOUND", str(error)
