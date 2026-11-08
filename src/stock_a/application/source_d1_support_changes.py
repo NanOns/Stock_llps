@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from typing import Any
+from typing import Any, Mapping
 
 from stock_a.application.pg_research import (
     PgResearchBindingError,
@@ -35,6 +35,7 @@ def discover_source_d1_support_changes(
     limit,
     include_symbol_details=False,
     source_symbol=None,
+    source_version_context: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """单遍读取Raw来源历史，发现窗口内全部D1事件的目标日支撑变化。"""
     if (
@@ -119,6 +120,27 @@ def discover_source_d1_support_changes(
     support_requested_sessions = 0
     symbol_details: dict[str, dict[str, Any]] = {}
 
+    if source_version_context is not None and (
+        not isinstance(source_version_context, Mapping)
+        or source_version_context.get("status") != "AVAILABLE"
+        or source_version_context.get("target_session") != target.isoformat()
+        or source_version_context.get("package_sha256") != package_sha256
+        or source_version_context.get("version_status") != "COMPLETE"
+        or source_version_context.get("identity_status") != "SOURCE_SYMBOL_ONLY"
+        or source_version_context.get("price_coordinate") != "RAW_UNADJUSTED"
+        or type(source_version_context.get("raw_row_count")) is not int
+        or source_version_context.get("raw_row_count") <= 0
+        or source_version_context.get("capture_expected_row_count")
+        != source_version_context.get("raw_row_count")
+        or not source_version_context.get("source_content_id")
+        or not source_version_context.get("source_capture_id")
+        or not source_version_context.get("source_raw_digest")
+    ):
+        raise PgResearchBindingError(
+            "D1_SUPPORT_DISCOVERY_SOURCE_CONTEXT_INVALID",
+            "复用的D1来源上下文必须完整绑定已闭合的目标日Raw捕获",
+        )
+
     while True:
         page = read_raw_daily_history_page(
             config,
@@ -173,14 +195,21 @@ def discover_source_d1_support_changes(
             seen_symbols.add(symbol)
             last_symbol = symbol
 
-        context = read_source_version_context(
-            config,
-            target_session=target,
-            package_sha256=package_sha256,
-            namespace_id=page["namespace_id"],
-            target_raw_rows=target_rows,
-            expected_raw_row_count=page["version_row_count"],
+        context = (
+            read_source_version_context(
+                config,
+                target_session=target,
+                package_sha256=package_sha256,
+                namespace_id=page["namespace_id"],
+                target_raw_rows=target_rows,
+                expected_raw_row_count=page["version_row_count"],
+            )
+            if source_version_context is None
+            else dict(source_version_context)
         )
+        if source_version_context is not None:
+            context["target_raw_binding_count"] = len(target_rows)
+            context["target_raw_binding_verified"] = bool(target_rows)
         if source_context is None:
             source_context = context
 
@@ -215,6 +244,21 @@ def discover_source_d1_support_changes(
             or page["page_count"] != len(candidates)
             or len(target_rows) != len(candidates)
             or page["total_count"] != source_query_total
+            or source_version_context is not None
+            and (
+                context.get("namespace_id") != page["namespace_id"]
+                or context.get("raw_row_count") != page["version_row_count"]
+                or context.get("capture_expected_row_count")
+                != page["version_expected_row_count"]
+                or any(
+                    row.get("package_sha256") != package_sha256
+                    or row.get("namespace_id") != context.get("namespace_id")
+                    or row.get("source_content_id") != context.get("source_content_id")
+                    or str(row.get("source_capture_id"))
+                    != str(context.get("source_capture_id"))
+                    for row in target_rows
+                )
+            )
         ):
             raise PgResearchBindingError(
                 "D1_SUPPORT_DISCOVERY_POOL_INCOMPLETE",

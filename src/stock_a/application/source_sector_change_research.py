@@ -79,6 +79,98 @@ class SourceSectorChangeInputs:
     d0_launch_changes: Mapping[str, Any] | None
 
 
+def validate_source_d1_discovery_fact(
+    discovery: Mapping[str, Any],
+    *,
+    source_version_context: Mapping[str, Any],
+    target_session: date,
+    research_cutoff: date,
+    package_sha256: str,
+    sessions: tuple[date, ...],
+    calendar_revision: str,
+    event_window_start: date,
+) -> None:
+    """验证可在画像或成员快照切换时复用的完整Raw D1事实。"""
+    if not isinstance(source_version_context, Mapping):
+        raise PgResearchBindingError(
+            "D1_SUPPORT_DISCOVERY_SOURCE_CONTEXT_INVALID",
+            "D1事实复用必须提供已读取的Raw来源上下文",
+        )
+    source = discovery.get("source") if isinstance(discovery, Mapping) else None
+    event_sessions = tuple(
+        day for day in sessions if event_window_start <= day < target_session
+    )
+    row_count = source_version_context.get("raw_row_count")
+    event_counts = (
+        discovery.get("raw_d1_counts_by_session")
+        if isinstance(discovery, Mapping)
+        else None
+    )
+    execution = discovery.get("execution") if isinstance(discovery, Mapping) else None
+    expected_event_days = {day.isoformat() for day in event_sessions}
+    if (
+        not isinstance(discovery, Mapping)
+        or not isinstance(source, Mapping)
+        or not isinstance(event_counts, Mapping)
+        or not isinstance(execution, Mapping)
+        or discovery.get("scope")
+        != "TARGET_SESSION_RAW_SOURCE_POOL_EVENT_WINDOW_DISCOVERY"
+        or discovery.get("identity_status") != "SOURCE_SYMBOL_ONLY"
+        or discovery.get("price_coordinate") != "RAW_UNADJUSTED"
+        or discovery.get("target_session") != target_session.isoformat()
+        or discovery.get("research_cutoff") != research_cutoff.isoformat()
+        or discovery.get("event_window_start") != event_window_start.isoformat()
+        or discovery.get("calendar_revision") != calendar_revision
+        or discovery.get("evaluated_source_symbol") is not None
+        or discovery.get("source_pool_count") != row_count
+        or discovery.get("evaluated_source_symbol_count") != row_count
+        or discovery.get("source_pool_partition_closed") is not True
+        or discovery.get("raw_d1_partition_closed") is not True
+        or discovery.get("support_event_partition_closed") is not True
+        or discovery.get("changed_symbol_partition_closed") is not True
+        or set(event_counts) != expected_event_days
+        or any(
+            not isinstance(event_counts[day], Mapping) for day in expected_event_days
+        )
+        or any(
+            type(event_counts[day].get(state)) is not int
+            or event_counts[day][state] < 0
+            for day in expected_event_days
+            for state in ("TRUE", "FALSE", "UNKNOWN")
+        )
+        or any(
+            sum(
+                event_counts[day].get(state, -1)
+                for state in ("TRUE", "FALSE", "UNKNOWN")
+            )
+            != row_count
+            or event_counts[day].get("partition_closed") is not True
+            for day in expected_event_days
+        )
+        or source.get("status") != "AVAILABLE"
+        or source.get("version_status") != "COMPLETE"
+        or source.get("namespace_id") != source_version_context.get("namespace_id")
+        or source.get("target_session") != target_session.isoformat()
+        or source.get("package_sha256") != package_sha256
+        or source.get("source_content_id")
+        != source_version_context.get("source_content_id")
+        or str(source.get("source_capture_id"))
+        != str(source_version_context.get("source_capture_id"))
+        or source.get("source_raw_digest")
+        != source_version_context.get("source_raw_digest")
+        or source.get("capture_digest") != source_version_context.get("capture_digest")
+        or source.get("raw_row_count") != row_count
+        or source.get("capture_expected_row_count") != row_count
+        or execution.get("database_write_attempted") is not False
+        or execution.get("ddl_executed") is not False
+        or execution.get("dml_executed") is not False
+    ):
+        raise PgResearchBindingError(
+            "D1_SUPPORT_DISCOVERY_REUSE_IDENTITY_MISMATCH",
+            "待复用D1事实未与当前Raw捕获、窗口或完整分母严格闭合",
+        )
+
+
 def prepare_source_sector_change_inputs(
     config: dict[str, Any],
     config_path: str,
@@ -94,6 +186,8 @@ def prepare_source_sector_change_inputs(
     include_d0_launch_new: bool = False,
     d0_before_session: date | None = None,
     cross_period_board_kind: str | None = None,
+    source_d1_discovery: Mapping[str, Any] | None = None,
+    source_version_context: Mapping[str, Any] | None = None,
 ) -> SourceSectorChangeInputs:
     """从固定PG读取完整行业/GN集合与指定事件窗的D1历史。"""
     if (
@@ -210,7 +304,7 @@ def prepare_source_sector_change_inputs(
                 )
             )
 
-    try:
+    if source_d1_discovery is None:
         discovery = discover_source_d1_support_changes(
             config,
             config_path,
@@ -223,9 +317,21 @@ def prepare_source_sector_change_inputs(
             0,
             1,
             include_symbol_details=True,
+            source_version_context=source_version_context,
         )
-    except PgResearchBindingError:
-        raise
+    else:
+        discovery = source_d1_discovery
+    if source_version_context is not None:
+        validate_source_d1_discovery_fact(
+            discovery,
+            source_version_context=source_version_context,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            package_sha256=package_sha256,
+            sessions=sessions,
+            calendar_revision=calendar_revision,
+            event_window_start=event_window_start,
+        )
     return SourceSectorChangeInputs(
         target_session=target_session,
         research_cutoff=research_cutoff,

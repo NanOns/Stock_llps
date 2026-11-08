@@ -53,10 +53,12 @@ from stock_a.application.source_sector_change_research import (
     SourceSectorChangeInputs,
     prepare_source_sector_change_inputs,
     build_source_sector_change_view,
+    validate_source_d1_discovery_fact,
 )
 from stock_a.application.source_d1_support_changes import (
     discover_source_d1_support_changes,
 )
+from stock_a.research.entry_history import history_preview as research_history_preview
 from stock_a.application.tdx_sector_change_stocks import _member_detail
 from stock_a.application.source_stock_change_context import (
     SourceStockChangeContextError,
@@ -448,6 +450,33 @@ class _PreviewState:
         self.raw_period_source_sha256 = hashlib.sha256(
             Path(research_raw_periods.__file__).read_bytes()
         ).hexdigest()
+        self.source_d1_algorithm_identity_sha256 = canonical_sha(
+            {
+                "discovery_source_sha256": hashlib.sha256(
+                    Path(
+                        discover_source_d1_support_changes.__code__.co_filename
+                    ).read_bytes()
+                ).hexdigest(),
+                "history_preview_source_sha256": hashlib.sha256(
+                    Path(research_history_preview.__file__).read_bytes()
+                ).hexdigest(),
+                "core_source_sha256": self.core_source_sha256,
+                "entry_source_sha256": self.entry_source_sha256,
+                "raw_reader_source_sha256": hashlib.sha256(
+                    Path(read_raw_daily_history_stock.__code__.co_filename).read_bytes()
+                ).hexdigest(),
+                "profile_contract_sha256": self.profile_contract_sha256,
+                "identity_status": "SOURCE_SYMBOL_ONLY",
+                "price_coordinate": "RAW_UNADJUSTED",
+            }
+        )
+        self.source_d1_cache_lock = threading.Lock()
+        self.source_d1_cache_key: tuple[Any, ...] | None = None
+        self.source_d1_cache_result: dict[str, Any] | None = None
+        self.source_d1_cache_expires_at = 0.0
+        self.source_d1_cache_generation = 0
+        self.source_d1_cache_result_generation = 0
+        self.source_d1_inflight: dict[tuple[Any, ...], threading.Event] = {}
         self.source_sector_change_cache_lock = threading.Lock()
         self.source_sector_change_cache_key: tuple[Any, ...] | None = None
         self.source_sector_change_cache_inputs: SourceSectorChangeInputs | None = None
@@ -493,6 +522,46 @@ class _PreviewState:
             self.source_pool_rps_cache_expires_at = time.monotonic() + 600
             if self.source_pool_rps_inflight.get(cache_key) is event:
                 del self.source_pool_rps_inflight[cache_key]
+            event.set()
+        return result, False
+
+    def source_d1_discovery(
+        self, cache_key: tuple[Any, ...], factory: Any
+    ) -> tuple[dict[str, Any], bool]:
+        """复用同一Raw捕获、算法和会话窗的完整D1事实，最多保留10分钟。"""
+        while True:
+            with self.source_d1_cache_lock:
+                now = time.monotonic()
+                if (
+                    self.source_d1_cache_key == cache_key
+                    and self.source_d1_cache_result is not None
+                    and now < self.source_d1_cache_expires_at
+                ):
+                    return self.source_d1_cache_result, True
+                event = self.source_d1_inflight.get(cache_key)
+                if event is None:
+                    event = threading.Event()
+                    self.source_d1_inflight[cache_key] = event
+                    self.source_d1_cache_generation += 1
+                    generation = self.source_d1_cache_generation
+                    break
+            event.wait()
+        try:
+            result = factory()
+        except BaseException:
+            with self.source_d1_cache_lock:
+                if self.source_d1_inflight.get(cache_key) is event:
+                    del self.source_d1_inflight[cache_key]
+                event.set()
+            raise
+        with self.source_d1_cache_lock:
+            if generation >= self.source_d1_cache_result_generation:
+                self.source_d1_cache_key = cache_key
+                self.source_d1_cache_result = result
+                self.source_d1_cache_expires_at = time.monotonic() + 600
+                self.source_d1_cache_result_generation = generation
+            if self.source_d1_inflight.get(cache_key) is event:
+                del self.source_d1_inflight[cache_key]
             event.set()
         return result, False
 
@@ -1532,6 +1601,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 else None
             )
             cache_hit = inputs is not None
+            source_d1_cache_hit = False
             if d1_only and inputs is None:
                 _resolved_target, d1_sessions, d1_calendar_revision = (
                     resolve_pg_history_window(target.isoformat(), history_session_count)
@@ -1603,9 +1673,104 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "cache": {
                         "reused_exact_inputs": False,
                         "reused_completed_full_inputs": False,
+                        "reused_source_d1_discovery": False,
                     },
                 }
+            if not d1_only:
+                namespace_id = profile_catalog["namespace_id"]
+                source_version_context = read_source_version_context(
+                    config,
+                    target_session=target,
+                    package_sha256=package_sha,
+                    namespace_id=namespace_id,
+                )
+                resolved_target, d1_sessions, d1_calendar_revision = (
+                    resolve_pg_history_window(target.isoformat(), history_session_count)
+                )
+                if resolved_target != target:
+                    raise PgResearchBindingError(
+                        "D1_SUPPORT_DISCOVERY_SESSION_INVALID",
+                        "D1上下文日期没有解析为请求的目标官方会话",
+                    )
+                if inputs is not None:
+                    try:
+                        validate_source_d1_discovery_fact(
+                            inputs.discovery,
+                            source_version_context=source_version_context,
+                            target_session=target,
+                            research_cutoff=cutoff,
+                            package_sha256=package_sha,
+                            sessions=d1_sessions,
+                            calendar_revision=d1_calendar_revision,
+                            event_window_start=event_window_start,
+                        )
+                    except PgResearchBindingError:
+                        inputs = None
+                        cache_hit = False
             if inputs is None:
+                source_d1_cache_key = (
+                    target.isoformat(),
+                    cutoff.isoformat(),
+                    namespace_id,
+                    package_sha,
+                    source_version_context["source_content_id"],
+                    str(source_version_context["source_capture_id"]),
+                    source_version_context["source_raw_digest"],
+                    source_version_context["raw_row_count"],
+                    source_version_context["capture_expected_row_count"],
+                    d1_calendar_revision,
+                    tuple(day.isoformat() for day in d1_sessions),
+                    event_window_start.isoformat(),
+                    history_session_count,
+                    "SOURCE_SYMBOL_ONLY",
+                    "RAW_UNADJUSTED",
+                    "TARGET_SESSION_RAW_SOURCE_POOL_EVENT_WINDOW_DISCOVERY",
+                    self.preview_server.state.source_d1_algorithm_identity_sha256,
+                )
+
+                def discover_exact_source_d1() -> dict[str, Any]:
+                    discovery = discover_source_d1_support_changes(
+                        config,
+                        str(self.preview_server.state.config_path),
+                        target,
+                        cutoff,
+                        d1_sessions,
+                        d1_calendar_revision,
+                        package_sha,
+                        event_window_start,
+                        0,
+                        1,
+                        include_symbol_details=True,
+                        source_version_context=source_version_context,
+                    )
+                    validate_source_d1_discovery_fact(
+                        discovery,
+                        source_version_context=source_version_context,
+                        target_session=target,
+                        research_cutoff=cutoff,
+                        package_sha256=package_sha,
+                        sessions=d1_sessions,
+                        calendar_revision=d1_calendar_revision,
+                        event_window_start=event_window_start,
+                    )
+                    return discovery
+
+                source_d1_discovery, source_d1_cache_hit = (
+                    self.preview_server.state.source_d1_discovery(
+                        source_d1_cache_key,
+                        discover_exact_source_d1,
+                    )
+                )
+                validate_source_d1_discovery_fact(
+                    source_d1_discovery,
+                    source_version_context=source_version_context,
+                    target_session=target,
+                    research_cutoff=cutoff,
+                    package_sha256=package_sha,
+                    sessions=d1_sessions,
+                    calendar_revision=d1_calendar_revision,
+                    event_window_start=event_window_start,
+                )
                 inputs, cache_hit = (
                     self.preview_server.state.source_sector_change_inputs(
                         cache_key,
@@ -1622,6 +1787,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             pg_history_session_count=history_session_count,
                             include_d0_launch_new=read_d0,
                             d0_before_session=d0_before_session,
+                            source_d1_discovery=source_d1_discovery,
+                            source_version_context=source_version_context,
                         ),
                     )
                 )
@@ -1678,7 +1845,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 status = 503
             raise PreviewHttpError(status, error.code, str(error)) from error
         result["observation_mode"] = observation_mode
-        result["cache"] = {"reused_exact_inputs": cache_hit}
+        result["cache"] = {
+            "reused_exact_inputs": cache_hit,
+            "reused_source_d1_discovery": source_d1_cache_hit,
+        }
         return result
 
     def do_HEAD(self) -> None:
