@@ -358,6 +358,9 @@ button:disabled {
   gap: 16px;
   align-items: start;
 }
+.profile-change-card {
+  margin-top: 16px;
+}
 .card {
   background: #fff;
   border: 1px solid #e2e9e5;

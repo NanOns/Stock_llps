@@ -1309,6 +1309,8 @@ def query_source_d0_raw_launch(
     expected_namespace_id: str | None = None,
     _history_symbol: str | None = None,
     _include_shape_observation: bool = False,
+    _single_symbol_only: bool = False,
+    _rps_result: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """读取启动或恢复原始状态，或联结启动相邻官方会话的三态变化。"""
     expected_namespace_id = _canonical_expected_namespace(expected_namespace_id)
@@ -1341,6 +1343,7 @@ def query_source_d0_raw_launch(
             limit=limit,
             transition=transition,
             expected_namespace_id=expected_namespace_id,
+            single_symbol_only=_single_symbol_only,
         )
     if action != "current":
         raise SourceD0RawError(
@@ -1390,6 +1393,12 @@ def query_source_d0_raw_launch(
             "精确来源代码须为SH./SZ.加六位数字。",
             category="ARGUMENT",
         )
+    if _single_symbol_only and symbol is None:
+        raise SourceD0RawError(
+            "D0_SINGLE_SYMBOL_REQUIRED",
+            "单股诊断读取必须显式提供来源代码。",
+            category="ARGUMENT",
+        )
     if type(offset) is not int or offset < 0:
         raise SourceD0RawError(
             "D0_OFFSET_INVALID", "分页offset必须为非负整数。", category="ARGUMENT"
@@ -1425,6 +1434,7 @@ def query_source_d0_raw_launch(
             sessions=sessions,
             expected_calendar=calendar_identity,
             expected_namespace_id=expected_namespace_id,
+            history_source_symbol=symbol if _single_symbol_only else None,
         )
     except D0RawPgError as error:
         raise SourceD0RawError(error.code, str(error)) from error
@@ -1435,14 +1445,21 @@ def query_source_d0_raw_launch(
     rps_input_error = None
     if scenario == "RECOVERY_TURN":
         try:
-            rps = read_source_pool_rps(
+            rps = _rps_result or read_source_pool_rps(
                 config,
                 target_session=target_session,
                 research_cutoff=research_cutoff,
                 package_sha256=package_sha256,
                 expected_namespace_id=pg_result["namespace_id"],
             )
-            if set(rps["facts"]) != set(pg_result["source_symbols"]):
+            if (
+                rps.get("target_session") != target_session
+                or rps.get("research_cutoff") != research_cutoff
+                or rps.get("namespace_id") != pg_result["namespace_id"]
+                or rps.get("package_sha256") != package_sha256
+            ):
+                rps_input_error = "D0_RPS_SOURCE_IDENTITY_MISMATCH"
+            elif set(rps["facts"]) != set(pg_result["source_symbols"]):
                 rps_input_error = "D0_RPS_SOURCE_POOL_MISMATCH"
             else:
                 rps_facts = rps["facts"]
@@ -1454,7 +1471,14 @@ def query_source_d0_raw_launch(
     unknown_reasons: Counter[str] = Counter()
     false_reasons: Counter[str] = Counter()
     state_counts: Counter[str] = Counter()
-    for source_symbol in pg_result["source_symbols"]:
+    evaluated_source_symbols = (
+        (symbol,)
+        if _single_symbol_only and symbol in pg_result["source_symbols"]
+        else ()
+        if _single_symbol_only
+        else pg_result["source_symbols"]
+    )
+    for source_symbol in evaluated_source_symbols:
         arguments = dict(
             target_session=target_session,
             official_sessions=sessions,
@@ -1615,7 +1639,8 @@ def query_source_d0_raw_launch(
                 "core_fields_status"
             ] = "NOT_REQUESTED_SELECT_EXACT_SOURCE_SYMBOL"
     source_count = pg_result["source_count"]
-    if sum(state_counts.values()) != source_count:
+    partition_closed = sum(state_counts.values()) == source_count
+    if not _single_symbol_only and not partition_closed:
         raise SourceD0RawError(
             "D0_STATE_PARTITION_OPEN", "TRUE/FALSE/UNKNOWN没有闭合到完整来源池。"
         )
@@ -1675,17 +1700,28 @@ def query_source_d0_raw_launch(
         },
         "source_pool": {
             "source_count": source_count,
+            "evaluation_scope": "EXACT_SOURCE_SYMBOL_ONLY"
+            if _single_symbol_only
+            else "FULL_SOURCE_POOL",
+            "requested_symbol_in_pool": symbol in pg_result["source_symbols"]
+            if _single_symbol_only
+            else None,
+            "evaluated_source_count": len(evaluated_source_symbols),
             "target_present_count": source_version["target_present_count"],
             "target_missing_count": source_version["target_missing_count"],
             "read_failed_count": source_version["read_failed_count"],
             "scenario_state_counts": {
                 key: state_counts.get(key, 0) for key in ("TRUE", "FALSE", "UNKNOWN")
             },
-            "scenario_state_partition_closed": sum(state_counts.values())
-            == source_count,
+            "scenario_state_partition_scope": "FULL_SOURCE_POOL"
+            if not _single_symbol_only
+            else "EXACT_SOURCE_SYMBOL_ONLY",
+            "scenario_state_partition_closed": partition_closed
+            if not _single_symbol_only
+            else False,
             "unknown_main_reason_counts": dict(sorted(unknown_reasons.items())),
-            "unknown_main_reason_partition_closed": sum(unknown_reasons.values())
-            == state_counts.get("UNKNOWN", 0),
+            "unknown_main_reason_partition_closed": not _single_symbol_only
+            and sum(unknown_reasons.values()) == state_counts.get("UNKNOWN", 0),
             "false_main_reason_counts": dict(sorted(false_reasons.items())),
             "evaluated_before_filter_and_pagination": True,
         },
@@ -1742,6 +1778,7 @@ def _query_source_d0_raw_launch_changes(
     limit: int,
     transition: str | None,
     expected_namespace_id: str | None,
+    single_symbol_only: bool,
 ) -> dict[str, Any]:
     if scenario != "LAUNCH_CONFIRM":
         raise SourceD0RawError(
@@ -1856,8 +1893,10 @@ def _query_source_d0_raw_launch_changes(
             state="ALL",
             offset=0,
             limit=_MAX_LIMIT,
+            symbol=symbol if single_symbol_only else None,
             expected_namespace_id=expected_namespace_id,
             _history_symbol=symbol,
+            _single_symbol_only=single_symbol_only,
         )
         after_result = query_source_d0_raw_launch(
             config,
@@ -1868,8 +1907,10 @@ def _query_source_d0_raw_launch_changes(
             state="ALL",
             offset=0,
             limit=_MAX_LIMIT,
+            symbol=symbol if single_symbol_only else None,
             expected_namespace_id=expected_namespace_id,
             _history_symbol=symbol,
+            _single_symbol_only=single_symbol_only,
         )
     except SourceD0RawError:
         raise
@@ -1896,7 +1937,19 @@ def _query_source_d0_raw_launch_changes(
     ) -> dict[tuple[str, str], dict[str, Any]]:
         pool = result["source_pool"]
         rows = result["results"]
-        if (
+        if pool.get("evaluation_scope") == "EXACT_SOURCE_SYMBOL_ONLY":
+            if (
+                symbol is None
+                or result["selection"].get("symbol") != symbol
+                or result["selection"]["page_count"] != len(rows)
+                or len(rows) > 1
+                or any(row.get("source_symbol") != symbol for row in rows)
+            ):
+                raise SourceD0RawError(
+                    "D0_CHANGE_SYMBOL_ENDPOINT_INVALID",
+                    "单股相邻变化端点没有绑定到唯一请求代码。",
+                )
+        elif (
             len(rows) != pool["source_count"]
             or result["selection"]["matched_count"] != pool["source_count"]
             or result["selection"]["offset"] != 0
@@ -1983,7 +2036,7 @@ def _query_source_d0_raw_launch_changes(
         )
     comparable_count = len(before_keys & after_keys)
     transition_counts = {name: counts.get(name, 0) for name in _TRANSITIONS}
-    if sum(transition_counts.values()) != comparable_count:
+    if not single_symbol_only and sum(transition_counts.values()) != comparable_count:
         raise SourceD0RawError(
             "D0_CHANGE_COMPARABLE_PARTITION_OPEN",
             "九种三态转移没有闭合到双端可比交集。",
@@ -2035,19 +2088,37 @@ def _query_source_d0_raw_launch_changes(
         "after": endpoint_summary(after_result),
         "source_key_set": {
             "key": "market+source_symbol",
-            "before_count": len(before_keys),
-            "after_count": len(after_keys),
-            "comparable_intersection_count": comparable_count,
-            "source_union_count": len(union_keys),
-            "before_only_count": counts.get("BEFORE_ONLY", 0),
-            "after_only_count": counts.get("AFTER_ONLY", 0),
-            "pair_not_comparable_count": 0,
-            "union_partition_closed": len(before_keys & after_keys)
+            "evaluation_scope": "EXACT_SOURCE_SYMBOL_ONLY"
+            if single_symbol_only
+            else "FULL_SOURCE_POOL",
+            "before_count": before_result["source_pool"]["source_count"]
+            if single_symbol_only
+            else len(before_keys),
+            "after_count": after_result["source_pool"]["source_count"]
+            if single_symbol_only
+            else len(after_keys),
+            "comparable_intersection_count": None
+            if single_symbol_only
+            else comparable_count,
+            "source_union_count": None if single_symbol_only else len(union_keys),
+            "before_only_count": None
+            if single_symbol_only
+            else counts.get("BEFORE_ONLY", 0),
+            "after_only_count": None
+            if single_symbol_only
+            else counts.get("AFTER_ONLY", 0),
+            "pair_not_comparable_count": None if single_symbol_only else 0,
+            "union_partition_closed": None
+            if single_symbol_only
+            else len(before_keys & after_keys)
             + counts.get("BEFORE_ONLY", 0)
             + counts.get("AFTER_ONLY", 0)
             == len(union_keys),
         },
         "transition_counts": transition_counts,
+        "transition_counts_scope": "EXACT_SOURCE_SYMBOL_ONLY"
+        if single_symbol_only
+        else "FULL_SOURCE_POOL",
         "missing_endpoint_counts": {
             "BEFORE_ONLY": counts.get("BEFORE_ONLY", 0),
             "AFTER_ONLY": counts.get("AFTER_ONLY", 0),

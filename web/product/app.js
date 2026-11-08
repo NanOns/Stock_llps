@@ -12,7 +12,11 @@ const state = {
   memberOffset: 0,
   request: 0,
   stockRequest: 0,
+  profileChangeRequest: 0,
   researchReady: null,
+  researchController: null,
+  stockController: null,
+  profileChangeController: null,
 };
 const names = {
   overview: ["今日总览", "从真实变化出发，了解市场中正在发生什么。", "01"],
@@ -49,19 +53,51 @@ function format(value) {
 }
 let activeRequests = 0;
 const requestWaiters = [];
-async function api(path, body) {
-  if (activeRequests >= 3)
-    await new Promise((resolve) => requestWaiters.push(resolve));
-  else activeRequests++;
+function abortError() {
+  return new DOMException("请求已取消。", "AbortError");
+}
+function acquireRequest(signal) {
+  if (signal?.aborted) return Promise.reject(abortError());
+  if (activeRequests < 3) {
+    activeRequests++;
+    return Promise.resolve();
+  }
+  return new Promise((resolve, reject) => {
+    const waiter = { resolve, reject, signal, onAbort: null };
+    waiter.onAbort = () => {
+      const index = requestWaiters.indexOf(waiter);
+      if (index >= 0) requestWaiters.splice(index, 1);
+      reject(abortError());
+    };
+    signal?.addEventListener("abort", waiter.onAbort, { once: true });
+    requestWaiters.push(waiter);
+  });
+}
+function releaseRequest() {
+  while (requestWaiters.length) {
+    const waiter = requestWaiters.shift();
+    waiter.signal?.removeEventListener("abort", waiter.onAbort);
+    if (waiter.signal?.aborted) {
+      waiter.reject(abortError());
+      continue;
+    }
+    waiter.resolve();
+    return;
+  }
+  activeRequests--;
+}
+async function api(path, body, signal) {
+  await acquireRequest(signal);
   try {
     const response = await fetch(
       path,
       body === undefined
-        ? {}
+        ? { signal }
         : {
             method: "POST",
             headers: { "Content-Type": "application/json" },
             body: JSON.stringify(body),
+            signal,
           },
     );
     const result = await response.json();
@@ -71,9 +107,7 @@ async function api(path, body) {
       );
     return result;
   } finally {
-    const next = requestWaiters.shift();
-    if (next) next();
-    else activeRequests--;
+    releaseRequest();
   }
 }
 function gotoPage(page) {
@@ -283,6 +317,12 @@ async function loadResearch() {
     return;
   }
   const token = ++state.request;
+  state.researchController?.abort();
+  ++state.stockRequest;
+  state.stockController?.abort();
+  const controller = new AbortController();
+  state.researchController = controller;
+  void loadProfileChanges();
   state.data = null;
   for (const id of ["overviewBoards", "overviewStocks", "stockList"]) {
     $(id).classList.remove("has-items");
@@ -317,7 +357,11 @@ async function loadResearch() {
   $("refreshResearch").disabled = true;
   message("observationLabel", "正在读取 PG 研究结果…");
   try {
-    const pending = api("/api/preview/sector-change-stocks", requestBody());
+    const pending = api(
+      "/api/preview/sector-change-stocks",
+      requestBody(),
+      controller.signal,
+    );
     state.researchReady = pending;
     const data = await pending;
     if (token !== state.request) return;
@@ -325,6 +369,7 @@ async function loadResearch() {
     renderResearch(data);
   } catch (error) {
     if (token === state.request) {
+      if (error.name === "AbortError") return;
       state.data = null;
       message("observationLabel", `读取失败：${error.message}`);
       message("overviewBoards", `研究读取失败：${error.message}`);
@@ -404,6 +449,112 @@ function stockRow(stock, i) {
     i,
   );
 }
+
+function profileChangeTypeLabel(type) {
+  return (
+    {
+      PROFILE_STATE_CHANGED: "画像状态变化",
+      RAW_CLOSE_VS_MA20_CHANGED: "收盘与 MA20 关系变化",
+      PRICE_DAMAGE_STATE_CHANGED: "价格损伤状态变化",
+      MA_SLOPE20_ATR_STATE_CHANGED: "MA20 斜率状态变化",
+      PROFILE_QUALITY_CHANGED: "画像质量变化",
+      CORE_QUALITY_CHANGED: "核心字段质量变化",
+    }[type] ||
+    type ||
+    "画像字段变化"
+  );
+}
+
+async function loadProfileChanges() {
+  state.profileChangeController?.abort();
+  const controller = new AbortController();
+  state.profileChangeController = controller;
+  const token = ++state.profileChangeRequest;
+  const context = state.selected;
+  const list = $("profileChangeList");
+  list.classList.remove("has-items");
+  message("profileChangeSummary", "读取独立画像变化…");
+  message("profileChangeList", "正在读取相邻会话画像变化；不计入 D1 统计。");
+  if (!context) return;
+  const previous = (state.context?.window_options || []).find(
+    (item) => item.event_session_count === 1,
+  );
+  if (!previous || previous.event_window_start >= context.target_session) {
+    message("profileChangeSummary", "相邻官方会话不可用");
+    message("profileChangeList", "当前范围没有可用的此前官方会话。");
+    return;
+  }
+  const sameIdentity = (item, session) =>
+    item.complete &&
+    item.target_session === session &&
+    item.package_sha256 === context.package_sha256 &&
+    item.profile_revision === context.profile_revision;
+  const beforeProfiles = state.profiles.filter((item) =>
+    sameIdentity(item, previous.event_window_start),
+  );
+  const afterProfiles = state.profiles.filter((item) =>
+    sameIdentity(item, context.target_session),
+  );
+  if (beforeProfiles.length !== 1 || afterProfiles.length !== 1) {
+    message("profileChangeSummary", "精确修订不可配对");
+    message(
+      "profileChangeList",
+      "所选来源包与画像修订在相邻会话中没有唯一完整配对；本项未回退到其他修订。",
+    );
+    return;
+  }
+  const query = new URLSearchParams({
+    before_session: previous.event_window_start,
+    after_session: context.target_session,
+    before_package_sha256: context.package_sha256,
+    before_profile_revision: context.profile_revision,
+    after_package_sha256: context.package_sha256,
+    after_profile_revision: context.profile_revision,
+    offset: "0",
+    limit: "15",
+  });
+  try {
+    const result = await api(
+      `/api/source-symbol-price-profile-changes?${query}`,
+      undefined,
+      controller.signal,
+    );
+    if (token !== state.profileChangeRequest || context !== state.selected)
+      return;
+    const rows = result.rows || [];
+    const changed =
+      result.summary?.changed_source_symbol_count ?? result.page?.total ?? "—";
+    const denominator =
+      result.core_transitions?.source_symbol_union_count ?? "—";
+    message(
+      "profileChangeSummary",
+      `${format(changed)} / ${format(denominator)} 个来源代码有画像变化 · 展示 ${rows.length} 条`,
+    );
+    fillList(
+      "profileChangeList",
+      rows,
+      "相邻会话没有可展示的画像变化；不代表 D1 结果。",
+      (item, index) => {
+        const types = (item.change_types || []).map(profileChangeTypeLabel);
+        return rowButton(
+          item.source_symbol,
+          `${previous.event_window_start} → ${context.target_session} · ${types.join("、") || "状态不可比较"} · RAW_UNADJUSTED · NON_PIT`,
+          (item.change_types || []).length,
+          "项变化",
+          () =>
+            openStock(item.source_symbol, { change_state: "NOT_EVALUATED" }),
+          index,
+        );
+      },
+    );
+  } catch (error) {
+    if (token !== state.profileChangeRequest) return;
+    if (error.name === "AbortError") return;
+    message("profileChangeSummary", "画像变化读取失败");
+    message("profileChangeList", `画像变化不可用：${error.message}`);
+  }
+}
+
 function renderResearch(data) {
   const c = data.source_counts || {},
     d = data.d1_discovery || {},
@@ -682,6 +833,7 @@ function launchDisplayExplanation(change, mode, symbol) {
     : "已知为 D0 新增，未在当前代码页；请检查分页。";
 }
 async function openStock(symbol, row = {}) {
+  state.stockController?.abort();
   if (!state.selected) {
     $("contextDialog").showModal();
     return;
@@ -713,6 +865,10 @@ async function openStock(symbol, row = {}) {
   }
   const c = state.selected,
     token = ++state.stockRequest;
+  const controller = new AbortController();
+  state.stockController = controller;
+  const stockApi = (path, body) => api(path, body, controller.signal);
+  const researchReady = state.researchReady;
   const d1State =
     row.change_state ||
     (row.changed_anchor_event_count ? "CHANGED" : "NOT_EVALUATED");
@@ -733,7 +889,7 @@ async function openStock(symbol, row = {}) {
   $("stockContent").replaceChildren();
   if (!$("stockDialog").open) $("stockDialog").showModal();
   try {
-    const data = await api("/api/preview/stock", {
+    const data = await stockApi("/api/preview/stock", {
       symbol,
       target_session: c.target_session,
       package_sha256: c.package_sha256,
@@ -864,7 +1020,7 @@ async function openStock(symbol, row = {}) {
       symbol,
       limit: "1",
     });
-    api(`/api/source-symbol-price-profiles?${profileQuery}`)
+    stockApi(`/api/source-symbol-price-profiles?${profileQuery}`)
       .then((result) => {
         if (token !== state.stockRequest) return;
         const item = result.rows?.[0];
@@ -887,7 +1043,7 @@ async function openStock(symbol, row = {}) {
         if (token === state.stockRequest)
           storedProfiles.textContent = `所选画像 UNKNOWN：${error.message}`;
       });
-    api(`/api/source-symbol/raw-periods?${query}`)
+    stockApi(`/api/source-symbol/raw-periods?${query}`)
       .then((p) => {
         if (token !== state.stockRequest) return;
         history.week = p.periods?.week || [];
@@ -901,7 +1057,7 @@ async function openStock(symbol, row = {}) {
           if (history.selected !== "day") showHistory(history.selected);
         }
       });
-    const timelineRequest = api("/api/preview/stock-timeline", {
+    stockApi("/api/preview/stock-timeline", {
       symbol,
       target_session: c.target_session,
       package_sha256: c.package_sha256,
@@ -927,7 +1083,7 @@ async function openStock(symbol, row = {}) {
       industry_snapshot_id: c.industry_snapshot_id,
       concept_snapshot_id: c.concept_snapshot_id,
     };
-    api("/api/preview/stock-timeline", {
+    stockApi("/api/preview/stock-timeline", {
       ...observationRequest,
       diagnostic_scope: "LAUNCH",
     })
@@ -958,7 +1114,7 @@ async function openStock(symbol, row = {}) {
       .then(() => {
         if (token !== state.stockRequest) return null;
         recoveryInfo.textContent = "RECOVERY 正在读取…";
-        return api("/api/preview/stock-timeline", {
+        return stockApi("/api/preview/stock-timeline", {
           ...observationRequest,
           diagnostic_scope: "RECOVERY",
         });
@@ -974,10 +1130,10 @@ async function openStock(symbol, row = {}) {
     if (state.data || state.researchReady) {
       const request = { ...requestBody(), explain_symbol: symbol };
       if (c.mode === "D1") request.d1_only_explanation = true;
-      Promise.all([timelineRequest, state.researchReady?.catch(() => null)])
+      Promise.resolve(researchReady?.catch(() => null))
         .then(() => {
           if (token !== state.stockRequest) return null;
-          return api("/api/preview/sector-change-stocks", request);
+          return stockApi("/api/preview/sector-change-stocks", request);
         })
         .then((result) => {
           if (token !== state.stockRequest) return;
@@ -1023,5 +1179,7 @@ $("stockSearch").addEventListener("submit", (e) => {
 });
 $("stockDialog").addEventListener("close", () => {
   ++state.stockRequest;
+  state.stockController?.abort();
+  state.stockController = null;
 });
 init();

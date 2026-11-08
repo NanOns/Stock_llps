@@ -63,6 +63,7 @@ from stock_a.application.source_d0_raw import (
     _official_calendar,
     query_source_d0_raw_launch,
 )
+from stock_a.application.source_pool_factors import read_source_pool_rps
 from stock_a.application.source_tdx_sector_membership import (
     read_tdx_sector_symbol_membership,
 )
@@ -447,34 +448,49 @@ class _PreviewState:
         self.source_sector_change_cache_key: tuple[Any, ...] | None = None
         self.source_sector_change_cache_inputs: SourceSectorChangeInputs | None = None
         self.source_sector_change_cache_expires_at = 0.0
-        self.single_d0_cache_lock = threading.Lock()
-        self.single_d0_cache_key: tuple[Any, ...] | None = None
-        self.single_d0_cache_rows: dict[str, Any] = {}
-        self.single_d0_cache_expires_at = 0.0
+        self.source_sector_change_cache_generation = 0
+        self.source_sector_change_cache_result_generation = 0
+        self.source_sector_change_inflight: dict[tuple[Any, ...], threading.Event] = {}
+        self.source_pool_rps_cache_lock = threading.Lock()
+        self.source_pool_rps_cache_key: tuple[Any, ...] | None = None
+        self.source_pool_rps_cache_result: dict[str, Any] | None = None
+        self.source_pool_rps_cache_expires_at = 0.0
+        self.source_pool_rps_inflight: dict[tuple[Any, ...], threading.Event] = {}
 
-    def single_d0_rows(
+    def source_pool_rps(
         self, cache_key: tuple[Any, ...], factory: Any
-    ) -> dict[str, Any]:
-        """按精确双日来源身份短时复用D0全池，不在每次单股点击重复计算。"""
-        with self.single_d0_cache_lock:
-            if (
-                self.single_d0_cache_key == cache_key
-                and time.monotonic() < self.single_d0_cache_expires_at
-            ):
-                return self.single_d0_cache_rows
+    ) -> tuple[dict[str, Any], bool]:
+        """复用一个精确来源身份的完整RPS横截面，最多保留10分钟。"""
+        while True:
+            with self.source_pool_rps_cache_lock:
+                if (
+                    self.source_pool_rps_cache_key == cache_key
+                    and self.source_pool_rps_cache_result is not None
+                    and time.monotonic() < self.source_pool_rps_cache_expires_at
+                ):
+                    return self.source_pool_rps_cache_result, True
+                event = self.source_pool_rps_inflight.get(cache_key)
+                if event is None:
+                    event = threading.Event()
+                    self.source_pool_rps_inflight[cache_key] = event
+                    break
+            event.wait()
+        try:
             result = factory()
-            if (
-                result["selection"]["page_count"]
-                != result["source_key_set"]["source_union_count"]
-            ):
-                raise SourceStockChangeContextError(
-                    "D0_CHANGE_PARTITION_NOT_CLOSED", "单股观察要求完整D0来源集合。"
-                )
-            rows = {row["source_symbol"]: row for row in result["results"]}
-            self.single_d0_cache_key = cache_key
-            self.single_d0_cache_rows = rows
-            self.single_d0_cache_expires_at = time.monotonic() + 600
-            return rows
+        except BaseException:
+            with self.source_pool_rps_cache_lock:
+                if self.source_pool_rps_inflight.get(cache_key) is event:
+                    del self.source_pool_rps_inflight[cache_key]
+                event.set()
+            raise
+        with self.source_pool_rps_cache_lock:
+            self.source_pool_rps_cache_key = cache_key
+            self.source_pool_rps_cache_result = result
+            self.source_pool_rps_cache_expires_at = time.monotonic() + 600
+            if self.source_pool_rps_inflight.get(cache_key) is event:
+                del self.source_pool_rps_inflight[cache_key]
+            event.set()
+        return result, False
 
     def source_sector_change_inputs(
         self,
@@ -482,19 +498,41 @@ class _PreviewState:
         factory: Any,
     ) -> tuple[SourceSectorChangeInputs, bool]:
         """为连续页面筛选复用一份精确绑定的全池只读输入，最多保留10分钟。"""
-        with self.source_sector_change_cache_lock:
-            now = time.monotonic()
-            if (
-                self.source_sector_change_cache_key == cache_key
-                and self.source_sector_change_cache_inputs is not None
-                and now < self.source_sector_change_cache_expires_at
-            ):
-                return self.source_sector_change_cache_inputs, True
+        while True:
+            with self.source_sector_change_cache_lock:
+                now = time.monotonic()
+                if (
+                    self.source_sector_change_cache_key == cache_key
+                    and self.source_sector_change_cache_inputs is not None
+                    and now < self.source_sector_change_cache_expires_at
+                ):
+                    return self.source_sector_change_cache_inputs, True
+                event = self.source_sector_change_inflight.get(cache_key)
+                if event is None:
+                    event = threading.Event()
+                    self.source_sector_change_inflight[cache_key] = event
+                    self.source_sector_change_cache_generation += 1
+                    generation = self.source_sector_change_cache_generation
+                    break
+            event.wait()
+        try:
             inputs = factory()
-            self.source_sector_change_cache_key = cache_key
-            self.source_sector_change_cache_inputs = inputs
-            self.source_sector_change_cache_expires_at = time.monotonic() + 600
-            return inputs, False
+        except BaseException:
+            with self.source_sector_change_cache_lock:
+                if self.source_sector_change_inflight.get(cache_key) is event:
+                    del self.source_sector_change_inflight[cache_key]
+                event.set()
+            raise
+        with self.source_sector_change_cache_lock:
+            if generation >= self.source_sector_change_cache_result_generation:
+                self.source_sector_change_cache_key = cache_key
+                self.source_sector_change_cache_inputs = inputs
+                self.source_sector_change_cache_expires_at = time.monotonic() + 600
+                self.source_sector_change_cache_result_generation = generation
+            if self.source_sector_change_inflight.get(cache_key) is event:
+                del self.source_sector_change_inflight[cache_key]
+            event.set()
+        return inputs, False
 
     def snapshot_identity(
         self,
@@ -2740,27 +2778,27 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_IDENTITY_INVALID",
                         "namespace_id须为有效UUID",
                     ) from error
-                rows = {}
+                launch_change = None
                 if diagnostic_scope != "RECOVERY":
                     _, pair, _ = resolve_pg_history_window(target.isoformat(), 2)
                     try:
-                        rows = self.preview_server.state.single_d0_rows(
-                            (namespace, pair[0], target, cutoff, package),
-                            lambda: query_source_d0_raw_launch(
-                                self.preview_server.state.config,
-                                scenario="LAUNCH_CONFIRM",
-                                action="changes",
-                                before_session=pair[0],
-                                target_session=target,
-                                research_cutoff=cutoff,
-                                before_package_sha256=package,
-                                package_sha256=package,
-                                expected_namespace_id=namespace,
-                                transition="ALL",
-                                offset=0,
-                                limit=5000,
-                            ),
+                        changes = query_source_d0_raw_launch(
+                            self.preview_server.state.config,
+                            scenario="LAUNCH_CONFIRM",
+                            action="changes",
+                            before_session=pair[0],
+                            target_session=target,
+                            research_cutoff=cutoff,
+                            before_package_sha256=package,
+                            package_sha256=package,
+                            symbol=symbol,
+                            expected_namespace_id=namespace,
+                            transition="ALL",
+                            offset=0,
+                            limit=1,
+                            _single_symbol_only=True,
                         )
+                        launch_change = next(iter(changes["results"]), None)
                     except (SourceD0RawError, SourceStockChangeContextError) as error:
                         mapped = _source_context_preview_error(error)
                         if mapped is None:
@@ -2768,6 +2806,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         raise mapped from error
                 recovery = None
                 if diagnostic_scope != "LAUNCH":
+                    try:
+                        rps, _ = self.preview_server.state.source_pool_rps(
+                            (namespace, target, cutoff, package),
+                            lambda: read_source_pool_rps(
+                                self.preview_server.state.config,
+                                target_session=target,
+                                research_cutoff=cutoff,
+                                package_sha256=package,
+                                expected_namespace_id=namespace,
+                            ),
+                        )
+                    except ValueError:
+                        rps = None
                     recovery = query_source_d0_raw_launch(
                         self.preview_server.state.config,
                         scenario="RECOVERY_TURN",
@@ -2779,6 +2830,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         symbol=symbol,
                         offset=0,
                         limit=1,
+                        _single_symbol_only=True,
+                        _rps_result=rps,
                     )
                 membership = {
                     "status": "NOT_EVALUATED",
@@ -2809,7 +2862,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "source_symbol": symbol,
                         "target_session": target.isoformat(),
-                        "d0_change": rows.get(symbol),
+                        "d0_change": launch_change,
                         "recovery": next(iter(recovery["results"]), None)
                         if recovery
                         else None,

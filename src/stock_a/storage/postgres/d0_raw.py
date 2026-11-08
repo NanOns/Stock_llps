@@ -278,9 +278,17 @@ def read_source_d0_raw_window(
     sessions: Sequence[date],
     expected_calendar: Mapping[str, str],
     expected_namespace_id: str | None = None,
+    history_source_symbol: str | None = None,
 ) -> dict[str, Any]:
     """一次一致只读事务核验Raw捕获分母并读取来源池历史网格。"""
     selected_sessions = tuple(sessions)
+    if (
+        history_source_symbol is not None
+        and _SYMBOL.fullmatch(history_source_symbol) is None
+    ):
+        raise D0RawPgError(
+            "D0_SOURCE_SYMBOL_INVALID", "指定的单股历史来源代码格式无效。"
+        )
     if expected_namespace_id is not None:
         try:
             canonical_namespace_id = str(uuid.UUID(expected_namespace_id))
@@ -367,10 +375,17 @@ def read_source_d0_raw_window(
         target_scan_seconds = time.perf_counter() - target_scan_started
 
         history_scan_started = time.perf_counter()
+        history_symbols = (
+            symbols
+            if history_source_symbol is None
+            else (history_source_symbol,)
+            if history_source_symbol in symbols
+            else ()
+        )
         rows_by_symbol, present_rows, missing_cells = _read_history_grid(
             cursor,
             namespace_id=namespace_id,
-            source_symbols=symbols,
+            source_symbols=history_symbols,
             sessions=selected_sessions,
             package_sha256=package_sha256,
             source_version=source_version,
@@ -387,7 +402,8 @@ def read_source_d0_raw_window(
         "source_count": len(symbols),
         "history_sessions": [session.isoformat() for session in selected_sessions],
         "raw_history_rows_read": present_rows,
-        "history_grid_cells": len(symbols) * len(selected_sessions),
+        "history_grid_cells": len(rows_by_symbol) * len(selected_sessions),
+        "history_symbol_count": len(rows_by_symbol),
         "missing_history_cells": missing_cells,
         "raw_history_batch_reads": 1,
         "pg_source_version_read_seconds": source_version_seconds,
