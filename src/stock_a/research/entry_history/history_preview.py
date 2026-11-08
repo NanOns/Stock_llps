@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, timedelta
 from pathlib import Path
 import re
@@ -54,6 +54,21 @@ class _SourceD1PreviewContext:
     ]
     core_source_sha256: str
     execution_adapter_source_sha256: str
+    target_windows: dict[date, _SourceD1TargetWindow] = field(
+        default_factory=dict,
+        compare=False,
+        repr=False,
+    )
+
+
+@dataclass(frozen=True)
+class _SourceD1TargetWindow:
+    session_vector: tuple[date, ...]
+    expected_sessions: tuple[date, ...]
+    calendar_payload: Mapping[str, Any]
+    calendar_metadata: tuple[Mapping[str, Any], ...]
+    calendar_revision: str
+    bounded_calendar: MarketSessionCalendar
 
 
 @dataclass(frozen=True)
@@ -266,18 +281,16 @@ def prepare_source_d1_preview_context(
     )
 
 
-def _source_d1_preview_for_target(
-    *,
+def _source_d1_target_window(
     target: date,
+    *,
     sessions: tuple[date, ...],
-    normalized: str,
-    coordinate_id: str,
-    rows_by_session: Mapping[date, Mapping[str, Any]],
-    decoded_by_session: Mapping[date, DecodedDay],
-    observations_by_session: Mapping[date, CoreObservation],
-    row_facts: Mapping[date, _SourceD1RowFacts],
     context: _SourceD1PreviewContext,
-) -> dict[str, Any]:
+) -> _SourceD1TargetWindow:
+    cached = context.target_windows.get(target)
+    if cached is not None and cached.session_vector == sessions:
+        return cached
+
     expected_sessions = tuple(day for day in sessions if day <= target)
     calendar_data = context.calendars_by_year.get(target.year)
     if calendar_data is None:
@@ -303,15 +316,47 @@ def _source_d1_preview_for_target(
         raise ResearchEntryError(
             "CALENDAR_SESSION_GAP", "PG历史窗口遗漏版本化官方日历中的交易会话"
         )
-    history = tuple(observations_by_session[day] for day in expected_sessions)
-    bounded_calendar = MarketSessionCalendar(
-        calendar_id=calendar_payload["calendar_id"],
-        revision=calendar_revision,
-        sessions=expected_sessions,
+    window = _SourceD1TargetWindow(
+        session_vector=sessions,
+        expected_sessions=expected_sessions,
+        calendar_payload=calendar_payload,
+        calendar_metadata=calendar_metadata,
+        calendar_revision=calendar_revision,
+        bounded_calendar=MarketSessionCalendar(
+            calendar_id=calendar_payload["calendar_id"],
+            revision=calendar_revision,
+            sessions=expected_sessions,
+        ),
     )
+    context.target_windows[target] = window
+    return window
+
+
+def _source_d1_preview_for_target(
+    *,
+    target: date,
+    sessions: tuple[date, ...],
+    normalized: str,
+    coordinate_id: str,
+    rows_by_session: Mapping[date, Mapping[str, Any]],
+    decoded_by_session: Mapping[date, DecodedDay],
+    observations_by_session: Mapping[date, CoreObservation],
+    row_facts: Mapping[date, _SourceD1RowFacts],
+    context: _SourceD1PreviewContext,
+) -> dict[str, Any]:
+    target_window = _source_d1_target_window(
+        target,
+        sessions=sessions,
+        context=context,
+    )
+    expected_sessions = target_window.expected_sessions
+    calendar_payload = target_window.calendar_payload
+    calendar_metadata = target_window.calendar_metadata
+    calendar_revision = target_window.calendar_revision
+    history = tuple(observations_by_session[day] for day in expected_sessions)
     core = _calculate_core_d1_inputs(
         history,
-        official_calendar=bounded_calendar,
+        official_calendar=target_window.bounded_calendar,
         row_facts=row_facts,
     )
     _apply_calendar_coverage_to_core(
