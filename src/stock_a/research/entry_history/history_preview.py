@@ -56,10 +56,88 @@ class _SourceD1PreviewContext:
     execution_adapter_source_sha256: str
 
 
+@dataclass(frozen=True)
+class _SourceD1RowFacts:
+    """一次D1批量预览中逐会话复用的Raw价格校验事实。"""
+
+    known_ohlc_error: str | None
+    numbers: Mapping[str, tuple[Any | None, str | None]]
+
+
+def _source_d1_row_facts(row: CoreObservation) -> _SourceD1RowFacts:
+    """按Core原有顺序校验一次OHLC，并保留字段数值及其缺失原因。"""
+    numbers: dict[str, tuple[Any | None, str | None]] = {}
+    known: dict[str, Any] = {}
+    ohlc_error = None
+    for name in ("open", "high", "low", "close"):
+        field = getattr(row, name)
+        if not isinstance(field, FieldValue) or field.quality != "OBSERVED":
+            value, reason = _number(field, f"DATA_INVALID_{name.upper()}")
+            numbers[name] = (value, reason)
+            continue
+        try:
+            value = exact_number(field.value)
+        except (ValueError, TypeError, ZeroDivisionError):
+            value = None
+            ohlc_error = "DATA_INVALID_OHLC"
+        if value is not None and value <= 0:
+            ohlc_error = "DATA_INVALID_OHLC"
+        if ohlc_error is None:
+            known[name] = value
+        numbers[name] = (
+            value,
+            "DATA_INVALID_OHLC" if ohlc_error else None,
+        )
+    if ohlc_error is None:
+        open_value, high, low, close = (
+            known.get(name) for name in ("open", "high", "low", "close")
+        )
+        if high is not None and low is not None and low > high:
+            ohlc_error = "DATA_INVALID_OHLC"
+        elif low is not None and any(
+            value is not None and low > value for value in (open_value, close)
+        ):
+            ohlc_error = "DATA_INVALID_OHLC"
+        elif high is not None and any(
+            value is not None and value > high for value in (open_value, close)
+        ):
+            ohlc_error = "DATA_INVALID_OHLC"
+    if ohlc_error:
+        numbers = {
+            name: (value, reason or ohlc_error)
+            for name, (value, reason) in numbers.items()
+        }
+    return _SourceD1RowFacts(ohlc_error, numbers)
+
+
+def _source_d1_column(
+    rows: Sequence[CoreObservation],
+    name: str,
+    *,
+    row_facts: Mapping[date, _SourceD1RowFacts],
+) -> tuple[list[Any] | None, str | None]:
+    coordinates = {row.coordinate_id for row in rows if row.state == "ACTUAL"}
+    if len(coordinates) > 1:
+        return None, "MIXED_PRICE_COORDINATE"
+    values = []
+    for row in rows:
+        facts = row_facts[row.session]
+        if facts.known_ohlc_error:
+            return None, facts.known_ohlc_error
+        value, reason = facts.numbers[name]
+        if reason:
+            return None, reason
+        if value <= 0:
+            return None, f"DATA_INVALID_{name.upper()}"
+        values.append(value)
+    return values, None
+
+
 def _calculate_core_d1_inputs(
     history: Sequence[CoreObservation],
     *,
     official_calendar: MarketSessionCalendar,
+    row_facts: Mapping[date, _SourceD1RowFacts] | None = None,
 ) -> dict[str, FieldValue]:
     """复用现役Core原语，只生成ALG-29消费的三字段。"""
     if not isinstance(official_calendar, MarketSessionCalendar):
@@ -80,11 +158,13 @@ def _calculate_core_d1_inputs(
         }
 
     prior_rows, prior_reason = _actual_window(history, 20, exclude_current=True)
-    prior_highs, high_reason = (
-        _extreme_column(prior_rows, "high")
-        if not prior_reason
-        else (None, prior_reason)
-    )
+    prior_highs, high_reason = (None, prior_reason)
+    if not prior_reason:
+        prior_highs, high_reason = (
+            _source_d1_column(prior_rows, "high", row_facts=row_facts)
+            if row_facts is not None
+            else _extreme_column(prior_rows, "high")
+        )
     prior_high20 = _known(
         max(prior_highs, default=None) if prior_highs else None,
         prior_reason or high_reason,
@@ -95,15 +175,31 @@ def _calculate_core_d1_inputs(
         atr_reason = _coordinate_error(rows)
     if not atr_reason:
         atr_reason = next(
-            (error for row in rows if (error := _known_ohlc_error(row))), None
+            (
+                error
+                for row in rows
+                if (
+                    error := (
+                        row_facts[row.session].known_ohlc_error
+                        if row_facts is not None
+                        else _known_ohlc_error(row)
+                    )
+                )
+            ),
+            None,
         )
     if not atr_reason:
         true_ranges = []
         for previous, current in zip(rows, rows[1:]):
             # 窗口已逐行检查坐标及已知OHLC；此处只读取实际依赖字段。
-            cur_high, high_reason = _number(current.high, "DATA_INVALID_HIGH")
-            cur_low, low_reason = _number(current.low, "DATA_INVALID_LOW")
-            prev_close, close_reason = _number(previous.close, "DATA_INVALID_CLOSE")
+            if row_facts is None:
+                cur_high, high_reason = _number(current.high, "DATA_INVALID_HIGH")
+                cur_low, low_reason = _number(current.low, "DATA_INVALID_LOW")
+                prev_close, close_reason = _number(previous.close, "DATA_INVALID_CLOSE")
+            else:
+                cur_high, high_reason = row_facts[current.session].numbers["high"]
+                cur_low, low_reason = row_facts[current.session].numbers["low"]
+                prev_close, close_reason = row_facts[previous.session].numbers["close"]
             dependency_error = high_reason or low_reason or close_reason
             if dependency_error:
                 atr_reason = dependency_error
@@ -117,9 +213,14 @@ def _calculate_core_d1_inputs(
             )
     atr20 = _known(mean(true_ranges), None) if not atr_reason else unknown(atr_reason)
 
-    closes, close_reason = _column([latest], "close")
-    highs, high_reason = _extreme_column([latest], "high")
-    lows, low_reason = _extreme_column([latest], "low")
+    if row_facts is None:
+        closes, close_reason = _column([latest], "close")
+        highs, high_reason = _extreme_column([latest], "high")
+        lows, low_reason = _extreme_column([latest], "low")
+    else:
+        closes, close_reason = _source_d1_column([latest], "close", row_facts=row_facts)
+        highs, high_reason = _source_d1_column([latest], "high", row_facts=row_facts)
+        lows, low_reason = _source_d1_column([latest], "low", row_facts=row_facts)
     if closes and highs and lows:
         high, low = highs[0], lows[0]
         clv = (
@@ -174,6 +275,7 @@ def _source_d1_preview_for_target(
     rows_by_session: Mapping[date, Mapping[str, Any]],
     decoded_by_session: Mapping[date, DecodedDay],
     observations_by_session: Mapping[date, CoreObservation],
+    row_facts: Mapping[date, _SourceD1RowFacts],
     context: _SourceD1PreviewContext,
 ) -> dict[str, Any]:
     expected_sessions = tuple(day for day in sessions if day <= target)
@@ -207,7 +309,11 @@ def _source_d1_preview_for_target(
         revision=calendar_revision,
         sessions=expected_sessions,
     )
-    core = _calculate_core_d1_inputs(history, official_calendar=bounded_calendar)
+    core = _calculate_core_d1_inputs(
+        history,
+        official_calendar=bounded_calendar,
+        row_facts=row_facts,
+    )
     _apply_calendar_coverage_to_core(
         core, history, calendar_metadata[-1]["coverage_context"]
     )
@@ -409,6 +515,12 @@ def research_stock_pg_d1_history_previews(
                 "PG_HISTORY_STATUS_INVALID", "PG历史行含未登记的Raw来源状态"
             )
 
+    row_facts = {
+        day: _source_d1_row_facts(observation)
+        for day, observation in observations_by_session.items()
+        if observation.state == "ACTUAL"
+    }
+
     result = {
         day: _source_d1_preview_for_target(
             target=day,
@@ -419,6 +531,7 @@ def research_stock_pg_d1_history_previews(
             decoded_by_session=decoded_by_session,
             observations_by_session=observations_by_session,
             context=context,
+            row_facts=row_facts,
         )
         for day in events
     }
@@ -435,6 +548,7 @@ def research_stock_pg_d1_history_previews(
             decoded_by_session=decoded_by_session,
             observations_by_session=observations_by_session,
             context=context,
+            row_facts=row_facts,
         )
     return result
 

@@ -34,6 +34,7 @@ def discover_source_d1_support_changes(
     offset,
     limit,
     include_symbol_details=False,
+    source_symbol=None,
 ) -> dict[str, Any]:
     """单遍读取Raw来源历史，发现窗口内全部D1事件的目标日支撑变化。"""
     if (
@@ -49,6 +50,18 @@ def discover_source_d1_support_changes(
             "D1_SUPPORT_DISCOVERY_SESSION_INVALID",
             "目标日与事件窗口必须位于有界版本化官方会话范围内，且窗口早于目标日",
         )
+
+    if source_symbol is not None:
+        if not isinstance(source_symbol, str):
+            raise PgResearchBindingError(
+                "D1_SUPPORT_DISCOVERY_SYMBOL_INVALID", "单股D1解释代码无效"
+            )
+        normalized_symbol = source_symbol.strip().upper()
+        if re.fullmatch(r"(?:SH|SZ)\.[0-9]{6}", normalized_symbol) is None:
+            raise PgResearchBindingError(
+                "D1_SUPPORT_DISCOVERY_SYMBOL_INVALID", "单股D1解释代码无效"
+            )
+        source_symbol = normalized_symbol
 
     event_sessions = tuple(
         day for day in sessions if event_window_start <= day < target
@@ -96,6 +109,7 @@ def discover_source_d1_support_changes(
     last_symbol = None
     source_context = None
     source_pool_total = None
+    source_query_total = None
     source_offset = 0
     source_page_count = 0
     history_preview_count = 0
@@ -115,10 +129,13 @@ def discover_source_d1_support_changes(
             limit=100,
             market="ALL",
             board="ALL",
+            source_symbol=source_symbol,
         )
         candidates = page["candidates"]
+        if source_query_total is None:
+            source_query_total = page["total_count"]
         if source_pool_total is None:
-            source_pool_total = page["total_count"]
+            source_pool_total = page["version_row_count"]
         target_rows = []
         for candidate in candidates:
             symbol = candidate["source_symbol"]
@@ -181,14 +198,23 @@ def discover_source_d1_support_changes(
             or any(context.get(key) != source_context.get(key) for key in context_keys)
             or page["version_status"] != "CLOSED"
             or not page["partition_closed"]
-            or page["total_count"] != context["raw_row_count"]
+            or (
+                page["total_count"] != context["raw_row_count"]
+                if source_symbol is None
+                else page["total_count"] not in {0, 1}
+                or page["total_count"] == 1
+                and (
+                    len(candidates) != 1
+                    or candidates[0]["source_symbol"] != source_symbol
+                )
+            )
             or page["version_row_count"] != context["raw_row_count"]
             or page["version_expected_row_count"]
             != context["capture_expected_row_count"]
             or page["offset"] != source_offset
             or page["page_count"] != len(candidates)
             or len(target_rows) != len(candidates)
-            or page["total_count"] != source_pool_total
+            or page["total_count"] != source_query_total
         ):
             raise PgResearchBindingError(
                 "D1_SUPPORT_DISCOVERY_POOL_INCOMPLETE",
@@ -427,8 +453,17 @@ def discover_source_d1_support_changes(
     if (
         source_context is None
         or source_pool_total is None
-        or len(seen_symbols) != source_pool_total
-        or len(seen_symbols) != source_context["raw_row_count"]
+        or len(seen_symbols) != source_query_total
+        or source_pool_total != source_context["raw_row_count"]
+        or (
+            source_symbol is None
+            and len(seen_symbols) != source_context["raw_row_count"]
+        )
+        or (
+            source_symbol is not None
+            and len(seen_symbols) == 1
+            and source_symbol not in seen_symbols
+        )
     ):
         raise PgResearchBindingError(
             "D1_SUPPORT_DISCOVERY_POOL_INCOMPLETE",
@@ -505,7 +540,11 @@ def discover_source_d1_support_changes(
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "price_coordinate": "RAW_UNADJUSTED",
-        "scope": "TARGET_SESSION_RAW_SOURCE_POOL_EVENT_WINDOW_DISCOVERY",
+        "scope": (
+            "TARGET_SESSION_RAW_SOURCE_POOL_EVENT_WINDOW_DISCOVERY"
+            if source_symbol is None
+            else "SOURCE_SYMBOL_ONLY_TARGET_SESSION_EVENT_WINDOW_D1_SUPPORT_EXPLANATION"
+        ),
         "target_session": target.isoformat(),
         "event_window_start": event_window_start.isoformat(),
         "event_window_end_exclusive": target.isoformat(),
@@ -521,7 +560,11 @@ def discover_source_d1_support_changes(
         "source": source_context,
         "source_capture_started_at": source_context.get("capture_read_started_at"),
         "source_capture_validated_at": source_context.get("capture_validated_at"),
-        "source_pool_count": len(seen_symbols),
+        "source_pool_count": source_context["raw_row_count"],
+        "evaluated_source_symbol_count": len(seen_symbols),
+        "evaluated_source_symbol": source_symbol,
+        "source_pool_partition_closed": source_symbol is None
+        and len(seen_symbols) == source_context["raw_row_count"],
         "anchor_window_session_count": len(event_sessions),
         "raw_d1_counts_by_session": {
             day: {
@@ -529,25 +572,44 @@ def discover_source_d1_support_changes(
                 "unknown_reason_counts": dict(
                     sorted(counts["unknown_reason_counts"].items())
                 ),
-                "partition_closed": sum(
+                "evaluated_partition_closed": sum(
                     counts[state] for state in ("TRUE", "FALSE", "UNKNOWN")
                 )
                 == len(seen_symbols),
+                "partition_closed": source_symbol is None
+                and sum(counts[state] for state in ("TRUE", "FALSE", "UNKNOWN"))
+                == source_context["raw_row_count"],
             }
             for day, counts in per_session_counts.items()
         },
-        "raw_d1_event_count": raw_d1_event_count,
-        "raw_d1_partition_closed": all(
+        "raw_d1_event_count": raw_d1_event_count if source_symbol is None else None,
+        "evaluated_raw_d1_event_count": raw_d1_event_count,
+        "raw_d1_evaluated_partition_closed": all(
             sum(counts[state] for state in ("TRUE", "FALSE", "UNKNOWN"))
             == len(seen_symbols)
             for counts in per_session_counts.values()
         ),
-        "support_event_counts": support_counts,
+        "raw_d1_partition_closed": source_symbol is None
+        and all(
+            sum(counts[state] for state in ("TRUE", "FALSE", "UNKNOWN"))
+            == source_context["raw_row_count"]
+            for counts in per_session_counts.values()
+        ),
+        "support_event_counts": support_counts if source_symbol is None else None,
+        "evaluated_support_event_counts": support_counts,
         "support_event_reason_counts": dict(sorted(support_reason_counts.items())),
-        "support_event_partition_closed": sum(support_counts.values())
+        "support_event_partition_closed": source_symbol is None
+        and sum(support_counts.values()) == raw_d1_event_count,
+        "support_event_evaluated_partition_closed": sum(support_counts.values())
         == raw_d1_event_count,
-        "unique_changed_symbol_count": unique_changed_symbol_count,
-        "changed_symbol_partition_closed": unique_changed_symbol_count
+        "unique_changed_symbol_count": unique_changed_symbol_count
+        if source_symbol is None
+        else None,
+        "evaluated_unique_changed_symbol_count": unique_changed_symbol_count,
+        "changed_symbol_partition_closed": source_symbol is None
+        and unique_changed_symbol_count
+        == len({event["source_symbol"] for event in changed_events}),
+        "evaluated_changed_symbol_partition_closed": unique_changed_symbol_count
         == len({event["source_symbol"] for event in changed_events}),
         "page": selected_page["page"],
         "results": selected_page["results"],

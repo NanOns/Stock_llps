@@ -880,6 +880,11 @@ async function openStock(symbol, row = {}) {
     : d1State === "CHANGED"
       ? "已知有变化，不在当前代码页；请检查分页"
       : "本次尚未证明符合当前变化列表，或该列表未计算";
+  const d1IsPending =
+    c.mode === "D1" &&
+    !row.change_state &&
+    !row.changed_anchor_event_count &&
+    Boolean(state.data || researchReady);
   message("stockTitle", symbol);
   message(
     "stockMeta",
@@ -988,7 +993,7 @@ async function openStock(symbol, row = {}) {
     root.append(periods, node("h3", "来源级规则与未展示原因"));
     const rules = node(
       "div",
-      `LAUNCH / RECOVERY 正在读取；D1 ${row.change_state || (row.changed_anchor_event_count ? "CHANGED" : "NOT_EVALUATED")}；正式 Priority、Risk、D2 与 Focus NOT_EVALUATED。`,
+      `LAUNCH / RECOVERY 正在读取；D1 ${d1IsPending ? "CALCULATING" : d1State}；正式 Priority、Risk、D2 与 Focus NOT_EVALUATED。`,
       "rule",
     );
     const launchInfo = node("p", "LAUNCH 正在读取…");
@@ -1001,7 +1006,10 @@ async function openStock(symbol, row = {}) {
       membershipInfo,
       node("p", "正式 Priority / Risk / D2 / Focus：NOT_EVALUATED"),
     );
-    const d1Info = node("p", `D1：${d1State}；${displayReason}。`);
+    const d1Info = node(
+      "p",
+      `D1 ${d1IsPending ? "CALCULATING" : d1State} · ${d1IsPending ? "正在读取该代码的精确历史窗口" : displayReason}。`,
+    );
     root.append(rules, d1Info);
     message(
       "stockStatus",
@@ -1130,14 +1138,13 @@ async function openStock(symbol, row = {}) {
     if (state.data || state.researchReady) {
       const request = { ...requestBody(), explain_symbol: symbol };
       if (c.mode === "D1") request.d1_only_explanation = true;
-      Promise.resolve(researchReady?.catch(() => null))
-        .then(() => {
-          if (token !== state.stockRequest) return null;
-          return stockApi("/api/preview/sector-change-stocks", request);
-        })
-        .then((result) => {
-          if (token !== state.stockRequest) return;
-          if (!result) return;
+      const requestD1 = async () => {
+        try {
+          const result = await stockApi(
+            "/api/preview/sector-change-stocks",
+            request,
+          );
+          if (token !== state.stockRequest || !result) return;
           const item = result.symbol_observation;
           const d1 = item?.d1;
           if (!d1) {
@@ -1150,11 +1157,13 @@ async function openStock(symbol, row = {}) {
           );
           const reason = pageContains
             ? "位于当前变化代码页"
-            : changed
-              ? "已知有变化，不在当前代码页；请检查分页"
-              : d1.change_state === "UNCHANGED"
-                ? "当前观察窗没有新增支撑变化"
-                : "本次未能判定为变化，原因见状态";
+            : result.scope === "SOURCE_SYMBOL_ONLY_D1_SUPPORT_EXPLANATION"
+              ? "已按该代码精确Raw历史计算；全池研究单独进行"
+              : changed
+                ? "已知有变化，不在当前代码页；请检查分页"
+                : d1.change_state === "UNCHANGED"
+                  ? "当前观察窗没有新增支撑变化"
+                  : "本次未能判定为变化，原因见状态";
           const events = (d1.anchor_events || [])
             .map(
               (event) =>
@@ -1162,11 +1171,27 @@ async function openStock(symbol, row = {}) {
             )
             .join("；");
           d1Info.textContent = `D1 ${d1.change_state} · ${reason} · ${(d1.unknown_reasons || []).join("、") || events || "无锚事件"}。正式 Priority 尚未计算。`;
-        })
-        .catch((error) => {
+        } catch (error) {
           if (token === state.stockRequest)
-            d1Info.textContent = `D1 NOT_EVALUATED：${error.message}`;
+            d1Info.textContent = `D1 UNKNOWN：${error.message}`;
+        }
+      };
+      if (c.mode === "D1") {
+        const firstD1 = requestD1();
+        if (researchReady)
+          Promise.resolve(researchReady)
+            .then(() => firstD1)
+            .then(() => {
+              if (token === state.stockRequest) return requestD1();
+              return null;
+            })
+            .catch(() => {});
+      } else {
+        Promise.resolve(researchReady?.catch(() => null)).then(() => {
+          if (token === state.stockRequest) return requestD1();
+          return null;
         });
+      }
     }
   } catch (error) {
     if (token === state.stockRequest)

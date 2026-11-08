@@ -1311,6 +1311,7 @@ def query_source_d0_raw_launch(
     _include_shape_observation: bool = False,
     _single_symbol_only: bool = False,
     _rps_result: Mapping[str, Any] | None = None,
+    _rps_result_error: str | None = None,
 ) -> dict[str, Any]:
     """读取启动或恢复原始状态，或联结启动相邻官方会话的三态变化。"""
     expected_namespace_id = _canonical_expected_namespace(expected_namespace_id)
@@ -1444,27 +1445,34 @@ def query_source_d0_raw_launch(
     rps_facts = {}
     rps_input_error = None
     if scenario == "RECOVERY_TURN":
-        try:
-            rps = _rps_result or read_source_pool_rps(
-                config,
-                target_session=target_session,
-                research_cutoff=research_cutoff,
-                package_sha256=package_sha256,
-                expected_namespace_id=pg_result["namespace_id"],
-            )
-            if (
-                rps.get("target_session") != target_session
-                or rps.get("research_cutoff") != research_cutoff
-                or rps.get("namespace_id") != pg_result["namespace_id"]
-                or rps.get("package_sha256") != package_sha256
-            ):
-                rps_input_error = "D0_RPS_SOURCE_IDENTITY_MISMATCH"
-            elif set(rps["facts"]) != set(pg_result["source_symbols"]):
-                rps_input_error = "D0_RPS_SOURCE_POOL_MISMATCH"
-            else:
-                rps_facts = rps["facts"]
-        except ValueError as error:
-            rps_input_error = f"RPS_INPUT_VALUE_ERROR:{error}"
+        if _rps_result_error is not None:
+            rps_input_error = f"RPS_INPUT_VALUE_ERROR:{_rps_result_error}"
+        else:
+            try:
+                rps = (
+                    _rps_result
+                    if _rps_result is not None
+                    else read_source_pool_rps(
+                        config,
+                        target_session=target_session,
+                        research_cutoff=research_cutoff,
+                        package_sha256=package_sha256,
+                        expected_namespace_id=pg_result["namespace_id"],
+                    )
+                )
+                if (
+                    rps.get("target_session") != target_session
+                    or rps.get("research_cutoff") != research_cutoff
+                    or rps.get("namespace_id") != pg_result["namespace_id"]
+                    or rps.get("package_sha256") != package_sha256
+                ):
+                    rps_input_error = "D0_RPS_SOURCE_IDENTITY_MISMATCH"
+                elif set(rps["facts"]) != set(pg_result["source_symbols"]):
+                    rps_input_error = "D0_RPS_SOURCE_POOL_MISMATCH"
+                else:
+                    rps_facts = rps["facts"]
+            except ValueError as error:
+                rps_input_error = f"RPS_INPUT_VALUE_ERROR:{error}"
     calculate_started = time.perf_counter()
     calculate_cpu_started = time.process_time()
     results = []

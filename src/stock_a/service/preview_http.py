@@ -54,6 +54,10 @@ from stock_a.application.source_sector_change_research import (
     prepare_source_sector_change_inputs,
     build_source_sector_change_view,
 )
+from stock_a.application.source_d1_support_changes import (
+    discover_source_d1_support_changes,
+)
+from stock_a.application.tdx_sector_change_stocks import _member_detail
 from stock_a.application.source_stock_change_context import (
     SourceStockChangeContextError,
     query_source_stock_change_context,
@@ -533,6 +537,19 @@ class _PreviewState:
                 del self.source_sector_change_inflight[cache_key]
             event.set()
         return inputs, False
+
+    def completed_source_sector_change_inputs(
+        self, cache_key: tuple[Any, ...]
+    ) -> SourceSectorChangeInputs | None:
+        """只读读取已完成的精确全池输入，不等待或启动额外全池任务。"""
+        with self.source_sector_change_cache_lock:
+            if (
+                self.source_sector_change_cache_key != cache_key
+                or self.source_sector_change_cache_inputs is None
+                or time.monotonic() >= self.source_sector_change_cache_expires_at
+            ):
+                return None
+            return self.source_sector_change_cache_inputs
 
     def snapshot_identity(
         self,
@@ -1507,23 +1524,107 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 read_d0,
                 d0_before_session.isoformat() if d0_before_session else None,
             )
-            inputs, cache_hit = self.preview_server.state.source_sector_change_inputs(
-                cache_key,
-                lambda: prepare_source_sector_change_inputs(
+            inputs = (
+                self.preview_server.state.completed_source_sector_change_inputs(
+                    cache_key
+                )
+                if d1_only
+                else None
+            )
+            cache_hit = inputs is not None
+            if d1_only and inputs is None:
+                _resolved_target, d1_sessions, d1_calendar_revision = (
+                    resolve_pg_history_window(target.isoformat(), history_session_count)
+                )
+                discovery = discover_source_d1_support_changes(
                     config,
                     str(self.preview_server.state.config_path),
-                    target_session=target,
-                    research_cutoff=cutoff,
-                    industry_snapshot_id=industry_snapshot_id,
-                    concept_snapshot_id=concept_snapshot_id,
-                    package_sha256=package_sha,
-                    profile_revision=profile_revision,
-                    event_window_start=event_window_start,
-                    pg_history_session_count=history_session_count,
-                    include_d0_launch_new=read_d0,
-                    d0_before_session=d0_before_session,
-                ),
-            )
+                    target,
+                    cutoff,
+                    d1_sessions,
+                    d1_calendar_revision,
+                    package_sha,
+                    event_window_start,
+                    0,
+                    1,
+                    include_symbol_details=True,
+                    source_symbol=explain_symbol,
+                )
+                exact_details = discovery["complete_symbol_details"]
+                detail = (
+                    exact_details[0]
+                    if exact_details
+                    and exact_details[0].get("source_symbol") == explain_symbol
+                    else None
+                )
+                symbol_d1 = _member_detail(explain_symbol, detail)
+                return {
+                    "ok": True,
+                    "scope": "SOURCE_SYMBOL_ONLY_D1_SUPPORT_EXPLANATION",
+                    "target_session": target.isoformat(),
+                    "research_cutoff": cutoff.isoformat(),
+                    "package_sha256": package_sha,
+                    "source_pool_count": discovery["source_pool_count"],
+                    "evaluated_source_symbol_count": discovery[
+                        "evaluated_source_symbol_count"
+                    ],
+                    "symbol_observation": {
+                        "source_symbol": explain_symbol,
+                        "in_target_raw_pool": detail is not None,
+                        "d1": symbol_d1,
+                        "d0_change": None,
+                        "memberships": [],
+                        "missing_membership_kinds": ["INDUSTRY", "CONCEPT"],
+                        "membership_status": "NOT_EVALUATED",
+                        "formal_evaluation_status": "NOT_EVALUATED",
+                    },
+                    "d1_discovery": {
+                        "scope": discovery["scope"],
+                        "identity_status": discovery["identity_status"],
+                        "price_coordinate": discovery["price_coordinate"],
+                        "source": discovery["source"],
+                        "raw_d1_counts_by_session": discovery[
+                            "raw_d1_counts_by_session"
+                        ],
+                        "evaluated_support_event_counts": discovery[
+                            "evaluated_support_event_counts"
+                        ],
+                        "source_pool_partition_closed": discovery[
+                            "source_pool_partition_closed"
+                        ],
+                    },
+                    "execution": {
+                        **discovery["execution"],
+                        "d1_full_universe_scan": False,
+                        "database_write_attempted": False,
+                        "ddl_executed": False,
+                        "dml_executed": False,
+                    },
+                    "cache": {
+                        "reused_exact_inputs": False,
+                        "reused_completed_full_inputs": False,
+                    },
+                }
+            if inputs is None:
+                inputs, cache_hit = (
+                    self.preview_server.state.source_sector_change_inputs(
+                        cache_key,
+                        lambda: prepare_source_sector_change_inputs(
+                            config,
+                            str(self.preview_server.state.config_path),
+                            target_session=target,
+                            research_cutoff=cutoff,
+                            industry_snapshot_id=industry_snapshot_id,
+                            concept_snapshot_id=concept_snapshot_id,
+                            package_sha256=package_sha,
+                            profile_revision=profile_revision,
+                            event_window_start=event_window_start,
+                            pg_history_session_count=history_session_count,
+                            include_d0_launch_new=read_d0,
+                            d0_before_session=d0_before_session,
+                        ),
+                    )
+                )
         except PreviewHttpError:
             raise
         except SourceD0RawError as error:
@@ -2806,6 +2907,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         raise mapped from error
                 recovery = None
                 if diagnostic_scope != "LAUNCH":
+                    rps_error = None
                     try:
                         rps, _ = self.preview_server.state.source_pool_rps(
                             (namespace, target, cutoff, package),
@@ -2817,8 +2919,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 expected_namespace_id=namespace,
                             ),
                         )
-                    except ValueError:
+                    except ValueError as error:
                         rps = None
+                        rps_error = f"{type(error).__name__}:{error}"
                     recovery = query_source_d0_raw_launch(
                         self.preview_server.state.config,
                         scenario="RECOVERY_TURN",
@@ -2832,6 +2935,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         limit=1,
                         _single_symbol_only=True,
                         _rps_result=rps,
+                        _rps_result_error=rps_error,
                     )
                 membership = {
                     "status": "NOT_EVALUATED",
