@@ -54,6 +54,7 @@ function format(value) {
     );
   return String(value);
 }
+let lastApiError = null;
 let activeRequests = 0;
 const requestWaiters = [];
 function abortError() {
@@ -109,13 +110,26 @@ async function api(path, body, signal) {
         `${result.code || response.status}：${result.message || "请求失败"}`,
       );
     return result;
+  } catch (error) {
+    if (error.name !== "AbortError")
+      lastApiError = {
+        time: new Date().toISOString(),
+        route: path.split("?")[0],
+        reason: error.message,
+      };
+    throw error;
   } finally {
     releaseRequest();
   }
 }
 let activePage = "overview";
 let extraRequest = 0;
+let cohortRequest = 0;
+let focusStockRequest = 0;
+let focusKeysLoading = false;
 let cohortOffset = 0;
+let currentStockSymbol = null;
+let currentStockSource = null;
 function gotoPage(page) {
   activePage = page;
   const extra = ["focus", "market", "diagnostics"].includes(page);
@@ -123,6 +137,8 @@ function gotoPage(page) {
   $("refreshResearch").hidden = extra;
   $("contextNotice").hidden = extra;
   ++extraRequest;
+  ++cohortRequest;
+  ++focusStockRequest;
   document
     .querySelectorAll(".page")
     .forEach((n) => n.classList.toggle("active", n.id === page));
@@ -857,6 +873,13 @@ function launchDisplayExplanation(change, mode, symbol) {
 }
 async function openStock(symbol, row = {}) {
   state.stockController?.abort();
+  currentStockSymbol = symbol;
+  currentStockSource = state.selected
+    ? {
+        target_session: state.selected.target_session,
+        package_sha256: state.selected.package_sha256,
+      }
+    : null;
   if (!state.selected) {
     $("contextDialog").showModal();
     return;
@@ -1254,14 +1277,37 @@ async function loadExtra(page) {
         ? "marketResult"
         : "diagnosticResult";
   if (!c) {
+    if (page === "focus") {
+      ++cohortRequest;
+      ++focusStockRequest;
+      focusKeysLoading = false;
+      $("cohortKey").replaceChildren();
+      $("cohortKey").disabled = true;
+      $("cohortSummary").replaceChildren();
+      $("cohortRows").replaceChildren();
+      $("focusStockResult").replaceChildren();
+      $("cohortPrev").disabled = $("cohortNext").disabled = true;
+      message("cohortPage", "—");
+    }
     message(id, "请选择研究范围。");
     return;
   }
   message(id, "正在读取所选范围…");
   if (page === "focus") {
+    ++cohortRequest;
+    ++focusStockRequest;
+    focusKeysLoading = true;
+    $("cohortKey").disabled = true;
     $("cohortKey").replaceChildren();
     $("cohortSummary").replaceChildren();
     $("cohortRows").replaceChildren();
+    $("cohortPrev").disabled = $("cohortNext").disabled = true;
+    message("cohortPage", "—");
+    $("focusStockResult").replaceChildren();
+    message(
+      "focusStockStatus",
+      "输入来源代码后可独立读取 Raw 观察；正式 Focus 未计算。",
+    );
   }
   const common = {
     target_session: c.target_session,
@@ -1306,6 +1352,7 @@ async function loadExtra(page) {
           ),
         );
       select.disabled = !data.keys.length;
+      focusKeysLoading = false;
       message(
         id,
         data.keys.length
@@ -1335,19 +1382,45 @@ async function loadExtra(page) {
       if (token !== extraRequest || activePage !== page) return;
       const snapshots = context.snapshots || [];
       detailRows($(id), [
-        ["来源目录", version || "未保存"],
-        ["画像修订", profiles.length ? profiles : "目录中未保存"],
-        ["成员快照", snapshots.length ? snapshots : "未保存"],
+        ["目标日 / 来源包", `${c.target_session} / ${c.package_sha256}`],
+        [
+          "Raw 覆盖",
+          version
+            ? `${version.row_count} / ${version.expected_row_count} · ${JSON.stringify(version.bar_status_counts)} · ${version.version_status}`
+            : "目录中未保存",
+        ],
+        [
+          "来源捕获 / 质量",
+          version
+            ? `${version.capture_read_started_at} → ${version.capture_validated_at} · ${version.source_time_quality} · ${version.source_clock_role}`
+            : "UNKNOWN",
+        ],
+        ["画像修订数", profiles.length || "目录中未保存"],
+        ...profiles.map((p) => [
+          `画像 ${p.profile_revision}`,
+          `${p.source_symbol_count} / ${p.expected_source_symbol_count} · ${p.complete ? "已保存完整" : "不完整"} · ${p.history_session_count} 会话`,
+        ]),
+        ...snapshots.map((s) => [
+          s.source_kind,
+          `${s.member_rows} 条 · 观测 ${s.observed_at} · ${s.clock_quality} · ${s.source_quality} · SHA ${s.source_file_sha256}`,
+        ]),
         ["官方日历修订", context.official_calendar_revision],
         ["研究截止", context.research_cutoff],
         ["PG 命名空间", context.namespace_id],
-        ["来源读取错误", "当前目录读取成功；历史错误未保存"],
+        [
+          "本页会话最近读取错误",
+          lastApiError
+            ? `${lastApiError.time} · ${lastApiError.route} · ${lastApiError.reason}`
+            : "本页会话未观察到；服务历史错误不可用",
+        ],
         ["服务身份", "开发只读服务；未提供可信进程身份字段"],
       ]);
     }
   } catch (error) {
-    if (token === extraRequest && activePage === page)
+    if (token === extraRequest && activePage === page) {
+      if (page === "focus") focusKeysLoading = false;
       message(id, `读取失败：${error.message}`);
+    }
   }
 }
 async function readCohort() {
@@ -1358,10 +1431,12 @@ async function readCohort() {
         : state.selected,
     raw = $("cohortKey").value;
   if (!c || !raw) return;
-  const token = ++extraRequest,
+  const token = ++cohortRequest,
     key = JSON.parse(raw),
     symbol = $("cohortSymbol").value.trim().toUpperCase();
   message("focusStatus", "正在读取冻结研究…");
+  $("cohortSummary").replaceChildren();
+  $("cohortRows").replaceChildren();
   try {
     const query = {
       target_session: c.target_session,
@@ -1376,7 +1451,16 @@ async function readCohort() {
     };
     if (symbol) query.symbol = symbol;
     const d = await api(`/api/product/cohort?${new URLSearchParams(query)}`);
-    if (token !== extraRequest || activePage !== "focus") return;
+    if (token !== cohortRequest || activePage !== "focus") return;
+    if (d.storage_status === "NO_STORED_FACT") {
+      message(
+        "focusStatus",
+        `NO_STORED_FACT：${d.reason}；不能解释为全部不符合。`,
+      );
+      message("cohortPage", "无已保存分母");
+      $("cohortPrev").disabled = $("cohortNext").disabled = true;
+      return;
+    }
     message(
       "focusStatus",
       `${d.storage_status} · ${d.scope} · ${d.target_session} → ${d.endpoint_session || "未知"} · ${d.due ? "已到期" : "未到期"}`,
@@ -1424,7 +1508,7 @@ async function readCohort() {
     $("cohortPrev").disabled = cohortOffset === 0;
     $("cohortNext").disabled = cohortOffset + 30 >= d.source_pool_count;
   } catch (error) {
-    if (token === extraRequest && activePage === "focus")
+    if (token === cohortRequest && activePage === "focus")
       message("focusStatus", `读取失败：${error.message}`);
   }
 }
@@ -1444,3 +1528,165 @@ $("cohortNext").addEventListener("click", () => {
 $("extraVersion").addEventListener("change", () => {
   void loadExtra(activePage);
 });
+
+function focusSourceSelection() {
+  const [target_session, package_sha256] = $("extraVersion").value.split("|");
+  return target_session && package_sha256
+    ? { target_session, package_sha256 }
+    : state.selected;
+}
+$("stockToFocus").addEventListener("click", () => {
+  if (!currentStockSource || !currentStockSymbol) return;
+  $("extraVersion").value =
+    `${currentStockSource.target_session}|${currentStockSource.package_sha256}`;
+  $("cohortSymbol").value = currentStockSymbol;
+  $("stockDialog").close();
+  if ($("boardDialog").open) $("boardDialog").close();
+  gotoPage("focus");
+});
+$("focusBackStock").addEventListener("click", () => {
+  const c = focusSourceSelection(),
+    symbol = $("cohortSymbol").value.trim().toUpperCase();
+  if (!c || !/^(SH|SZ)\.\d{6}$/.test(symbol)) {
+    message("focusStockStatus", "请选择来源范围并输入有效来源代码。");
+    return;
+  }
+  gotoPage("stocks");
+  $("stockSymbol").value = symbol;
+  if (
+    state.selected &&
+    state.selected.target_session === c.target_session &&
+    state.selected.package_sha256 === c.package_sha256
+  ) {
+    void openStock(symbol);
+  } else {
+    void openScopedSourceStock(symbol, c);
+  }
+});
+async function openScopedSourceStock(symbol, source) {
+  state.stockController?.abort();
+  const controller = new AbortController(),
+    token = ++state.stockRequest;
+  state.stockController = controller;
+  currentStockSymbol = symbol;
+  currentStockSource = { ...source };
+  message("stockTitle", symbol);
+  message(
+    "stockMeta",
+    `${source.target_session} · RAW_UNADJUSTED · SOURCE_SYMBOL_ONLY · NON_PIT · 本次查看不改变研究日期`,
+  );
+  message("stockStatus", "正在读取所选来源范围的单股价格…");
+  $("stockContent").replaceChildren();
+  if (!$("stockDialog").open) $("stockDialog").showModal();
+  try {
+    const context = await api(
+      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: source.target_session })}`,
+      undefined,
+      controller.signal,
+    );
+    const sessionCount = context.window_options?.[0]?.pg_history_session_count;
+    if (!sessionCount) throw new Error("官方会话窗口不可用");
+    const data = await api(
+      "/api/preview/stock",
+      {
+        symbol,
+        target_session: source.target_session,
+        package_sha256: source.package_sha256,
+        session_count: sessionCount,
+      },
+      controller.signal,
+    );
+    if (token !== state.stockRequest) return;
+    message(
+      "stockStatus",
+      `已读取 ${data.window?.real_bar_count ?? "—"} / ${data.window?.requested_sessions ?? sessionCount} 个 Bar；持久画像、正式 Focus 和 Priority 未在此范围加载。`,
+    );
+    detailRows($("stockContent"), [
+      ["来源包", source.package_sha256],
+      ...[
+        ["open", "开盘"],
+        ["high", "最高"],
+        ["low", "最低"],
+        ["close", "收盘"],
+      ].map(([key, label]) => [
+        label,
+        `${format(data.raw?.[key]?.value)} · ${data.raw?.[key]?.quality || "UNKNOWN"} · ${data.raw?.[key]?.reason || "—"}`,
+      ]),
+    ]);
+  } catch (error) {
+    if (token === state.stockRequest)
+      message("stockStatus", `来源观察不可用：${error.message}`);
+  }
+}
+$("focusReadStock").addEventListener("click", async () => {
+  const c = focusSourceSelection(),
+    symbol = $("cohortSymbol").value.trim().toUpperCase();
+  const token = ++focusStockRequest;
+  $("focusStockResult").replaceChildren();
+  if (!c || !/^(SH|SZ)\.\d{6}$/.test(symbol)) {
+    message("focusStockStatus", "请选择来源范围并输入有效来源代码。");
+    return;
+  }
+  message("focusStockStatus", "正在读取来源价格；不等待全池 D1。");
+  try {
+    const context = await api(
+      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session })}`,
+    );
+    if (token !== focusStockRequest || activePage !== "focus") return;
+    const sessionCount = context.window_options?.[0]?.pg_history_session_count;
+    if (!sessionCount) throw new Error("官方会话窗口不可用");
+    const data = await api("/api/preview/stock", {
+      symbol,
+      target_session: c.target_session,
+      package_sha256: c.package_sha256,
+      session_count: sessionCount,
+    });
+    if (token !== focusStockRequest || activePage !== "focus") return;
+    message(
+      "focusStockStatus",
+      `${symbol} · ${c.target_session} · RAW_UNADJUSTED · SOURCE_SYMBOL_ONLY · NON_PIT；来源观察已计算，冻结规则及正式 Focus 的状态分别以规则结果为准。`,
+    );
+    detailRows($("focusStockResult"), [
+      ["来源包", c.package_sha256],
+      [
+        "实际窗口",
+        `${data.window?.real_bar_count ?? "—"} / ${data.window?.requested_sessions ?? sessionCount} 个 Bar`,
+      ],
+      ...[
+        ["open", "开盘"],
+        ["high", "最高"],
+        ["low", "最低"],
+        ["close", "收盘"],
+      ].map(([k, label]) => [
+        label,
+        `${format(data.raw?.[k]?.value)} · ${data.raw?.[k]?.quality || "UNKNOWN"} · ${data.raw?.[k]?.reason || "—"}`,
+      ]),
+    ]);
+  } catch (error) {
+    if (token === focusStockRequest && activePage === "focus")
+      message("focusStockStatus", `来源观察不可用：${error.message}`);
+  }
+});
+for (const id of ["cohortKey", "cohortHorizon", "cohortSymbol"]) {
+  $(id).addEventListener(id === "cohortSymbol" ? "input" : "change", () => {
+    ++cohortRequest;
+    ++focusStockRequest;
+    $("cohortSummary").replaceChildren();
+    $("cohortRows").replaceChildren();
+    $("cohortPrev").disabled = $("cohortNext").disabled = true;
+    message("cohortPage", "—");
+    $("focusStockResult").replaceChildren();
+    message(
+      "focusStockStatus",
+      "输入来源代码后可独立读取 Raw 观察；正式 Focus 未计算。",
+    );
+    message(
+      "focusStatus",
+      focusKeysLoading
+        ? "正在读取冻结规则目录…"
+        : $("cohortKey").options.length
+          ? "选择已改变，请重新读取冻结研究。"
+          : "NO_STORED_FACT：此来源范围没有可读取的冻结规则；可继续读取来源价格。",
+    );
+  });
+}

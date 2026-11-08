@@ -23,7 +23,10 @@ from stock_a.application.source_market_context import (
     source_market_context_payload,
 )
 from stock_a.application.source_persisted_research import read_persisted_cohort
-from stock_a.storage.postgres.research_facts import read_research_keys
+from stock_a.storage.postgres.research_facts import (
+    ResearchFactNotFound,
+    read_research_keys,
+)
 from stock_a.contracts import PriceProfileContractError, load_price_profile_contract
 from stock_a.application.runtime_config import (
     DiagnosticError,
@@ -1966,33 +1969,47 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400, "HORIZON_INVALID", "后继会话数须为1、3、5、10或20"
                     )
-                result = read_persisted_cohort(
-                    self.preview_server.state.config,
-                    target=target,
-                    research_cutoff=cutoff,
-                    package_sha256=_sha(values["package_sha256"]),
-                    profile_revision=_sha(values["profile_revision"]),
-                    history_session_count=_positive_int(
-                        _nonnegative_int(values["history"], "history", 500),
-                        "history",
-                        500,
-                    ),
-                    d1_history_session_count=_positive_int(
-                        _nonnegative_int(values["d1_history"], "d1_history", 500),
-                        "d1_history",
-                        500,
-                    ),
-                    event_window_start=_iso_date(values["window"]),
-                    rule=values["rule"],
-                    horizon=_positive_int(
-                        _nonnegative_int(values["horizon"], "horizon", 120),
-                        "horizon",
-                        120,
-                    ),
-                    offset=_nonnegative_int(values.get("offset", "0"), "offset"),
-                    limit=30,
-                    symbol=symbol,
-                )
+                try:
+                    result = read_persisted_cohort(
+                        self.preview_server.state.config,
+                        target=target,
+                        research_cutoff=cutoff,
+                        package_sha256=_sha(values["package_sha256"]),
+                        profile_revision=_sha(values["profile_revision"]),
+                        history_session_count=_positive_int(
+                            _nonnegative_int(values["history"], "history", 500),
+                            "history",
+                            500,
+                        ),
+                        d1_history_session_count=_positive_int(
+                            _nonnegative_int(values["d1_history"], "d1_history", 500),
+                            "d1_history",
+                            500,
+                        ),
+                        event_window_start=_iso_date(values["window"]),
+                        rule=values["rule"],
+                        horizon=_positive_int(
+                            _nonnegative_int(values["horizon"], "horizon", 120),
+                            "horizon",
+                            120,
+                        ),
+                        offset=_nonnegative_int(values.get("offset", "0"), "offset"),
+                        limit=30,
+                        symbol=symbol,
+                    )
+                except ResearchFactNotFound:
+                    self._send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "storage_status": "NO_STORED_FACT",
+                            "source_pool_count": None,
+                            "groups": [],
+                            "results": [],
+                            "reason": "精确研究键没有已保存的规则事实",
+                        },
+                    )
+                    return
                 result["storage_status"] = (
                     "SAVED" if result["source_pool_count"] else "NO_STORED_FACT"
                 )

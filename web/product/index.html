@@ -306,6 +306,16 @@
               <button id="readCohort" class="button primary">
                 读取冻结研究
               </button>
+              <button id="focusReadStock" class="button subtle">
+                读取该代码来源价格
+              </button>
+              <button id="focusBackStock" class="button subtle">
+                在个股研究打开该代码
+              </button>
+              <div id="focusStockStatus" role="status">
+                输入来源代码后可独立读取 Raw 观察；正式 Focus 未计算。
+              </div>
+              <div id="focusStockResult"></div>
               <div id="cohortSummary"></div>
               <div id="cohortRows"></div>
               <div class="pagination">
@@ -450,6 +460,9 @@
         <div id="stockStatus" class="inline-status" role="status">
           正在读取…
         </div>
+        <button id="stockToFocus" class="button subtle">
+          查看该代码的关注观察
+        </button>
         <div id="stockContent"></div>
       </div>
     </dialog>

@@ -15,6 +15,10 @@ PATH_VERSION = "SOURCE_RAW_FORWARD_PATH_R1"
 SCOPE = "NON_PIT_EXPLORATORY"
 
 
+class ResearchFactNotFound(ValueError):
+    """精确研究键没有已保存的规则事实。"""
+
+
 class ResearchFactConflict(ValueError):
     """同一业务键对应不同冻结事实，事务必须完整回滚。"""
 
@@ -367,7 +371,7 @@ def read_research_rows(
         )
         rows = cursor.fetchall()
     if not rows:
-        raise ValueError("未找到精确输入版本的持久规则事实")
+        raise ResearchFactNotFound("未找到精确输入版本的持久规则事实")
     if len({row[0] for row in rows}) != len(rows):
         raise ValueError("精确规则版本存在多个来源捕获，必须先消除歧义")
     return rows
