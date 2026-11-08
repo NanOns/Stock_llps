@@ -28,6 +28,18 @@
             <span class="nav-icon">⌁</span><span>个股研究</span
             ><span class="nav-arrow">›</span>
           </button>
+          <button class="nav-item" data-page="focus">
+            <span class="nav-icon">◎</span><span>关注跟踪</span
+            ><span class="nav-arrow">›</span>
+          </button>
+          <button class="nav-item" data-page="market">
+            <span class="nav-icon">◷</span><span>市场研究</span
+            ><span class="nav-arrow">›</span>
+          </button>
+          <button class="nav-item" data-page="diagnostics">
+            <span class="nav-icon">◇</span><span>数据与诊断</span
+            ><span class="nav-arrow">›</span>
+          </button>
         </nav>
         <div class="sidebar-note">
           <span class="status-dot"></span>
@@ -253,6 +265,81 @@
                   下一页
                 </button>
               </div>
+            </section>
+          </section>
+          <div id="extraContext" hidden>
+            <label
+              >来源日期与版本
+              <select id="extraVersion"></select
+            ></label>
+          </div>
+          <section id="focus" class="page" aria-label="关注跟踪">
+            <section class="card">
+              <div class="card-head">
+                <div>
+                  <h2>来源级规则组与后继事实</h2>
+                  <p>
+                    NON_PIT 探索；正式 Focus episode、自动进退与 Priority
+                    未计算。
+                  </p>
+                </div>
+              </div>
+              <p id="focusStatus">请选择研究范围。</p>
+              <label
+                >冻结规则与窗口
+                <select id="cohortKey"></select
+              ></label>
+              <label
+                >后继会话数
+                <select id="cohortHorizon">
+                  <option value="1">1</option>
+                  <option value="3">3</option>
+                  <option value="5" selected>5</option>
+                  <option value="10">10</option>
+                  <option value="20">20</option>
+                </select></label
+              >
+              <label
+                >来源代码（可选）
+                <input id="cohortSymbol" placeholder="输入来源代码"
+              /></label>
+              <button id="readCohort" class="button primary">
+                读取冻结研究
+              </button>
+              <div id="cohortSummary"></div>
+              <div id="cohortRows"></div>
+              <div class="pagination">
+                <button id="cohortPrev" class="button subtle">上一页</button
+                ><span id="cohortPage">—</span
+                ><button id="cohortNext" class="button subtle">下一页</button>
+              </div>
+            </section>
+          </section>
+          <section id="market" class="page" aria-label="市场研究">
+            <section class="card">
+              <h2>固定目标日来源池宽度</h2>
+              <p>
+                NON_PIT_RETROSPECTIVE · SOURCE_SYMBOL_ONLY ·
+                RAW_UNADJUSTED；不代表官方上市总体。
+              </p>
+              <div id="marketResult">请选择研究范围。</div>
+              <p>
+                正式市场四轴、指数压力：NOT_COMPUTED，缺少真实消费者及必要输入。
+              </p>
+            </section>
+          </section>
+          <section id="diagnostics" class="page" aria-label="数据与诊断">
+            <section class="card">
+              <h2>当前读取范围与来源质量</h2>
+              <p>只读 PG 目录；成员快照回看为 NON_PIT。</p>
+              <div id="diagnosticResult">请选择研究范围。</div>
+              <button class="button subtle" data-goto="overview">
+                返回今日总览</button
+              ><button class="button subtle" data-goto="sectors">
+                板块研究</button
+              ><button class="button subtle" data-goto="stocks">
+                个股研究
+              </button>
             </section>
           </section>
         </div>

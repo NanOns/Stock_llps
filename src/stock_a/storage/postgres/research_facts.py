@@ -400,3 +400,27 @@ def read_board_members(config, *, industry_snapshot_id, concept_snapshot_id):
         )
         members = cursor.fetchall()
     return snapshots, members
+
+
+def read_research_keys(config, *, target, package_sha256):
+    """列出所选来源日期已保存的规则与冻结窗口，超过上限由调用方拒绝。"""
+    with _transaction(config, write=False) as (_, cursor, namespace):
+        cursor.execute(
+            """SELECT rule_id, history_session_count, d1_history_session_count,
+                      event_window_start, profile_revision, count(*)
+               FROM stock.source_rule_evaluations
+               WHERE namespace_id=%s AND target_session=%s AND package_sha256=%s
+               GROUP BY 1,2,3,4,5 ORDER BY 1,2,3,4,5 LIMIT 101""",
+            (namespace, target, package_sha256),
+        )
+        return [
+            {
+                "rule": row[0],
+                "history": row[1],
+                "d1_history": row[2],
+                "window": row[3].isoformat(),
+                "profile_revision": row[4],
+                "count": row[5],
+            }
+            for row in cursor.fetchall()
+        ]

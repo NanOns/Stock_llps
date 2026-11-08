@@ -842,3 +842,14 @@ td.empty {
     flex-wrap: wrap;
   }
 }
+
+[hidden] {
+  display: none !important;
+}
+
+#focus .card,
+#diagnostics .card,
+#market .card {
+  overflow-wrap: anywhere;
+  min-width: 0;
+}

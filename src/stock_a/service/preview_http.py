@@ -18,6 +18,12 @@ from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
+from stock_a.application.source_market_context import (
+    read_source_market_context,
+    source_market_context_payload,
+)
+from stock_a.application.source_persisted_research import read_persisted_cohort
+from stock_a.storage.postgres.research_facts import read_research_keys
 from stock_a.contracts import PriceProfileContractError, load_price_profile_contract
 from stock_a.application.runtime_config import (
     DiagnosticError,
@@ -1880,6 +1886,117 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(400, "PREVIEW_QUERY_INVALID", message)
                 body, content_type = read_static_asset(asset_name)
                 self._send(200, body, content_type)
+                return
+            if parsed.path == "/api/product/market":
+                values = _query(self.path, {"target_session", "package_sha256"})
+                if set(values) != {"target_session", "package_sha256"}:
+                    raise PreviewHttpError(
+                        400, "QUERY_REQUIRED", "须提供目标日与来源包"
+                    )
+                target = _iso_date(values["target_session"])
+                cutoff = self.preview_server.state.research_cutoff
+                _require_research_cutoff(target, cutoff)
+                market = read_source_market_context(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    research_cutoff=cutoff,
+                    package_sha256=_sha(values["package_sha256"]),
+                )
+                self._send_json(
+                    200, {"ok": True, **source_market_context_payload(market)}
+                )
+                return
+            if parsed.path == "/api/product/cohort-keys":
+                values = _query(self.path, {"target_session", "package_sha256"})
+                if set(values) != {"target_session", "package_sha256"}:
+                    raise PreviewHttpError(
+                        400, "QUERY_REQUIRED", "须提供目标日和来源包"
+                    )
+                target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
+                package = _sha(values["package_sha256"])
+                keys = read_research_keys(
+                    self.preview_server.state.config,
+                    target=target,
+                    package_sha256=package,
+                )
+                if len(keys) > 100:
+                    raise PreviewHttpError(
+                        409,
+                        "COHORT_KEYS_TOO_MANY",
+                        "冻结研究键超过读取上限，请缩小范围",
+                    )
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "keys": keys,
+                        "status": "SAVED" if keys else "NO_STORED_FACT",
+                    },
+                )
+                return
+            if parsed.path == "/api/product/cohort":
+                allowed = {
+                    "target_session",
+                    "package_sha256",
+                    "profile_revision",
+                    "rule",
+                    "history",
+                    "d1_history",
+                    "window",
+                    "horizon",
+                    "offset",
+                    "symbol",
+                }
+                values = _query(self.path, allowed)
+                required = allowed - {"offset", "symbol"}
+                if not required.issubset(values):
+                    raise PreviewHttpError(
+                        400, "QUERY_REQUIRED", "须提供完整冻结研究键"
+                    )
+                target = _iso_date(values["target_session"])
+                cutoff = self.preview_server.state.research_cutoff
+                _require_research_cutoff(target, cutoff)
+                symbol = values.get("symbol") or None
+                if symbol is not None and not _SYMBOL.fullmatch(symbol):
+                    raise PreviewHttpError(400, "SYMBOL_INVALID", "来源代码格式无效")
+                if values["horizon"] not in {"1", "3", "5", "10", "20"}:
+                    raise PreviewHttpError(
+                        400, "HORIZON_INVALID", "后继会话数须为1、3、5、10或20"
+                    )
+                result = read_persisted_cohort(
+                    self.preview_server.state.config,
+                    target=target,
+                    research_cutoff=cutoff,
+                    package_sha256=_sha(values["package_sha256"]),
+                    profile_revision=_sha(values["profile_revision"]),
+                    history_session_count=_positive_int(
+                        _nonnegative_int(values["history"], "history", 500),
+                        "history",
+                        500,
+                    ),
+                    d1_history_session_count=_positive_int(
+                        _nonnegative_int(values["d1_history"], "d1_history", 500),
+                        "d1_history",
+                        500,
+                    ),
+                    event_window_start=_iso_date(values["window"]),
+                    rule=values["rule"],
+                    horizon=_positive_int(
+                        _nonnegative_int(values["horizon"], "horizon", 120),
+                        "horizon",
+                        120,
+                    ),
+                    offset=_nonnegative_int(values.get("offset", "0"), "offset"),
+                    limit=30,
+                    symbol=symbol,
+                )
+                result["storage_status"] = (
+                    "SAVED" if result["source_pool_count"] else "NO_STORED_FACT"
+                )
+                self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/preview/sector-change-context":
                 values = _query(self.path, {"target_session"})

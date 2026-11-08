@@ -22,6 +22,9 @@ const names = {
   overview: ["今日总览", "从真实变化出发，了解市场中正在发生什么。", "01"],
   sectors: ["板块研究", "从行业与 GN 概念进入成员与个股。", "02"],
   stocks: ["个股研究", "查看来源画像、价格结构和规则解释。", "03"],
+  focus: ["关注跟踪", "读取来源级冻结规则与后继观察。", "04"],
+  market: ["市场研究", "查看来源池宽度和覆盖。", "05"],
+  diagnostics: ["数据与诊断", "查看所选来源与质量。", "06"],
 };
 function node(tag, text, cls) {
   const n = document.createElement(tag);
@@ -110,7 +113,16 @@ async function api(path, body, signal) {
     releaseRequest();
   }
 }
+let activePage = "overview";
+let extraRequest = 0;
+let cohortOffset = 0;
 function gotoPage(page) {
+  activePage = page;
+  const extra = ["focus", "market", "diagnostics"].includes(page);
+  $("extraContext").hidden = !extra;
+  $("refreshResearch").hidden = extra;
+  $("contextNotice").hidden = extra;
+  ++extraRequest;
   document
     .querySelectorAll(".page")
     .forEach((n) => n.classList.toggle("active", n.id === page));
@@ -122,6 +134,7 @@ function gotoPage(page) {
   message("pageTitle", data[0]);
   message("pageSubtitle", data[1]);
   message("headingIndex", data[2]);
+  if (["focus", "market", "diagnostics"].includes(page)) void loadExtra(page);
 }
 document
   .querySelectorAll("[data-page]")
@@ -158,6 +171,13 @@ async function init() {
     ]);
     state.versions = catalog.versions || [];
     state.profiles = profiles.snapshots || [];
+    resetSelect("extraVersion", "请选择来源日期与版本");
+    addChoices(
+      "extraVersion",
+      state.versions,
+      (v) => `${v.session_date} · ${v.package_sha256.slice(0, 12)}…`,
+      (v) => `${v.session_date}|${v.package_sha256}`,
+    );
     resetSelect("versionSelect", "请选择真实交易日与来源包");
     addChoices(
       "versionSelect",
@@ -279,7 +299,10 @@ $("applyContext").addEventListener("click", () => {
     `${target_session} · 来源 ${package_sha256.slice(0, 12)}… · 画像 ${profile_revision.slice(0, 12)}… · 当前成员快照回看 NON_PIT`,
   );
   $("contextDialog").close();
+  $("extraVersion").value = `${target_session}|${package_sha256}`;
   loadResearch();
+  if (["focus", "market", "diagnostics"].includes(activePage))
+    void loadExtra(activePage);
 });
 function requestBody() {
   const c = state.selected;
@@ -1208,3 +1231,216 @@ $("stockDialog").addEventListener("close", () => {
   state.stockController = null;
 });
 init();
+
+function detailRows(container, entries) {
+  container.replaceChildren();
+  for (const [label, value] of entries) {
+    const p = node("p");
+    p.append(node("strong", `${label}：`), node("span", format(value)));
+    container.append(p);
+  }
+}
+async function loadExtra(page) {
+  const token = ++extraRequest;
+  const [target_session, package_sha256] = $("extraVersion").value.split("|");
+  const c =
+    target_session && package_sha256
+      ? { target_session, package_sha256 }
+      : state.selected;
+  const id =
+    page === "focus"
+      ? "focusStatus"
+      : page === "market"
+        ? "marketResult"
+        : "diagnosticResult";
+  if (!c) {
+    message(id, "请选择研究范围。");
+    return;
+  }
+  message(id, "正在读取所选范围…");
+  if (page === "focus") {
+    $("cohortKey").replaceChildren();
+    $("cohortSummary").replaceChildren();
+    $("cohortRows").replaceChildren();
+  }
+  const common = {
+    target_session: c.target_session,
+    package_sha256: c.package_sha256,
+  };
+  try {
+    if (page === "market") {
+      const data = await api(
+        `/api/product/market?${new URLSearchParams(common)}`,
+      );
+      if (token !== extraRequest || activePage !== page) return;
+      detailRows($(id), [
+        ["状态", data.status],
+        ["目标日 / 截止", `${data.target_session} / ${data.research_cutoff}`],
+        ["公式", data.metric.formula],
+        ["精确值", data.metric.exact?.fraction],
+        ["来源分母", data.denominator.N_source],
+        ["可评价分母", data.denominator.N_eligible],
+        ["UNKNOWN", data.denominator.UNKNOWN],
+        ["覆盖", data.denominator.coverage?.fraction],
+        ["分类", data.denominator.counts],
+        ["未知原因", data.denominator.unknown_reason_counts],
+        ["来源包", data.source_cohort.package_sha256],
+        [
+          "来源质量 / 可得时间",
+          `${data.source_cohort.source_time_quality} / ${data.source_cohort.source_available_at}`,
+        ],
+        ["窗口", data.official_calendar.lookback_sessions],
+      ]);
+    } else if (page === "focus") {
+      const data = await api(
+        `/api/product/cohort-keys?${new URLSearchParams(common)}`,
+      );
+      if (token !== extraRequest || activePage !== page) return;
+      const select = $("cohortKey");
+      select.replaceChildren();
+      for (const key of data.keys)
+        select.add(
+          new Option(
+            `${key.rule} · ${key.window} · ${key.history}/${key.d1_history} · ${key.profile_revision.slice(0, 12)} · ${key.count}`,
+            JSON.stringify(key),
+          ),
+        );
+      select.disabled = !data.keys.length;
+      message(
+        id,
+        data.keys.length
+          ? `已保存 ${data.keys.length} 个规则/窗口键。选择后读取。`
+          : "NO_STORED_FACT：此精确范围未保存冻结规则；不等于全部不符合。可到个股研究查看来源级观察。",
+      );
+      $("cohortSummary").replaceChildren();
+      $("cohortRows").replaceChildren();
+      cohortOffset = 0;
+    } else {
+      const version = state.versions.find(
+        (v) =>
+          v.session_date === c.target_session &&
+          v.package_sha256 === c.package_sha256,
+      );
+      const profiles = state.profiles.filter(
+        (p) =>
+          p.target_session === c.target_session &&
+          p.package_sha256 === c.package_sha256 &&
+          (c.profile_revision
+            ? p.profile_revision === c.profile_revision
+            : true),
+      );
+      const context = await api(
+        `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session })}`,
+      );
+      if (token !== extraRequest || activePage !== page) return;
+      const snapshots = context.snapshots || [];
+      detailRows($(id), [
+        ["来源目录", version || "未保存"],
+        ["画像修订", profiles.length ? profiles : "目录中未保存"],
+        ["成员快照", snapshots.length ? snapshots : "未保存"],
+        ["官方日历修订", context.official_calendar_revision],
+        ["研究截止", context.research_cutoff],
+        ["PG 命名空间", context.namespace_id],
+        ["来源读取错误", "当前目录读取成功；历史错误未保存"],
+        ["服务身份", "开发只读服务；未提供可信进程身份字段"],
+      ]);
+    }
+  } catch (error) {
+    if (token === extraRequest && activePage === page)
+      message(id, `读取失败：${error.message}`);
+  }
+}
+async function readCohort() {
+  const [target_session, package_sha256] = $("extraVersion").value.split("|");
+  const c =
+      target_session && package_sha256
+        ? { target_session, package_sha256 }
+        : state.selected,
+    raw = $("cohortKey").value;
+  if (!c || !raw) return;
+  const token = ++extraRequest,
+    key = JSON.parse(raw),
+    symbol = $("cohortSymbol").value.trim().toUpperCase();
+  message("focusStatus", "正在读取冻结研究…");
+  try {
+    const query = {
+      target_session: c.target_session,
+      package_sha256: c.package_sha256,
+      profile_revision: key.profile_revision,
+      rule: key.rule,
+      history: key.history,
+      d1_history: key.d1_history,
+      window: key.window,
+      horizon: $("cohortHorizon").value,
+      offset: cohortOffset,
+    };
+    if (symbol) query.symbol = symbol;
+    const d = await api(`/api/product/cohort?${new URLSearchParams(query)}`);
+    if (token !== extraRequest || activePage !== "focus") return;
+    message(
+      "focusStatus",
+      `${d.storage_status} · ${d.scope} · ${d.target_session} → ${d.endpoint_session || "未知"} · ${d.due ? "已到期" : "未到期"}`,
+    );
+    detailRows($("cohortSummary"), [
+      ["完整来源分母", d.source_pool_count],
+      ...d.groups.map((g) => [
+        `${g.group} · ${g.weighting === "stock" ? "按代码" : "按事件"}`,
+        `总数 ${g.count}；可评价 ${g.evaluable}；未知 ${g.unknown}；到期状态 ${JSON.stringify(g.maturity)}；原因 ${JSON.stringify(g.unevaluable_reasons)}`,
+      ]),
+      [
+        "所选代码后继事实",
+        d.frozen_candidate_followup
+          ? `${d.frozen_candidate_followup.source_symbol} · ${d.frozen_candidate_followup.maturity} · 路径 ${d.frozen_candidate_followup.path_quality} · 收盘变化 ${format(d.frozen_candidate_followup.endpoint?.raw_close_relative_change?.value)} · 首次触及 ${d.frozen_candidate_followup.first_touch_status}`
+          : "未选择来源代码",
+      ],
+      ...(d.d1_anchor_events || []).map((a) => [
+        `锚 ${a.anchor_session}`,
+        `${a.generation_status} · ${a.previous_state} → ${a.target_state} · ${a.change_classification} · 原因 ${a.reason || "无"} · 下界 ${format(a.lower)} · 首次触及 ${a.lower_touch_followup?.first_proved_touch || a.lower_touch_followup?.first_touch_status}`,
+      ]),
+    ]);
+    const rows = $("cohortRows");
+    rows.replaceChildren();
+    for (const row of d.results) {
+      const p = node("p");
+      const button = node("button", row.source_symbol, "text-button");
+      button.addEventListener("click", () => {
+        $("cohortSymbol").value = row.source_symbol;
+        cohortOffset = 0;
+        void readCohort();
+      });
+      p.append(
+        button,
+        node(
+          "span",
+          ` · ${{ TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[row.state] || row.state} · ${row.maturity} · ${format(row.reasons)} · ${format(row.endpoint_reason)}`,
+        ),
+      );
+      rows.append(p);
+    }
+    message(
+      "cohortPage",
+      `从 ${cohortOffset + 1} 起 · 总分母 ${d.source_pool_count}`,
+    );
+    $("cohortPrev").disabled = cohortOffset === 0;
+    $("cohortNext").disabled = cohortOffset + 30 >= d.source_pool_count;
+  } catch (error) {
+    if (token === extraRequest && activePage === "focus")
+      message("focusStatus", `读取失败：${error.message}`);
+  }
+}
+$("readCohort").addEventListener("click", () => {
+  cohortOffset = 0;
+  void readCohort();
+});
+$("cohortPrev").addEventListener("click", () => {
+  cohortOffset = Math.max(0, cohortOffset - 30);
+  void readCohort();
+});
+$("cohortNext").addEventListener("click", () => {
+  cohortOffset += 30;
+  void readCohort();
+});
+
+$("extraVersion").addEventListener("change", () => {
+  void loadExtra(activePage);
+});
