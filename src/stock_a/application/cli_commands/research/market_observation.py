@@ -48,6 +48,7 @@ from stock_a.application.source_d0_raw import (
     attach_stock_risk_readiness,
 )
 from stock_a.application.source_pool_factors import read_source_pool_rps
+from stock_a.application.source_pool_seed import summarize_source_qualification
 from stock_a.application.pg_price_profiles import PgPriceProfileError
 from stock_a.application.pg_research import PgResearchBindingError
 from stock_a.application.source_market_context import SourceMarketContextError
@@ -734,6 +735,15 @@ def _run_source_market_observation(args) -> int:
                                     else "NOT_COMPUTED_TRANSITION_ONLY",
                                 }
                             )
+        facts_by_session = {
+            day["session"]: day["seed"].get("facts", {}) for day in days
+        }
+        for event in summary_changes:
+            source_fact = facts_by_session.get(event["session"], {}).get(
+                event["source_symbol"],
+            )
+            if source_fact and source_fact.get("qualification"):
+                event["source_qualification"] = deepcopy(source_fact["qualification"])
         selected = [
             event
             for event in summary_changes
@@ -920,6 +930,10 @@ def _run_source_market_observation(args) -> int:
                         },
                     },
                     "detail": stock_detail((day["session"], args.symbol)),
+                    "source_qualification": day["seed"]
+                    .get("facts", {})
+                    .get(args.symbol, {})
+                    .get("qualification"),
                     "d1": d1_stock[day["session"]],
                     "formal_eligibility": "UNKNOWN",
                     "formal_eligibility_reason": "FORMAL_EPISODE_AND_QUALIFICATION_UNPROVED",
@@ -1004,6 +1018,20 @@ def _run_source_market_observation(args) -> int:
                 {
                     "session": day["session"],
                     "source_pool_count": len(day["states"]),
+                    "source_version": {
+                        "namespace_id": day["namespace_id"],
+                        **{
+                            key: day["scenarios"]["LAUNCH_CONFIRM"]["source_version"][
+                                key
+                            ]
+                            for key in (
+                                "package_sha256",
+                                "source_content_id",
+                                "source_capture_id",
+                                "source_raw_digest",
+                            )
+                        },
+                    },
                     "observation_event_count": sum(
                         event["session"] == day["session"] for event in result["events"]
                     ),
@@ -1023,6 +1051,18 @@ def _run_source_market_observation(args) -> int:
                         name: dict(Counter(row[name] for row in day["states"].values()))
                         for name in ("s1", "s2", "seed")
                     },
+                    "source_qualification": summarize_source_qualification(
+                        day["seed"].get("facts", {})
+                    ),
+                    "seed_evaluation_scope": day["seed"].get("seed_evaluation_scope"),
+                    "formal_research_universe": day["seed"].get(
+                        "formal_research_universe"
+                    ),
+                    "price_coordinate": day["seed"].get("price_coordinate"),
+                    "corporate_action_continuity": day["seed"].get(
+                        "corporate_action_continuity"
+                    ),
+                    "rps_endpoint_counts": day["seed"].get("endpoint_counts"),
                     "seed_reason": day["seed"].get("reason"),
                     "seed_reason_counts": seed_reasons,
                     "profile_revision_matches_runtime": day["seed"].get(
@@ -1030,6 +1070,9 @@ def _run_source_market_observation(args) -> int:
                     ),
                     "runtime_profile_revision": day["seed"].get(
                         "runtime_profile_revision"
+                    ),
+                    "profile_revision_comparison": day["seed"].get(
+                        "profile_revision_comparison"
                     ),
                     "stored_profile_status": day["seed"].get("stored_profile_status"),
                     "profile_input_note": day["seed"].get("profile_input_note"),
@@ -1126,6 +1169,8 @@ def _run_source_market_observation(args) -> int:
         output = {
             "ok": True,
             "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
+            "qualification_scope": "SOURCE_ONLY_NON_PIT_NOT_FORMAL_D2_OR_TRADING_SIGNAL",
+            "qualification_contract": "UNIVERSE_ELIGIBILITY_R1+ALG-19/20",
             "configuration_path": str(config_path),
             "namespace_id": days[0]["namespace_id"],
             "package_sha256": args.package_sha256,

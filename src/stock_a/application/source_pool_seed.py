@@ -61,6 +61,17 @@ def _or(*values: dict[str, Any]) -> dict[str, Any]:
     return {"state": state, "reasons": _reasons(values)}
 
 
+def _tri_state(value: Mapping[str, Any] | str) -> str:
+    if isinstance(value, str):
+        return value
+    return str(value.get("state", "UNKNOWN"))
+
+
+def _state_counts(values) -> dict[str, int]:
+    counts = Counter(_tri_state(value) for value in values)
+    return {state: counts[state] for state in ("TRUE", "FALSE", "UNKNOWN")}
+
+
 def _reasons(values: tuple[dict[str, Any], ...]) -> list[str]:
     return list(
         dict.fromkeys(
@@ -76,13 +87,270 @@ def _reasons(values: tuple[dict[str, Any], ...]) -> list[str]:
     )
 
 
-def _from_field(field: Mapping[str, Any], predicate) -> dict[str, Any]:
+def _from_field(
+    field: Mapping[str, Any], predicate, *, false_reason: str | None = None
+) -> dict[str, Any]:
     if field.get("quality") != "OBSERVED":
         return _tri(None, str(field.get("reason") or "FIELD_UNKNOWN"))
     value = field.get("value")
     if isinstance(value, dict):
         value = Fraction(value["exact"])
-    return _tri(bool(predicate(value)))
+    result = bool(predicate(value))
+    return _tri(result, None if result else false_reason)
+
+
+def source_qualification_explanation(
+    predicates: Mapping[str, Mapping[str, Any]],
+    *,
+    s1: Mapping[str, Any],
+    s2: Mapping[str, Any],
+    safety: Mapping[str, Any],
+    seed: Mapping[str, Any],
+    formal_candidate_seed: Mapping[str, Any],
+    source_seed: Mapping[str, Any],
+    prewatch: Mapping[str, Any],
+) -> dict[str, Any]:
+    """以同一组三态谓词说明来源形态、正式门、排除与缺证。"""
+    public_conditions = (
+        "research_universe",
+        "actual_bar",
+        "non_st",
+        "normal_listing_phase",
+        "limited_price_rule",
+        "coordinate_ready",
+    )
+    seed_safety_conditions = (
+        "research_universe",
+        "actual_bar",
+        "coordinate_ready",
+        "liquidity_mean20",
+        "no_damage",
+        "no_severe_extension",
+    )
+    public_gate = _and(*(dict(predicates[key]) for key in public_conditions))
+    public_failures = [
+        {"condition": key, "reason": predicates[key].get("reason")}
+        for key in public_conditions
+        if _tri_state(predicates[key]) == "FALSE"
+    ]
+    seed_failures = [
+        {"condition": key, "reason": predicates[key].get("reason")}
+        for key in seed_safety_conditions
+        if _tri_state(predicates[key]) == "FALSE"
+    ]
+    route_failures = []
+    for route_name, route in (("S1", s1), ("S2", s2)):
+        if _tri_state(route) == "FALSE":
+            route_failures.append(
+                {
+                    "route": route_name,
+                    "reasons": list(route.get("reasons", [])),
+                }
+            )
+
+    relevant = list(dict.fromkeys(public_conditions + seed_safety_conditions))
+    unknown_gaps = [
+        {"condition": key, "reason": predicates[key].get("reason")}
+        for key in relevant
+        if _tri_state(predicates[key]) == "UNKNOWN"
+    ]
+    for route_name, route in (("S1", s1), ("S2", s2)):
+        if _tri_state(route) == "UNKNOWN":
+            unknown_gaps.append(
+                {
+                    "condition": route_name,
+                    "reason": list(route.get("reasons", [])),
+                }
+            )
+
+    first_exclusion = next(iter(public_failures or seed_failures), None)
+    if first_exclusion:
+        primary = {
+            "kind": "PROVED_FORMAL_GATE_EXCLUSION",
+            **first_exclusion,
+        }
+    elif _tri_state(s1) == _tri_state(s2) == "FALSE":
+        primary = {
+            "kind": "NO_SEED_ROUTE_MATCHED",
+            "reason": "S1_AND_S2_FALSE",
+        }
+    elif _tri_state(formal_candidate_seed) == "TRUE":
+        primary = {"kind": "FORMAL_CANDIDATE_SEED_TRUE", "reason": None}
+    else:
+        primary = {
+            "kind": "FORMAL_CANDIDATE_SEED_UNKNOWN",
+            "reason": (formal_candidate_seed.get("reasons") or [None])[0],
+        }
+
+    exclusion_pairs = list(
+        dict.fromkeys(
+            (item["condition"], item.get("reason"))
+            for item in public_failures + seed_failures
+        )
+    )
+    return {
+        "contract": "UNIVERSE_ELIGIBILITY_R1+ALG-19/20",
+        "evidence_scope": "SOURCE_ONLY_NON_PIT",
+        "data_universe": {
+            "state": "TRUE",
+            "evidence_status": "TRACEABLE_SOURCE_ROW",
+            "identity_partition": "UNRESOLVED_SOURCE_SYMBOL",
+            "reason": "RAW_SOURCE_POOL_MEMBERSHIP_ONLY",
+        },
+        "research_universe": dict(predicates["research_universe"]),
+        "ordinary_candidate_public_gate": public_gate,
+        "ordinary_candidate_state_counts_scope": "ONE_SOURCE_SYMBOL",
+        "s1": dict(s1),
+        "s2": dict(s2),
+        "source_seed_shape": dict(source_seed),
+        "seed_safety": dict(safety),
+        "formal_seed": dict(seed),
+        "formal_candidate_seed": dict(formal_candidate_seed),
+        "raw_prewatch": {
+            **dict(prewatch),
+            "implementation_status": "NOT_IMPLEMENTED",
+            "unbound_condition": "MANDATORY_CORE_QUALITY_CONTRACT_UNBOUND",
+        },
+        "known_exclusions": [
+            {"condition": condition, "reason": reason}
+            for condition, reason in exclusion_pairs
+        ],
+        "seed_routes_not_matched": route_failures,
+        "unknown_gaps": unknown_gaps,
+        "primary_explanation": primary,
+        "counts": {
+            "ordinary_candidate_public_gate": _state_counts([public_gate]),
+            "formal_seed": _state_counts([seed]),
+            "formal_candidate_seed": _state_counts([formal_candidate_seed]),
+            "raw_prewatch": _state_counts([prewatch]),
+        },
+    }
+
+
+def summarize_source_qualification(
+    facts: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    """按完整来源池分母汇总资格三态、已知排除和缺证原因。"""
+    state_counts = {
+        name: Counter()
+        for name in (
+            "data_universe",
+            "research_universe",
+            "ordinary_candidate_public_gate",
+            "formal_seed",
+            "formal_candidate_seed",
+            "raw_prewatch",
+        )
+    }
+    reasons: dict[str, Counter[str]] = {
+        "known_exclusions": Counter(),
+        "seed_route_failures": Counter(),
+        "seed_route_reasons": Counter(),
+        "unknown_gaps": Counter(),
+        "primary_explanations": Counter(),
+    }
+    shape_counts = {name: Counter() for name in ("s1", "s2", "seed")}
+    prewatch_implementation = Counter()
+    for fact in facts.values():
+        explanation = fact.get("qualification") or {}
+        for name in state_counts:
+            node = explanation.get(name) or {}
+            state_counts[name][_tri_state(node)] += 1
+        for name in shape_counts:
+            shape_counts[name][_tri_state(fact.get(name) or {})] += 1
+        prewatch_implementation[
+            (explanation.get("raw_prewatch") or {}).get(
+                "implementation_status", "NOT_IMPLEMENTED"
+            )
+        ] += 1
+        for item in explanation.get("known_exclusions", []):
+            reasons["known_exclusions"][item["condition"]] += 1
+        for item in explanation.get("seed_routes_not_matched", []):
+            reasons["seed_route_failures"][item["route"]] += 1
+            reasons["seed_route_reasons"].update(item.get("reasons", []))
+        for item in explanation.get("unknown_gaps", []):
+            reasons["unknown_gaps"][item["condition"]] += 1
+        primary = explanation.get("primary_explanation") or {}
+        reasons["primary_explanations"][primary.get("kind", "NOT_EVALUATED")] += 1
+
+    return {
+        "scope": "FULL_SOURCE_POOL",
+        "source_pool_total": len(facts),
+        "source_shape_status": "SOURCE_ONLY_NON_PIT",
+        "shape_states": {
+            name: {
+                state: shape_counts[name][state]
+                for state in ("TRUE", "FALSE", "UNKNOWN")
+            }
+            for name in shape_counts
+        },
+        "eligibility_states": {
+            name: {
+                state: state_counts[name][state]
+                for state in ("TRUE", "FALSE", "UNKNOWN")
+            }
+            for name in state_counts
+        },
+        "raw_prewatch_implementation": dict(prewatch_implementation),
+        "reason_counts": {
+            name: dict(sorted(counter.items())) for name, counter in reasons.items()
+        },
+    }
+
+
+def unavailable_source_qualification(reason: str) -> dict[str, Any]:
+    """历史输入冲突时保留完整三态形状并说明局部不可评估。"""
+    predicates = {
+        name: _tri(None, reason)
+        for name in (
+            "research_universe",
+            "actual_bar",
+            "non_st",
+            "normal_listing_phase",
+            "limited_price_rule",
+            "coordinate_ready",
+            "liquidity_mean20",
+            "no_damage",
+            "no_severe_extension",
+        )
+    }
+    s1 = _and(_tri(None, reason), _tri(None, reason), _tri(None, reason))
+    s2 = _and(
+        _tri(None, reason),
+        _tri(None, reason),
+        _or(_tri(None, reason), _tri(None, reason)),
+    )
+    safety = _and(
+        predicates["research_universe"],
+        predicates["actual_bar"],
+        predicates["coordinate_ready"],
+        predicates["liquidity_mean20"],
+        predicates["no_damage"],
+        predicates["no_severe_extension"],
+    )
+    source_seed = _and(safety, _or(s1, s2))
+    public_gate = _and(
+        predicates["research_universe"],
+        predicates["actual_bar"],
+        predicates["non_st"],
+        predicates["normal_listing_phase"],
+        predicates["limited_price_rule"],
+        predicates["coordinate_ready"],
+    )
+    seed = _and(safety, _or(s1, s2))
+    formal_candidate_seed = _and(public_gate, seed)
+    prewatch = _and(seed, _tri(None, "MANDATORY_CORE_QUALITY_CONTRACT_UNBOUND"))
+    prewatch["implementation_status"] = "NOT_IMPLEMENTED"
+    return source_qualification_explanation(
+        predicates,
+        s1=s1,
+        s2=s2,
+        safety=safety,
+        seed=seed,
+        formal_candidate_seed=formal_candidate_seed,
+        source_seed=source_seed,
+        prewatch=prewatch,
+    )
 
 
 def source_seed_predicates(
@@ -93,27 +361,40 @@ def source_seed_predicates(
     components = {
         item["field_id"]: item for item in preview["profile_preview"]["components"]
     }
-    bias = _from_field(core["core.bias20_atr"], lambda value: value < 3)
+    bias = _from_field(
+        core["core.bias20_atr"],
+        lambda value: value < 3,
+        false_reason="BIAS20_ATR_NOT_BELOW_3",
+    )
     delta3 = (
-        _tri(delta.value >= 3)
+        _tri(delta.value >= 3, None if delta.value >= 3 else "RPS5_DELTA3_BELOW_3")
         if delta.quality == "OBSERVED"
         else _tri(None, delta.reason)
     )
     delta10 = (
-        _tri(delta.value >= 10)
+        _tri(delta.value >= 10, None if delta.value >= 10 else "RPS5_DELTA3_BELOW_10")
         if delta.quality == "OBSERVED"
         else _tri(None, delta.reason)
     )
     compression = _from_field(
         components["profile.compression"],
         lambda value: value in {"COMPRESSING", "COMPRESSING_STRONG"},
+        false_reason="COMPRESSION_NOT_QUALIFIED",
     )
     bull = _from_field(
-        components["profile.ma_structure"], lambda value: value == "BULL_TRANSITION"
+        components["profile.ma_structure"],
+        lambda value: value == "BULL_TRANSITION",
+        false_reason="MA_STRUCTURE_NOT_BULL_TRANSITION",
     )
-    damage = _from_field(core["core.price_damage"], lambda value: value is False)
+    damage = _from_field(
+        core["core.price_damage"],
+        lambda value: value is False,
+        false_reason="PRICE_DAMAGE_PROVED",
+    )
     extension = _from_field(
-        components["profile.extension"], lambda value: value != "EXTREME"
+        components["profile.extension"],
+        lambda value: value != "EXTREME",
+        false_reason="EXTENSION_EXTREME_PROVED",
     )
     # 此读取链仅持有原生金额，未取得人民币单位权威，不能比较绝对金额门槛。
     liquidity = _tri(None, "UNKNOWN_UNIT_UNVERIFIED")
@@ -123,36 +404,64 @@ def source_seed_predicates(
         and preview["price_research_status"] == "AVAILABLE"
         else _tri(None, "TARGET_ACTUAL_OR_PRICE_UNKNOWN")
     )
-    formal_universe = _tri(None, "HISTORICAL_RESEARCH_UNIVERSE_UNPROVED")
-    formal_coordinate = _tri(None, "CORPORATE_ACTION_COORDINATE_UNPROVED")
+    formal_universe = _tri(None, "DATE_VALID_IDENTITY_LIFECYCLE_EVIDENCE_MISSING")
+    formal_coordinate = _tri(None, "RAW_UNADJUSTED_COORDINATE_CONTINUITY_UNPROVED")
+    non_st = _tri(None, "DATE_VALID_ST_STATUS_EVIDENCE_MISSING")
+    normal_listing = _tri(None, "DATE_VALID_LISTING_PHASE_EVIDENCE_MISSING")
+    limited_price_rule = _tri(None, "DATE_VALID_LIMIT_APPLICABILITY_EVIDENCE_MISSING")
     safety = _and(
         formal_universe, actual, formal_coordinate, liquidity, damage, extension
     )
     s1 = _and(bias, compression, delta3)
     s2 = _and(bias, delta10, _or(bull, previous_cross))
     seed = _and(safety, _or(s1, s2))
+    public_gate = _and(
+        formal_universe,
+        actual,
+        non_st,
+        normal_listing,
+        limited_price_rule,
+        formal_coordinate,
+    )
+    formal_candidate_seed = _and(public_gate, seed)
     prewatch = _and(seed, _tri(None, "MANDATORY_CORE_QUALITY_CONTRACT_UNBOUND"))
+    prewatch["implementation_status"] = "NOT_IMPLEMENTED"
+    predicates = {
+        "research_universe": formal_universe,
+        "actual_bar": actual,
+        "non_st": non_st,
+        "normal_listing_phase": normal_listing,
+        "limited_price_rule": limited_price_rule,
+        "coordinate_ready": formal_coordinate,
+        "liquidity_mean20": liquidity,
+        "no_damage": damage,
+        "no_severe_extension": extension,
+        "bias_below_3": bias,
+        "compression": compression,
+        "rps5_delta3_at_least_3": delta3,
+        "rps5_delta3_at_least_10": delta10,
+        "bull_transition": bull,
+        "previous_ma20_cross": previous_cross,
+    }
+    qualification = source_qualification_explanation(
+        predicates,
+        s1=s1,
+        s2=s2,
+        safety=safety,
+        seed=seed,
+        formal_candidate_seed=formal_candidate_seed,
+        source_seed=seed,
+        prewatch=prewatch,
+    )
     return {
-        "predicates": {
-            "research_universe": formal_universe,
-            "actual_bar": actual,
-            "coordinate_ready": formal_coordinate,
-            "liquidity_mean20": liquidity,
-            "no_damage": damage,
-            "no_severe_extension": extension,
-            "bias_below_3": bias,
-            "compression": compression,
-            "rps5_delta3_at_least_3": delta3,
-            "rps5_delta3_at_least_10": delta10,
-            "bull_transition": bull,
-            "previous_ma20_cross": previous_cross,
-        },
+        "predicates": predicates,
         "safety": safety,
         "s1": s1,
         "s2": s2,
         "seed": seed,
         "raw_prewatch": prewatch,
         "formal_eligibility": "NOT_AUTHORIZED",
+        "qualification": qualification,
     }
 
 
@@ -284,6 +593,7 @@ def read_source_pool_seed(
                     "seed": unavailable,
                     "raw_prewatch": unavailable,
                     "formal_eligibility": "NOT_AUTHORIZED",
+                    "qualification": unavailable_source_qualification(error.code),
                     "reason": error.code,
                 }
                 continue
@@ -345,10 +655,14 @@ def read_source_pool_seed(
                 and current_close.quality == "OBSERVED"
                 and current_ma["quality"] == "OBSERVED"
             ):
+                crossed = Fraction(prior_close.value) <= Fraction(
+                    previous.value
+                ) and Fraction(current_close.value) > Fraction(
+                    current_ma["value"]["exact"]
+                )
                 cross = _tri(
-                    Fraction(prior_close.value) <= Fraction(previous.value)
-                    and Fraction(current_close.value)
-                    > Fraction(current_ma["value"]["exact"])
+                    crossed,
+                    None if crossed else "PREVIOUS_MA20_CROSS_NOT_MET",
                 )
             else:
                 cross = _tri(None, "PREVIOUS_MA20_CROSS_INPUT_UNKNOWN")
@@ -421,6 +735,18 @@ def read_source_pool_seed(
         "profile_revision": profile_revision,
         "runtime_profile_revision": runtime_revision,
         "profile_revision_matches_runtime": runtime_revision == profile_revision,
+        "profile_revision_comparison": {
+            "requested_profile_revision": profile_revision,
+            "stored_profile_revision": None
+            if profile_snapshot_missing
+            else profile_revision,
+            "runtime_profile_revision": runtime_revision,
+            "status": "MISSING_RAW_RECOMPUTED"
+            if profile_snapshot_missing
+            else "MATCH"
+            if runtime_revision == profile_revision
+            else "STORED_AND_RUNTIME_REVISIONS_DIFFER",
+        },
         "history_session_count": history_session_count,
         "profile_input_note": (
             "该日无已存画像；以同包Raw和现役Core/Profile合同即时计算，标明实际运行修订，未生成画像快照。"
