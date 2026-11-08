@@ -213,7 +213,7 @@ def _summarize_board_conditions(facts, day, snapshot, kind, board_id, rules, hor
     }
 
 
-def _aggregate_board_days(days):
+def _aggregate_board_days(days, condition=None):
     """分成员与因子范围按日等权，不跨质量或期限拼接。"""
     labels = days[0]["board_conditions"]["scopes"] if days else ()
     return {
@@ -236,6 +236,7 @@ def _aggregate_board_days(days):
                     for day in days
                 ]
             )
+            if not condition or row["condition"] == condition
         ]
         for label in labels
         if label != "BOARD_RET5_UNKNOWN"
@@ -399,9 +400,14 @@ def _run_source_market_observation(args) -> int:
             for day in days:
 
                 def consume_facts(**facts):
+                    selected_rules = (
+                        tuple(next(iter(facts["frozen"].values()))["rules"])
+                        if snapshot is not None and not args.rule_id
+                        else rules
+                    )
                     result = summarize_day(
                         **facts,
-                        rules=rules,
+                        rules=selected_rules,
                         horizons=tuple(horizons),
                         market=day["market"],
                     )
@@ -412,13 +418,7 @@ def _run_source_market_observation(args) -> int:
                             snapshot,
                             args.board_kind,
                             args.board_id,
-                            (
-                                rules
-                                if args.rule_id
-                                else tuple(
-                                    next(iter(facts["frozen"].values()))["rules"]
-                                )
-                            ),
+                            selected_rules,
                             tuple(horizons),
                         )
                     return result
@@ -466,7 +466,9 @@ def _run_source_market_observation(args) -> int:
                     "event_window_start": event_start.isoformat(),
                     "days": fep_days,
                     "equal_date_comparisons": comparisons,
-                    "board_equal_date_comparisons": _aggregate_board_days(fep_days)
+                    "board_equal_date_comparisons": _aggregate_board_days(
+                        fep_days, args.fep_condition
+                    )
                     if snapshot is not None
                     else None,
                     "quantile_definition": "离散最近秩ceil(n*p)",

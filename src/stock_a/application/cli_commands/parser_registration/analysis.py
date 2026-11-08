@@ -53,7 +53,8 @@ def register_commands(commands):
         help="完整研究、盘后变化、独立研究组、持久读取或FEP只读条件统计",
     )
     observation.add_argument(
-        "--rule-id", help="持久读取或FEP的精确规则标识；FEP默认启动与恢复"
+        "--rule-id",
+        help="持久读取或FEP的精确规则标识；FEP默认无板块为启动与恢复，有板块为全部规则",
     )
     observation.add_argument(
         "--fep-condition",
