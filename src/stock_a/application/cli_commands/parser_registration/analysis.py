@@ -48,11 +48,18 @@ def register_commands(commands):
     )
     observation.add_argument(
         "--view",
-        choices=("full", "summary", "cohort", "persisted", "persisted-changes"),
+        choices=("full", "summary", "cohort", "persisted", "persisted-changes", "fep"),
         default="full",
-        help="完整研究、盘后变化摘要或按官方会话计算全来源独立研究组",
+        help="完整研究、盘后变化、独立研究组、持久读取或FEP只读条件统计",
     )
-    observation.add_argument("--rule-id", help="持久研究读取的精确规则标识")
+    observation.add_argument(
+        "--rule-id", help="持久读取或FEP的精确规则标识；FEP默认启动与恢复"
+    )
+    observation.add_argument(
+        "--fep-condition",
+        choices=("ALL", "B_FIXED_POSITIVE", "B_FIXED_NON_POSITIVE", "B_FIXED_UNKNOWN"),
+        help="FEP日期条件；不筛减逐日来源分母",
+    )
     observation.add_argument("--before-session", help="持久规则对照的前一日期")
     observation.add_argument(
         "--before-event-window-start", help="前一日期的D1事件窗口起点"

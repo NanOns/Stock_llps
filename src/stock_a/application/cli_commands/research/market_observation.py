@@ -34,6 +34,8 @@ from stock_a.application.source_persisted_research import (
     read_persisted_cohort,
 )
 from stock_a.storage.postgres.research_facts import (
+    PATH_VERSION,
+    RULE_VERSION,
     prepare_research_rows,
     write_research_rows,
 )
@@ -55,6 +57,7 @@ from stock_a.storage.postgres.source_raw import RawSourcePgError
 from stock_a.storage.postgres.tdx_sector_members import TdxSectorMembersPgError
 from stock_a.contracts import load_price_profile_contract
 from stock_a.research.entry_context.sessions import _load_calendar
+from stock_a.research.source_fep_baseline import aggregate_days, summarize_day
 
 
 def _run_source_market_observation(args) -> int:
@@ -73,14 +76,29 @@ def _run_source_market_observation(args) -> int:
         if args.relative_position and not args.board_id:
             raise ValueError("相对位置研究需要精确板块")
         horizons = sorted(set(args.horizon or []))
-        if not horizons and args.view in {"full", "cohort", "persisted"}:
+        if not horizons and args.view in {"full", "cohort", "persisted", "fep"}:
             raise ValueError("完整研究必须指定至少一个后继会话数")
-        if args.view not in {"cohort", "persisted"} and any(
+        if args.view not in {"cohort", "persisted", "fep"} and any(
             not 1 <= value <= 10 for value in horizons
         ):
             raise ValueError("后续会话数须为1至10")
         if args.view == "cohort" and (args.board_id or args.signal):
             raise ValueError("独立研究组不接受板块或信号筛选")
+        if args.view == "fep" and (
+            args.board_id
+            or args.signal
+            or args.symbol
+            or args.risk_readiness
+            or args.persist_research_facts
+            or args.persist_research_events
+        ):
+            raise ValueError("FEP只接受完整来源池只读研究")
+        if args.view == "fep" and any(
+            value not in {1, 3, 5, 10, 20} for value in horizons
+        ):
+            raise ValueError("FEP期限须从1、3、5、10、20中选择")
+        if getattr(args, "fep_condition", None) and args.view != "fep":
+            raise ValueError("FEP条件只适用于FEP视图")
         if args.persist_research_facts and args.view != "cohort":
             raise ValueError("持久化只接受完整来源池cohort计算")
         if args.persist_research_facts and start != end:
@@ -167,6 +185,7 @@ def _run_source_market_observation(args) -> int:
             profile_revision=args.profile_revision,
             profile_contract=contract,
             history_session_count=args.history_session_count,
+            **({"allow_missing_market": True} if args.view == "fep" else {}),
         )
         d1 = read_observation_d1(
             config,
@@ -177,6 +196,76 @@ def _run_source_market_observation(args) -> int:
             event_window_start=event_start,
             history_session_count=args.d1_history_session_count,
         )
+        if args.view == "fep":
+            fep_days = []
+            rules = (
+                (args.rule_id,) if args.rule_id else ("LAUNCH_CONFIRM", "RECOVERY_TURN")
+            )
+            for day in days:
+
+                def consume_facts(**facts):
+                    return summarize_day(
+                        **facts,
+                        rules=rules,
+                        horizons=tuple(horizons),
+                        market=day["market"],
+                    )
+
+                cohort = read_source_cohort_forward(
+                    config,
+                    day,
+                    d1[day["session"]],
+                    research_cutoff=cutoff,
+                    package_sha256=args.package_sha256,
+                    horizons=tuple(horizons),
+                    d1_history_count=args.d1_history_session_count,
+                    facts_observer=consume_facts,
+                )
+                observed = cohort["observation"]
+                observed["rule_versions"] = {
+                    name: {
+                        "algorithm_contract": page["algorithm_contract"],
+                        "producer_version": page["producer_version"],
+                    }
+                    for name, page in day["scenarios"].items()
+                }
+                observed["runtime_profile_revision"] = day["seed"].get(
+                    "runtime_profile_revision"
+                )
+                fep_days.append(observed)
+            comparisons = aggregate_days(fep_days)
+            if args.fep_condition:
+                comparisons = [
+                    row for row in comparisons if row["condition"] == args.fep_condition
+                ]
+            _emit(
+                {
+                    "ok": True,
+                    "entity": "SOURCE_STOCK",
+                    "scope": "NON_PIT_EXPLORATORY",
+                    "targets": ["RAW_CLOSE_RETURN", "RAW_PATH"],
+                    "rule_version": RULE_VERSION,
+                    "path_version": PATH_VERSION,
+                    "research_cutoff": cutoff.isoformat(),
+                    "profile_revision": args.profile_revision,
+                    "history_session_count": args.history_session_count,
+                    "d1_history_session_count": args.d1_history_session_count,
+                    "event_window_start": event_start.isoformat(),
+                    "days": fep_days,
+                    "equal_date_comparisons": comparisons,
+                    "quantile_definition": "离散最近秩ceil(n*p)",
+                    "backoff": "NONE；条件不足时NOT_EVALUABLE，不自动合并来源或质量",
+                    "market_hypothesis": "按T0固定来源宽度B_fixed_source正或非正分层，比较同日MATCH与NO_MATCH；后验描述，非因果推断",
+                    "limitations": [
+                        "INSUFFICIENT_INDEPENDENT_DATES",
+                        "NON_PIT_MEMBERSHIP",
+                        "NOT_CAUSAL_OR_PREDICTIVE",
+                    ],
+                    "database_transaction": "READ_ONLY",
+                    "database_write_attempted": False,
+                }
+            )
+            return _EXIT_OK
         if args.view == "cohort":
 
             def persist(**facts):

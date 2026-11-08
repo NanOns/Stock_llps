@@ -275,6 +275,7 @@ def read_source_cohort_forward(
     offset: int = 0,
     limit: int = 30,
     facts_consumer=None,
+    facts_observer=None,
 ) -> dict[str, Any]:
     """先冻结全部T0规则，再对同一代码池逐期限描述后验事实。"""
     if not horizons or any(
@@ -589,8 +590,12 @@ def read_source_cohort_forward(
         for code in symbols
     )
     written = None
-    if facts_consumer is not None:
-        written = facts_consumer(
+    observed = None
+    if facts_consumer is not None and facts_observer is not None:
+        raise ValueError("不能同时写入和观察研究事实")
+    if facts_consumer is not None or facts_observer is not None:
+        consumer = facts_consumer if facts_consumer is not None else facts_observer
+        consumed = consumer(
             target=target,
             source=source,
             namespace_id=day["namespace_id"],
@@ -599,6 +604,10 @@ def read_source_cohort_forward(
             frozen=frozen,
             outcomes=outcomes,
         )
+        if facts_consumer is not None:
+            written = consumed
+        else:
+            observed = consumed
     return {
         "ok": True,
         "scope": "NON_PIT_EXPLORATORY",
@@ -662,4 +671,5 @@ def read_source_cohort_forward(
         "database_transaction": "READ_ONLY" if written is None else "WRITE_COMMITTED",
         "database_write_attempted": written is not None,
         "persisted": written,
+        "observation": observed,
     }

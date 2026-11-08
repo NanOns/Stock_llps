@@ -10,6 +10,7 @@ from typing import Any, Mapping
 
 from stock_a.application.source_d0_raw import query_source_d0_raw_launch
 from stock_a.application.source_market_context import (
+    SourceMarketContextError,
     read_source_market_context,
     source_market_context_payload,
 )
@@ -97,6 +98,7 @@ def read_market_observation_sessions(
     profile_revision: str,
     profile_contract: dict[str, Any],
     history_session_count: int,
+    allow_missing_market: bool = False,
 ) -> list[dict[str, Any]]:
     """先完整计算每个来源池，再按相邻会话和来源代码归并三态。"""
     if not sessions or len(sessions) > 75 or tuple(sorted(set(sessions))) != sessions:
@@ -232,14 +234,24 @@ def read_market_observation_sessions(
             for name, transition in transitions.items():
                 transition_counts[name][transition] += 1
             current[symbol] = states
-        market = read_source_market_context(
-            config,
-            target_session=session,
-            research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
-        )
+        try:
+            market = read_source_market_context(
+                config,
+                target_session=session,
+                research_cutoff=research_cutoff,
+                package_sha256=package_sha256,
+            )
+        except SourceMarketContextError as error:
+            if not allow_missing_market or error.category != "NOT_EVALUABLE":
+                raise
+            market = None
+            market_payload = {
+                "status": "UNKNOWN",
+                "reason": error.code,
+                "metric": {"exact": None},
+            }
         source_version = scenarios["LAUNCH_CONFIRM"]["source_version"]
-        if (
+        if market is not None and (
             market.cohort.namespace_id != namespace
             or market.cohort.source_content_id != source_version["source_content_id"]
             or market.cohort.source_capture_id != source_version["source_capture_id"]
@@ -247,11 +259,13 @@ def read_market_observation_sessions(
             != source_version["source_raw_digest"]
         ):
             raise SourceObservationError("市场宽度与D0来源捕获身份不一致")
+        if market is not None:
+            market_payload = source_market_context_payload(market)
         outputs.append(
             {
                 "session": session,
                 "namespace_id": namespace,
-                "market": source_market_context_payload(market),
+                "market": market_payload,
                 "scenarios": scenarios,
                 "seed": seed,
                 "states": current,
