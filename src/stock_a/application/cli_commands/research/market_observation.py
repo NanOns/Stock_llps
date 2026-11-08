@@ -28,7 +28,10 @@ from stock_a.application.source_market_observation import (
     read_observation_board_details,
     read_observation_d1,
 )
-from stock_a.application.source_cohort_forward import read_source_cohort_forward
+from stock_a.application.source_cohort_forward import (
+    _anchor_lower_followups,
+    read_source_cohort_forward,
+)
 from stock_a.application.source_persisted_research import (
     compare_persisted_cohorts,
     read_persisted_cohort,
@@ -55,9 +58,188 @@ from stock_a.application.source_relative_position import (
 )
 from stock_a.storage.postgres.source_raw import RawSourcePgError
 from stock_a.storage.postgres.tdx_sector_members import TdxSectorMembersPgError
+from stock_a.storage.postgres.tdx_sector_members import read_rotation_snapshot_members
 from stock_a.contracts import load_price_profile_contract
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.source_fep_baseline import aggregate_days, summarize_day
+
+
+def _summarize_board_conditions(facts, day, snapshot, kind, board_id, rules, horizons):
+    """将T0成员及既有中秩固定后，复用同一FEP统计。"""
+    boards = snapshot["boards"]
+    members = set(boards[board_id]["members"])
+    mapped = {symbol for board in boards.values() for symbol in board["members"]}
+    symbols = set(facts["frozen"])
+    memberships = {}
+    identities = []
+    for key, board in boards.items():
+        identity = {
+            "board_kind": kind,
+            "board_native_id": key,
+            "board_name": board["name"],
+        }
+        identities.append(identity)
+        for symbol in board["members"]:
+            memberships.setdefault(symbol, []).append(identity)
+    position = relative_position_view(
+        [day],
+        {
+            "memberships_by_symbol": memberships,
+            "boards": [
+                {**identity, "session": day["session"]} for identity in identities
+            ],
+            "events": [
+                {"session": day["session"], "source_symbol": symbol}
+                for symbol in sorted(members & symbols)
+            ],
+        },
+        board_kind=kind,
+        board_id=board_id,
+    )
+    positions = {
+        row["source_symbol"]: row["relative_position"]["ret5"]
+        for row in position["sessions"][0]["stocks"]
+    }
+    high, low, unknown = set(), set(), set()
+    for symbol in members & symbols:
+        percentile = positions[symbol]["midrank_percentile"]
+        if percentile is None:
+            unknown.add(symbol)
+        elif Fraction(percentile) >= 50:
+            high.add(symbol)
+        else:
+            low.add(symbol)
+    sets = {
+        "BOARD_IN": members & symbols,
+        "OTHER_MAPPED_CURRENT_SNAPSHOT": (mapped - members) & symbols,
+        "UNMAPPED_CURRENT_SNAPSHOT": symbols - mapped,
+        "BOARD_RET5_MIDRANK_GE_50": high,
+        "BOARD_RET5_MIDRANK_LT_50": low,
+        "BOARD_RET5_UNKNOWN": unknown,
+    }
+    scopes = {}
+    for label, selected in sets.items():
+        scoped = {
+            **facts,
+            "frozen": {s: facts["frozen"][s] for s in selected},
+            "outcomes": {s: facts["outcomes"][s] for s in selected},
+        }
+        scopes[label] = summarize_day(
+            **scoped, rules=rules, horizons=horizons, market=day["market"]
+        )
+    known_values = [
+        Fraction(p["value"]) for p in positions.values() if p["value"] is not None
+    ]
+    hypothesis_comparisons = []
+    anchor_examples = []
+    for horizon in horizons:
+        found = None
+        for symbol in sorted(members & symbols):
+            followups = _anchor_lower_followups(
+                facts["frozen"][symbol]["anchors"], facts["outcomes"][symbol][horizon]
+            )
+            for item in followups:
+                if item["lower_touch_followup"]["first_proved_touch_upper_bound"]:
+                    found = {"source_symbol": symbol, **item}
+                    break
+            if found:
+                break
+        anchor_examples.append(
+            {
+                "horizon": horizon,
+                "status": "OBSERVED" if found else "NOT_OBSERVED_IN_WINDOW",
+                "example": found,
+                "scope": "后验来源价格诊断，不作为T0未入选原因或正式失效",
+            }
+        )
+    for rule in rules:
+        for horizon in horizons:
+            for state in ("MATCH", "NO_MATCH", "UNKNOWN"):
+
+                def endpoint(label):
+                    return next(
+                        row["endpoint"]
+                        for row in scopes[label]["groups"]
+                        if row["rule"] == rule
+                        and row["horizon"] == horizon
+                        and row["group"] == state
+                    )
+
+                a = endpoint("BOARD_RET5_MIDRANK_GE_50")
+                b = endpoint("BOARD_RET5_MIDRANK_LT_50")
+                comparable = bool(a["count"] and b["count"])
+                hypothesis_comparisons.append(
+                    {
+                        "rule": rule,
+                        "horizon": horizon,
+                        "group": state,
+                        "status": "DESCRIPTIVE" if comparable else "NOT_EVALUABLE",
+                        "median_difference": str(
+                            Fraction(a["median"]) - Fraction(b["median"])
+                        )
+                        if comparable
+                        else None,
+                        "high_evaluable": a["count"],
+                        "low_evaluable": b["count"],
+                    }
+                )
+    return {
+        "board_kind": kind,
+        "board_id": board_id,
+        "board_name": boards[board_id]["name"],
+        "snapshot": snapshot["snapshot"],
+        "membership_status": "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT",
+        "membership_note": "同类其他映射和未映射仅描述当前快照，不证明历史板外",
+        "declared_distinct_members": len(members),
+        "members_in_source": len(members & symbols),
+        "members_outside_source": len(members - symbols),
+        "source_partition_counts": {
+            key: len(sets[key])
+            for key in (
+                "BOARD_IN",
+                "OTHER_MAPPED_CURRENT_SNAPSHOT",
+                "UNMAPPED_CURRENT_SNAPSHOT",
+            )
+        },
+        "hypothesis": "T0板内ret5已知成员中秩>=50与<50，同日同规则描述性比较；阈值不依赖后继",
+        "ret5_known_count": len(high) + len(low),
+        "ret5_unknown_count": len(unknown),
+        "ret5_value_min": str(min(known_values)) if known_values else None,
+        "ret5_value_max": str(max(known_values)) if known_values else None,
+        "positions": positions,
+        "hypothesis_comparisons": hypothesis_comparisons,
+        "d1_anchor_touch_examples": anchor_examples,
+        "scopes": scopes,
+    }
+
+
+def _aggregate_board_days(days):
+    """分成员与因子范围按日等权，不跨质量或期限拼接。"""
+    labels = days[0]["board_conditions"]["scopes"] if days else ()
+    return {
+        label: [
+            {
+                **row,
+                "condition_scope": "所选成员范围的描述基线，包含市场条件未知日；不代表已知市场环境"
+                if row["condition"] == "ALL"
+                else row["condition_scope"],
+            }
+            for row in aggregate_days(
+                [
+                    {
+                        **day,
+                        "groups": day["board_conditions"]["scopes"][label]["groups"],
+                        "comparisons": day["board_conditions"]["scopes"][label][
+                            "comparisons"
+                        ],
+                    }
+                    for day in days
+                ]
+            )
+        ]
+        for label in labels
+        if label != "BOARD_RET5_UNKNOWN"
+    }
 
 
 def _run_source_market_observation(args) -> int:
@@ -71,7 +253,7 @@ def _run_source_market_observation(args) -> int:
             raise ValueError("会话范围、截止日或分页参数无效")
         if bool(args.board_kind) != bool(args.board_id):
             raise ValueError("板块类型和编号必须同时提供")
-        if bool(args.rotation_start) != bool(args.board_id):
+        if args.view != "fep" and bool(args.rotation_start) != bool(args.board_id):
             raise ValueError("精确板块与Rotation起始会话必须同时提供")
         if args.relative_position and not args.board_id:
             raise ValueError("相对位置研究需要精确板块")
@@ -85,8 +267,7 @@ def _run_source_market_observation(args) -> int:
         if args.view == "cohort" and (args.board_id or args.signal):
             raise ValueError("独立研究组不接受板块或信号筛选")
         if args.view == "fep" and (
-            args.board_id
-            or args.signal
+            args.signal
             or args.symbol
             or args.risk_readiness
             or args.persist_research_facts
@@ -198,18 +379,49 @@ def _run_source_market_observation(args) -> int:
         )
         if args.view == "fep":
             fep_days = []
+            snapshot = None
+            if args.board_id:
+                snapshot_id = (
+                    args.industry_snapshot_id
+                    if args.board_kind == "INDUSTRY"
+                    else args.concept_snapshot_id
+                )
+                snapshot = read_rotation_snapshot_members(
+                    config, snapshot_id=snapshot_id, board_kind=args.board_kind
+                )
+                if args.board_id not in snapshot["boards"]:
+                    raise ValueError("所选板块不存在于精确成员快照")
+                if any(day["namespace_id"] != snapshot["namespace_id"] for day in days):
+                    raise ValueError("板块快照与来源池namespace不一致")
             rules = (
                 (args.rule_id,) if args.rule_id else ("LAUNCH_CONFIRM", "RECOVERY_TURN")
             )
             for day in days:
 
                 def consume_facts(**facts):
-                    return summarize_day(
+                    result = summarize_day(
                         **facts,
                         rules=rules,
                         horizons=tuple(horizons),
                         market=day["market"],
                     )
+                    if snapshot is not None:
+                        result["board_conditions"] = _summarize_board_conditions(
+                            facts,
+                            day,
+                            snapshot,
+                            args.board_kind,
+                            args.board_id,
+                            (
+                                rules
+                                if args.rule_id
+                                else tuple(
+                                    next(iter(facts["frozen"].values()))["rules"]
+                                )
+                            ),
+                            tuple(horizons),
+                        )
+                    return result
 
                 cohort = read_source_cohort_forward(
                     config,
@@ -222,6 +434,7 @@ def _run_source_market_observation(args) -> int:
                     facts_observer=consume_facts,
                 )
                 observed = cohort["observation"]
+                observed["all_rule_partitions"] = cohort["partitions"]
                 observed["rule_versions"] = {
                     name: {
                         "algorithm_contract": page["algorithm_contract"],
@@ -253,6 +466,9 @@ def _run_source_market_observation(args) -> int:
                     "event_window_start": event_start.isoformat(),
                     "days": fep_days,
                     "equal_date_comparisons": comparisons,
+                    "board_equal_date_comparisons": _aggregate_board_days(fep_days)
+                    if snapshot is not None
+                    else None,
                     "quantile_definition": "离散最近秩ceil(n*p)",
                     "backoff": "NONE；条件不足时NOT_EVALUABLE，不自动合并来源或质量",
                     "market_hypothesis": "按T0固定来源宽度B_fixed_source正或非正分层，比较同日MATCH与NO_MATCH；后验描述，非因果推断",

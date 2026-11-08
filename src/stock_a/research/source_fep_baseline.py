@@ -40,8 +40,8 @@ def summarize_day(
     symbols = sorted(frozen)
     if set(symbols) != set(outcomes):
         raise ValueError("冻结来源池与后继来源池不一致")
-    unknown_rules = set(rules) - set(
-        next(iter(frozen.values()))["rules"] if symbols else ()
+    unknown_rules = (
+        set(rules) - set(next(iter(frozen.values()))["rules"]) if symbols else set()
     )
     if unknown_rules:
         raise ValueError("规则不在冻结来源池中")
@@ -82,6 +82,23 @@ def summarize_day(
                 for symbol in members:
                     fact = outcomes[symbol][horizon]
                     due_count += int(fact.get("due", False))
+                    if state == "UNKNOWN" and not any(
+                        e["kind"] == "T0_RULE_UNKNOWN"
+                        and e["rule"] == rule
+                        and e["horizon"] == horizon
+                        for e in examples
+                    ):
+                        examples.append(
+                            {
+                                "kind": "T0_RULE_UNKNOWN",
+                                "rule": rule,
+                                "horizon": horizon,
+                                "source_symbol": symbol,
+                                "t0_rule_reasons": frozen[symbol]["rules"][rule].get(
+                                    "reasons", []
+                                ),
+                            }
+                        )
                     rule_reasons.update(
                         frozen[symbol]["rules"][rule].get("reasons", [])
                     )
@@ -106,14 +123,19 @@ def summarize_day(
                             if state == "FALSE" and amount > 0
                             else None
                         )
-                        if fact["path_quality"] != "OBSERVED":
-                            kind = "ENDPOINT_WITH_UNKNOWN_PATH"
-                        if kind and not any(
-                            e["kind"] == kind
-                            and e["rule"] == rule
-                            and e["horizon"] == horizon
-                            for e in examples
-                        ):
+                        kinds = ([kind] if kind else []) + (
+                            ["ENDPOINT_WITH_UNKNOWN_PATH"]
+                            if fact["path_quality"] != "OBSERVED"
+                            else []
+                        )
+                        for kind in kinds:
+                            if any(
+                                e["kind"] == kind
+                                and e["rule"] == rule
+                                and e["horizon"] == horizon
+                                for e in examples
+                            ):
+                                continue
                             examples.append(
                                 {
                                     "kind": kind,
@@ -121,6 +143,13 @@ def summarize_day(
                                     "horizon": horizon,
                                     "source_symbol": symbol,
                                     "endpoint": str(amount),
+                                    "t0_rule_state": state,
+                                    "t0_rule_reasons": frozen[symbol]["rules"][
+                                        rule
+                                    ].get("reasons", []),
+                                    "t0_failure_line": frozen[symbol]["rules"][
+                                        rule
+                                    ].get("frozen_line"),
                                     "path_reasons": fact["path_reasons"],
                                 }
                             )
@@ -249,6 +278,27 @@ def summarize_day(
         "groups": rows,
         "comparisons": comparisons,
         "examples": examples,
+        "example_availability": [
+            {
+                "rule": rule,
+                "horizon": horizon,
+                "kind": kind,
+                "status": "OBSERVED"
+                if any(
+                    e["rule"] == rule and e["horizon"] == horizon and e["kind"] == kind
+                    for e in examples
+                )
+                else "NOT_OBSERVED_IN_WINDOW",
+            }
+            for rule in rules
+            for horizon in horizons
+            for kind in (
+                "MATCH_NON_POSITIVE",
+                "NO_MATCH_POSITIVE",
+                "ENDPOINT_WITH_UNKNOWN_PATH",
+                "T0_RULE_UNKNOWN",
+            )
+        ],
         "weighting": "股票按同日来源代码去重；D1匹配锚事件单独计权；不同规则允许重叠",
         "reason_counts_note": "原因可重叠；原因计数之和不是独立样本数",
     }
@@ -295,7 +345,9 @@ def aggregate_days(days):
                 metric = (market.get("metric") or {}).get("exact")
                 value = (
                     Fraction(metric["fraction"])
-                    if metric and metric.get("fraction") is not None
+                    if metric
+                    and metric.get("fraction") is not None
+                    and market.get("status") not in {"UNKNOWN", "UNKNOWN_DATA"}
                     else None
                 )
                 label = (
@@ -317,6 +369,13 @@ def aggregate_days(days):
                     for c in day["comparisons"]
                     if c["rule"] == rule and c["horizon"] == horizon
                 )
+                if condition == "B_FIXED_UNKNOWN":
+                    comparison = {
+                        **comparison,
+                        "status": "NOT_EVALUABLE",
+                        "median_difference": None,
+                        "positive_fraction_difference": None,
+                    }
                 selected.append({"session": day["target_session"], **comparison})
             valid = [
                 Fraction(c["median_difference"])
@@ -328,14 +387,45 @@ def aggregate_days(days):
                 for c in selected
                 if c["status"] == "COMPUTED"
             ]
+            if condition == "B_FIXED_UNKNOWN":
+                # 未知条件可展示逐日基础统计，但不能作为已知环境比较。
+                valid = []
+                valid_positive = []
+            direction_counts = Counter(
+                "POSITIVE" if value > 0 else "NEGATIVE" if value < 0 else "ZERO"
+                for value in valid
+            )
             output.append(
                 {
                     "rule": rule,
                     "horizon": horizon,
                     "condition": condition,
+                    "condition_scope": "完整来源描述基线，包含市场条件未知日；不代表已知市场环境"
+                    if condition == "ALL"
+                    else "按T0市场条件和质量分层",
+                    "market_quality_date_counts": dict(
+                        Counter(
+                            (d.get("market") or {}).get("status", "UNKNOWN")
+                            for d in days
+                        )
+                    )
+                    if condition == "ALL"
+                    else None,
                     "market_quality": market_quality,
                     "dates": selected,
+                    "requested_date_count": len(days),
+                    "condition_date_count": len(selected),
+                    "condition_not_selected_date_count": len(days) - len(selected),
+                    "unevaluable_condition_date_count": len(selected) - len(valid),
                     "valid_date_count": len(valid),
+                    "median_difference_direction_counts": dict(direction_counts),
+                    "median_difference_direction_consistency": (
+                        "CONSISTENT" if len(direction_counts) == 1 else "MIXED"
+                    )
+                    if len(valid) > 1
+                    else "INSUFFICIENT_INDEPENDENT_DATES"
+                    if valid
+                    else "NOT_EVALUABLE",
                     "equal_date_mean_median_difference": str(
                         sum(valid, Fraction()) / len(valid)
                     )
