@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Stock A · 研究工作台</title>
     <link rel="stylesheet" href="/app.css" />
-    <script src="/app.js" defer></script>
+    <script type="module" src="/app.js"></script>
   </head>
   <body>
     <div class="shell">
@@ -83,6 +83,44 @@
               >请选择真实交易日、来源版本、画像与成员快照，然后读取研究结果。</span
             ><button id="configureContext">选择研究范围 <span>→</span></button>
           </div>
+          <div id="d1MaterialFilters" class="d1-material-filters" hidden>
+            <label
+              >结构类型<select id="d1StructureType">
+                <option value="ALL">全部结构</option>
+                <option value="PIVOT_LOW">枢轴低点</option>
+                <option value="PIVOT_HIGH">枢轴高点</option>
+                <option value="RANGE_FLOOR">区间底部</option>
+                <option value="RANGE_CEILING">区间顶部</option>
+                <option value="GAP_ZONE">缺口区域</option>
+              </select></label
+            >
+            <label
+              >材料变化原因<select id="d1MaterialReason">
+                <option value="ALL">全部原因</option>
+                <option value="SUPPORT_STATE_TRANSITION">支撑状态变化</option>
+                <option value="SUPPORT_ACCEPTANCE_TRANSITION">
+                  支撑接受状态变化
+                </option>
+                <option value="SUPPORT_FRESHNESS_TRANSITION">
+                  支撑新鲜度变化
+                </option>
+                <option value="RETEST_QUALIFICATION_TRANSITION">
+                  回测资格变化
+                </option>
+                <option value="FIRST_VALID_TEST_OBSERVED">首次有效测试</option>
+                <option value="FIRST_SEPARATED_SESSION_OBSERVED">
+                  首次间隔会话观察
+                </option>
+                <option value="GAP_FILL_STAGE_TRANSITION">
+                  缺口回补阶段变化
+                </option>
+              </select></label
+            >
+            <span id="d1MaterialStatus" role="status"
+              >选择 D1 材料变化并明确触发读取。</span
+            >
+          </div>
+          <p id="d1MaterialQuality" class="d1-material-quality" hidden></p>
           <section id="overview" class="page active" aria-label="今日总览">
             <div class="section-heading">
               <div>
@@ -109,7 +147,7 @@
                 ><small>当前快照，非历史成员</small>
               </article>
             </div>
-            <section class="card profile-change-card">
+            <section id="profileChangeCard" class="card profile-change-card">
               <div class="card-head">
                 <div>
                   <span class="section-kicker">PROFILE CHANGES</span>
@@ -180,7 +218,7 @@
                   <option value="ALL">全部类型</option>
                   <option value="INDUSTRY">行业</option>
                   <option value="CONCEPT">GN 概念</option></select
-                ><label class="checkbox"
+                ><label id="changedOnlyFilter" class="checkbox"
                   ><input type="checkbox" id="changedOnly" checked />
                   只看有变化</label
                 >
@@ -394,6 +432,7 @@
         ><label
           >观察模式<select id="modeSelect">
             <option value="D1">D1 支撑变化</option>
+            <option value="D1_MATERIAL">D1 材料变化</option>
             <option value="D0">D0 新增启动</option>
           </select></label
         >

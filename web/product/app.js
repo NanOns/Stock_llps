@@ -1,4 +1,8 @@
-"use strict";
+import { requestD1Material } from "./api.js";
+import { buildD1MaterialRequest, byId, d1MaterialState } from "./state.js";
+import { renderD1MaterialMarket, setD1MaterialStatus } from "./market.js";
+import { renderD1Boards, renderD1Members } from "./sectors.js";
+import { renderD1StockDetail, renderD1Stocks } from "./stocks.js";
 const $ = (id) => document.getElementById(id);
 const state = {
   versions: [],
@@ -150,6 +154,10 @@ function gotoPage(page) {
   message("pageTitle", data[0]);
   message("pageSubtitle", data[1]);
   message("headingIndex", data[2]);
+  if (page === "sectors" && state.selected?.mode === "D1_MATERIAL")
+    d1MaterialState.data && renderD1Boards(d1MaterialState.data, openD1Board);
+  if (page === "stocks" && state.selected?.mode === "D1_MATERIAL")
+    d1MaterialState.data && renderD1Stocks(d1MaterialState.data, openD1Stock);
   if (["focus", "market", "diagnostics"].includes(page)) void loadExtra(page);
 }
 document
@@ -181,12 +189,18 @@ function addChoices(id, items, label, value) {
 }
 async function init() {
   try {
-    const [catalog, profiles] = await Promise.all([
-      api("/api/preview/catalog?offset=0&limit=100"),
-      api("/api/source-symbol-price-profiles/snapshots"),
-    ]);
+    const catalog = await api("/api/preview/catalog?offset=0&limit=100");
     state.versions = catalog.versions || [];
-    state.profiles = profiles.snapshots || [];
+    try {
+      const profiles = await api("/api/source-symbol-price-profiles/snapshots");
+      state.profiles = profiles.snapshots || [];
+    } catch (error) {
+      state.profiles = [];
+      message(
+        "contextStatus",
+        `画像修订不可用；D1材料模式仍可选择：${error.message}`,
+      );
+    }
     resetSelect("extraVersion", "请选择来源日期与版本");
     addChoices(
       "extraVersion",
@@ -277,17 +291,18 @@ $("applyContext").addEventListener("click", () => {
       item.profile_revision === profile_revision &&
       item.complete,
   );
+  const mode = $("modeSelect").value;
+  const d1Material = mode === "D1_MATERIAL";
   if (
     !state.context ||
     !target_session ||
     !package_sha256 ||
-    !profile_revision ||
     !industry_snapshot_id ||
     !concept_snapshot_id ||
     !event_window_start ||
     !history ||
-    !profile ||
-    !Number.isInteger(profile.history_session_count)
+    (!d1Material && (!profile_revision || !profile)) ||
+    (profile && !Number.isInteger(profile.history_session_count))
   ) {
     message("contextStatus", "请选择所有必要的真实版本。");
     return;
@@ -295,25 +310,34 @@ $("applyContext").addEventListener("click", () => {
   state.selected = {
     target_session,
     package_sha256,
-    profile_revision,
+    profile_revision:
+      profile_revision || "NOT_REQUIRED_FOR_D1_RAW_MATERIAL_VIEW",
     industry_snapshot_id,
     concept_snapshot_id,
     event_window_start,
     pg_history_session_count: Number(history),
-    stock_history_session_count: profile.history_session_count,
+    stock_history_session_count:
+      profile?.history_session_count || Number(history),
     research_cutoff: state.context.research_cutoff,
     namespace_id: state.context.namespace_id,
-    mode: $("modeSelect").value,
+    mode,
   };
   state.board = null;
   state.boardOffset = state.stockOffset = state.memberOffset = 0;
   state.data = null;
+  d1MaterialState.controller?.abort();
+  d1MaterialState.data = null;
+  d1MaterialState.board = null;
+  d1MaterialState.boardOffset = 0;
+  d1MaterialState.stockOffset = 0;
+  d1MaterialState.memberOffset = 0;
   ++state.stockRequest;
   message("currentDate", target_session);
   message(
     "contextText",
-    `${target_session} · 来源 ${package_sha256.slice(0, 12)}… · 画像 ${profile_revision.slice(0, 12)}… · 当前成员快照回看 NON_PIT`,
+    `${target_session} · 来源 ${package_sha256.slice(0, 12)}… · ${d1Material ? "D1材料变化无需画像修订" : `画像 ${profile_revision.slice(0, 12)}…`} · 当前成员快照回看 NON_PIT`,
   );
+  setD1MaterialMode(d1Material);
   $("contextDialog").close();
   $("extraVersion").value = `${target_session}|${package_sha256}`;
   loadResearch();
@@ -350,9 +374,207 @@ function requestBody() {
     stock_limit: 30,
   };
 }
+function setD1MaterialMode(enabled) {
+  $("d1MaterialFilters").hidden = !enabled;
+  $("d1MaterialQuality").hidden = !enabled;
+  $("profileChangeCard").hidden = enabled;
+  $("changedOnlyFilter").hidden = enabled;
+  if (enabled) {
+    $("memberState").replaceChildren(
+      new Option("全部状态", "ALL"),
+      new Option("材料变化", "MATERIAL_CHANGE"),
+      new Option("未命中所选原因", "NO_SELECTED_REASON"),
+      new Option("已知非材料变化", "KNOWN_NON_MATERIAL"),
+      new Option("未知", "UNKNOWN"),
+      new Option("不可比较", "NOT_COMPARABLE"),
+      new Option("不可评价", "NOT_EVALUABLE"),
+      new Option("不适用", "NOT_APPLICABLE"),
+      new Option("无已证锚点", "NO_PROVED_ANCHOR"),
+      new Option("不在目标来源池", "NOT_IN_SOURCE_POOL"),
+    );
+  } else {
+    $("memberState").replaceChildren(
+      new Option("全部状态", "ALL"),
+      new Option("有变化", "CHANGED"),
+      new Option("未变化", "UNCHANGED"),
+      new Option("未知", "UNKNOWN"),
+      new Option("不可比较", "NOT_COMPARABLE"),
+      new Option("不可评价", "NOT_EVALUABLE"),
+    );
+  }
+}
+function openD1Board(board) {
+  d1MaterialState.board = {
+    board_kind: board.board_kind,
+    board_native_id: board.board_native_id,
+    board_name: board.board_name,
+  };
+  d1MaterialState.memberOffset = 0;
+  $("boardKind").value = board.board_kind;
+  $("memberSearch").value = "";
+  $("memberState").value = "ALL";
+  message("boardTitle", board.board_name);
+  message(
+    "boardMeta",
+    `${board.board_kind === "INDUSTRY" ? "行业" : "GN 概念"} · 当前成员快照 NON_PIT · D1材料变化`,
+  );
+  message("memberList", "正在读取同一D1筛选范围的板块成员…");
+  $("memberList").classList.remove("has-items");
+  if (!$("boardDialog").open) $("boardDialog").showModal();
+  void loadD1Material();
+}
+function openD1Stock(symbol, member = null) {
+  message("stockTitle", symbol);
+  message(
+    "stockMeta",
+    `${state.selected?.target_session || "—"} · D1材料变化 · RAW_UNADJUSTED · NON_PIT`,
+  );
+  message("stockStatus", "正在读取同一全池计算中的个股结构与质量解释…");
+  $("stockContent").replaceChildren();
+  if (!$("stockDialog").open) $("stockDialog").showModal();
+  if (member?.source_pool_status === "NOT_IN_TARGET_SOURCE_POOL") {
+    renderD1StockDetail({ source_pool_status: "NOT_IN_TARGET_SOURCE_POOL" });
+    return;
+  }
+  void loadD1Material(symbol);
+}
+function clearD1MaterialView(symbol = null) {
+  $("metrics").replaceChildren(
+    countCard("来源代码池", "—", "等待D1材料变化"),
+    countCard("材料变化代码", "—", "等待全池读取"),
+    countCard("材料变化锚点", "—", "等待全池读取"),
+    countCard("行业 / GN 板块", "—", "当前成员快照 · NON_PIT"),
+  );
+  for (const id of ["overviewBoards", "overviewStocks", "stockList"]) {
+    $(id).replaceChildren(node("p", "等待同一来源范围的D1全池读取…"));
+    $(id).classList.remove("has-items");
+  }
+  const row = node("tr");
+  const cell = node("td", "等待D1材料变化全池读取…", "empty");
+  cell.colSpan = 6;
+  row.append(cell);
+  $("boardRows").replaceChildren(row);
+  for (const id of ["boardSummary", "boardPage", "stockPage", "memberPage"])
+    message(id, "正在读取…");
+  for (const id of [
+    "boardPrev",
+    "boardNext",
+    "stockPrev",
+    "stockNext",
+    "memberPrev",
+    "memberNext",
+  ])
+    $(id).disabled = true;
+  if (symbol) {
+    message("stockStatus", "正在从同一D1全池事实读取所选个股…");
+    $("stockContent").replaceChildren();
+  }
+}
+async function loadD1Material(symbol = null) {
+  if (!state.selected || state.selected.mode !== "D1_MATERIAL") {
+    $("contextDialog").showModal();
+    return;
+  }
+  const token = ++d1MaterialState.request;
+  d1MaterialState.controller?.abort();
+  const controller = new AbortController();
+  d1MaterialState.controller = controller;
+  const hadFacts = Boolean(d1MaterialState.data);
+  d1MaterialState.data = null;
+  d1MaterialState.startedAt = performance.now();
+  const requestStartedAt = d1MaterialState.startedAt;
+  clearD1MaterialView(symbol);
+  $("refreshResearch").disabled = true;
+  const body = buildD1MaterialRequest(
+    state.selected,
+    d1MaterialState.board,
+    {
+      board: d1MaterialState.boardOffset,
+      member: d1MaterialState.memberOffset,
+      stock: d1MaterialState.stockOffset,
+    },
+    symbol,
+  );
+  setD1MaterialStatus(
+    hadFacts
+      ? "正在将结构、原因、板块与股票筛选应用到已计算的同一D1事实…"
+      : "正在读取完整来源池D1材料变化。首次计算可能需要数分钟，页面不会显示缩小后的来源池结果。",
+  );
+  message(
+    "observationLabel",
+    hadFacts ? "正在复用已计算的完整来源池…" : "正在计算完整来源池，请稍候…",
+  );
+  const timer = window.setInterval(() => {
+    if (token !== d1MaterialState.request) return;
+    const seconds = Math.floor(
+      (performance.now() - d1MaterialState.startedAt) / 1000,
+    );
+    setD1MaterialStatus(
+      `完整来源池仍在读取，已等待 ${seconds} 秒；筛选和分页不会裁剪来源池或另起扫描。`,
+    );
+  }, 1000);
+  try {
+    const data = await requestD1Material(body, controller.signal);
+    if (token !== d1MaterialState.request) return;
+    const responseSeconds = (performance.now() - requestStartedAt) / 1000;
+    const renderStartedAt = performance.now();
+    d1MaterialState.data = data;
+    state.data = data;
+    renderD1MaterialMarket(data, openD1Board, openD1Stock);
+    renderD1Boards(data, openD1Board);
+    renderD1Stocks(data, openD1Stock);
+    renderD1Members(data, openD1Stock);
+    const renderSeconds = (performance.now() - renderStartedAt) / 1000;
+    const execution = data.execution || {};
+    const scan = execution.d1_full_pool_scan_passes || 0;
+    const scanSeconds = execution.d1_full_pool_scan_wall_seconds;
+    setD1MaterialStatus(
+      execution.reused_process_d1_material_facts
+        ? `已复用同进程完整事实 · 本次全池扫描 ${scan} 次 · 首次扫描 ${scanSeconds ?? "—"} 秒 · 服务处理 ${execution.http_request_wall_seconds ?? "—"} 秒 · 请求往返/JSON ${responseSeconds.toFixed(3)} 秒 · 页面渲染 ${renderSeconds.toFixed(3)} 秒。`
+        : `全池计算完成 · 扫描 ${scan} 次 · 耗时 ${scanSeconds ?? "—"} 秒 · 请求往返/JSON ${responseSeconds.toFixed(3)} 秒 · 页面渲染 ${renderSeconds.toFixed(3)} 秒；后续筛选与分页复用同一事实。`,
+    );
+    message(
+      "observationLabel",
+      `${data.target_session} · ${data.d1_history_session_count} 个官方会话 · D1材料变化 · 全池扫描 ${scan} 次`,
+    );
+    if (symbol) renderD1StockDetail(data.selected_stock);
+  } catch (error) {
+    if (token !== d1MaterialState.request || error.name === "AbortError")
+      return;
+    d1MaterialState.data = null;
+    state.data = null;
+    setD1MaterialStatus(
+      `读取失败：${error.message}。可修正筛选或来源代码后重新读取。`,
+    );
+    message("observationLabel", `D1材料读取失败：${error.message}`);
+    if (symbol) {
+      message("stockStatus", `个股材料读取失败：${error.message}`);
+      $("stockContent").replaceChildren(
+        node("p", "修正来源代码或研究范围后可重新读取。", "rule"),
+      );
+    }
+    for (const id of ["overviewBoards", "overviewStocks", "stockList"])
+      message(id, "读取失败；不能据此推断没有变化或正式未入选。");
+  } finally {
+    window.clearInterval(timer);
+    if (token === d1MaterialState.request)
+      $("refreshResearch").disabled = false;
+  }
+}
+for (const id of ["d1StructureType", "d1MaterialReason"])
+  $(id).addEventListener("change", () => {
+    d1MaterialState.boardOffset = 0;
+    d1MaterialState.stockOffset = 0;
+    d1MaterialState.memberOffset = 0;
+    if (state.selected?.mode === "D1_MATERIAL") void loadD1Material();
+  });
 async function loadResearch() {
   if (!state.selected) {
     $("contextDialog").showModal();
+    return;
+  }
+  if (state.selected.mode === "D1_MATERIAL") {
+    await loadD1Material();
     return;
   }
   const token = ++state.request;
@@ -755,40 +977,88 @@ function renderMembers(detail) {
   $("memberNext").disabled = page.next_offset == null;
 }
 $("boardPrev").addEventListener("click", () => {
+  if (state.selected?.mode === "D1_MATERIAL") {
+    d1MaterialState.boardOffset = Math.max(0, d1MaterialState.boardOffset - 15);
+    void loadD1Material();
+    return;
+  }
   state.boardOffset = Math.max(0, state.boardOffset - 15);
   loadResearch();
 });
 $("boardNext").addEventListener("click", () => {
+  if (state.selected?.mode === "D1_MATERIAL") {
+    d1MaterialState.boardOffset += 15;
+    void loadD1Material();
+    return;
+  }
   state.boardOffset += 15;
   loadResearch();
 });
 $("stockPrev").addEventListener("click", () => {
+  if (state.selected?.mode === "D1_MATERIAL") {
+    d1MaterialState.stockOffset = Math.max(0, d1MaterialState.stockOffset - 30);
+    void loadD1Material();
+    return;
+  }
   state.stockOffset = Math.max(0, state.stockOffset - 30);
   loadResearch();
 });
 $("stockNext").addEventListener("click", () => {
+  if (state.selected?.mode === "D1_MATERIAL") {
+    d1MaterialState.stockOffset += 30;
+    void loadD1Material();
+    return;
+  }
   state.stockOffset += 30;
   loadResearch();
 });
 $("memberPrev").addEventListener("click", () => {
+  if (state.selected?.mode === "D1_MATERIAL") {
+    d1MaterialState.memberOffset = Math.max(
+      0,
+      d1MaterialState.memberOffset - 30,
+    );
+    void loadD1Material();
+    return;
+  }
   state.memberOffset = Math.max(0, state.memberOffset - 30);
   loadResearch();
 });
 $("memberNext").addEventListener("click", () => {
+  if (state.selected?.mode === "D1_MATERIAL") {
+    d1MaterialState.memberOffset += 30;
+    void loadD1Material();
+    return;
+  }
   state.memberOffset += 30;
   loadResearch();
 });
 $("searchMembers").addEventListener("click", () => {
+  if (state.selected?.mode === "D1_MATERIAL") {
+    d1MaterialState.memberOffset = 0;
+    void loadD1Material();
+    return;
+  }
   state.memberOffset = 0;
   loadResearch();
 });
 $("memberState").addEventListener("change", () => {
+  if (state.selected?.mode === "D1_MATERIAL") {
+    d1MaterialState.memberOffset = 0;
+    void loadD1Material();
+    return;
+  }
   state.memberOffset = 0;
   loadResearch();
 });
 $("memberSearch").addEventListener("keydown", (e) => {
   if (e.key === "Enter") {
     e.preventDefault();
+    if (state.selected?.mode === "D1_MATERIAL") {
+      d1MaterialState.memberOffset = 0;
+      void loadD1Material();
+      return;
+    }
     state.memberOffset = 0;
     loadResearch();
   }
@@ -796,14 +1066,28 @@ $("memberSearch").addEventListener("keydown", (e) => {
 $("boardDialog").addEventListener("close", () => {
   state.board = null;
   state.memberOffset = 0;
+  d1MaterialState.board = null;
+  d1MaterialState.memberOffset = 0;
 });
 for (const id of ["boardKind", "changedOnly"])
   $(id).addEventListener("change", () => {
+    if (state.selected?.mode === "D1_MATERIAL") {
+      d1MaterialState.boardOffset = 0;
+      d1MaterialState.board = null;
+      void loadD1Material();
+      return;
+    }
     state.boardOffset = 0;
     state.board = null;
     loadResearch();
   });
 $("searchBoards").addEventListener("click", () => {
+  if (state.selected?.mode === "D1_MATERIAL") {
+    d1MaterialState.boardOffset = 0;
+    d1MaterialState.board = null;
+    void loadD1Material();
+    return;
+  }
   state.boardOffset = 0;
   state.board = null;
   loadResearch();
@@ -882,6 +1166,10 @@ async function openStock(symbol, row = {}) {
     : null;
   if (!state.selected) {
     $("contextDialog").showModal();
+    return;
+  }
+  if (state.selected.mode === "D1_MATERIAL") {
+    openD1Stock(symbol, row);
     return;
   }
   if (/^BJ\.\d{6}$/.test(symbol) && row.change_state) {

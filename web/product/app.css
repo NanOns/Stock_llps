@@ -847,6 +847,46 @@ td.empty {
   display: none !important;
 }
 
+.d1-material-filters {
+  display: flex;
+  align-items: end;
+  gap: 14px;
+  flex-wrap: wrap;
+  margin: -12px 0 20px;
+  padding: 14px 16px;
+  border: 1px solid #dce4e1;
+  border-radius: 12px;
+  background: #fff;
+}
+.d1-material-filters label {
+  display: grid;
+  gap: 6px;
+  color: #60736f;
+  font-size: 12px;
+}
+.d1-material-filters select {
+  min-width: 210px;
+  min-height: 38px;
+  padding: 0 10px;
+  border: 1px solid #dce4e1;
+  border-radius: 8px;
+  background: #fff;
+  color: #17292e;
+}
+#d1MaterialStatus {
+  flex: 1 1 320px;
+  align-self: center;
+  color: var(--muted);
+  font-size: 13px;
+}
+.d1-material-quality {
+  margin: -10px 0 20px;
+  padding: 10px 14px;
+  border-left: 3px solid #c8794e;
+  color: #60736f;
+  font-size: 13px;
+}
+
 #focus .card,
 #diagnostics .card,
 #market .card {

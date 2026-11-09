@@ -22,6 +22,15 @@ from stock_a.application.source_market_context import (
     read_source_market_context,
     source_market_context_payload,
 )
+from stock_a.application.source_market_observation import (
+    SourceObservationError,
+    prepare_d1_material_observation,
+    read_d1_material_observation,
+)
+from stock_a.application.source_d1_structures import (
+    MATERIAL_CHANGE_REASONS,
+    STRUCTURE_TYPES,
+)
 from stock_a.application.source_persisted_research import (
     ResearchSymbolNotFound,
     read_persisted_cohort,
@@ -130,6 +139,7 @@ _DIAGNOSTIC_ROUTES = frozenset(
         "/api/product/cohort-keys",
         "/api/product/cohort",
         "/api/product/market",
+        "/api/product/d1-material",
         "/api/source-symbol-price-profile-breadth-members",
         "/api/source-symbol-price-profile-breadth",
         "/api/source-symbol-price-profile-changes",
@@ -267,6 +277,16 @@ def _nonnegative_int(value: str | None, field: str, maximum: int = _MAX_OFFSET) 
     if parsed > maximum:
         raise PreviewHttpError(400, "PREVIEW_PARAMETER_INVALID", f"{field}超过允许上限")
     return parsed
+
+
+def _d1_material_int(value: Any, field: str, minimum: int, maximum: int) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise PreviewHttpError(
+            400,
+            "D1_MATERIAL_PARAMETER_INVALID",
+            f"{field}必须为{minimum}至{maximum}的整数",
+        )
+    return value
 
 
 def _ratio_decimal(value: str | None, field: str) -> Decimal | None:
@@ -527,6 +547,47 @@ class _PreviewState:
         self.source_pool_rps_cache_result: dict[str, Any] | None = None
         self.source_pool_rps_cache_expires_at = 0.0
         self.source_pool_rps_inflight: dict[tuple[Any, ...], threading.Event] = {}
+        self.d1_material_cache_lock = threading.Lock()
+        self.d1_material_cache_key: tuple[Any, ...] | None = None
+        self.d1_material_cache_facts: dict[str, Any] | None = None
+        self.d1_material_inflight: threading.Event | None = None
+
+    def source_d1_material_facts(
+        self, cache_key: tuple[Any, ...], factory: Any
+    ) -> tuple[dict[str, Any], bool]:
+        """串行准备并复用一份精确绑定的D1全池材料事实。"""
+        while True:
+            with self.d1_material_cache_lock:
+                if (
+                    self.d1_material_cache_key == cache_key
+                    and self.d1_material_cache_facts is not None
+                ):
+                    return self.d1_material_cache_facts, True
+                event = self.d1_material_inflight
+                if event is None:
+                    event = threading.Event()
+                    self.d1_material_inflight = event
+                    owner = True
+                else:
+                    owner = False
+            if not owner:
+                event.wait()
+                continue
+            try:
+                facts = factory()
+            except BaseException:
+                with self.d1_material_cache_lock:
+                    if self.d1_material_inflight is event:
+                        self.d1_material_inflight = None
+                    event.set()
+                raise
+            with self.d1_material_cache_lock:
+                self.d1_material_cache_key = cache_key
+                self.d1_material_cache_facts = facts
+                if self.d1_material_inflight is event:
+                    self.d1_material_inflight = None
+                event.set()
+            return facts, False
 
     def source_pool_rps(
         self, cache_key: tuple[Any, ...], factory: Any
@@ -1361,6 +1422,277 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "dml_executed": False,
             },
         }
+
+    def _d1_material(self, body: Any) -> dict[str, Any]:
+        required = {
+            "target_session",
+            "research_cutoff",
+            "package_sha256",
+            "d1_history_session_count",
+            "industry_snapshot_id",
+            "concept_snapshot_id",
+        }
+        optional = {
+            "structure_type",
+            "material_change_reason",
+            "board_kind",
+            "board_native_id",
+            "symbol",
+            "board_offset",
+            "member_offset",
+            "stock_offset",
+            "board_limit",
+            "member_limit",
+            "stock_limit",
+            "board_search",
+            "member_search",
+            "member_group",
+        }
+        if (
+            not isinstance(body, dict)
+            or set(body) - required - optional
+            or not (required <= set(body))
+        ):
+            raise PreviewHttpError(
+                400,
+                "D1_MATERIAL_REQUEST_FIELDS_INVALID",
+                "D1材料请求字段不完整或含未登记字段",
+            )
+        target = _iso_date(body["target_session"])
+        cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
+        _require_research_cutoff(cutoff, self.preview_server.state.research_cutoff)
+        _require_research_cutoff(target, cutoff)
+        package_sha = _sha(body["package_sha256"])
+        d1_history_session_count = _d1_material_int(
+            body["d1_history_session_count"],
+            "d1_history_session_count",
+            1,
+            _MAX_OFFSET,
+        )
+        snapshots = {}
+        for field in ("industry_snapshot_id", "concept_snapshot_id"):
+            value = body[field]
+            try:
+                parsed_id = str(UUID(value))
+            except (ValueError, TypeError, AttributeError) as error:
+                raise PreviewHttpError(
+                    400,
+                    "D1_MATERIAL_SNAPSHOT_ID_INVALID",
+                    f"{field}必须是有效成员快照UUID",
+                ) from error
+            snapshots[field] = parsed_id
+        if snapshots["industry_snapshot_id"] == snapshots["concept_snapshot_id"]:
+            raise PreviewHttpError(
+                400,
+                "D1_MATERIAL_SNAPSHOT_IDS_NOT_DISTINCT",
+                "行业与GN成员快照必须是两个不同的记录",
+            )
+
+        structure_type = body.get("structure_type") or None
+        if structure_type == "ALL":
+            structure_type = None
+        if structure_type is not None and (
+            not isinstance(structure_type, str) or structure_type not in STRUCTURE_TYPES
+        ):
+            raise PreviewHttpError(
+                400, "D1_MATERIAL_STRUCTURE_TYPE_INVALID", "D1结构类型筛选值无效"
+            )
+        material_change_reason = body.get("material_change_reason") or None
+        if material_change_reason == "ALL":
+            material_change_reason = None
+        if material_change_reason is not None and (
+            not isinstance(material_change_reason, str)
+            or material_change_reason not in MATERIAL_CHANGE_REASONS
+        ):
+            raise PreviewHttpError(
+                400, "D1_MATERIAL_REASON_INVALID", "D1材料变化原因筛选值无效"
+            )
+        board_kind = body.get("board_kind") or None
+        if board_kind == "ALL":
+            board_kind = None
+        if board_kind is not None and (
+            not isinstance(board_kind, str) or board_kind not in {"INDUSTRY", "CONCEPT"}
+        ):
+            raise PreviewHttpError(
+                400, "D1_MATERIAL_BOARD_KIND_INVALID", "板块类型筛选值无效"
+            )
+        board_native_id = body.get("board_native_id") or None
+        if board_native_id is not None:
+            board_native_id = str(board_native_id).strip()
+            if not board_kind or not board_native_id or len(board_native_id) > 128:
+                raise PreviewHttpError(
+                    400,
+                    "D1_MATERIAL_BOARD_ID_INVALID",
+                    "精确板块下钻必须同时指定板块类型和编号",
+                )
+        symbol = body.get("symbol") or None
+        if symbol is not None:
+            symbol = _symbol(symbol)
+        page_values = {}
+        for name, default in (
+            ("board_offset", 0),
+            ("member_offset", 0),
+            ("stock_offset", 0),
+        ):
+            page_values[name] = _d1_material_int(
+                body.get(name, default), name, 0, _MAX_OFFSET
+            )
+        for name, default in (
+            ("board_limit", 15),
+            ("member_limit", 30),
+            ("stock_limit", 30),
+        ):
+            page_values[name] = _d1_material_int(
+                body.get(name, default), name, 1, _MAX_PAGE_SIZE
+            )
+        text_values = {}
+        for name in ("board_search", "member_search"):
+            value = body.get(name)
+            if value is not None and not isinstance(value, str):
+                raise PreviewHttpError(
+                    400, "D1_MATERIAL_SEARCH_INVALID", "D1搜索条件必须是文本"
+                )
+            value = value.strip() if value else ""
+            if len(value) > 120:
+                raise PreviewHttpError(
+                    400, "D1_MATERIAL_SEARCH_INVALID", "D1搜索文本最多120个字符"
+                )
+            text_values[name] = value or None
+        member_group = body.get("member_group") or None
+        if member_group == "ALL":
+            member_group = None
+        allowed_groups = {
+            "MATERIAL_CHANGE",
+            "NO_SELECTED_REASON",
+            "KNOWN_NON_MATERIAL",
+            "UNKNOWN",
+            "NOT_COMPARABLE",
+            "NOT_EVALUABLE",
+            "NOT_APPLICABLE",
+            "NO_PROVED_ANCHOR",
+            "NOT_IN_SOURCE_POOL",
+        }
+        if member_group is not None and (
+            not isinstance(member_group, str) or member_group not in allowed_groups
+        ):
+            raise PreviewHttpError(
+                400, "D1_MATERIAL_MEMBER_GROUP_INVALID", "板块成员状态筛选值无效"
+            )
+
+        cache_key = (
+            target.isoformat(),
+            cutoff.isoformat(),
+            package_sha,
+            d1_history_session_count,
+            snapshots["industry_snapshot_id"],
+            snapshots["concept_snapshot_id"],
+            "SOURCE_D1_STRUCTURE_MATERIAL_CHANGE_R1",
+        )
+        request_started = time.perf_counter()
+        try:
+            prepared, cache_hit = self.preview_server.state.source_d1_material_facts(
+                cache_key,
+                lambda: prepare_d1_material_observation(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    research_cutoff=cutoff,
+                    package_sha256=package_sha,
+                    d1_history_session_count=d1_history_session_count,
+                    industry_snapshot_id=snapshots["industry_snapshot_id"],
+                    concept_snapshot_id=snapshots["concept_snapshot_id"],
+                ),
+            )
+            result = read_d1_material_observation(
+                self.preview_server.state.config,
+                target_session=target,
+                research_cutoff=cutoff,
+                package_sha256=package_sha,
+                d1_history_session_count=d1_history_session_count,
+                industry_snapshot_id=snapshots["industry_snapshot_id"],
+                concept_snapshot_id=snapshots["concept_snapshot_id"],
+                structure_type=structure_type,
+                material_change_reason=material_change_reason,
+                board_kind=board_kind,
+                board_native_id=board_native_id,
+                symbol=symbol,
+                offset=0,
+                limit=30,
+                prepared_facts=prepared,
+                board_offset=page_values["board_offset"],
+                member_offset=page_values["member_offset"],
+                stock_offset=page_values["stock_offset"],
+                board_limit=page_values["board_limit"],
+                member_limit=page_values["member_limit"],
+                stock_limit=page_values["stock_limit"],
+                board_search=text_values["board_search"],
+                member_search=text_values["member_search"],
+                member_group=member_group,
+            )
+        except SourceObservationError as error:
+            raise PreviewHttpError(409, error.code, str(error)) from error
+
+        d1 = prepared["d1"]
+        full_scan_passes = (
+            0 if cache_hit else d1["execution"].get("full_pool_scan_passes", 1)
+        )
+        payload = {
+            "ok": True,
+            "view": result["view"],
+            "scope": result["scope"],
+            "qualification_scope": result["qualification_scope"],
+            "target_session": result["target_session"],
+            "research_cutoff": result["research_cutoff"],
+            "package_sha256": result["package_sha256"],
+            "profile_revision": result["profile_revision"],
+            "d1_history_session_count": result["d1_history_session_count"],
+            "d1_history_start": result["d1_history_start"],
+            "d1_history_end": result["d1_history_end"],
+            "source": {
+                key: result["source"].get(key)
+                for key in (
+                    "namespace_id",
+                    "package_sha256",
+                    "raw_row_count",
+                    "capture_expected_row_count",
+                    "capture_read_started_at",
+                    "capture_validated_at",
+                    "source_time_quality",
+                    "source_clock_role",
+                )
+            },
+            "snapshots": result["snapshots"],
+            "market": result["market"],
+            "boards": {
+                key: value
+                for key, value in result["boards"].items()
+                if key not in {"selected_material_stocks"}
+            },
+            "stocks": result["stocks"],
+            "selected_structure_type": result["selected_structure_type"],
+            "selected_material_change_reason": result[
+                "selected_material_change_reason"
+            ],
+            "selection_scope": result["selection_scope"],
+            "selected_stock": result["selected_stock"],
+            "d1": {
+                "status": result["d1"]["status"],
+                "contract": result["d1"]["contract"],
+                "research_mode": result["d1"]["research_mode"],
+                "price_coordinate": result["d1"]["price_coordinate"],
+                "formal_downstream": result["d1"]["formal_downstream"],
+            },
+            "outcome_comparison": result["outcome_comparison"],
+            "execution": {
+                **result["execution"],
+                "d1_full_pool_scan_passes": full_scan_passes,
+                "d1_full_pool_scan_wall_seconds": d1["execution"].get("wall_seconds"),
+                "reused_process_d1_material_facts": cache_hit,
+                "http_request_wall_seconds": round(
+                    time.perf_counter() - request_started, 6
+                ),
+            },
+        }
+        return payload
 
     def _sector_change_stocks(self, body: Any) -> dict[str, Any]:
         required = {
@@ -3024,6 +3356,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "/api/preview/stock-timeline",
             "/api/preview/source-launch-watch",
             "/api/preview/sector-change-stocks",
+            "/api/product/d1-material",
         }:
             self._error(
                 PreviewHttpError(
@@ -3039,6 +3372,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     400,
                     "SOURCE_LAUNCH_WATCH_QUERY_REJECTED",
                     "来源级变化观察POST只接受JSON请求体，不接受查询参数",
+                )
+            )
+            return
+        if post_path == "/api/product/d1-material" and self.path != post_path:
+            self._error(
+                PreviewHttpError(
+                    400,
+                    "D1_MATERIAL_QUERY_REJECTED",
+                    "D1材料观察POST只接受JSON请求体，不接受查询参数",
                 )
             )
             return
@@ -3099,6 +3441,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 ) from error
             if post_path == "/api/preview/source-launch-watch":
                 self._send_json(200, self._source_launch_watch(body))
+                return
+            if post_path == "/api/product/d1-material":
+                self._send_json(200, self._d1_material(body))
                 return
             if post_path == "/api/preview/sector-change-stocks":
                 self._send_json(200, self._sector_change_stocks(body))

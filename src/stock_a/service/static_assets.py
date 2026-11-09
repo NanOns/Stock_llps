@@ -11,6 +11,11 @@ _ASSET_TYPES = {
     "index.html": "text/html; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
+    "api.js": "text/javascript; charset=utf-8",
+    "state.js": "text/javascript; charset=utf-8",
+    "market.js": "text/javascript; charset=utf-8",
+    "sectors.js": "text/javascript; charset=utf-8",
+    "stocks.js": "text/javascript; charset=utf-8",
 }
 _STATIC_ROUTES = MappingProxyType(
     {

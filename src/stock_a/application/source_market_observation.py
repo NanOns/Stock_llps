@@ -1044,6 +1044,61 @@ def _d1_material_board_summaries(
     return board_rows, mapped_by_kind
 
 
+def _d1_material_board_member_page(
+    snapshots: list[dict[str, Any]],
+    source_symbol_summaries: Mapping[str, Mapping[str, Any]],
+    *,
+    board_kind: str,
+    board_native_id: str,
+    offset: int,
+    limit: int,
+    member_search: str | None,
+    member_group: str | None,
+) -> tuple[int, list[dict[str, Any]]]:
+    """按同一D1筛选口径展示板块全部当前成员及来源池状态。"""
+    snapshot = next(
+        (item for item in snapshots if item["board_kind"] == board_kind), None
+    )
+    board = snapshot["boards"].get(board_native_id) if snapshot else None
+    if board is None:
+        raise SourceObservationError("所选精确板块不在当前成员快照中")
+    search = member_search.strip().upper() if member_search else None
+    groups = {
+        "MATERIAL_CHANGE",
+        "NO_SELECTED_REASON",
+        "KNOWN_NON_MATERIAL",
+        "UNKNOWN",
+        "NOT_COMPARABLE",
+        "NOT_EVALUABLE",
+        "NOT_APPLICABLE",
+        "NO_PROVED_ANCHOR",
+        "NOT_IN_SOURCE_POOL",
+    }
+    if member_group and member_group not in groups:
+        raise SourceObservationError("板块成员D1状态筛选值无效")
+    members = []
+    for symbol in sorted(board["members"]):
+        if search and search not in symbol:
+            continue
+        summary = source_symbol_summaries.get(symbol)
+        group = summary["group"] if summary else "NOT_IN_SOURCE_POOL"
+        if member_group and group != member_group:
+            continue
+        members.append(
+            {
+                "source_symbol": symbol,
+                "source_pool_status": (
+                    "AVAILABLE" if summary else "NOT_IN_TARGET_SOURCE_POOL"
+                ),
+                "material_group": group,
+                "selected_scope_summary": summary,
+                "formal_eligibility": "UNKNOWN/NOT_EVALUATED",
+                "membership_status": "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT",
+            }
+        )
+    return len(members), members[offset : offset + limit]
+
+
 def _d1_material_scope_summaries(
     source_symbol_summaries: Mapping[str, Mapping[str, Any]],
     *,
@@ -1469,6 +1524,53 @@ def _d1_material_outcomes(
     }
 
 
+def prepare_d1_material_observation(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    package_sha256: str,
+    d1_history_session_count: int,
+    industry_snapshot_id: str,
+    concept_snapshot_id: str,
+) -> dict[str, Any]:
+    """一次只读准备全池D1与成员事实，供同进程筛选分页复用。"""
+    _target, sessions, calendar_revision = resolve_pg_history_window(
+        target_session.isoformat(), d1_history_session_count
+    )
+    d1 = discover_source_d1_structures(
+        config,
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        sessions=sessions,
+        package_sha256=package_sha256,
+        offset=0,
+        limit=1,
+        structure_changes=True,
+        material_changes_only=True,
+        include_source_symbol_change_summary=True,
+        include_source_symbol_d1_details=True,
+    )
+    snapshots = [
+        read_rotation_snapshot_members(config, snapshot_id=snapshot_id, board_kind=kind)
+        for kind, snapshot_id in (
+            ("INDUSTRY", industry_snapshot_id),
+            ("CONCEPT", concept_snapshot_id),
+        )
+    ]
+    if any(
+        snapshot["namespace_id"] != d1["source"]["namespace_id"]
+        for snapshot in snapshots
+    ):
+        raise SourceObservationError("板块当前成员快照与D1来源namespace不一致")
+    return {
+        "d1": d1,
+        "sessions": sessions,
+        "calendar_revision": calendar_revision,
+        "snapshots": snapshots,
+    }
+
+
 def read_d1_material_observation(
     config: Mapping[str, Any],
     *,
@@ -1486,27 +1588,69 @@ def read_d1_material_observation(
     symbol: str | None = None,
     offset: int = 0,
     limit: int = 30,
+    prepared_facts: Mapping[str, Any] | None = None,
+    board_offset: int | None = None,
+    member_offset: int | None = None,
+    stock_offset: int | None = None,
+    board_limit: int | None = None,
+    member_limit: int | None = None,
+    stock_limit: int | None = None,
+    board_search: str | None = None,
+    member_search: str | None = None,
+    member_group: str | None = None,
 ) -> dict[str, Any]:
     """单次全池D1后生成市场、当前板块与股票研究视图。"""
     started_wall = time.perf_counter()
-    _target, sessions, _calendar_revision = resolve_pg_history_window(
-        target_session.isoformat(), d1_history_session_count
-    )
-    d1 = discover_source_d1_structures(
-        config,
-        target_session=target_session,
-        research_cutoff=research_cutoff,
-        sessions=sessions,
-        package_sha256=package_sha256,
-        offset=offset,
-        limit=limit,
-        structure_symbol=symbol,
-        structure_changes=True,
-        structure_type=structure_type,
-        material_change_reason=material_change_reason,
-        material_changes_only=True,
-        include_source_symbol_change_summary=True,
-    )
+    board_offset = offset if board_offset is None else board_offset
+    member_offset = offset if member_offset is None else member_offset
+    stock_offset = offset if stock_offset is None else stock_offset
+    board_limit = limit if board_limit is None else board_limit
+    member_limit = limit if member_limit is None else member_limit
+    stock_limit = limit if stock_limit is None else stock_limit
+    if any(
+        type(value) is not int or value < 0
+        for value in (offset, board_offset, member_offset, stock_offset)
+    ) or any(
+        type(value) is not int or not 1 <= value <= 100
+        for value in (limit, board_limit, member_limit, stock_limit)
+    ):
+        raise SourceObservationError("D1材料分页参数无效")
+    if (board_search and len(board_search) > 120) or (
+        member_search and len(member_search) > 120
+    ):
+        raise SourceObservationError("D1板块或成员搜索文本过长")
+    if prepared_facts is None:
+        _target, sessions, _calendar_revision = resolve_pg_history_window(
+            target_session.isoformat(), d1_history_session_count
+        )
+        d1 = discover_source_d1_structures(
+            config,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            sessions=sessions,
+            package_sha256=package_sha256,
+            offset=offset,
+            limit=limit,
+            structure_symbol=symbol,
+            structure_changes=True,
+            structure_type=structure_type,
+            material_change_reason=material_change_reason,
+            material_changes_only=True,
+            include_source_symbol_change_summary=True,
+        )
+        snapshots = [
+            read_rotation_snapshot_members(
+                config, snapshot_id=snapshot_id, board_kind=kind
+            )
+            for kind, snapshot_id in (
+                ("INDUSTRY", industry_snapshot_id),
+                ("CONCEPT", concept_snapshot_id),
+            )
+        ]
+    else:
+        sessions = prepared_facts["sessions"]
+        d1 = prepared_facts["d1"]
+        snapshots = prepared_facts["snapshots"]
     changes = d1["historical_anchor_changes"]
     all_type_source_symbol_summary = changes.get("source_symbol_material_summary")
     if (
@@ -1527,13 +1671,6 @@ def read_d1_material_observation(
         else projected_source_symbol_summary
     )
 
-    snapshots = [
-        read_rotation_snapshot_members(config, snapshot_id=snapshot_id, board_kind=kind)
-        for kind, snapshot_id in (
-            ("INDUSTRY", industry_snapshot_id),
-            ("CONCEPT", concept_snapshot_id),
-        )
-    ]
     if any(
         snapshot["namespace_id"] != d1["source"]["namespace_id"]
         for snapshot in snapshots
@@ -1546,19 +1683,64 @@ def read_d1_material_observation(
     )
     if board_kind is not None:
         board_rows = [row for row in board_rows if row["board_kind"] == board_kind]
-    if board_native_id is not None:
+    if board_search:
+        needle = board_search.strip().upper()
         board_rows = [
-            row for row in board_rows if row["board_native_id"] == board_native_id
+            row
+            for row in board_rows
+            if needle in row["board_name"].upper()
+            or needle in row["board_native_id"].upper()
         ]
-        if not board_rows:
+    selected_board = None
+    if board_native_id is not None:
+        selected_board = next(
+            (
+                row
+                for row in board_rows
+                if row["board_kind"] == board_kind
+                and row["board_native_id"] == board_native_id
+            ),
+            None,
+        )
+        if selected_board is None:
             raise SourceObservationError("所选精确板块不在当前成员快照中")
-    selected_board = board_rows[0] if board_native_id is not None else None
-    board_page = board_rows[offset : offset + limit]
+    board_page = board_rows[board_offset : board_offset + board_limit]
     member_page = (
-        selected_board["material_change_stocks"][offset : offset + limit]
+        selected_board["material_change_stocks"][
+            member_offset : member_offset + member_limit
+        ]
         if selected_board is not None
         else []
     )
+    selected_members = []
+    selected_member_count = 0
+    if selected_board is not None:
+        selected_member_count, selected_members = _d1_material_board_member_page(
+            snapshots,
+            source_symbol_summary,
+            board_kind=selected_board["board_kind"],
+            board_native_id=selected_board["board_native_id"],
+            offset=member_offset,
+            limit=member_limit,
+            member_search=member_search,
+            member_group=member_group,
+        )
+    stock_rows = [
+        {
+            "source_symbol": source_symbol,
+            **summary,
+            "formal_eligibility": "UNKNOWN/NOT_EVALUATED",
+        }
+        for source_symbol, summary in source_symbol_summary.items()
+        if summary["group"] == "MATERIAL_CHANGE"
+    ]
+    stock_rows.sort(
+        key=lambda row: (
+            -row["material_change_anchor_count"],
+            row["source_symbol"],
+        )
+    )
+    stock_page = stock_rows[stock_offset : stock_offset + stock_limit]
 
     group_counts = Counter(item["group"] for item in source_symbol_summary.values())
     if sum(group_counts.values()) != d1["source_pool_count"]:
@@ -1674,6 +1856,41 @@ def read_d1_material_observation(
         all_type_source_symbol_summary.get(symbol) if symbol is not None else None
     )
     selected_stock_detail = d1.get("selected_source_symbol_detail")
+    if prepared_facts is not None and symbol is not None:
+        material_details = changes.get("source_symbol_d1_details") or {}
+        all_stock_changes = material_details.get(symbol, [])
+        selected_stock_detail = {
+            "source_symbol": symbol,
+            "status": (
+                "AVAILABLE"
+                if symbol in all_type_source_symbol_summary
+                else "NOT_IN_TARGET_SOURCE_POOL"
+            ),
+            "historical_change_detail": {
+                "status": (
+                    "AVAILABLE"
+                    if symbol in all_type_source_symbol_summary
+                    else "NOT_IN_TARGET_SOURCE_POOL"
+                ),
+                "anchor_changes": all_stock_changes,
+                "filtered_anchor_changes": [
+                    item
+                    for item in all_stock_changes
+                    if (structure_type is None or item["type"] == structure_type)
+                    and (
+                        material_change_reason is None
+                        or material_change_reason in item["material_change_reasons"]
+                    )
+                ],
+                "quality_anchor_changes": [
+                    item
+                    for item in all_stock_changes
+                    if item["material_change_classification"]
+                    in {"UNKNOWN", "NOT_COMPARABLE", "NOT_EVALUABLE"}
+                    and (structure_type is None or item["type"] == structure_type)
+                ],
+            },
+        }
     selected_stock = None
     if symbol is not None:
         memberships = []
@@ -1760,10 +1977,14 @@ def read_d1_material_observation(
             for snapshot in snapshots
         ],
         "boards": {
-            "offset": offset,
-            "limit": limit,
+            "offset": board_offset,
+            "limit": board_limit,
             "total_count": len(board_rows),
-            "next_offset": offset + limit if offset + limit < len(board_rows) else None,
+            "next_offset": (
+                board_offset + board_limit
+                if board_offset + board_limit < len(board_rows)
+                else None
+            ),
             "summaries": [
                 {
                     key: value
@@ -1787,6 +2008,26 @@ def read_d1_material_observation(
             )
             if selected_board
             else 0,
+            "selected_member_count": selected_member_count,
+            "selected_members": selected_members,
+            "member_offset": member_offset,
+            "member_limit": member_limit,
+            "member_next_offset": (
+                member_offset + member_limit
+                if member_offset + member_limit < selected_member_count
+                else None
+            ),
+        },
+        "stocks": {
+            "offset": stock_offset,
+            "limit": stock_limit,
+            "total_count": len(stock_rows),
+            "next_offset": (
+                stock_offset + stock_limit
+                if stock_offset + stock_limit < len(stock_rows)
+                else None
+            ),
+            "results": stock_page,
         },
         "selected_structure_type": structure_type or "ALL",
         "selected_material_change_reason": material_change_reason or "ALL",

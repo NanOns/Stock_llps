@@ -1209,6 +1209,7 @@ def discover_source_d1_structures(
     structure_change_status: str | None = None,
     material_changes_only: bool = False,
     include_source_symbol_change_summary: bool = False,
+    include_source_symbol_d1_details: bool = False,
 ) -> dict[str, Any]:
     """一遍完整扫描目标日Raw池，统计五种D1结构并按事件分页。"""
     started_wall = time.perf_counter()
@@ -1229,6 +1230,8 @@ def discover_source_d1_structures(
         or type(structure_changes) is not bool
         or type(material_changes_only) is not bool
         or type(include_source_symbol_change_summary) is not bool
+        or type(include_source_symbol_d1_details) is not bool
+        or (include_source_symbol_d1_details and not structure_changes)
         or (structure_type is not None and structure_type not in STRUCTURE_TYPES)
         or (
             material_change_reason is not None
@@ -1331,6 +1334,7 @@ def discover_source_d1_structures(
     changed_source_symbols: set[str] = set()
     material_change_source_symbols: set[str] = set()
     source_symbol_change_summaries: dict[str, dict[str, Any]] = {}
+    source_symbol_d1_details: dict[str, list[dict[str, Any]]] = {}
     range_history_status_counts = {kind: Counter() for kind in sorted(_RANGE_TYPES)}
     structure_core_preview_count = 0
     structure_timeline_candidate_count = 0
@@ -1579,6 +1583,14 @@ def discover_source_d1_structures(
                 source_symbol_change_summaries[candidate["source_symbol"]] = (
                     symbol_change_summary
                 )
+                if include_source_symbol_d1_details:
+                    source_symbol_d1_details[candidate["source_symbol"]] = [
+                        change
+                        for change in candidate_changes
+                        if change["material_change"]
+                        or change["material_change_classification"]
+                        in {"UNKNOWN", "NOT_COMPARABLE", "NOT_EVALUABLE"}
+                    ]
                 structure_timeline_candidate_count += 1
                 generation_calls += 5 * len(days)
                 if candidate["source_symbol"] == structure_symbol:
@@ -1886,6 +1898,9 @@ def discover_source_d1_structures(
                 for kind in STRUCTURE_TYPES
             },
             "source_symbol_material_summary": source_symbol_material_summary,
+            "source_symbol_d1_details": (
+                source_symbol_d1_details if include_source_symbol_d1_details else None
+            ),
         },
         "range_previous_anchor_evidence_counts": {
             kind: dict(sorted(range_history_status_counts[kind].items()))
