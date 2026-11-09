@@ -90,7 +90,12 @@ def _history_observations(
     history_rows: Sequence[Mapping[str, Any]],
     namespace_id: str,
     package_sha256: str,
-) -> tuple[tuple[CoreObservation, ...], tuple[Bar, ...], dict[date, Mapping[str, Any]]]:
+) -> tuple[
+    tuple[CoreObservation, ...],
+    tuple[Bar, ...],
+    dict[date, Mapping[str, Any]],
+    dict[date, Any],
+]:
     normalized = symbol.strip().upper()
     if _SYMBOL.fullmatch(normalized) is None:
         raise PgResearchBindingError(
@@ -125,9 +130,12 @@ def _history_observations(
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
     observations: list[CoreObservation] = []
     bars: list[Bar] = []
+    decoded_by_session = {}
     for ordinal, day in enumerate(days):
         row = row_map.get(day)
         decoded = _decoded_day_from_pg_raw(row) if row is not None else None
+        if decoded is not None:
+            decoded_by_session[day] = decoded
         values = (
             _valid_ohlc(decoded.prices.value)
             if decoded is not None and decoded.prices.quality == "OBSERVED"
@@ -176,7 +184,7 @@ def _history_observations(
             )
         )
         bars.append(Bar(ordinal, unknown(reason)))
-    return tuple(observations), tuple(bars), row_map
+    return tuple(observations), tuple(bars), row_map, decoded_by_session
 
 
 def _core_at(
@@ -212,7 +220,9 @@ def _source_row_identity(row: Mapping[str, Any] | None) -> dict[str, Any]:
     return {
         "session": row["session_date"].isoformat(),
         "bar_status": row.get("bar_status"),
+        "bar_reason": row.get("bar_reason"),
         "price_quality": row.get("price_quality"),
+        "price_reason": row.get("price_reason"),
         "namespace_id": row.get("namespace_id"),
         "package_sha256": row.get("package_sha256"),
         "source_capture_id": str(row["source_capture_id"])
@@ -220,6 +230,7 @@ def _source_row_identity(row: Mapping[str, Any] | None) -> dict[str, Any]:
         else None,
         "source_content_id": row.get("source_content_id"),
         "source_entry_sha256": row.get("source_entry_sha256"),
+        "parser_contract": row.get("parser_contract"),
         "source_clock_role": row.get("source_clock_role"),
         "source_time_quality": row.get("source_time_quality"),
         "source_available_at": row.get("source_available_at"),
@@ -664,16 +675,33 @@ def _pool_candidate_result(
     package_sha256: str,
     calendar_id: str,
     calendar_revision: str,
+    history_inputs=None,
+    core_previews_by_session: Mapping[date, Mapping[str, Any]] | None = None,
 ) -> tuple[dict[str, dict[str, Any]], int, int, int]:
     symbol = candidate["source_symbol"]
-    observations, bars, row_map = _history_observations(
-        symbol=symbol,
-        sessions=sessions,
-        history_rows=candidate["history_rows"],
-        namespace_id=namespace_id,
-        package_sha256=package_sha256,
-    )
+    history_inputs_reused = history_inputs is not None
+    if history_inputs is None:
+        history_inputs = _history_observations(
+            symbol=symbol,
+            sessions=sessions,
+            history_rows=candidate["history_rows"],
+            namespace_id=namespace_id,
+            package_sha256=package_sha256,
+        )
+    observations, bars, row_map, _decoded_by_session = history_inputs
     core_cache: dict[int, dict[str, FieldValue]] = {}
+    if core_previews_by_session is not None:
+        if set(core_previews_by_session) != set(sessions):
+            raise PgResearchBindingError(
+                "D1_STRUCTURE_CORE_PREVIEW_INCOMPLETE",
+                "共享结构Core预览未覆盖完整官方会话",
+            )
+        for index, day in enumerate(sessions):
+            fields = core_previews_by_session[day]["core"]["fields"]
+            core_cache[index] = {
+                name: _field_from_rendered(fields.get(name), name)
+                for name in ("core.atr20", "core.ma_slope20_atr", "core.clv")
+            }
 
     def core_at(end_index: int) -> dict[str, FieldValue] | None:
         if end_index < 0:
@@ -881,7 +909,7 @@ def _pool_candidate_result(
         results[kind]["prior_anchor_evidence"] = range_history_evidence[kind]
     return (
         results,
-        len(candidate["history_rows"]),
+        0 if history_inputs_reused else len(row_map),
         len(core_cache),
         range_history_checks,
     )
@@ -895,6 +923,7 @@ def _structure_history_core_previews(
     namespace_id: str,
     package_sha256: str,
     preview_context,
+    decoded_by_session: Mapping[date, Any] | None = None,
 ) -> dict[date, dict[str, Any]]:
     previews = research_stock_pg_d1_history_previews(
         symbol=symbol,
@@ -905,11 +934,44 @@ def _structure_history_core_previews(
         history_rows=history_rows,
         namespace_id=namespace_id,
         context=preview_context,
+        _decoded_by_session=decoded_by_session,
     )
     return {
         day: {"core": {"fields": preview["structure_core_fields"]}}
         for day, preview in previews.items()
     }
+
+
+def _observation_quality_reasons(observation: Mapping[str, Any] | None) -> list[str]:
+    if not isinstance(observation, Mapping):
+        return []
+    reasons = []
+    for group, fields in (
+        (
+            "SUPPORT_CORE",
+            {
+                "atr_previous": observation.get("atr_previous"),
+                "clv": observation.get("clv"),
+            },
+        ),
+        ("SUPPORT_PRICE", observation.get("price_inputs", {})),
+    ):
+        if not isinstance(fields, Mapping):
+            continue
+        for name, field in fields.items():
+            if not isinstance(field, Mapping) or field.get("quality") == "OBSERVED":
+                continue
+            reason = field.get("reason") or field.get("quality") or "UNKNOWN"
+            reasons.append(f"{group}_{name.upper()}:{reason}")
+    source = observation.get("source")
+    if isinstance(source, Mapping):
+        for name in ("bar_reason", "price_reason"):
+            reason = source.get(name)
+            if reason:
+                reasons.append(f"SOURCE_{name.upper()}:{reason}")
+    if observation.get("state") == "UNKNOWN" and not reasons:
+        reasons.append("SUPPORT_STATE_UNKNOWN_WITHOUT_FIELD_REASON")
+    return sorted(set(reasons))
 
 
 def _structure_timeline_changes(
@@ -995,6 +1057,62 @@ def _structure_timeline_changes(
             gap_status = "UNCHANGED"
             gap_reasons = ["GAP_FILL_STATE_UNCHANGED"]
 
+        quality_reasons = sorted(
+            set(
+                _observation_quality_reasons(before)
+                + _observation_quality_reasons(after)
+                + [
+                    f"GAP_FILL_{name.upper()}:{item.get('reason')}"
+                    for name, item in (("BEFORE", gap_before), ("AFTER", gap_after))
+                    if isinstance(item, Mapping)
+                    and item.get("quality") != "OBSERVED"
+                    and item.get("reason")
+                ]
+            )
+        )
+        material_reasons = []
+        if relation != "SUPPORT":
+            material_status = "NOT_APPLICABLE"
+            material_reasons = ["RESISTANCE_ANCHOR_EXCLUDED_FROM_MATERIAL_SUPPORT"]
+        elif support_status in {"NOT_COMPARABLE", "NOT_EVALUABLE"}:
+            material_status = support_status
+            material_reasons = list(support_reasons)
+        else:
+            if support_status != "UNKNOWN" and before is not None and after is not None:
+                for field, reason in (
+                    ("state", "SUPPORT_STATE_TRANSITION"),
+                    ("acceptance", "SUPPORT_ACCEPTANCE_TRANSITION"),
+                    ("freshness", "SUPPORT_FRESHNESS_TRANSITION"),
+                    ("retest_qualified", "RETEST_QUALIFICATION_TRANSITION"),
+                ):
+                    if before.get(field) != after.get(field):
+                        material_reasons.append(reason)
+                if before.get("test_count", 0) == 0 and after.get("test_count", 0) > 0:
+                    material_reasons.append("FIRST_VALID_TEST_OBSERVED")
+                if (
+                    before.get("separated_sessions", 0) == 0
+                    and after.get("separated_sessions", 0) > 0
+                ):
+                    material_reasons.append("FIRST_SEPARATED_SESSION_OBSERVED")
+            if gap_status == "CHANGED":
+                material_reasons.append("GAP_FILL_STAGE_TRANSITION")
+            if material_reasons:
+                material_status = "MATERIAL_CHANGE"
+            elif support_status == "UNKNOWN" or gap_status == "UNKNOWN":
+                material_status = "UNKNOWN"
+                material_reasons = sorted(set(support_reasons + gap_reasons))
+            elif support_status in {"NOT_COMPARABLE", "NOT_EVALUABLE"}:
+                material_status = support_status
+                material_reasons = list(support_reasons)
+            elif support_changed_fields:
+                material_status = "COUNT_ONLY"
+                material_reasons = [
+                    "DIAGNOSTIC_COUNTER_CHANGED_WITHOUT_STATE_TRANSITION"
+                ]
+            else:
+                material_status = "UNCHANGED"
+                material_reasons = ["NO_MATERIAL_SUPPORT_OR_GAP_FILL_TRANSITION"]
+
         if relation != "SUPPORT":
             classification = "NOT_APPLICABLE"
         elif support_status == "CHANGED" or gap_status == "CHANGED":
@@ -1033,7 +1151,12 @@ def _structure_timeline_changes(
                     "anchor_id_used_across_request_windows": False,
                 },
                 "change_classification": classification,
+                "field_change_classification": classification,
                 "change_reasons": sorted(set(support_reasons + gap_reasons)),
+                "quality_reasons": quality_reasons,
+                "material_change": material_status == "MATERIAL_CHANGE",
+                "material_change_classification": material_status,
+                "material_change_reasons": sorted(set(material_reasons)),
                 "support_change": {
                     "classification": support_status,
                     "reason_codes": support_reasons,
@@ -1074,6 +1197,7 @@ def discover_source_d1_structures(
     structure_changes: bool = False,
     structure_type: str | None = None,
     structure_change_status: str | None = None,
+    material_changes_only: bool = False,
 ) -> dict[str, Any]:
     """一遍完整扫描目标日Raw池，统计五种D1结构并按事件分页。"""
     started_wall = time.perf_counter()
@@ -1092,6 +1216,7 @@ def discover_source_d1_structures(
         or not isinstance(package_sha256, str)
         or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
         or type(structure_changes) is not bool
+        or type(material_changes_only) is not bool
         or (structure_type is not None and structure_type not in STRUCTURE_TYPES)
         or (
             structure_change_status is not None
@@ -1106,6 +1231,7 @@ def discover_source_d1_structures(
             }
         )
         or (not structure_changes and structure_change_status is not None)
+        or (not structure_changes and material_changes_only)
         or (not structure_changes and structure_type is not None)
         or (structure_changes and target_session == days[0])
     ):
@@ -1169,8 +1295,13 @@ def discover_source_d1_structures(
     filtered_anchor_count = 0
     historical_anchor_count_by_type: Counter[str] = Counter()
     change_status_counts: Counter[str] = Counter()
+    material_change_status_counts: Counter[str] = Counter()
+    material_change_status_counts_by_type = {
+        kind: Counter() for kind in STRUCTURE_TYPES
+    }
     support_status_counts: Counter[str] = Counter()
     changed_source_symbols: set[str] = set()
+    material_change_source_symbols: set[str] = set()
     range_history_status_counts = {kind: Counter() for kind in sorted(_RANGE_TYPES)}
     structure_core_preview_count = 0
     structure_timeline_candidate_count = 0
@@ -1252,6 +1383,27 @@ def discover_source_d1_structures(
             )
 
         for candidate in candidates:
+            history_inputs = None
+            core_previews = None
+            if structure_changes:
+                history_inputs = _history_observations(
+                    symbol=candidate["source_symbol"],
+                    sessions=days,
+                    history_rows=candidate["history_rows"],
+                    namespace_id=page["namespace_id"],
+                    package_sha256=package_sha256,
+                )
+                history_rows_decoded += len(history_inputs[2])
+                core_previews = _structure_history_core_previews(
+                    symbol=candidate["source_symbol"],
+                    sessions=days,
+                    history_rows=candidate["history_rows"],
+                    namespace_id=page["namespace_id"],
+                    package_sha256=package_sha256,
+                    preview_context=structure_preview_context,
+                    decoded_by_session=history_inputs[3],
+                )
+                structure_core_preview_count += len(core_previews)
             result, decoded_count, core_count, range_check_count = (
                 _pool_candidate_result(
                     candidate=candidate,
@@ -1261,6 +1413,8 @@ def discover_source_d1_structures(
                     package_sha256=package_sha256,
                     calendar_id=calendar_id,
                     calendar_revision=target_calendar_revision,
+                    history_inputs=history_inputs,
+                    core_previews_by_session=core_previews,
                 )
             )
             history_rows_decoded += decoded_count
@@ -1290,14 +1444,6 @@ def discover_source_d1_structures(
                         "D1_STRUCTURE_CHANGE_CONTEXT_UNAVAILABLE",
                         "全池结构变化缺少相邻会话Core上下文",
                     )
-                core_previews = _structure_history_core_previews(
-                    symbol=candidate["source_symbol"],
-                    sessions=days,
-                    history_rows=candidate["history_rows"],
-                    namespace_id=page["namespace_id"],
-                    package_sha256=package_sha256,
-                    preview_context=structure_preview_context,
-                )
                 timeline = evaluate_source_d1_structure_timeline(
                     symbol=candidate["source_symbol"],
                     sessions=days,
@@ -1305,6 +1451,7 @@ def discover_source_d1_structures(
                     namespace_id=page["namespace_id"],
                     package_sha256=package_sha256,
                     core_previews_by_session=core_previews,
+                    history_inputs=history_inputs,
                 )
                 candidate_changes = _structure_timeline_changes(
                     timeline=timeline,
@@ -1322,22 +1469,31 @@ def discover_source_d1_structures(
                 )
                 for change in candidate_changes:
                     change_status_counts[change["change_classification"]] += 1
+                    material_status = change["material_change_classification"]
+                    material_change_status_counts[material_status] += 1
+                    material_change_status_counts_by_type[change["type"]][
+                        material_status
+                    ] += 1
                     support_status_counts[
                         change["support_change"]["classification"]
                     ] += 1
                     historical_anchor_count_by_type[change["type"]] += 1
                     if change["change_classification"] == "CHANGED":
                         changed_source_symbols.add(candidate["source_symbol"])
+                    if change["material_change"]:
+                        material_change_source_symbols.add(candidate["source_symbol"])
                     if (
-                        structure_type is None or change["type"] == structure_type
-                    ) and (
-                        structure_change_status is None
-                        or change["change_classification"] == structure_change_status
+                        (structure_type is None or change["type"] == structure_type)
+                        and (
+                            structure_change_status is None
+                            or change["change_classification"]
+                            == structure_change_status
+                        )
+                        and (not material_changes_only or change["material_change"])
                     ):
                         if offset <= filtered_anchor_count < offset + limit:
                             historical_change_page.append(change)
                         filtered_anchor_count += 1
-                structure_core_preview_count += len(core_previews)
                 structure_timeline_candidate_count += 1
                 generation_calls += 5 * len(days)
                 if candidate["source_symbol"] == structure_symbol:
@@ -1420,6 +1576,8 @@ def discover_source_d1_structures(
                     structure_change_status is None
                     or item["change_classification"] == structure_change_status
                 )
+                and (structure_type is None or item["type"] == structure_type)
+                and (not material_changes_only or item["material_change"])
             ],
         }
         if selected_symbol_anchor_changes is not None
@@ -1478,6 +1636,7 @@ def discover_source_d1_structures(
             "status": "COMPLETE_FULL_POOL_ADJACENT_SESSION_SCAN"
             if structure_changes
             else "NOT_REQUESTED",
+            "material_change_contract": "SOURCE_D1_STRUCTURE_MATERIAL_CHANGE_R1",
             "previous_official_session": previous_session.isoformat()
             if previous_session
             else None,
@@ -1494,8 +1653,35 @@ def discover_source_d1_structures(
             + support_status_counts.get("UNCHANGED", 0),
             "support_status_counts": dict(sorted(support_status_counts.items())),
             "change_status_counts": dict(sorted(change_status_counts.items())),
+            "field_change_status_counts": dict(sorted(change_status_counts.items())),
+            "material_change_status_counts": dict(
+                sorted(material_change_status_counts.items())
+            ),
+            "material_change_status_counts_by_type": {
+                kind: dict(sorted(material_change_status_counts_by_type[kind].items()))
+                for kind in STRUCTURE_TYPES
+            },
+            "material_change_count": material_change_status_counts.get(
+                "MATERIAL_CHANGE", 0
+            ),
+            "material_change_distinct_source_symbol_count": len(
+                material_change_source_symbols
+            ),
+            "material_change_evaluable_anchor_count": sum(
+                material_change_status_counts.get(status, 0)
+                for status in ("MATERIAL_CHANGE", "COUNT_ONLY", "UNCHANGED")
+            ),
+            "material_change_denominator": sum(
+                historical_anchor_count_by_type.values()
+            ),
+            "material_change_partition_closed": sum(
+                material_change_status_counts.values()
+            )
+            == sum(historical_anchor_count_by_type.values()),
             "changed_anchor_count": change_status_counts.get("CHANGED", 0),
             "changed_distinct_source_symbol_count": len(changed_source_symbols),
+            "field_changed_anchor_count": change_status_counts.get("CHANGED", 0),
+            "field_changed_distinct_source_symbol_count": len(changed_source_symbols),
             "unknown_or_not_applicable_anchor_count": sum(
                 change_status_counts.get(state, 0)
                 for state in ("UNKNOWN", "NOT_APPLICABLE")
@@ -1503,6 +1689,7 @@ def discover_source_d1_structures(
             "filters": {
                 "structure_type": structure_type or "ALL",
                 "change_status": structure_change_status or "ALL",
+                "material_changes_only": material_changes_only,
                 "applied_after_full_pool_evaluation": True,
             },
             "filtered_anchor_count": filtered_anchor_count,
@@ -1562,8 +1749,8 @@ def discover_source_d1_structures(
             "source_version_context_reads": source_context_read_count,
             "full_pool_scan_passes": 1,
             "evaluated_source_rows": len(seen_symbols),
-            "raw_history_rows_decoded": history_rows_decoded
-            * (3 if structure_changes else 1),
+            "raw_history_rows_decoded": history_rows_decoded,
+            "raw_history_decode_passes": 1,
             "target_generation_raw_rows_decoded": history_rows_decoded,
             "structure_history_core_preview_sessions": structure_core_preview_count,
             "structure_timeline_candidates": structure_timeline_candidate_count,
@@ -1583,16 +1770,19 @@ def evaluate_source_d1_structure_timeline(
     namespace_id: str,
     package_sha256: str,
     core_previews_by_session: Mapping[date, Mapping[str, Any]],
+    history_inputs=None,
 ) -> dict[str, Any]:
     """为单一来源代码沿已存会话生成锚并逐日观察后继，不回写PG。"""
     normalized = symbol.strip().upper()
-    observations, bars, row_map = _history_observations(
-        symbol=normalized,
-        sessions=sessions,
-        history_rows=history_rows,
-        namespace_id=namespace_id,
-        package_sha256=package_sha256,
-    )
+    if history_inputs is None:
+        history_inputs = _history_observations(
+            symbol=normalized,
+            sessions=sessions,
+            history_rows=history_rows,
+            namespace_id=namespace_id,
+            package_sha256=package_sha256,
+        )
+    observations, bars, row_map, _decoded_by_session = history_inputs
     if set(core_previews_by_session) != set(sessions):
         raise PgResearchBindingError(
             "D1_STRUCTURE_HISTORY_PREVIEW_INCOMPLETE",
@@ -1853,4 +2043,213 @@ def evaluate_source_d1_structure_timeline(
             "focus": "NOT_EVALUATED",
             "trade_signal": "NOT_EVALUATED",
         },
+    }
+
+
+def discover_source_d1_prior_support_reference(
+    *,
+    symbol: str,
+    sessions: Sequence[date],
+    history_rows: Sequence[Mapping[str, Any]],
+    namespace_id: str,
+    package_sha256: str,
+    source_content_id: str,
+    parser_contract: str | None = None,
+) -> dict[str, Any]:
+    """按单股历史生成截至窗口末会话已可见的来源支撑参考。"""
+    days = tuple(sessions)
+    if (
+        not days
+        or tuple(sorted(set(days))) != days
+        or len(days) > 75
+        or not isinstance(source_content_id, str)
+        or not source_content_id
+    ):
+        raise PgResearchBindingError(
+            "D1_SOURCE_PRIOR_REFERENCE_REQUEST_INVALID",
+            "单股D1前态需要完整内容身份及最多75个递增官方会话",
+        )
+    normalized = symbol.strip().upper()
+    history_inputs = _history_observations(
+        symbol=normalized,
+        sessions=days,
+        history_rows=history_rows,
+        namespace_id=namespace_id,
+        package_sha256=package_sha256,
+    )
+    core_previews = _structure_history_core_previews(
+        symbol=normalized,
+        sessions=days,
+        history_rows=history_rows,
+        namespace_id=namespace_id,
+        package_sha256=package_sha256,
+        preview_context=prepare_source_d1_preview_context(days),
+        decoded_by_session=history_inputs[3],
+    )
+    timeline = evaluate_source_d1_structure_timeline(
+        symbol=normalized,
+        sessions=days,
+        history_rows=history_rows,
+        namespace_id=namespace_id,
+        package_sha256=package_sha256,
+        core_previews_by_session=core_previews,
+        history_inputs=history_inputs,
+    )
+    prior_session = days[-1]
+    supported_types = {"PIVOT_LOW", "RANGE_FLOOR", "GAP_ZONE"}
+    references = []
+    for event in timeline["events"]:
+        if (
+            event.get("relation") != "SUPPORT"
+            or event.get("type") not in supported_types
+            or date.fromisoformat(event["created_session"]) >= prior_session
+            or event.get("coordinate_id") != f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
+        ):
+            continue
+        observation = next(
+            (
+                item
+                for item in event.get("support_observations", [])
+                if item.get("session") == prior_session.isoformat()
+            ),
+            None,
+        )
+        if not isinstance(observation, Mapping):
+            continue
+        quality_reasons = _observation_quality_reasons(observation)
+        gap_fill_observation = next(
+            (
+                item
+                for item in event.get("gap_fill_observations", [])
+                if item.get("session") == prior_session.isoformat()
+            ),
+            None,
+        )
+        gap_fill_quality_reasons = []
+        if isinstance(gap_fill_observation, Mapping):
+            if gap_fill_observation.get("quality") != "OBSERVED":
+                gap_fill_quality_reasons.append(
+                    "GAP_FILL_STATE:"
+                    + str(
+                        gap_fill_observation.get("reason")
+                        or gap_fill_observation.get("quality")
+                        or "UNKNOWN"
+                    )
+                )
+        source = observation.get("source")
+        birth_source = event.get("source_row")
+        for label, row in (("OBSERVATION", source), ("BIRTH", birth_source)):
+            if not isinstance(row, Mapping):
+                quality_reasons.append(f"{label}_SOURCE_IDENTITY_MISSING")
+                continue
+            if row.get("namespace_id") != namespace_id:
+                quality_reasons.append(f"{label}_NAMESPACE_MISMATCH")
+            if row.get("package_sha256") != package_sha256:
+                quality_reasons.append(f"{label}_PACKAGE_SHA_MISMATCH")
+            if row.get("source_content_id") != source_content_id:
+                quality_reasons.append(f"{label}_SOURCE_CONTENT_MISMATCH")
+            if (
+                parser_contract is not None
+                and row.get("parser_contract") != parser_contract
+            ):
+                quality_reasons.append(f"{label}_PARSER_CONTRACT_MISMATCH")
+        if source is None or source.get("session") != prior_session.isoformat():
+            quality_reasons.append("OBSERVATION_SOURCE_SESSION_MISMATCH")
+        quality_reasons = sorted(set(quality_reasons))
+        observed = observation.get("state") != "UNKNOWN" and not quality_reasons
+        references.append(
+            {
+                "source_symbol": normalized,
+                "anchor_id": event.get("anchor_id"),
+                "type": event.get("type"),
+                "relation": event.get("relation"),
+                "anchor_session": event.get("created_session"),
+                "available_from_session": event.get("available_from_session"),
+                "observable_session": prior_session.isoformat(),
+                "coordinate_id": event.get("coordinate_id"),
+                "price_coordinate": event.get("price_coordinate"),
+                "identity_status": event.get("identity_status"),
+                "lower": event.get("lower"),
+                "upper": event.get("upper"),
+                "state": observation.get("state", "UNKNOWN"),
+                "acceptance": observation.get("acceptance", "UNKNOWN"),
+                "freshness": observation.get("freshness", "UNKNOWN"),
+                "breach_streak": observation.get("breach_streak"),
+                "acceptance_streak": observation.get("acceptance_streak"),
+                "test_count": observation.get("test_count"),
+                "separated_sessions": observation.get("separated_sessions"),
+                "retest_qualified": observation.get("retest_qualified"),
+                "broken": observation.get("state") == "BROKEN"
+                or observation.get("acceptance") == "BROKEN",
+                "gap_fill": (
+                    {
+                        "state": gap_fill_observation.get("state"),
+                        "quality": gap_fill_observation.get("quality"),
+                        "reason": gap_fill_observation.get("reason"),
+                        "source": gap_fill_observation.get("source"),
+                    }
+                    if isinstance(gap_fill_observation, Mapping)
+                    else None
+                ),
+                "quality": "OBSERVED" if observed else "UNKNOWN",
+                "quality_reasons": quality_reasons,
+                "gap_fill_quality_reasons": gap_fill_quality_reasons,
+                "generation_evidence": event.get("generation_evidence"),
+                "source": source,
+                "birth_source": birth_source,
+                "research_mode": "NON_PIT_RETROSPECTIVE",
+                "price_coordinate_status": "RAW_UNADJUSTED",
+                "formal_parent": "NOT_FORMAL_PARENT",
+            }
+        )
+    usable = [
+        item
+        for item in references
+        if item["quality"] == "OBSERVED"
+        and item["state"]
+        in {
+            "IDLE",
+            "APPROACHING",
+            "TESTING",
+            "HELD_TENTATIVE",
+            "RETESTING",
+            "HELD_CONFIRMED",
+            "BREACHED_SHALLOW",
+            "RECLAIMED",
+        }
+    ]
+    return {
+        "source_symbol": normalized,
+        "namespace_id": namespace_id,
+        "package_sha256": package_sha256,
+        "source_content_id": source_content_id,
+        "parser_contract": parser_contract,
+        "state": "TRUE" if usable else "UNKNOWN",
+        "reason": "SOURCE_SUPPORT_OBSERVED"
+        if usable
+        else "SOURCE_SUPPORT_REFERENCES_ONLY_BROKEN_OR_UNKNOWN"
+        if references
+        else "NO_OBSERVED_SOURCE_SUPPORT_IN_WINDOW_LEFT_CENSORED",
+        "source_prior_support_observed": "TRUE"
+        if any(item["quality"] == "OBSERVED" for item in references)
+        else "UNKNOWN",
+        "source_prior_support_reason": "OBSERVED_SOURCE_SUPPORT_REFERENCE"
+        if any(item["quality"] == "OBSERVED" for item in references)
+        else "NO_QUALIFYING_SUPPORT_PROVEN_WITHIN_LEFT_CENSORED_WINDOW",
+        "formal_parent": "NOT_FORMAL_PARENT",
+        "references": references,
+        "window": {
+            "start_session": days[0].isoformat(),
+            "prior_session": prior_session.isoformat(),
+            "official_session_count": len(days),
+            "left_censored_at_window_start": len(days) < 75,
+            "future_session_rows_used": 0,
+        },
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "research_mode": "NON_PIT_RETROSPECTIVE",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "raw_history_rows_decoded": len(history_inputs[2]),
+        "database_write_attempted": False,
+        "ddl_executed": False,
+        "dml_executed": False,
     }

@@ -21,6 +21,9 @@ from stock_a.research.d0_launch_raw import (
 from stock_a.research.d0_prior_observation import observe_prior_shapes
 from stock_a.application.source_pool_factors import read_source_pool_rps
 from stock_a.application.source_pool_seed import source_seed_predicates
+from stock_a.application.source_d1_structures import (
+    discover_source_d1_prior_support_reference,
+)
 from stock_a.application.tdx_sector_members import _raw_window_observation
 from stock_a.research.core import MarketSessionCalendar, calculate_core
 from stock_a.domain import FieldValue, unknown
@@ -608,47 +611,161 @@ def attach_stock_risk_readiness(
 
 
 def attach_source_d1_prior_reference(
-    item: dict[str, Any], discovery: Mapping[str, Any]
+    item: dict[str, Any],
+    discovery: Mapping[str, Any] | None = None,
+    *,
+    source_prior: Mapping[str, Any] | None = None,
 ) -> None:
     """给D0诊断附上前一会话已观察的来源级D1支撑，不构造正式父事件。"""
     symbol = item["source_symbol"]
-    if discovery.get("target_session") != item["target_session"]:
+    if (
+        discovery is not None
+        and discovery.get("target_session") != item["target_session"]
+    ):
         raise SourceD0RawError("D0_D1_SESSION_MISMATCH", "D0与D1目标会话不一致。")
-    previous = discovery["previous_official_session"]
-    details = [
-        row
-        for row in discovery.get("complete_symbol_details", ())
-        if row.get("source_symbol") == symbol
-    ]
-    if len(details) != 1:
-        raise SourceD0RawError(
-            "D0_D1_SOURCE_SYMBOL_MISMATCH", "D1完整来源池缺少唯一股票。"
-        )
     references = []
-    for event in details[0]["anchor_events"]:
-        observation = event.get("support_observation_before")
-        if event["support_anchor_session"] >= item["target_session"] or not isinstance(
-            observation, Mapping
-        ):
-            continue
-        if observation.get("session") != previous:
+    source_prior_references = []
+    if discovery is not None:
+        previous = discovery["previous_official_session"]
+        details = [
+            row
+            for row in discovery.get("complete_symbol_details", ())
+            if row.get("source_symbol") == symbol
+        ]
+        if len(details) != 1:
             raise SourceD0RawError(
-                "D0_D1_PRIOR_SESSION_MISMATCH", "D1支撑观察不是D0前一官方会话。"
+                "D0_D1_SOURCE_SYMBOL_MISMATCH", "D1完整来源池缺少唯一股票。"
             )
-        support = observation.get("support_observation") or {}
-        references.append(
-            {
-                "anchor_session": event["support_anchor_session"],
-                "observable_session": previous,
-                "state": support.get("state"),
-                "quality": support.get("quality"),
-                "event_key": event.get("event_key"),
-                "birth_predicate": event.get("raw_d1_breakout_predicate"),
-                "platform_generation": event.get("platform_generation"),
-                "prior_observation": observation,
-                "after_observation": event.get("support_observation_after"),
-            }
+        for event in details[0]["anchor_events"]:
+            observation = event.get("support_observation_before")
+            if event["support_anchor_session"] >= item[
+                "target_session"
+            ] or not isinstance(observation, Mapping):
+                continue
+            if observation.get("session") != previous:
+                raise SourceD0RawError(
+                    "D0_D1_PRIOR_SESSION_MISMATCH", "D1支撑观察不是D0前一官方会话。"
+                )
+            support = observation.get("support_observation") or {}
+            references.append(
+                {
+                    "anchor_session": event["support_anchor_session"],
+                    "observable_session": previous,
+                    "state": support.get("state"),
+                    "quality": support.get("quality"),
+                    "event_key": event.get("event_key"),
+                    "birth_predicate": event.get("raw_d1_breakout_predicate"),
+                    "platform_generation": event.get("platform_generation"),
+                    "prior_observation": observation,
+                    "after_observation": event.get("support_observation_after"),
+                }
+            )
+    if source_prior is not None:
+        target = date.fromisoformat(item["target_session"])
+        calendar_sessions = _official_calendar(target)["sessions"]
+        target_index = calendar_sessions.index(target)
+        expected_prior = (
+            calendar_sessions[target_index - 1].isoformat()
+            if target_index > 0
+            else None
         )
+        if source_prior.get("window", {}).get("prior_session") != expected_prior:
+            raise SourceD0RawError(
+                "D0_D1_PRIOR_SESSION_MISMATCH", "结构支撑参考不是D0前一官方会话。"
+            )
+        if source_prior.get("source_symbol", symbol) != symbol:
+            raise SourceD0RawError(
+                "D0_D1_SOURCE_SYMBOL_MISMATCH", "结构支撑参考来源代码与D0不一致。"
+            )
+        expected_coordinate = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
+        source_prior_identity_reasons = []
+        if source_prior.get("identity_status") != "SOURCE_SYMBOL_ONLY":
+            source_prior_identity_reasons.append(
+                "SOURCE_IDENTITY_NOT_SOURCE_SYMBOL_ONLY"
+            )
+        if source_prior.get("research_mode") != "NON_PIT_RETROSPECTIVE":
+            source_prior_identity_reasons.append("SOURCE_RESEARCH_MODE_NOT_NON_PIT")
+        if source_prior.get("price_coordinate") != "RAW_UNADJUSTED":
+            source_prior_identity_reasons.append("SOURCE_PRICE_COORDINATE_NOT_RAW")
+        for identity_field in (
+            "namespace_id",
+            "package_sha256",
+            "source_content_id",
+            "parser_contract",
+        ):
+            if source_prior.get(identity_field) is None:
+                source_prior_identity_reasons.append(
+                    f"SOURCE_{identity_field.upper()}_IDENTITY_MISSING"
+                )
+        for raw_reference in source_prior.get("references", ()):
+            if not isinstance(raw_reference, Mapping):
+                continue
+            if raw_reference.get("relation") != "SUPPORT" or raw_reference.get(
+                "type"
+            ) not in {"PIVOT_LOW", "RANGE_FLOOR", "GAP_ZONE"}:
+                continue
+            reference = dict(raw_reference)
+            quality_reasons = set(reference.get("quality_reasons") or ())
+            quality_reasons.update(source_prior_identity_reasons)
+            if reference.get("source_symbol") != symbol:
+                quality_reasons.add("REFERENCE_SOURCE_SYMBOL_MISMATCH")
+            if reference.get("coordinate_id") != expected_coordinate:
+                quality_reasons.add("REFERENCE_COORDINATE_MISMATCH")
+            if reference.get("identity_status") != "SOURCE_SYMBOL_ONLY":
+                quality_reasons.add("REFERENCE_IDENTITY_NOT_SOURCE_SYMBOL_ONLY")
+            if reference.get("research_mode") != "NON_PIT_RETROSPECTIVE":
+                quality_reasons.add("REFERENCE_RESEARCH_MODE_NOT_NON_PIT")
+            if reference.get("price_coordinate_status") != "RAW_UNADJUSTED":
+                quality_reasons.add("REFERENCE_PRICE_COORDINATE_NOT_RAW")
+            if reference.get("observable_session") != expected_prior:
+                quality_reasons.add("REFERENCE_OBSERVABLE_SESSION_MISMATCH")
+            anchor_session = reference.get("anchor_session")
+            try:
+                anchor_day = date.fromisoformat(anchor_session)
+            except (TypeError, ValueError):
+                anchor_day = None
+                quality_reasons.add("REFERENCE_ANCHOR_SESSION_INVALID")
+            if anchor_day is not None and anchor_day >= date.fromisoformat(
+                expected_prior
+            ):
+                reference["comparability"] = "NOT_COMPARABLE"
+                quality_reasons.add("ANCHOR_NOT_BORN_BEFORE_PRIOR_SESSION")
+            observation_source = reference.get("source")
+            birth_source = reference.get("birth_source")
+            for label, row, expected_session in (
+                ("OBSERVATION", observation_source, expected_prior),
+                (
+                    "BIRTH",
+                    birth_source,
+                    anchor_day.isoformat() if anchor_day is not None else None,
+                ),
+            ):
+                if not isinstance(row, Mapping):
+                    quality_reasons.add(f"{label}_SOURCE_IDENTITY_MISSING")
+                    continue
+                if row.get("session") != expected_session:
+                    quality_reasons.add(f"{label}_SOURCE_SESSION_MISMATCH")
+                for identity_field in (
+                    "namespace_id",
+                    "package_sha256",
+                    "source_content_id",
+                    "parser_contract",
+                ):
+                    expected_value = source_prior.get(identity_field)
+                    if (
+                        expected_value is None
+                        or row.get(identity_field) != expected_value
+                    ):
+                        quality_reasons.add(
+                            f"{label}_{identity_field.upper()}_MISMATCH"
+                        )
+            if quality_reasons or reference.get("state") == "UNKNOWN":
+                reference["quality"] = "UNKNOWN"
+                if reference.get("state") == "UNKNOWN" and not quality_reasons:
+                    quality_reasons.add("SOURCE_SUPPORT_STATE_UNKNOWN")
+            reference["quality_reasons"] = sorted(quality_reasons)
+            source_prior_references.append(reference)
+        references.extend(source_prior_references)
     usable_states = {
         "IDLE",
         "APPROACHING",
@@ -664,13 +781,42 @@ def attach_source_d1_prior_reference(
         for ref in references
         if ref["quality"] == "OBSERVED" and ref["state"] in usable_states
     ]
+    source_prior_observed_references = (
+        source_prior_references
+        if source_prior is not None
+        else [ref for ref in references if ref.get("quality") == "OBSERVED"]
+    )
+    source_prior_observed = any(
+        ref.get("quality") == "OBSERVED" for ref in source_prior_observed_references
+    )
+    source_observed_state = "TRUE" if source_prior_observed else "UNKNOWN"
+    formal_parent_status = {
+        "state": "UNKNOWN",
+        "implementation_status": "NOT_IMPLEMENTED",
+        "reason": "FORMAL_PARENT_EPISODE_NOT_READ_BY_SOURCE_D0_RAW",
+    }
     item["d1_prior_structure_reference"] = {
         "state": "TRUE" if usable else "UNKNOWN",
         "reason": "SOURCE_SUPPORT_OBSERVED"
         if usable
+        else "SOURCE_SUPPORT_REFERENCES_ONLY_BROKEN_OR_UNKNOWN"
+        if source_prior_observed_references and source_prior_observed
+        else "SOURCE_SUPPORT_REFERENCE_QUALITY_UNKNOWN"
+        if source_prior_observed_references
         else "NO_PROVEN_UNBROKEN_SOURCE_SUPPORT_OR_LEFT_CENSORED",
         "formal_parent": "NOT_FORMAL_PARENT",
         "references": references,
+        "source_prior_support_observed": source_observed_state,
+        "source_prior_support_reason": "OBSERVED_SOURCE_SUPPORT_REFERENCE"
+        if source_prior_observed
+        else "SOURCE_PRIOR_REFERENCES_NOT_QUALIFIED"
+        if source_prior_observed_references
+        else "NO_PRIOR_SUPPORT_PROVEN",
+        "formal_parent_episode_ready": formal_parent_status,
+        "identity_status": "SOURCE_SYMBOL_ONLY",
+        "research_mode": "NON_PIT_RETROSPECTIVE",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "window": source_prior.get("window") if source_prior is not None else None,
     }
     for scenario in ("STRONG_PULLBACK", "TREND_CONTINUE"):
         item["other_scenario_partial_predicates"][scenario][
@@ -679,6 +825,17 @@ def attach_source_d1_prior_reference(
             "state": "TRUE" if usable else "UNKNOWN",
             "formal_parent": "NOT_FORMAL_PARENT",
         }
+        item["other_scenario_partial_predicates"][scenario][
+            "source_prior_support_observed"
+        ] = {
+            "state": source_observed_state,
+            "reason": item["d1_prior_structure_reference"][
+                "source_prior_support_reason"
+            ],
+        }
+        item["other_scenario_partial_predicates"][scenario][
+            "formal_parent_episode_ready"
+        ] = formal_parent_status
 
 
 def attach_recovery_failure_followup(
@@ -1426,6 +1583,10 @@ def query_source_d0_raw_launch(
 
     process_started = time.perf_counter()
     cpu_started = time.process_time()
+    source_d1_prior_history_read_seconds = 0.0
+    source_d1_prior_history_rows_read = 0
+    source_d1_prior_rows_decoded = 0
+    source_d1_prior_session_count = 0
     try:
         pg_result = read_source_d0_raw_window(
             config,
@@ -1551,8 +1712,9 @@ def query_source_d0_raw_launch(
             )
             if _include_shape_observation:
                 extended_sessions = calendar["sessions"][
-                    max(0, target_index - 44) : target_index + 1
+                    max(0, target_index - 74) : target_index + 1
                 ]
+                history_read_started = time.perf_counter()
                 history = read_raw_daily_history_stock(
                     config,
                     source_symbol=item["source_symbol"],
@@ -1562,6 +1724,10 @@ def query_source_d0_raw_launch(
                     expected_namespace_id=pg_result["namespace_id"],
                     include_parser_contract=True,
                 )
+                source_d1_prior_history_read_seconds += (
+                    time.perf_counter() - history_read_started
+                )
+                source_d1_prior_history_rows_read += len(history["history_rows"])
                 history_target = next(
                     (
                         row
@@ -1583,9 +1749,16 @@ def query_source_d0_raw_launch(
                         "D0_PRIOR_HISTORY_TARGET_BINDING_MISMATCH",
                         "单股历史与目标日来源捕获或解析合同不一致。",
                     )
+                shape_sessions = extended_sessions[-45:]
+                shape_session_set = set(shape_sessions)
+                shape_rows = [
+                    row
+                    for row in history["history_rows"]
+                    if row["session_date"] in shape_session_set
+                ]
                 item["prior_shape_observation"] = observe_prior_shapes(
-                    sessions=extended_sessions,
-                    rows=history["history_rows"],
+                    sessions=shape_sessions,
+                    rows=shape_rows,
                     symbol=item["source_symbol"],
                     package=package_sha256,
                     namespace=pg_result["namespace_id"],
@@ -1627,8 +1800,8 @@ def query_source_d0_raw_launch(
                         )
                 if historical_rps:
                     item["prior_shape_observation"] = observe_prior_shapes(
-                        sessions=extended_sessions,
-                        rows=history["history_rows"],
+                        sessions=shape_sessions,
+                        rows=shape_rows,
                         symbol=item["source_symbol"],
                         package=package_sha256,
                         namespace=pg_result["namespace_id"],
@@ -1641,6 +1814,25 @@ def query_source_d0_raw_launch(
                     rps_denominators
                 )
                 finalize_prior_shape_observation(item)
+                prior_sessions = extended_sessions[:-1]
+                prior_session_set = set(prior_sessions)
+                prior_rows = [
+                    row
+                    for row in history["history_rows"]
+                    if row["session_date"] in prior_session_set
+                ]
+                source_prior = discover_source_d1_prior_support_reference(
+                    symbol=item["source_symbol"],
+                    sessions=prior_sessions,
+                    history_rows=prior_rows,
+                    namespace_id=pg_result["namespace_id"],
+                    package_sha256=package_sha256,
+                    source_content_id=source_version["source_content_id"],
+                    parser_contract=source_version["parser_contract"],
+                )
+                attach_source_d1_prior_reference(item, source_prior=source_prior)
+                source_d1_prior_rows_decoded += source_prior["raw_history_rows_decoded"]
+                source_d1_prior_session_count += len(prior_sessions)
     elif scenario == "RECOVERY_TURN":
         for item in page:
             item["other_scenario_partial_predicates"]["TREND_CONTINUE"][
@@ -1750,6 +1942,12 @@ def query_source_d0_raw_launch(
             "transaction": pg_result["transaction"],
             "raw_history_batch_reads": pg_result["raw_history_batch_reads"],
             "raw_history_rows_read": pg_result["raw_history_rows_read"],
+            "source_d1_prior_history_rows_read": source_d1_prior_history_rows_read,
+            "source_d1_prior_history_rows_decoded": source_d1_prior_rows_decoded,
+            "source_d1_prior_official_sessions": source_d1_prior_session_count,
+            "source_d1_prior_history_read_seconds": round(
+                source_d1_prior_history_read_seconds, 6
+            ),
             "history_grid_cells": pg_result["history_grid_cells"],
             "missing_history_cells": pg_result["missing_history_cells"],
             "pg_source_version_read_seconds": pg_result[

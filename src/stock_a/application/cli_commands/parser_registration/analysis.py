@@ -262,6 +262,11 @@ def register_commands(commands):
         help="配合--discover-structures：全池比较同一旧结构锚的相邻会话变化",
     )
     source_d1_breakout.add_argument(
+        "--material-changes-only",
+        action="store_true",
+        help="只返回状态转折、首次有效触及、首次分离或真实Gap填补阶段变化",
+    )
+    source_d1_breakout.add_argument(
         "--structure-type",
         choices=STRUCTURE_TYPES,
         help="结构变化分页按一种D1来源结构类型过滤",
@@ -276,7 +281,7 @@ def register_commands(commands):
             "NOT_EVALUABLE",
             "NOT_APPLICABLE",
         ),
-        help="全池评估后按同锚变化状态过滤，分母仍为完整旧锚事件集",
+        help="按同锚字段变化状态过滤；要看实质结构转折使用--material-changes-only",
     )
     source_d1_breakout.add_argument(
         "--structure-symbol",

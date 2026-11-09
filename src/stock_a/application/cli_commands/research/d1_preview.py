@@ -90,6 +90,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
     discover_support_changes = args.discover_support_changes
     discover_structures = args.discover_structures
     structure_changes = args.structure_changes
+    material_changes_only = args.material_changes_only
     structure_type = args.structure_type
     structure_change_status = args.structure_change_status
     include_structures = args.include_structures
@@ -105,6 +106,12 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
         raise DiagnosticError(
             "D1_STRUCTURE_CHANGE_SELECTION_INVALID",
             "--structure-changes须与--discover-structures配合使用",
+            _EXIT_ARGUMENT,
+        )
+    if material_changes_only and not structure_changes:
+        raise DiagnosticError(
+            "D1_MATERIAL_CHANGE_FILTER_INVALID",
+            "--material-changes-only须与--structure-changes配合使用",
             _EXIT_ARGUMENT,
         )
     if (structure_type is not None or structure_change_status is not None) and not (
@@ -391,6 +398,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 structure_changes=structure_changes,
                 structure_type=structure_type,
                 structure_change_status=structure_change_status,
+                material_changes_only=material_changes_only,
             )
             _emit(result)
             return _EXIT_OK

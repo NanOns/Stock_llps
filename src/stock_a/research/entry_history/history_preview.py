@@ -477,6 +477,7 @@ def research_stock_pg_d1_history_previews(
     history_rows: Sequence[Mapping[str, Any]],
     namespace_id: str,
     context: _SourceD1PreviewContext,
+    _decoded_by_session: Mapping[date, Any] | None = None,
 ) -> dict[date, dict[str, Any]]:
     """一次解码同源历史，只计算D1会话及真实D1事件所需的目标后继。"""
     events = tuple(event_sessions)
@@ -529,11 +530,23 @@ def research_stock_pg_d1_history_previews(
         )
 
     rows_by_session = {row["session_date"]: row for row in rows}
-    decoded_by_session = {
-        row["session_date"]: decoded
-        for row in rows
-        if (decoded := _decoded_day_from_pg_raw(row)) is not None
-    }
+    if _decoded_by_session is None:
+        decoded_by_session = {
+            row["session_date"]: decoded
+            for row in rows
+            if (decoded := _decoded_day_from_pg_raw(row)) is not None
+        }
+    else:
+        decoded_by_session = dict(_decoded_by_session)
+        if any(day not in rows_by_session for day in decoded_by_session) or any(
+            row.get("bar_status") == "TARGET_PRESENT"
+            and row["session_date"] not in decoded_by_session
+            for row in rows
+        ):
+            raise ResearchEntryError(
+                "PG_HISTORY_DECODE_BINDING_INVALID",
+                "共享Raw解码与历史行身份或目标Bar不匹配",
+            )
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
     observations_by_session: dict[date, CoreObservation] = {}
     for day in sessions:
