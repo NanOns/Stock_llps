@@ -44,6 +44,15 @@ STRUCTURE_TYPES = (
     "RANGE_CEILING",
     "GAP_ZONE",
 )
+MATERIAL_CHANGE_REASONS = (
+    "SUPPORT_STATE_TRANSITION",
+    "SUPPORT_ACCEPTANCE_TRANSITION",
+    "SUPPORT_FRESHNESS_TRANSITION",
+    "RETEST_QUALIFICATION_TRANSITION",
+    "FIRST_VALID_TEST_OBSERVED",
+    "FIRST_SEPARATED_SESSION_OBSERVED",
+    "GAP_FILL_STAGE_TRANSITION",
+)
 _RANGE_TYPES = {"RANGE_FLOOR", "RANGE_CEILING"}
 _SYMBOL = re.compile(r"(?:SH|SZ)\.[0-9]{6}")
 
@@ -1196,6 +1205,7 @@ def discover_source_d1_structures(
     structure_symbol: str | None = None,
     structure_changes: bool = False,
     structure_type: str | None = None,
+    material_change_reason: str | None = None,
     structure_change_status: str | None = None,
     material_changes_only: bool = False,
     include_source_symbol_change_summary: bool = False,
@@ -1221,6 +1231,10 @@ def discover_source_d1_structures(
         or type(include_source_symbol_change_summary) is not bool
         or (structure_type is not None and structure_type not in STRUCTURE_TYPES)
         or (
+            material_change_reason is not None
+            and material_change_reason not in MATERIAL_CHANGE_REASONS
+        )
+        or (
             structure_change_status is not None
             and structure_change_status
             not in {
@@ -1233,6 +1247,7 @@ def discover_source_d1_structures(
             }
         )
         or (not structure_changes and structure_change_status is not None)
+        or (not structure_changes and material_change_reason is not None)
         or (not structure_changes and material_changes_only)
         or (not structure_changes and structure_type is not None)
         or (structure_changes and target_session == days[0])
@@ -1300,6 +1315,17 @@ def discover_source_d1_structures(
     material_change_status_counts: Counter[str] = Counter()
     material_change_status_counts_by_type = {
         kind: Counter() for kind in STRUCTURE_TYPES
+    }
+    material_change_reason_anchor_counts: Counter[str] = Counter()
+    material_change_reason_anchor_counts_by_type = {
+        kind: Counter() for kind in STRUCTURE_TYPES
+    }
+    material_change_reason_source_symbols = {
+        reason: set() for reason in MATERIAL_CHANGE_REASONS
+    }
+    material_change_reason_source_symbols_by_type = {
+        kind: {reason: set() for reason in MATERIAL_CHANGE_REASONS}
+        for kind in STRUCTURE_TYPES
     }
     support_status_counts: Counter[str] = Counter()
     changed_source_symbols: set[str] = set()
@@ -1479,6 +1505,10 @@ def discover_source_d1_structures(
                     "material_change_status_counts_by_type": {
                         kind: Counter() for kind in STRUCTURE_TYPES
                     },
+                    "material_change_reason_anchor_counts": Counter(),
+                    "material_change_reason_anchor_counts_by_type": {
+                        kind: Counter() for kind in STRUCTURE_TYPES
+                    },
                 }
                 for change in candidate_changes:
                     change_status_counts[change["change_classification"]] += 1
@@ -1495,6 +1525,25 @@ def discover_source_d1_structures(
                         symbol_change_summary["material_change_anchor_counts_by_type"][
                             change["type"]
                         ] += 1
+                        for reason in change["material_change_reasons"]:
+                            if reason not in MATERIAL_CHANGE_REASONS:
+                                continue
+                            symbol_change_summary[
+                                "material_change_reason_anchor_counts"
+                            ][reason] += 1
+                            symbol_change_summary[
+                                "material_change_reason_anchor_counts_by_type"
+                            ][change["type"]][reason] += 1
+                            material_change_reason_anchor_counts[reason] += 1
+                            material_change_reason_anchor_counts_by_type[
+                                change["type"]
+                            ][reason] += 1
+                            material_change_reason_source_symbols[reason].add(
+                                candidate["source_symbol"]
+                            )
+                            material_change_reason_source_symbols_by_type[
+                                change["type"]
+                            ][reason].add(candidate["source_symbol"])
                     material_change_status_counts[material_status] += 1
                     material_change_status_counts_by_type[change["type"]][
                         material_status
@@ -1515,6 +1564,14 @@ def discover_source_d1_structures(
                             == structure_change_status
                         )
                         and (not material_changes_only or change["material_change"])
+                        and (
+                            material_change_reason is None
+                            or (
+                                material_status == "MATERIAL_CHANGE"
+                                and material_change_reason
+                                in change["material_change_reasons"]
+                            )
+                        )
                     ):
                         if offset <= filtered_anchor_count < offset + limit:
                             historical_change_page.append(change)
@@ -1604,8 +1661,14 @@ def discover_source_d1_structures(
                     structure_change_status is None
                     or item["change_classification"] == structure_change_status
                 )
-                and (structure_type is None or item["type"] == structure_type)
                 and (not material_changes_only or item["material_change"])
+                and (
+                    material_change_reason is None
+                    or (
+                        item["material_change"]
+                        and material_change_reason in item["material_change_reasons"]
+                    )
+                )
             ],
         }
         if selected_symbol_anchor_changes is not None
@@ -1635,6 +1698,10 @@ def discover_source_d1_structures(
                     "material_change_anchor_counts_by_type": Counter(),
                     "material_change_status_counts": Counter(),
                     "material_change_status_counts_by_type": {
+                        kind: Counter() for kind in STRUCTURE_TYPES
+                    },
+                    "material_change_reason_anchor_counts": Counter(),
+                    "material_change_reason_anchor_counts_by_type": {
                         kind: Counter() for kind in STRUCTURE_TYPES
                     },
                 },
@@ -1669,6 +1736,19 @@ def discover_source_d1_structures(
                     kind: dict(
                         sorted(
                             summary["material_change_status_counts_by_type"][
+                                kind
+                            ].items()
+                        )
+                    )
+                    for kind in STRUCTURE_TYPES
+                },
+                "material_change_reason_anchor_counts": dict(
+                    sorted(summary["material_change_reason_anchor_counts"].items())
+                ),
+                "material_change_reason_anchor_counts_by_type": {
+                    kind: dict(
+                        sorted(
+                            summary["material_change_reason_anchor_counts_by_type"][
                                 kind
                             ].items()
                         )
@@ -1743,6 +1823,30 @@ def discover_source_d1_structures(
                 kind: dict(sorted(material_change_status_counts_by_type[kind].items()))
                 for kind in STRUCTURE_TYPES
             },
+            "material_change_reason_anchor_counts": dict(
+                sorted(material_change_reason_anchor_counts.items())
+            ),
+            "material_change_reason_anchor_counts_by_type": {
+                kind: dict(
+                    sorted(material_change_reason_anchor_counts_by_type[kind].items())
+                )
+                for kind in STRUCTURE_TYPES
+            },
+            "material_change_reason_distinct_source_symbol_counts": {
+                reason: len(symbols)
+                for reason, symbols in sorted(
+                    material_change_reason_source_symbols.items()
+                )
+            },
+            "material_change_reason_distinct_source_symbol_counts_by_type": {
+                kind: {
+                    reason: len(symbols)
+                    for reason, symbols in sorted(
+                        material_change_reason_source_symbols_by_type[kind].items()
+                    )
+                }
+                for kind in STRUCTURE_TYPES
+            },
             "material_change_count": material_change_status_counts.get(
                 "MATERIAL_CHANGE", 0
             ),
@@ -1770,6 +1874,7 @@ def discover_source_d1_structures(
             ),
             "filters": {
                 "structure_type": structure_type or "ALL",
+                "material_change_reason": material_change_reason or "ALL",
                 "change_status": structure_change_status or "ALL",
                 "material_changes_only": material_changes_only,
                 "applied_after_full_pool_evaluation": True,

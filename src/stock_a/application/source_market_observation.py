@@ -920,6 +920,8 @@ def read_observation_d1(
 def _d1_material_board_summaries(
     snapshots: list[dict[str, Any]],
     symbol_summaries: Mapping[str, Mapping[str, Any]],
+    *,
+    material_change_reason: str | None,
 ) -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
     source_symbols = set(symbol_summaries)
     board_rows = []
@@ -936,6 +938,8 @@ def _d1_material_board_summaries(
             status_counts_by_type = {name: Counter() for name in STRUCTURE_TYPES}
             anchor_counts_by_type: Counter[str] = Counter()
             material_anchor_counts_by_type: Counter[str] = Counter()
+            selected_reason_anchor_count = 0
+            selected_reason_symbols = set()
             material_symbols = []
             material_anchor_count = 0
             for symbol in sorted(in_source):
@@ -956,6 +960,9 @@ def _d1_material_board_summaries(
                     "material_change_anchor_counts_by_type"
                 ].items():
                     material_anchor_counts_by_type[structure] += count
+                if material_change_reason and item["material_change_anchor_count"]:
+                    selected_reason_anchor_count += item["material_change_anchor_count"]
+                    selected_reason_symbols.add(symbol)
                 if item["group"] == "MATERIAL_CHANGE":
                     material_anchor_count += item["material_change_anchor_count"]
                     material_symbols.append(
@@ -969,6 +976,9 @@ def _d1_material_board_summaries(
                             ],
                             "material_change_status_counts": item[
                                 "material_change_status_counts"
+                            ],
+                            "material_change_reason_anchor_counts": item[
+                                "material_change_reason_anchor_counts"
                             ],
                             "formal_eligibility": "UNKNOWN/NOT_EVALUATED",
                             "membership_status": (
@@ -991,6 +1001,21 @@ def _d1_material_board_summaries(
                     "source_pool_group_counts": dict(sorted(group_counts.items())),
                     "material_change_distinct_symbol_count": len(material_symbols),
                     "material_change_anchor_count": material_anchor_count,
+                    "material_change_status_counts_scope": (
+                        "SELECTED_STRUCTURE_TYPE_ALL_MATERIAL_REASONS"
+                    ),
+                    "selected_reason_scope": (
+                        {
+                            "material_change_reason": material_change_reason,
+                            "event_anchor_count": selected_reason_anchor_count,
+                            "distinct_symbol_count": len(selected_reason_symbols),
+                            "status_counts": {
+                                "MATERIAL_CHANGE": selected_reason_anchor_count
+                            },
+                        }
+                        if material_change_reason
+                        else None
+                    ),
                     "material_change_status_counts": dict(
                         sorted(status_counts.items())
                     ),
@@ -1019,18 +1044,219 @@ def _d1_material_board_summaries(
     return board_rows, mapped_by_kind
 
 
+def _d1_material_scope_summaries(
+    source_symbol_summaries: Mapping[str, Mapping[str, Any]],
+    *,
+    structure_type: str | None,
+    material_change_reason: str | None,
+) -> dict[str, dict[str, Any]]:
+    """按结构与既有原因把完整D1锚摘要投影到一个股票范围。"""
+    selected_types = (structure_type,) if structure_type else STRUCTURE_TYPES
+    result = {}
+    for symbol, source_summary in source_symbol_summaries.items():
+        anchors_by_type = source_summary["anchor_counts_by_type"]
+        material_by_type = source_summary["material_change_anchor_counts_by_type"]
+        reasons_by_type = source_summary["material_change_reason_anchor_counts_by_type"]
+        statuses_by_type = source_summary["material_change_status_counts_by_type"]
+        selected_anchor_counts = {
+            kind: anchors_by_type.get(kind, 0) if kind in selected_types else 0
+            for kind in STRUCTURE_TYPES
+        }
+        selected_material_counts = {
+            kind: (
+                reasons_by_type.get(kind, {}).get(material_change_reason, 0)
+                if material_change_reason
+                else material_by_type.get(kind, 0)
+            )
+            if kind in selected_types
+            else 0
+            for kind in STRUCTURE_TYPES
+        }
+        selected_status_counts_by_type = {
+            kind: Counter(statuses_by_type.get(kind, {}))
+            if kind in selected_types
+            else Counter()
+            for kind in STRUCTURE_TYPES
+        }
+        status_counts = Counter()
+        reason_counts: Counter[str] = Counter()
+        for kind in selected_types:
+            status_counts.update(statuses_by_type.get(kind, {}))
+            reason_counts.update(reasons_by_type.get(kind, {}))
+        selected_anchor_count = sum(selected_anchor_counts.values())
+        selected_material_count = sum(selected_material_counts.values())
+        if selected_material_count:
+            group = "MATERIAL_CHANGE"
+        elif status_counts.get("UNKNOWN", 0):
+            group = "UNKNOWN"
+        elif status_counts.get("NOT_COMPARABLE", 0):
+            group = "NOT_COMPARABLE"
+        elif status_counts.get("NOT_EVALUABLE", 0):
+            group = "NOT_EVALUABLE"
+        elif material_change_reason and selected_anchor_count:
+            group = (
+                "NOT_APPLICABLE"
+                if status_counts.get("NOT_APPLICABLE", 0) == selected_anchor_count
+                else "NO_SELECTED_REASON"
+            )
+        elif status_counts.get("COUNT_ONLY", 0) or status_counts.get("UNCHANGED", 0):
+            group = "KNOWN_NON_MATERIAL"
+        elif selected_anchor_count and status_counts.get("NOT_APPLICABLE", 0):
+            group = "NOT_APPLICABLE"
+        else:
+            group = "NO_PROVED_ANCHOR"
+        result[symbol] = {
+            "group": group,
+            "anchor_count": selected_anchor_count,
+            "material_change_anchor_count": selected_material_count,
+            "anchor_counts_by_type": selected_anchor_counts,
+            "material_change_anchor_counts_by_type": selected_material_counts,
+            "material_change_status_counts": dict(sorted(status_counts.items())),
+            "material_change_status_counts_by_type": {
+                kind: dict(sorted(counts.items()))
+                for kind, counts in selected_status_counts_by_type.items()
+            },
+            "material_change_reason_anchor_counts": dict(sorted(reason_counts.items())),
+            "material_change_reason_anchor_counts_by_type": {
+                kind: (
+                    dict(sorted(reasons_by_type.get(kind, {}).items()))
+                    if kind in selected_types
+                    else {}
+                )
+                for kind in STRUCTURE_TYPES
+            },
+            "selected_structure_type": structure_type or "ALL",
+            "selected_material_change_reason": material_change_reason or "ALL",
+        }
+    return result
+
+
+def _d1_material_scope_totals(
+    source_symbol_summaries: Mapping[str, Mapping[str, Any]],
+    *,
+    structure_type: str | None,
+    material_change_reason: str | None,
+) -> dict[str, Any]:
+    """计算投影后的锚、材料变化股票和互斥股票组分母。"""
+    status_counts: Counter[str] = Counter()
+    anchor_counts_by_type: Counter[str] = Counter()
+    material_anchor_counts_by_type: Counter[str] = Counter()
+    reason_anchor_counts: Counter[str] = Counter()
+    reason_anchor_counts_by_type = {kind: Counter() for kind in STRUCTURE_TYPES}
+    status_counts_by_type = {kind: Counter() for kind in STRUCTURE_TYPES}
+    group_counts: Counter[str] = Counter()
+    for item in source_symbol_summaries.values():
+        group_counts[item["group"]] += 1
+        status_counts.update(item["material_change_status_counts"])
+        for kind, counts in item["material_change_status_counts_by_type"].items():
+            status_counts_by_type[kind].update(counts)
+        for kind, count in item["anchor_counts_by_type"].items():
+            anchor_counts_by_type[kind] += count
+        for kind, count in item["material_change_anchor_counts_by_type"].items():
+            material_anchor_counts_by_type[kind] += count
+        reason_anchor_counts.update(item["material_change_reason_anchor_counts"])
+        for kind, counts in item[
+            "material_change_reason_anchor_counts_by_type"
+        ].items():
+            reason_anchor_counts_by_type[kind].update(counts)
+    for kind in STRUCTURE_TYPES:
+        anchor_counts_by_type.setdefault(kind, 0)
+        material_anchor_counts_by_type.setdefault(kind, 0)
+    selected_reason_anchor_count = (
+        reason_anchor_counts.get(material_change_reason, 0)
+        if material_change_reason
+        else None
+    )
+    selected_reason_symbol_count = (
+        sum(
+            item["material_change_reason_anchor_counts"].get(material_change_reason, 0)
+            > 0
+            for item in source_symbol_summaries.values()
+        )
+        if material_change_reason
+        else None
+    )
+    return {
+        "structure_type": structure_type or "ALL",
+        "material_change_reason": material_change_reason or "ALL",
+        "historical_anchor_count": sum(anchor_counts_by_type.values()),
+        "historical_anchor_count_by_type": dict(anchor_counts_by_type),
+        "material_change_anchor_count": sum(material_anchor_counts_by_type.values()),
+        "material_change_anchor_counts_by_type": dict(material_anchor_counts_by_type),
+        "material_change_distinct_symbol_count": group_counts.get("MATERIAL_CHANGE", 0),
+        "material_change_status_counts": dict(sorted(status_counts.items())),
+        "material_change_status_counts_scope": (
+            "SELECTED_STRUCTURE_TYPE_ALL_MATERIAL_REASONS"
+        ),
+        "material_change_status_counts_by_type": {
+            kind: dict(sorted(counts.items()))
+            for kind, counts in status_counts_by_type.items()
+        },
+        "unknown_anchor_count": status_counts.get("UNKNOWN", 0),
+        "not_comparable_anchor_count": status_counts.get("NOT_COMPARABLE", 0),
+        "not_applicable_anchor_count": status_counts.get("NOT_APPLICABLE", 0),
+        "material_change_reason_anchor_counts": dict(
+            sorted(reason_anchor_counts.items())
+        ),
+        "material_change_reason_anchor_counts_by_type": {
+            kind: dict(sorted(counts.items()))
+            for kind, counts in reason_anchor_counts_by_type.items()
+        },
+        "material_change_reason_distinct_symbol_count": (selected_reason_symbol_count),
+        "selected_reason_anchor_count": selected_reason_anchor_count,
+        "selected_reason_scope": (
+            {
+                "material_change_reason": material_change_reason,
+                "event_anchor_count": selected_reason_anchor_count,
+                "distinct_symbol_count": selected_reason_symbol_count,
+                "status_counts": {"MATERIAL_CHANGE": selected_reason_anchor_count},
+            }
+            if material_change_reason
+            else None
+        ),
+        "source_symbol_group_counts": dict(sorted(group_counts.items())),
+        "source_symbol_group_partition_closed": sum(group_counts.values())
+        == len(source_symbol_summaries),
+        "reason_counts_may_overlap_across_reasons": True,
+        "selected_reason_events_deduplicated_by_anchor": True,
+        "selection_applied_after_full_pool_evaluation": True,
+    }
+
+
 def _d1_material_outcomes(
     config: Mapping[str, Any],
     *,
     target_session: date,
     research_cutoff: date,
     package_sha256: str,
-    horizon: int,
+    horizon: int | None,
     source: Mapping[str, Any],
     source_symbol_summary: Mapping[str, Mapping[str, Any]],
+    structure_type: str | None,
+    material_change_reason: str | None,
 ) -> dict[str, Any]:
     started_wall = time.perf_counter()
     started_cpu = time.process_time()
+    if horizon is None:
+        return {
+            "status": "NOT_REQUESTED",
+            "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
+            "target_session": target_session.isoformat(),
+            "horizon": None,
+            "selection": {
+                "structure_type": structure_type or "ALL",
+                "material_change_reason": material_change_reason or "ALL",
+            },
+            "source_pool_denominator": len(source_symbol_summary),
+            "comparison_group_denominator": 0,
+            "groups": [],
+            "history_rows_read": 0,
+            "raw_batch_reads": 0,
+            "database_write_attempted": False,
+            "post_cutoff_rows_read": 0,
+            "wall_seconds": round(time.perf_counter() - started_wall, 6),
+            "cpu_seconds": round(time.process_time() - started_cpu, 6),
+        }
     _calendar_payload, _calendar_metadata, _calendar_revision, all_sessions = (
         _load_calendar(research_cutoff)
     )
@@ -1091,10 +1317,14 @@ def _d1_material_outcomes(
                 "post_cutoff_rows_read": 0,
             }
 
+    no_change_group = (
+        "NO_SELECTED_REASON" if material_change_reason else "KNOWN_NON_MATERIAL"
+    )
+    included_groups = {"MATERIAL_CHANGE", no_change_group}
     cohort_symbols = sorted(
         symbol
         for symbol, item in source_symbol_summary.items()
-        if item["group"] in {"MATERIAL_CHANGE", "KNOWN_NON_MATERIAL"}
+        if item["group"] in included_groups
     )
     rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
     raw_history_rows_read = 0
@@ -1123,7 +1353,7 @@ def _d1_material_outcomes(
 
     points_by_group: dict[str, list[dict[str, Any]]] = {
         "MATERIAL_CHANGE": [],
-        "KNOWN_NON_MATERIAL": [],
+        no_change_group: [],
     }
     for symbol in cohort_symbols:
         facts = post_signal_price_facts(
@@ -1157,7 +1387,7 @@ def _d1_material_outcomes(
         )
 
     groups = []
-    for group in ("MATERIAL_CHANGE", "KNOWN_NON_MATERIAL"):
+    for group in ("MATERIAL_CHANGE", no_change_group):
         symbols = [
             symbol
             for symbol, item in source_symbol_summary.items()
@@ -1178,6 +1408,11 @@ def _d1_material_outcomes(
         groups.append(
             {
                 "group": group,
+                "group_scope": (
+                    "SELECTED_REASON_EVENT_VERSUS_NO_SELECTED_REASON"
+                    if material_change_reason
+                    else "SELECTED_STRUCTURE_SCOPE_MATERIAL_VERSUS_KNOWN_NON_MATERIAL"
+                ),
                 "source_symbol_count": len(symbols),
                 "outcome_symbols_read": len(group_points),
                 "raw_close_change_observed_count": len(observed),
@@ -1199,15 +1434,25 @@ def _d1_material_outcomes(
                 "result_scope": "RAW_CLOSE_DESCRIPTION_ONLY_NOT_RETURN_VALIDATION",
             }
         )
+    excluded_groups = Counter(
+        item["group"]
+        for item in source_symbol_summary.values()
+        if item["group"] not in included_groups
+    )
     return {
         "status": "MATURED_RAW_DESCRIPTIVE_PARTIAL_COMPARABILITY",
         "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
         "selection_time_role": "T0_D1_ONLY_FUTURE_OUTCOMES_NOT_USED_FOR_GROUPING",
+        "selection": {
+            "structure_type": structure_type or "ALL",
+            "material_change_reason": material_change_reason or "ALL",
+        },
         "target_session": target_session.isoformat(),
         "horizon": horizon,
         "sessions": [day.isoformat() for day in horizon_sessions],
         "source_pool_denominator": len(source_symbol_summary),
         "comparison_group_denominator": len(cohort_symbols),
+        "excluded_t0_group_counts": dict(sorted(excluded_groups.items())),
         "groups": groups,
         "price_coordinate": "RAW_UNADJUSTED",
         "raw_close_formula": "C[T0+N]/C[T0]-1",
@@ -1233,8 +1478,9 @@ def read_d1_material_observation(
     d1_history_session_count: int,
     industry_snapshot_id: str,
     concept_snapshot_id: str,
-    horizon: int,
+    horizon: int | None = None,
     structure_type: str | None = None,
+    material_change_reason: str | None = None,
     board_kind: str | None = None,
     board_native_id: str | None = None,
     symbol: str | None = None,
@@ -1257,18 +1503,29 @@ def read_d1_material_observation(
         structure_symbol=symbol,
         structure_changes=True,
         structure_type=structure_type,
+        material_change_reason=material_change_reason,
         material_changes_only=True,
         include_source_symbol_change_summary=True,
     )
     changes = d1["historical_anchor_changes"]
-    source_symbol_summary = changes.get("source_symbol_material_summary")
+    all_type_source_symbol_summary = changes.get("source_symbol_material_summary")
     if (
-        not isinstance(source_symbol_summary, Mapping)
-        or len(source_symbol_summary) != d1["source_pool_count"]
+        not isinstance(all_type_source_symbol_summary, Mapping)
+        or len(all_type_source_symbol_summary) != d1["source_pool_count"]
         or not changes["material_change_partition_closed"]
         or not d1["source_pool_partition_closed"]
     ):
         raise SourceObservationError("D1材料变化来源池分母未闭合")
+    projected_source_symbol_summary = _d1_material_scope_summaries(
+        all_type_source_symbol_summary,
+        structure_type=structure_type,
+        material_change_reason=material_change_reason,
+    )
+    source_symbol_summary = (
+        all_type_source_symbol_summary
+        if structure_type is None and material_change_reason is None
+        else projected_source_symbol_summary
+    )
 
     snapshots = [
         read_rotation_snapshot_members(config, snapshot_id=snapshot_id, board_kind=kind)
@@ -1283,7 +1540,9 @@ def read_d1_material_observation(
     ):
         raise SourceObservationError("板块当前成员快照与D1来源namespace不一致")
     board_rows, mapped_by_kind = _d1_material_board_summaries(
-        snapshots, source_symbol_summary
+        snapshots,
+        source_symbol_summary,
+        material_change_reason=material_change_reason,
     )
     if board_kind is not None:
         board_rows = [row for row in board_rows if row["board_kind"] == board_kind]
@@ -1304,10 +1563,10 @@ def read_d1_material_observation(
     group_counts = Counter(item["group"] for item in source_symbol_summary.values())
     if sum(group_counts.values()) != d1["source_pool_count"]:
         raise SourceObservationError("D1股票归类分母未守恒")
-    kind_summaries = {snapshot["board_kind"]: snapshot for snapshot in snapshots}
-    market_summary = {
-        "source_pool_symbol_count": d1["source_pool_count"],
-        "evaluated_source_symbol_count": d1["evaluated_source_symbol_count"],
+    all_type_group_counts = Counter(
+        item["group"] for item in all_type_source_symbol_summary.values()
+    )
+    all_types_summary = {
         "historical_anchor_count": changes["effective_old_anchor_count"],
         "historical_anchor_count_by_type": changes[
             "effective_old_anchor_count_by_type"
@@ -1320,15 +1579,80 @@ def read_d1_material_observation(
         "material_change_status_counts_by_type": changes[
             "material_change_status_counts_by_type"
         ],
-        "source_symbol_group_counts": dict(sorted(group_counts.items())),
-        "source_symbol_group_partition_closed": sum(group_counts.values())
+        "material_change_reason_anchor_counts": changes[
+            "material_change_reason_anchor_counts"
+        ],
+        "material_change_reason_anchor_counts_by_type": changes[
+            "material_change_reason_anchor_counts_by_type"
+        ],
+        "material_change_reason_distinct_source_symbol_counts": changes[
+            "material_change_reason_distinct_source_symbol_counts"
+        ],
+        "source_symbol_group_counts": dict(sorted(all_type_group_counts.items())),
+        "source_symbol_group_partition_closed": sum(all_type_group_counts.values())
         == d1["source_pool_count"],
+    }
+    selected_scope_summary = _d1_material_scope_totals(
+        source_symbol_summary,
+        structure_type=structure_type,
+        material_change_reason=material_change_reason,
+    )
+    market_summary = {
+        "source_pool_symbol_count": d1["source_pool_count"],
+        "evaluated_source_symbol_count": d1["evaluated_source_symbol_count"],
+        "historical_anchor_count": selected_scope_summary["historical_anchor_count"],
+        "historical_anchor_count_by_type": selected_scope_summary[
+            "historical_anchor_count_by_type"
+        ],
+        "material_change_anchor_count": selected_scope_summary[
+            "material_change_anchor_count"
+        ],
+        "material_change_distinct_symbol_count": selected_scope_summary[
+            "material_change_distinct_symbol_count"
+        ],
+        "material_change_status_counts": selected_scope_summary[
+            "material_change_status_counts"
+        ],
+        "material_change_status_counts_scope": selected_scope_summary[
+            "material_change_status_counts_scope"
+        ],
+        "material_change_status_counts_by_type": selected_scope_summary[
+            "material_change_status_counts_by_type"
+        ],
+        "material_change_reason_anchor_counts": selected_scope_summary[
+            "material_change_reason_anchor_counts"
+        ],
+        "material_change_reason_anchor_counts_by_type": selected_scope_summary[
+            "material_change_reason_anchor_counts_by_type"
+        ],
+        "material_change_reason_distinct_symbol_count": selected_scope_summary[
+            "material_change_reason_distinct_symbol_count"
+        ],
+        "selected_reason_anchor_count": selected_scope_summary[
+            "selected_reason_anchor_count"
+        ],
+        "selected_reason_scope": selected_scope_summary["selected_reason_scope"],
+        "unknown_anchor_count": selected_scope_summary["unknown_anchor_count"],
+        "not_comparable_anchor_count": selected_scope_summary[
+            "not_comparable_anchor_count"
+        ],
+        "not_applicable_anchor_count": selected_scope_summary[
+            "not_applicable_anchor_count"
+        ],
+        "source_symbol_group_counts": dict(sorted(group_counts.items())),
+        "source_symbol_group_partition_closed": selected_scope_summary[
+            "source_symbol_group_partition_closed"
+        ],
+        "all_types": all_types_summary,
+        "selected_scope": selected_scope_summary,
         "unmapped_source_symbol_count_by_snapshot_kind": {
-            kind: len(set(source_symbol_summary) - mapped_by_kind.get(kind, set()))
+            kind: len(
+                set(all_type_source_symbol_summary) - mapped_by_kind.get(kind, set())
+            )
             for kind in ("INDUSTRY", "CONCEPT")
         },
         "unmapped_source_symbol_count_across_snapshots": len(
-            set(source_symbol_summary) - set().union(*mapped_by_kind.values())
+            set(all_type_source_symbol_summary) - set().union(*mapped_by_kind.values())
         ),
         "board_material_counts_are_non_additive": True,
     }
@@ -1340,9 +1664,14 @@ def read_d1_material_observation(
         horizon=horizon,
         source=d1["source"],
         source_symbol_summary=source_symbol_summary,
+        structure_type=structure_type,
+        material_change_reason=material_change_reason,
     )
     selected_stock_summary = (
         source_symbol_summary.get(symbol) if symbol is not None else None
+    )
+    all_type_selected_stock_summary = (
+        all_type_source_symbol_summary.get(symbol) if symbol is not None else None
     )
     selected_stock_detail = d1.get("selected_source_symbol_detail")
     selected_stock = None
@@ -1373,7 +1702,8 @@ def read_d1_material_observation(
             "material_group": selected_stock_summary.get("group")
             if selected_stock_summary
             else "NOT_IN_SOURCE_POOL",
-            "source_material_summary": selected_stock_summary,
+            "source_material_summary": all_type_selected_stock_summary,
+            "selected_scope_summary": selected_stock_summary,
             "current_snapshot_memberships": memberships,
             "selected_board_membership_status": (
                 "MEMBER_OF_SELECTED_CURRENT_SNAPSHOT"
@@ -1459,6 +1789,8 @@ def read_d1_material_observation(
             else 0,
         },
         "selected_structure_type": structure_type or "ALL",
+        "selected_material_change_reason": material_change_reason or "ALL",
+        "selection_scope": selected_scope_summary,
         "selected_stock": selected_stock,
         "d1": {
             "status": d1["status"],

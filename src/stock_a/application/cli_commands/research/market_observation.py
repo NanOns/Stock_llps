@@ -272,7 +272,6 @@ def _run_source_market_observation(args) -> int:
             "cohort",
             "persisted",
             "fep",
-            "d1-material",
         }:
             raise ValueError("完整研究必须指定至少一个后继会话数")
         if args.view not in {"cohort", "persisted", "fep"} and any(
@@ -296,7 +295,7 @@ def _run_source_market_observation(args) -> int:
         if args.view == "d1-material":
             if (
                 start != end
-                or len(horizons) != 1
+                or len(horizons) > 1
                 or args.rotation_start
                 or args.relative_position
                 or args.signal
@@ -307,8 +306,10 @@ def _run_source_market_observation(args) -> int:
                 or args.fep_condition
             ):
                 raise ValueError(
-                    "D1材料视图须指定单个T0和一个后继期限，不接受Rotation、信号或写入选项"
+                    "D1材料视图须指定单个T0和最多一个后继期限，不接受Rotation、信号或写入选项"
                 )
+        elif args.material_change_reason:
+            raise ValueError("材料变化原因筛选只适用于D1材料视图")
         elif not args.profile_revision or event_start is None:
             raise ValueError("现有市场观察视图须指定画像修订与D1事件窗起点")
         if getattr(args, "fep_condition", None) and args.view != "fep":
@@ -358,8 +359,9 @@ def _run_source_market_observation(args) -> int:
                 d1_history_session_count=args.d1_history_session_count,
                 industry_snapshot_id=args.industry_snapshot_id,
                 concept_snapshot_id=args.concept_snapshot_id,
-                horizon=horizons[0],
+                horizon=horizons[0] if horizons else None,
                 structure_type=args.structure_type,
+                material_change_reason=args.material_change_reason,
                 board_kind=args.board_kind,
                 board_native_id=args.board_id,
                 symbol=args.symbol,

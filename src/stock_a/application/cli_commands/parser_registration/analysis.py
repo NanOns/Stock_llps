@@ -12,7 +12,10 @@ from stock_a.application.pg_price_profiles import (
     run_source_symbol_price_profile,
     source_symbol_price_profile_snapshots,
 )
-from stock_a.application.source_d1_structures import STRUCTURE_TYPES
+from stock_a.application.source_d1_structures import (
+    MATERIAL_CHANGE_REASONS,
+    STRUCTURE_TYPES,
+)
 
 
 def register_commands(commands):
@@ -65,6 +68,11 @@ def register_commands(commands):
         "--structure-type",
         choices=STRUCTURE_TYPES,
         help="D1材料变化结构类型；完整全池分母仍先行统计",
+    )
+    observation.add_argument(
+        "--material-change-reason",
+        choices=MATERIAL_CHANGE_REASONS,
+        help="按现有具名D1材料变化原因筛选；原因计数可重叠",
     )
     observation.add_argument(
         "--rule-id",
