@@ -25,6 +25,7 @@ from stock_a.application.source_market_observation import (
     compare_source_outcomes,
     classify_source_transition,
     read_market_observation_sessions,
+    read_d1_material_observation,
     read_observation_board_details,
     read_observation_d1,
 )
@@ -250,17 +251,29 @@ def _run_source_market_observation(args) -> int:
         start = _parse_session_date(args.start_session)
         end = _parse_session_date(args.end_session)
         cutoff = _parse_session_date(args.research_cutoff)
-        event_start = _parse_session_date(args.event_window_start)
+        event_start = (
+            _parse_session_date(args.event_window_start)
+            if args.event_window_start
+            else None
+        )
         if start > end or end > cutoff or args.offset < 0 or not 1 <= args.limit <= 100:
             raise ValueError("会话范围、截止日或分页参数无效")
         if bool(args.board_kind) != bool(args.board_id):
             raise ValueError("板块类型和编号必须同时提供")
-        if args.view != "fep" and bool(args.rotation_start) != bool(args.board_id):
+        if args.view not in {"fep", "d1-material"} and bool(
+            args.rotation_start
+        ) != bool(args.board_id):
             raise ValueError("精确板块与Rotation起始会话必须同时提供")
         if args.relative_position and not args.board_id:
             raise ValueError("相对位置研究需要精确板块")
         horizons = sorted(set(args.horizon or []))
-        if not horizons and args.view in {"full", "cohort", "persisted", "fep"}:
+        if not horizons and args.view in {
+            "full",
+            "cohort",
+            "persisted",
+            "fep",
+            "d1-material",
+        }:
             raise ValueError("完整研究必须指定至少一个后继会话数")
         if args.view not in {"cohort", "persisted", "fep"} and any(
             not 1 <= value <= 10 for value in horizons
@@ -280,6 +293,24 @@ def _run_source_market_observation(args) -> int:
             value not in {1, 3, 5, 10, 20} for value in horizons
         ):
             raise ValueError("FEP期限须从1、3、5、10、20中选择")
+        if args.view == "d1-material":
+            if (
+                start != end
+                or len(horizons) != 1
+                or args.rotation_start
+                or args.relative_position
+                or args.signal
+                or args.risk_readiness
+                or args.persist_research_facts
+                or args.persist_research_events
+                or args.rule_id
+                or args.fep_condition
+            ):
+                raise ValueError(
+                    "D1材料视图须指定单个T0和一个后继期限，不接受Rotation、信号或写入选项"
+                )
+        elif not args.profile_revision or event_start is None:
+            raise ValueError("现有市场观察视图须指定画像修订与D1事件窗起点")
         if getattr(args, "fep_condition", None) and args.view != "fep":
             raise ValueError("FEP条件只适用于FEP视图")
         if args.persist_research_facts and args.view != "cohort":
@@ -315,6 +346,29 @@ def _run_source_market_observation(args) -> int:
             raise ValueError("研究范围端点必须是官方会话")
         sessions = tuple(day for day in calendar if start <= day <= end)
         config, config_path = load_runtime_config()
+        if args.view == "d1-material":
+            _, _, _, calendar = _load_calendar(end)
+            if end not in calendar:
+                raise ValueError("D1材料目标必须是官方交易会话")
+            result = read_d1_material_observation(
+                config,
+                target_session=end,
+                research_cutoff=cutoff,
+                package_sha256=args.package_sha256,
+                d1_history_session_count=args.d1_history_session_count,
+                industry_snapshot_id=args.industry_snapshot_id,
+                concept_snapshot_id=args.concept_snapshot_id,
+                horizon=horizons[0],
+                structure_type=args.structure_type,
+                board_kind=args.board_kind,
+                board_native_id=args.board_id,
+                symbol=args.symbol,
+                offset=args.offset,
+                limit=args.limit,
+            )
+            result["configuration_path"] = str(config_path)
+            _emit(result)
+            return _EXIT_OK
         if args.view == "persisted-changes":
             _emit(
                 compare_persisted_cohorts(

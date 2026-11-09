@@ -25,16 +25,16 @@ def register_commands(commands):
     observation.add_argument(
         "--package-sha256", required=True, help="精确来源包SHA-256"
     )
-    observation.add_argument("--profile-revision", required=True, help="精确画像修订")
+    observation.add_argument(
+        "--profile-revision", help="精确画像修订；D1材料视图不需要画像"
+    )
     observation.add_argument(
         "--industry-snapshot-id", required=True, help="行业成员快照UUID"
     )
     observation.add_argument(
         "--concept-snapshot-id", required=True, help="GN成员快照UUID"
     )
-    observation.add_argument(
-        "--event-window-start", required=True, help="D1历史事件窗起始会话"
-    )
+    observation.add_argument("--event-window-start", help="D1历史事件窗起始会话")
     observation.add_argument(
         "--history-session-count", type=int, default=75, help="画像历史会话数"
     )
@@ -49,9 +49,22 @@ def register_commands(commands):
     )
     observation.add_argument(
         "--view",
-        choices=("full", "summary", "cohort", "persisted", "persisted-changes", "fep"),
+        choices=(
+            "full",
+            "summary",
+            "cohort",
+            "persisted",
+            "persisted-changes",
+            "fep",
+            "d1-material",
+        ),
         default="full",
-        help="完整研究、盘后变化、独立研究组、持久读取或FEP只读条件统计",
+        help="完整研究、盘后变化、独立研究组、持久读取、FEP统计或D1材料变化",
+    )
+    observation.add_argument(
+        "--structure-type",
+        choices=STRUCTURE_TYPES,
+        help="D1材料变化结构类型；完整全池分母仍先行统计",
     )
     observation.add_argument(
         "--rule-id",

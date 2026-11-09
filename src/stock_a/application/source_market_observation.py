@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import date
 from fractions import Fraction
 from statistics import median
+import time
 from typing import Any, Mapping
 
 from stock_a.application.source_d0_raw import query_source_d0_raw_launch
@@ -26,11 +27,17 @@ from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.application.source_d1_support_changes import (
     discover_source_d1_support_changes,
 )
+from stock_a.application.source_d1_structures import (
+    STRUCTURE_TYPES,
+    discover_source_d1_structures,
+)
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.entry_history.history_timeline import post_signal_price_facts
 from stock_a.research.admission import line_breached
 from stock_a.domain import FieldValue
 from stock_a.storage.postgres.source_raw import (
+    read_raw_daily_catalog,
+    read_raw_daily_history_batch,
     read_raw_daily_history_page,
     read_raw_daily_history_stock,
 )
@@ -908,6 +915,574 @@ def read_observation_d1(
             include_symbol_details=True,
         )
     return result
+
+
+def _d1_material_board_summaries(
+    snapshots: list[dict[str, Any]],
+    symbol_summaries: Mapping[str, Mapping[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, set[str]]]:
+    source_symbols = set(symbol_summaries)
+    board_rows = []
+    mapped_by_kind: dict[str, set[str]] = {}
+    for snapshot in snapshots:
+        kind = snapshot["board_kind"]
+        mapped: set[str] = set()
+        for board_id, board in snapshot["boards"].items():
+            members = set(board["members"])
+            mapped.update(members)
+            in_source = members & source_symbols
+            group_counts: Counter[str] = Counter()
+            status_counts: Counter[str] = Counter()
+            status_counts_by_type = {name: Counter() for name in STRUCTURE_TYPES}
+            anchor_counts_by_type: Counter[str] = Counter()
+            material_anchor_counts_by_type: Counter[str] = Counter()
+            material_symbols = []
+            material_anchor_count = 0
+            for symbol in sorted(in_source):
+                item = symbol_summaries[symbol]
+                group_counts[item["group"]] += 1
+                for status, count in item["material_change_status_counts"].items():
+                    status_counts[status] += count
+                    status_counts_by_type_total = item[
+                        "material_change_status_counts_by_type"
+                    ]
+                    for structure, values in status_counts_by_type_total.items():
+                        status_counts_by_type[structure][status] += values.get(
+                            status, 0
+                        )
+                for structure, count in item["anchor_counts_by_type"].items():
+                    anchor_counts_by_type[structure] += count
+                for structure, count in item[
+                    "material_change_anchor_counts_by_type"
+                ].items():
+                    material_anchor_counts_by_type[structure] += count
+                if item["group"] == "MATERIAL_CHANGE":
+                    material_anchor_count += item["material_change_anchor_count"]
+                    material_symbols.append(
+                        {
+                            "source_symbol": symbol,
+                            "material_change_anchor_count": item[
+                                "material_change_anchor_count"
+                            ],
+                            "material_change_anchor_counts_by_type": item[
+                                "material_change_anchor_counts_by_type"
+                            ],
+                            "material_change_status_counts": item[
+                                "material_change_status_counts"
+                            ],
+                            "formal_eligibility": "UNKNOWN/NOT_EVALUATED",
+                            "membership_status": (
+                                "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"
+                            ),
+                        }
+                    )
+            board_rows.append(
+                {
+                    "board_kind": kind,
+                    "board_native_id": board_id,
+                    "board_name": board["name"],
+                    "snapshot_id": snapshot["snapshot"]["snapshot_id"],
+                    "snapshot_observed_at": snapshot["snapshot"]["observed_at"],
+                    "snapshot_membership_mode": snapshot["snapshot"]["research_mode"],
+                    "membership_status": ("NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"),
+                    "snapshot_member_count": len(members),
+                    "members_in_source_pool": len(in_source),
+                    "members_outside_source_pool": len(members - source_symbols),
+                    "source_pool_group_counts": dict(sorted(group_counts.items())),
+                    "material_change_distinct_symbol_count": len(material_symbols),
+                    "material_change_anchor_count": material_anchor_count,
+                    "material_change_status_counts": dict(
+                        sorted(status_counts.items())
+                    ),
+                    "material_change_status_counts_by_type": {
+                        structure: dict(sorted(counts.items()))
+                        for structure, counts in status_counts_by_type.items()
+                    },
+                    "anchor_counts_by_type": dict(
+                        sorted(anchor_counts_by_type.items())
+                    ),
+                    "material_change_anchor_counts_by_type": dict(
+                        sorted(material_anchor_counts_by_type.items())
+                    ),
+                    "material_change_stocks": material_symbols,
+                    "board_member_counts_are_non_additive": True,
+                }
+            )
+        mapped_by_kind[kind] = mapped
+    board_rows.sort(
+        key=lambda row: (
+            -row["material_change_distinct_symbol_count"],
+            row["board_kind"],
+            row["board_native_id"],
+        )
+    )
+    return board_rows, mapped_by_kind
+
+
+def _d1_material_outcomes(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    package_sha256: str,
+    horizon: int,
+    source: Mapping[str, Any],
+    source_symbol_summary: Mapping[str, Mapping[str, Any]],
+) -> dict[str, Any]:
+    started_wall = time.perf_counter()
+    started_cpu = time.process_time()
+    _calendar_payload, _calendar_metadata, _calendar_revision, all_sessions = (
+        _load_calendar(research_cutoff)
+    )
+    cutoff_sessions = tuple(day for day in all_sessions if day <= research_cutoff)
+    if target_session not in cutoff_sessions:
+        raise SourceObservationError("后续比较目标不在截止内的官方日历")
+    horizon_sessions = tuple(
+        (target_session,)
+        + tuple(day for day in cutoff_sessions if day > target_session)[:horizon]
+    )
+    if len(horizon_sessions) < horizon + 1:
+        return {
+            "status": "NOT_MATURED",
+            "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
+            "target_session": target_session.isoformat(),
+            "horizon": horizon,
+            "mature_session_count": len(horizon_sessions) - 1,
+            "required_session_count": horizon,
+            "history_rows_read": 0,
+            "raw_batch_reads": 0,
+            "reason": "NO_SAVED_POST_SIGNAL_SESSION_WITHIN_RESEARCH_CUTOFF",
+            "database_write_attempted": False,
+            "post_cutoff_rows_read": 0,
+        }
+
+    catalog = read_raw_daily_catalog(
+        config,
+        max_target_session=research_cutoff,
+        year=target_session.year,
+        offset=0,
+        limit=200,
+    )
+    if catalog["namespace_id"] != source.get("namespace_id"):
+        raise SourceObservationError("后续Raw目录与D1来源namespace不一致")
+    versions = {
+        (date.fromisoformat(row["session_date"]), row["package_sha256"]): row
+        for row in catalog["versions"]
+    }
+    for session in horizon_sessions:
+        version = versions.get((session, package_sha256))
+        if (
+            version is None
+            or version["version_status"] != "CLOSED"
+            or version["row_count"] != source["raw_row_count"]
+            or version["expected_row_count"] != source["raw_row_count"]
+        ):
+            return {
+                "status": "SOURCE_VERSION_NOT_CLOSED",
+                "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
+                "target_session": target_session.isoformat(),
+                "horizon": horizon,
+                "session_versions_checked": len(horizon_sessions),
+                "failed_session": session.isoformat(),
+                "failed_version": version,
+                "history_rows_read": 0,
+                "raw_batch_reads": 0,
+                "database_write_attempted": False,
+                "post_cutoff_rows_read": 0,
+            }
+
+    cohort_symbols = sorted(
+        symbol
+        for symbol, item in source_symbol_summary.items()
+        if item["group"] in {"MATERIAL_CHANGE", "KNOWN_NON_MATERIAL"}
+    )
+    rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
+    raw_history_rows_read = 0
+    raw_batch_reads = 0
+    expected_content_id = source.get("source_content_id")
+    target_capture_id = str(source.get("source_capture_id"))
+    for offset in range(0, len(cohort_symbols), 100):
+        batch_symbols = cohort_symbols[offset : offset + 100]
+        batch = read_raw_daily_history_batch(
+            config,
+            source_symbols=batch_symbols,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            package_sha256=package_sha256,
+            sessions=horizon_sessions,
+            expected_namespace_id=source["namespace_id"],
+            expected_source_content_id=expected_content_id,
+            expected_target_capture_id=target_capture_id,
+            starts_at_target=True,
+        )
+        if any(day > research_cutoff for day in horizon_sessions):
+            raise SourceObservationError("后续Raw请求越过显式研究截止")
+        rows_by_symbol.update(batch["history_rows_by_symbol"])
+        raw_history_rows_read += batch["raw_history_rows_read"]
+        raw_batch_reads += batch["raw_history_batch_reads"]
+
+    points_by_group: dict[str, list[dict[str, Any]]] = {
+        "MATERIAL_CHANGE": [],
+        "KNOWN_NON_MATERIAL": [],
+    }
+    for symbol in cohort_symbols:
+        facts = post_signal_price_facts(
+            horizon_sessions, rows_by_symbol.get(symbol, []), horizon
+        )
+        t0_quality = facts["t0"]["ohlc"]["quality"]
+        endpoint = facts["points"][horizon - 1]
+        endpoint_quality = endpoint["ohlc"]["quality"]
+        change = endpoint["raw_close_relative_change"]
+        if change.get("quality") == "OBSERVED":
+            raw_value = Fraction(change["value"]["exact"])
+            raw_status = "OBSERVED_RAW_CLOSE_CHANGE"
+            reason = None
+        else:
+            raw_value = None
+            raw_status = "UNKNOWN_PRICE_QUALITY"
+            reason = (
+                "T0:" + str(facts["t0"]["ohlc"].get("reason"))
+                if t0_quality != "OBSERVED"
+                else "T_PLUS_N:" + str(endpoint["ohlc"].get("reason"))
+            )
+        points_by_group[source_symbol_summary[symbol]["group"]].append(
+            {
+                "source_symbol": symbol,
+                "raw_status": raw_status,
+                "raw_close_change": raw_value,
+                "raw_reason": reason,
+                "raw_quality": change.get("quality"),
+                "corporate_action_continuity": "UNKNOWN_NOT_EVALUATED",
+            }
+        )
+
+    groups = []
+    for group in ("MATERIAL_CHANGE", "KNOWN_NON_MATERIAL"):
+        symbols = [
+            symbol
+            for symbol, item in source_symbol_summary.items()
+            if item["group"] == group
+        ]
+        group_points = points_by_group[group]
+        observed = [
+            item["raw_close_change"]
+            for item in group_points
+            if item["raw_close_change"] is not None
+        ]
+        reasons = Counter(
+            item["raw_reason"]
+            for item in group_points
+            if item["raw_reason"] is not None
+        )
+        positive_count = sum(value > 0 for value in observed)
+        groups.append(
+            {
+                "group": group,
+                "source_symbol_count": len(symbols),
+                "outcome_symbols_read": len(group_points),
+                "raw_close_change_observed_count": len(observed),
+                "raw_close_change_unknown_count": len(group_points) - len(observed),
+                "raw_close_change_unknown_reasons": dict(sorted(reasons.items())),
+                "non_comparable_count": len(observed),
+                "non_comparable_reason": (
+                    "CORPORATE_ACTION_CONTINUITY_NOT_PROVED_FOR_RAW_CLOSE_RATIO"
+                ),
+                "median_raw_close_change_unadjusted": (
+                    str(median(observed)) if observed else None
+                ),
+                "positive_raw_close_ratio_unadjusted": (
+                    str(Fraction(positive_count, len(observed))) if observed else None
+                ),
+                "median_comparable_outcome": None,
+                "positive_comparable_ratio": None,
+                "corporate_action_continuity": "UNKNOWN_NOT_EVALUATED",
+                "result_scope": "RAW_CLOSE_DESCRIPTION_ONLY_NOT_RETURN_VALIDATION",
+            }
+        )
+    return {
+        "status": "MATURED_RAW_DESCRIPTIVE_PARTIAL_COMPARABILITY",
+        "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
+        "selection_time_role": "T0_D1_ONLY_FUTURE_OUTCOMES_NOT_USED_FOR_GROUPING",
+        "target_session": target_session.isoformat(),
+        "horizon": horizon,
+        "sessions": [day.isoformat() for day in horizon_sessions],
+        "source_pool_denominator": len(source_symbol_summary),
+        "comparison_group_denominator": len(cohort_symbols),
+        "groups": groups,
+        "price_coordinate": "RAW_UNADJUSTED",
+        "raw_close_formula": "C[T0+N]/C[T0]-1",
+        "corporate_action_continuity": "UNKNOWN_NOT_EVALUATED",
+        "history_rows_read": raw_history_rows_read,
+        "raw_batch_reads": raw_batch_reads,
+        "rows_read_after_cutoff": 0,
+        "database_transaction": "REPEATABLE_READ_READ_ONLY",
+        "database_write_attempted": False,
+        "ddl_executed": False,
+        "dml_executed": False,
+        "wall_seconds": round(time.perf_counter() - started_wall, 6),
+        "cpu_seconds": round(time.process_time() - started_cpu, 6),
+    }
+
+
+def read_d1_material_observation(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    package_sha256: str,
+    d1_history_session_count: int,
+    industry_snapshot_id: str,
+    concept_snapshot_id: str,
+    horizon: int,
+    structure_type: str | None = None,
+    board_kind: str | None = None,
+    board_native_id: str | None = None,
+    symbol: str | None = None,
+    offset: int = 0,
+    limit: int = 30,
+) -> dict[str, Any]:
+    """单次全池D1后生成市场、当前板块与股票研究视图。"""
+    started_wall = time.perf_counter()
+    _target, sessions, _calendar_revision = resolve_pg_history_window(
+        target_session.isoformat(), d1_history_session_count
+    )
+    d1 = discover_source_d1_structures(
+        config,
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        sessions=sessions,
+        package_sha256=package_sha256,
+        offset=offset,
+        limit=limit,
+        structure_symbol=symbol,
+        structure_changes=True,
+        structure_type=structure_type,
+        material_changes_only=True,
+        include_source_symbol_change_summary=True,
+    )
+    changes = d1["historical_anchor_changes"]
+    source_symbol_summary = changes.get("source_symbol_material_summary")
+    if (
+        not isinstance(source_symbol_summary, Mapping)
+        or len(source_symbol_summary) != d1["source_pool_count"]
+        or not changes["material_change_partition_closed"]
+        or not d1["source_pool_partition_closed"]
+    ):
+        raise SourceObservationError("D1材料变化来源池分母未闭合")
+
+    snapshots = [
+        read_rotation_snapshot_members(config, snapshot_id=snapshot_id, board_kind=kind)
+        for kind, snapshot_id in (
+            ("INDUSTRY", industry_snapshot_id),
+            ("CONCEPT", concept_snapshot_id),
+        )
+    ]
+    if any(
+        snapshot["namespace_id"] != d1["source"]["namespace_id"]
+        for snapshot in snapshots
+    ):
+        raise SourceObservationError("板块当前成员快照与D1来源namespace不一致")
+    board_rows, mapped_by_kind = _d1_material_board_summaries(
+        snapshots, source_symbol_summary
+    )
+    if board_kind is not None:
+        board_rows = [row for row in board_rows if row["board_kind"] == board_kind]
+    if board_native_id is not None:
+        board_rows = [
+            row for row in board_rows if row["board_native_id"] == board_native_id
+        ]
+        if not board_rows:
+            raise SourceObservationError("所选精确板块不在当前成员快照中")
+    selected_board = board_rows[0] if board_native_id is not None else None
+    board_page = board_rows[offset : offset + limit]
+    member_page = (
+        selected_board["material_change_stocks"][offset : offset + limit]
+        if selected_board is not None
+        else []
+    )
+
+    group_counts = Counter(item["group"] for item in source_symbol_summary.values())
+    if sum(group_counts.values()) != d1["source_pool_count"]:
+        raise SourceObservationError("D1股票归类分母未守恒")
+    kind_summaries = {snapshot["board_kind"]: snapshot for snapshot in snapshots}
+    market_summary = {
+        "source_pool_symbol_count": d1["source_pool_count"],
+        "evaluated_source_symbol_count": d1["evaluated_source_symbol_count"],
+        "historical_anchor_count": changes["effective_old_anchor_count"],
+        "historical_anchor_count_by_type": changes[
+            "effective_old_anchor_count_by_type"
+        ],
+        "material_change_anchor_count": changes["material_change_count"],
+        "material_change_distinct_symbol_count": changes[
+            "material_change_distinct_source_symbol_count"
+        ],
+        "material_change_status_counts": changes["material_change_status_counts"],
+        "material_change_status_counts_by_type": changes[
+            "material_change_status_counts_by_type"
+        ],
+        "source_symbol_group_counts": dict(sorted(group_counts.items())),
+        "source_symbol_group_partition_closed": sum(group_counts.values())
+        == d1["source_pool_count"],
+        "unmapped_source_symbol_count_by_snapshot_kind": {
+            kind: len(set(source_symbol_summary) - mapped_by_kind.get(kind, set()))
+            for kind in ("INDUSTRY", "CONCEPT")
+        },
+        "unmapped_source_symbol_count_across_snapshots": len(
+            set(source_symbol_summary) - set().union(*mapped_by_kind.values())
+        ),
+        "board_material_counts_are_non_additive": True,
+    }
+    comparison = _d1_material_outcomes(
+        config,
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        package_sha256=package_sha256,
+        horizon=horizon,
+        source=d1["source"],
+        source_symbol_summary=source_symbol_summary,
+    )
+    selected_stock_summary = (
+        source_symbol_summary.get(symbol) if symbol is not None else None
+    )
+    selected_stock_detail = d1.get("selected_source_symbol_detail")
+    selected_stock = None
+    if symbol is not None:
+        memberships = []
+        for snapshot in snapshots:
+            for board_id, board in sorted(snapshot["boards"].items()):
+                if symbol in board["members"]:
+                    memberships.append(
+                        {
+                            "board_kind": snapshot["board_kind"],
+                            "board_native_id": board_id,
+                            "board_name": board["name"],
+                            "snapshot_id": snapshot["snapshot"]["snapshot_id"],
+                            "membership_status": (
+                                "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"
+                            ),
+                        }
+                    )
+        selected_stock = {
+            "source_symbol": symbol,
+            "source_pool_status": (
+                "AVAILABLE"
+                if selected_stock_summary is not None
+                and selected_stock_detail.get("source_symbol") == symbol
+                else selected_stock_detail.get("status")
+            ),
+            "material_group": selected_stock_summary.get("group")
+            if selected_stock_summary
+            else "NOT_IN_SOURCE_POOL",
+            "source_material_summary": selected_stock_summary,
+            "current_snapshot_memberships": memberships,
+            "selected_board_membership_status": (
+                "MEMBER_OF_SELECTED_CURRENT_SNAPSHOT"
+                if selected_board
+                and any(
+                    row["board_kind"] == selected_board["board_kind"]
+                    and row["board_native_id"] == selected_board["board_native_id"]
+                    for row in memberships
+                )
+                else "NOT_MEMBER_OF_SELECTED_CURRENT_SNAPSHOT"
+                if selected_board
+                else "NOT_REQUESTED"
+            ),
+            "formal_eligibility": "UNKNOWN/NOT_EVALUATED",
+            "pit_status": "NON_PIT_RETROSPECTIVE",
+            "d1_detail": selected_stock_detail,
+        }
+
+    return {
+        "ok": True,
+        "view": "d1-material",
+        "scope": "NON_PIT_DESCRIPTIVE_NOT_RETURN_VALIDATION",
+        "qualification_scope": "SOURCE_D1_MATERIAL_CHANGE_NOT_FORMAL_D2_OR_TRADING_SIGNAL",
+        "target_session": target_session.isoformat(),
+        "research_cutoff": research_cutoff.isoformat(),
+        "package_sha256": package_sha256,
+        "profile_revision": "NOT_REQUIRED_FOR_D1_RAW_MATERIAL_VIEW",
+        "d1_history_session_count": len(sessions),
+        "d1_history_start": sessions[0].isoformat(),
+        "d1_history_end": sessions[-1].isoformat(),
+        "source": {
+            key: d1["source"].get(key)
+            for key in (
+                "namespace_id",
+                "package_sha256",
+                "source_content_id",
+                "source_capture_id",
+                "source_raw_digest",
+                "raw_row_count",
+                "capture_expected_row_count",
+                "capture_read_started_at",
+                "capture_validated_at",
+                "source_time_quality",
+                "source_clock_role",
+            )
+        },
+        "market": market_summary,
+        "snapshots": [
+            {
+                "board_kind": snapshot["board_kind"],
+                "snapshot": snapshot["snapshot"],
+                "membership_status": ("NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"),
+            }
+            for snapshot in snapshots
+        ],
+        "boards": {
+            "offset": offset,
+            "limit": limit,
+            "total_count": len(board_rows),
+            "next_offset": offset + limit if offset + limit < len(board_rows) else None,
+            "summaries": [
+                {
+                    key: value
+                    for key, value in row.items()
+                    if key != "material_change_stocks"
+                }
+                for row in board_page
+            ],
+            "selected": (
+                {
+                    key: value
+                    for key, value in selected_board.items()
+                    if key != "material_change_stocks"
+                }
+                if selected_board
+                else None
+            ),
+            "selected_material_stocks": member_page,
+            "selected_material_stock_count": len(
+                selected_board["material_change_stocks"]
+            )
+            if selected_board
+            else 0,
+        },
+        "selected_structure_type": structure_type or "ALL",
+        "selected_stock": selected_stock,
+        "d1": {
+            "status": d1["status"],
+            "contract": d1["contract"],
+            "research_mode": d1["research_mode"],
+            "price_coordinate": d1["price_coordinate"],
+            "historical_anchor_changes": changes,
+            "material_change_page": d1["page"],
+            "formal_downstream": d1["formal_downstream"],
+            "execution": d1["execution"],
+        },
+        "outcome_comparison": comparison,
+        "execution": {
+            "database_target": "127.0.0.1:5432/stock_a",
+            "database_schema": "stock",
+            "database_role": "stock_a",
+            "database_mode": "READ_ONLY",
+            "database_write_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+            "d1_full_pool_scan_passes": d1["execution"]["full_pool_scan_passes"],
+            "wall_seconds": round(time.perf_counter() - started_wall, 6),
+        },
+    }
 
 
 def read_observation_board_details(

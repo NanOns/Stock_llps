@@ -1881,6 +1881,7 @@ def read_raw_daily_history_batch(
     expected_namespace_id: str,
     expected_source_content_id: str,
     expected_target_capture_id: str,
+    starts_at_target: bool = False,
 ) -> dict[str, Any]:
     """在单个只读事务中读取已展示来源代码的有界RAW会话窗口。"""
     selected_symbols = tuple(source_symbols)
@@ -1889,10 +1890,13 @@ def read_raw_daily_history_batch(
         target_session=target_session,
         package_sha256=package_sha256,
         sessions=sessions,
+        starts_at_target=starts_at_target,
     )
     if (
         type(research_cutoff) is not date
         or target_session > research_cutoff
+        or type(starts_at_target) is not bool
+        or (starts_at_target and selected_sessions[-1] > research_cutoff)
         or not selected_symbols
         or len(selected_symbols) > 100
         or tuple(sorted(set(selected_symbols))) != selected_symbols
@@ -1994,6 +1998,9 @@ ORDER BY r.source_symbol, r.session_date""",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
         "package_sha256": package_sha256,
+        "window_direction": "STARTS_AT_TARGET"
+        if starts_at_target
+        else "ENDS_AT_TARGET",
         "history_rows_by_symbol": rows_by_symbol,
         "missing_sessions_by_symbol": missing_by_symbol,
         "raw_history_rows_read": len(rows),
