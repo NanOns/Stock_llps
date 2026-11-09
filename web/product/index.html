@@ -76,7 +76,7 @@
               <p id="pageSubtitle">从真实变化出发，了解市场中正在发生什么。</p>
             </div>
             <button id="refreshResearch" class="button primary">
-              更新研究结果 <span>↗</span>
+              按需深入 D1 结构研究 <span>↗</span>
             </button>
           </div>
           <div id="contextNotice" class="context-notice">
@@ -146,6 +146,44 @@
                 ><small>当前快照，非历史成员</small>
               </article>
             </div>
+            <div class="grid-two">
+              <section class="card">
+                <div class="card-head">
+                  <div>
+                    <span class="section-kicker">SECTOR MOVES</span>
+                    <h3>发生变化的板块</h3>
+                    <p>
+                      D0 来源级新增启动，按已证新增成员数展示，最多 15
+                      个；成员回看 NON_PIT。
+                    </p>
+                  </div>
+                  <button class="text-button" data-goto="sectors">
+                    查看板块 <span>→</span>
+                  </button>
+                </div>
+                <div id="overviewBoards" class="list-empty">
+                  正在准备当前日期的变化研究。
+                </div>
+              </section>
+              <section class="card">
+                <div class="card-head">
+                  <div>
+                    <span class="section-kicker">STOCK MOVES</span>
+                    <h3>独立个股变化</h3>
+                    <p>
+                      D0 相邻官方会话 FALSE→TRUE，按来源代码去重，最多 30
+                      只；尚未排序为正式候选。
+                    </p>
+                  </div>
+                  <button class="text-button" data-goto="stocks">
+                    搜索个股 <span>→</span>
+                  </button>
+                </div>
+                <div id="overviewStocks" class="list-empty">
+                  变化对象将在这里显示。
+                </div>
+              </section>
+            </div>
             <section class="card">
               <div class="card-head">
                 <div>
@@ -184,38 +222,6 @@
                 正在核验相邻官方会话画像的可比性。
               </div>
             </section>
-            <div class="grid-two">
-              <section class="card">
-                <div class="card-head">
-                  <div>
-                    <span class="section-kicker">SECTOR MOVES</span>
-                    <h3>发生变化的板块</h3>
-                    <p>按可证变化成员数展示，最多 15 个。</p>
-                  </div>
-                  <button class="text-button" data-goto="sectors">
-                    查看板块 <span>→</span>
-                  </button>
-                </div>
-                <div id="overviewBoards" class="list-empty">
-                  正在准备当前日期的变化研究。
-                </div>
-              </section>
-              <section class="card">
-                <div class="card-head">
-                  <div>
-                    <span class="section-kicker">STOCK MOVES</span>
-                    <h3>独立个股变化</h3>
-                    <p>跨板块按来源代码去重，最多 30 只。</p>
-                  </div>
-                  <button class="text-button" data-goto="stocks">
-                    搜索个股 <span>→</span>
-                  </button>
-                </div>
-                <div id="overviewStocks" class="list-empty">
-                  变化对象将在这里显示。
-                </div>
-              </section>
-            </div>
             <div class="footnote">
               研究结果为来源代码级、RAW_UNADJUSTED、NON_PIT。正式 D2、Risk /
               Priority、Focus 尚未计算，不等同于“无信号”。
@@ -418,7 +424,7 @@
       </div>
       <div class="drawer-body">
         <div id="boardCoverage" class="coverage">—</div>
-        <div class="drawer-tools">
+        <div class="drawer-tools" id="memberTools">
           <label class="sr-only" for="memberSearch">搜索成员代码</label
           ><input id="memberSearch" placeholder="搜索成员来源代码" /><button
             id="searchMembers"

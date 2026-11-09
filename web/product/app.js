@@ -18,6 +18,9 @@ const state = {
   d0Controller: null,
   d0Request: 0,
   d0Offset: 0,
+  d0Board: null,
+  d0BoardOffset: 0,
+  d0BoardRequest: 0,
 };
 const names = {
   overview: ["今日总览", "从真实变化出发，了解市场中正在发生什么。", "01"],
@@ -189,7 +192,7 @@ function gotoPage(page) {
   message("headingIndex", data[2]);
   if (
     changed &&
-    ["overview", "sectors", "stocks"].includes(page) &&
+    ["sectors", "stocks"].includes(page) &&
     state.selected?.contextReady &&
     state.d1Requested
   ) {
@@ -207,14 +210,6 @@ function gotoPage(page) {
     d1MaterialState.data && renderD1Boards(d1MaterialState.data, openD1Board);
   if (page === "stocks" && state.selected?.contextReady)
     d1MaterialState.data && renderD1Stocks(d1MaterialState.data, openD1Stock);
-  if (
-    ["sectors", "stocks"].includes(page) &&
-    state.selected?.contextReady &&
-    !state.d1Requested
-  ) {
-    state.d1Requested = true;
-    void loadD1Material();
-  }
   if (["focus", "market", "diagnostics"].includes(page)) void loadExtra(page);
 }
 document
@@ -233,6 +228,7 @@ function invalidateDate() {
   ++state.stockRequest;
   ++state.profileChangeRequest;
   ++state.d0Request;
+  ++state.d0BoardRequest;
   ++d1MaterialState.request;
   ++extraRequest;
   ++cohortRequest;
@@ -271,6 +267,8 @@ function invalidateDate() {
   $("d0Stocks").replaceChildren();
   message("d0Status", "当前日期的 D0 新增启动尚未读取。");
   state.d0Offset = 0;
+  state.d0Board = null;
+  state.d0BoardOffset = 0;
   $("d0Prev").disabled = $("d0Next").disabled = true;
   message("d0Page", "—");
   $("metrics").replaceChildren(
@@ -407,10 +405,10 @@ async function selectDate(target_session) {
       version.bar_status_counts?.TARGET_MISSING,
       "不能推断停牌或退市",
     ),
-    countCard("变化研究", "尚未加载", "进入板块或个股研究后计算"),
+    countCard("D0 新增", "读取中", "相邻会话 FALSE→TRUE"),
   );
-  message("overviewBoards", "进入板块研究后加载同日变化。");
-  message("overviewStocks", "进入个股研究后加载同日变化。");
+  message("overviewBoards", "正在读取 D0 来源级新增启动。");
+  message("overviewStocks", "正在读取 D0 来源级新增启动。");
   if (["focus", "market", "diagnostics"].includes(activePage))
     void loadExtra(activePage);
   try {
@@ -459,10 +457,6 @@ async function selectDate(target_session) {
       controller.signal,
     );
     void loadD0Overview(selected);
-    if (["sectors", "stocks"].includes(activePage) && !state.d1Requested) {
-      state.d1Requested = true;
-      void loadD1Material();
-    }
   } catch (error) {
     if (token === state.contextRequest && error.name !== "AbortError")
       message(
@@ -531,6 +525,11 @@ async function loadD0Overview(c) {
       "d0Status",
       "相邻会话没有可确认的同源 Raw，D0 新增状态为 UNKNOWN。",
     );
+    message("overviewBoards", "相邻会话同源 Raw 不可用，板块变化 UNKNOWN。");
+    message("overviewStocks", "相邻会话同源 Raw 不可用，个股变化 UNKNOWN。");
+    $("metrics").lastElementChild.replaceWith(
+      countCard("D0 新增", "UNKNOWN", "相邻会话同源 Raw 不可用"),
+    );
     return;
   }
   state.d0Controller?.abort();
@@ -557,8 +556,58 @@ async function loadD0Overview(c) {
       controller.signal,
     );
     if (token !== state.d0Request || state.selected !== c) return;
-    const count = result.filter?.global_total;
+    if (state.d0Offset === 0) {
+      const boards = result.boards
+        .filter((item) => item.new_member_count > 0)
+        .slice(0, 15);
+      const uniqueStocks = [
+        ...new Map(
+          result.results.map((item) => [item.source_symbol, item]),
+        ).values(),
+      ].slice(0, 30);
+      fillList(
+        "overviewBoards",
+        boards,
+        "没有已证 D0 变化板块；成员缺失为 UNKNOWN。",
+        (item, index) =>
+          rowButton(
+            item.board_name,
+            `${item.board_kind} · 观测 ${item.observed_at || "UNKNOWN"} · NON_PIT`,
+            item.new_member_count,
+            "D0 新增成员",
+            () => openD0Board(item),
+            index,
+          ),
+      );
+      fillList(
+        "overviewStocks",
+        uniqueStocks,
+        "没有已证 D0 新增股票；UNKNOWN 不代表无变化。",
+        (item, index) =>
+          rowButton(
+            item.source_symbol,
+            "D0 来源级新增启动 · 相邻会话 FALSE→TRUE",
+            "D0",
+            "查看原因",
+            () => openStock(item.source_symbol),
+            index,
+          ),
+      );
+    }
     const missing = result.membership_status?.missing_membership_kinds || [];
+    if (state.d0Offset === 0 && missing.length) {
+      $("overviewBoards").prepend(
+        node(
+          "p",
+          `成员关系 UNKNOWN：${missing.join("、")}；其余类型独立展示。`,
+          "rule",
+        ),
+      );
+    }
+    const count = result.filter?.global_total;
+    $("metrics").lastElementChild.replaceWith(
+      countCard("D0 新增", count, "独立来源代码 · 尚未排序为正式候选"),
+    );
     message(
       "d0Status",
       `${c.target_session} · 新增 ${format(count)} 只 · 展示 ${result.results.length} 只 · NON_PIT${missing.length ? ` · 部分成员关系 UNKNOWN：${missing.join("、")}` : ""}`,
@@ -584,8 +633,16 @@ async function loadD0Overview(c) {
         ),
     );
   } catch (error) {
-    if (token === state.d0Request && error.name !== "AbortError")
+    if (token === state.d0Request && error.name !== "AbortError") {
       message("d0Status", `D0 新增读取失败：${error.message}`);
+      if (state.d0Offset === 0) {
+        $("metrics").lastElementChild.replaceWith(
+          countCard("D0 新增", "UNKNOWN", "来源读取失败"),
+        );
+        message("overviewBoards", `D0 UNKNOWN：${error.message}`);
+        message("overviewStocks", `D0 UNKNOWN：${error.message}`);
+      }
+    }
   }
 }
 $("d0Retry").addEventListener("click", () => {
@@ -599,6 +656,72 @@ $("d0Next").addEventListener("click", () => {
   state.d0Offset += 30;
   if (state.selected?.contextReady) void loadD0Overview(state.selected);
 });
+async function openD0Board(board, offset = 0) {
+  const c = state.selected;
+  if (!c?.contextReady) return;
+  state.d0Board = board;
+  $("memberTools").style.display = "none";
+  state.d0BoardOffset = offset;
+  const token = ++state.d0BoardRequest;
+  message("boardTitle", board.board_name);
+  message(
+    "boardMeta",
+    `${board.board_kind} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · D0 新增`,
+  );
+  message("boardCoverage", "正在读取该板块 D0 新增成员…");
+  message("memberList", "正在读取…");
+  $("memberPrev").disabled = $("memberNext").disabled = true;
+  if (!$("boardDialog").open) $("boardDialog").showModal();
+  try {
+    const result = await api("/api/preview/source-launch-watch", {
+      before_session: c.previous_session,
+      target_session: c.target_session,
+      research_cutoff: c.research_cutoff,
+      package_sha256: c.package_sha256,
+      namespace_id: c.namespace_id,
+      industry_snapshot_id: c.industry_snapshot_id,
+      concept_snapshot_id: c.concept_snapshot_id,
+      board_kind: board.board_kind,
+      board_native_id: board.board_native_id,
+      offset,
+      limit: 5,
+    });
+    if (
+      token !== state.d0BoardRequest ||
+      c !== state.selected ||
+      state.d0Board !== board ||
+      !$("boardDialog").open
+    )
+      return;
+    message(
+      "boardCoverage",
+      `D0 新增成员 ${result.filter.filtered_total} · 全市场独立新增 ${result.filter.global_total} · 板块关系可重叠 · NON_PIT`,
+    );
+    fillList(
+      "memberList",
+      result.results,
+      "没有已证明的新增成员；未知不等于无变化。",
+      (item, index) =>
+        rowButton(
+          item.source_symbol,
+          "来源池内 · D0 FALSE→TRUE · NON_PIT",
+          "D0",
+          "查看同日个股",
+          () => openStock(item.source_symbol),
+          index,
+        ),
+    );
+    message(
+      "memberPage",
+      `偏移 ${result.pagination.offset} · 总数 ${result.filter.filtered_total}`,
+    );
+    $("memberPrev").disabled = offset === 0;
+    $("memberNext").disabled = result.pagination.next_offset == null;
+  } catch (error) {
+    if (token === state.d0BoardRequest && c === state.selected)
+      message("memberList", `D0 成员 UNKNOWN：${error.message}`);
+  }
+}
 function supportRequest(c, symbol) {
   return {
     observation_mode: "D1",
@@ -648,6 +771,8 @@ function configureD1Filters() {
   );
 }
 function openD1Board(board) {
+  state.d0Board = null;
+  $("memberTools").style.display = "";
   d1MaterialState.board = {
     board_kind: board.board_kind,
     board_native_id: board.board_native_id,
@@ -672,13 +797,7 @@ function openD1Stock(symbol, member = null) {
 }
 function clearD1MaterialView(symbol = null) {
   message("d1MaterialQuality", "正在读取当前范围的质量与分组，旧结果已清除。");
-  $("metrics").replaceChildren(
-    countCard("来源代码池", "—", "等待D1材料变化"),
-    countCard("材料变化代码", "—", "等待全池读取"),
-    countCard("材料变化锚点", "—", "等待全池读取"),
-    countCard("行业 / GN 板块", "—", "当前成员快照 · NON_PIT"),
-  );
-  for (const id of ["overviewBoards", "overviewStocks", "stockList"]) {
+  for (const id of ["stockList"]) {
     $(id).replaceChildren(node("p", "等待同一来源范围的D1全池读取…"));
     $(id).classList.remove("has-items");
   }
@@ -687,18 +806,14 @@ function clearD1MaterialView(symbol = null) {
   cell.colSpan = 6;
   row.append(cell);
   $("boardRows").replaceChildren(row);
-  for (const id of ["boardSummary", "boardPage", "stockPage", "memberPage"])
+  for (const id of ["boardSummary", "boardPage", "stockPage"])
     message(id, "正在读取…");
-  for (const id of [
-    "boardPrev",
-    "boardNext",
-    "stockPrev",
-    "stockNext",
-    "memberPrev",
-    "memberNext",
-  ])
+  if (!state.d0Board) message("memberPage", "正在读取…");
+  for (const id of ["boardPrev", "boardNext", "stockPrev", "stockNext"])
     $(id).disabled = true;
-  if (d1MaterialState.board) {
+  if (!state.d0Board)
+    $("memberPrev").disabled = $("memberNext").disabled = true;
+  if (d1MaterialState.board && !state.d0Board) {
     message("boardCoverage", "正在读取当前成员范围…");
     message("memberList", "正在读取当前成员范围，旧结果已清除。");
     $("memberList").classList.remove("has-items");
@@ -738,10 +853,7 @@ async function loadD1Material(symbol = null) {
       ? "正在将结构、原因、板块与股票筛选应用到已计算的同一D1事实…"
       : "正在读取完整来源池D1材料变化。首次计算可能需要数分钟，页面不会显示缩小后的来源池结果。",
   );
-  message(
-    "observationLabel",
-    hadFacts ? "正在复用已计算的完整来源池…" : "正在计算完整来源池，请稍候…",
-  );
+
   const timer = window.setInterval(() => {
     if (token !== d1MaterialState.request) return;
     const seconds = Math.floor(
@@ -762,7 +874,7 @@ async function loadD1Material(symbol = null) {
     renderD1MaterialMarket(data, openD1Board, openD1Stock);
     renderD1Boards(data, openD1Board);
     renderD1Stocks(data, openD1Stock);
-    renderD1Members(data, openD1Stock);
+    if (!state.d0Board) renderD1Members(data, openD1Stock);
     const renderSeconds = (performance.now() - renderStartedAt) / 1000;
     const execution = data.execution || {};
     const scan = execution.d1_full_pool_scan_passes || 0;
@@ -772,10 +884,7 @@ async function loadD1Material(symbol = null) {
         ? `已复用同进程完整事实 · 本次全池扫描 ${scan} 次 · 首次扫描 ${scanSeconds ?? "—"} 秒 · 服务处理 ${execution.http_request_wall_seconds ?? "—"} 秒 · 请求往返/JSON ${responseSeconds.toFixed(3)} 秒 · 页面渲染 ${renderSeconds.toFixed(3)} 秒。`
         : `全池计算完成 · 扫描 ${scan} 次 · 耗时 ${scanSeconds ?? "—"} 秒 · 请求往返/JSON ${responseSeconds.toFixed(3)} 秒 · 页面渲染 ${renderSeconds.toFixed(3)} 秒；后续筛选与分页复用同一事实。`,
     );
-    message(
-      "observationLabel",
-      `${data.target_session} · ${data.d1_history_session_count} 个官方会话 · D1材料变化 · 全池扫描 ${scan} 次`,
-    );
+
     if (symbol) renderD1StockDetail(data.selected_stock);
   } catch (error) {
     if (token !== d1MaterialState.request || error.name === "AbortError")
@@ -785,16 +894,16 @@ async function loadD1Material(symbol = null) {
     setD1MaterialStatus(
       `读取失败：${error.message}。可修正筛选或来源代码后重新读取。`,
     );
-    message("observationLabel", `D1材料读取失败：${error.message}`);
+
     if (symbol) {
       message("stockStatus", `个股材料读取失败：${error.message}`);
       $("stockContent").replaceChildren(
         node("p", "修正来源代码或研究范围后可重新读取。", "rule"),
       );
     }
-    for (const id of ["overviewBoards", "overviewStocks", "stockList"])
+    for (const id of ["stockList"])
       message(id, "读取失败；不能据此推断没有变化或正式未入选。");
-    if (d1MaterialState.board)
+    if (d1MaterialState.board && !state.d0Board)
       message("memberList", "成员读取失败；不能据此推断没有变化。");
   } finally {
     window.clearInterval(timer);
@@ -810,6 +919,8 @@ for (const id of ["d1StructureType", "d1MaterialReason"])
     if (state.selected?.contextReady) void loadD1Material();
   });
 async function loadResearch() {
+  if (activePage === "overview") gotoPage("sectors");
+  state.d1Requested = true;
   await loadD1Material();
 }
 $("refreshResearch").addEventListener("click", loadResearch);
@@ -1012,14 +1123,22 @@ $("stockNext").addEventListener("click", () => {
   void loadD1Material();
 });
 $("memberPrev").addEventListener("click", () => {
+  if (state.d0Board)
+    return void openD0Board(
+      state.d0Board,
+      Math.max(0, state.d0BoardOffset - 5),
+    );
   d1MaterialState.memberOffset = Math.max(0, d1MaterialState.memberOffset - 30);
   void loadD1Material();
 });
 $("memberNext").addEventListener("click", () => {
+  if (state.d0Board)
+    return void openD0Board(state.d0Board, state.d0BoardOffset + 5);
   d1MaterialState.memberOffset += 30;
   void loadD1Material();
 });
 function filterMembers() {
+  if (state.d0Board) return;
   d1MaterialState.memberOffset = 0;
   void loadD1Material();
 }
@@ -1032,6 +1151,8 @@ $("memberSearch").addEventListener("keydown", (event) => {
   }
 });
 $("boardDialog").addEventListener("close", () => {
+  state.d0Board = null;
+  ++state.d0BoardRequest;
   d1MaterialState.board = null;
   d1MaterialState.memberOffset = 0;
 });
@@ -1294,29 +1415,38 @@ async function openStock(symbol, row = {}) {
       "rule",
     );
     root.append(materialDetail);
-    const materialRequest = buildD1MaterialRequest(
-      c,
-      d1MaterialState.board,
-      {
-        board: d1MaterialState.boardOffset,
-        member: d1MaterialState.memberOffset,
-        stock: d1MaterialState.stockOffset,
-      },
-      symbol,
-    );
-    waitForD1Material(materialRequest, controller.signal, () => {
-      if (token === state.stockRequest && state.selected === c)
-        materialDetail.textContent =
-          "已有完整来源池正在计算；本次材料将自动继续读取。";
-    })
-      .then((result) => {
+    materialDetail.textContent =
+      "按需读取完整来源池 D1 材料变化，首次可能需要数分钟。";
+    const deepen = node("button", "深入 D1 材料变化", "button subtle");
+    deepen.type = "button";
+    materialDetail.append(deepen);
+    deepen.addEventListener("click", () => {
+      deepen.disabled = true;
+      materialDetail.textContent = "完整来源池计算中，首次可能需要数分钟…";
+      const materialRequest = buildD1MaterialRequest(
+        c,
+        d1MaterialState.board,
+        {
+          board: d1MaterialState.boardOffset,
+          member: d1MaterialState.memberOffset,
+          stock: d1MaterialState.stockOffset,
+        },
+        symbol,
+      );
+      waitForD1Material(materialRequest, controller.signal, () => {
         if (token === state.stockRequest && state.selected === c)
-          renderD1StockDetail(result.selected_stock, materialDetail);
+          materialDetail.textContent =
+            "已有完整来源池正在计算；本次材料将自动继续读取。";
       })
-      .catch((error) => {
-        if (token === state.stockRequest && error.name !== "AbortError")
-          materialDetail.textContent = `D1材料变化不可用：${error.message}`;
-      });
+        .then((result) => {
+          if (token === state.stockRequest && state.selected === c)
+            renderD1StockDetail(result.selected_stock, materialDetail);
+        })
+        .catch((error) => {
+          if (token === state.stockRequest && error.name !== "AbortError")
+            materialDetail.textContent = `D1材料变化不可用：${error.message}`;
+        });
+    });
     message(
       "stockStatus",
       `已读取 ${data.window?.real_bar_count ?? "—"} / ${data.window?.requested_sessions ?? "—"} 个实际 Bar；来源级诊断不构成正式选股。`,

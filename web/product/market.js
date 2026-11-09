@@ -1,4 +1,4 @@
-import { byId, display, element } from "./state.js";
+import { byId } from "./state.js";
 
 const reasonNames = {
   SUPPORT_STATE_TRANSITION: "支撑状态变化",
@@ -10,122 +10,26 @@ const reasonNames = {
   GAP_FILL_STAGE_TRANSITION: "缺口回补阶段变化",
 };
 
-function metric(label, value, detail) {
-  const card = element("article");
-  card.append(
-    element("span", label),
-    element("strong", display(value)),
-    element("small", detail),
-  );
-  return card;
-}
-
 export function setD1MaterialStatus(text) {
   byId("d1MaterialStatus").textContent = text;
 }
 
-export function renderD1MaterialMarket(data, openBoard, openStock) {
+export function renderD1MaterialMarket(data) {
   const summary = data.market;
-  byId("metrics").replaceChildren(
-    metric("来源代码池", summary.source_pool_symbol_count, "同日完整来源分母"),
-    metric(
-      "材料变化代码",
-      summary.material_change_distinct_symbol_count,
-      "来源观察，不是正式候选",
-    ),
-    metric(
-      "材料变化锚点",
-      summary.material_change_anchor_count,
-      "按锚事件计数，可跨原因重叠",
-    ),
-    metric("行业 / GN 板块", data.boards.total_count, "当前成员快照 · NON_PIT"),
-  );
   const selectedReason = data.selected_material_change_reason;
   const reasonLabel =
     selectedReason === "ALL"
       ? "全部原因"
       : reasonNames[selectedReason] || selectedReason;
-  byId("observationLabel").textContent =
-    `${data.target_session} · D1 材料变化 · ${reasonLabel} · ${data.d1_history_session_count} 个官方会话 · NON_PIT`;
+
   const groups = summary.source_symbol_group_counts || {};
   byId("d1MaterialQuality").hidden = !(
     byId("sectors").classList.contains("active") ||
     byId("stocks").classList.contains("active")
   );
   byId("d1MaterialQuality").textContent =
-    `质量与分组：未知 ${groups.UNKNOWN || 0} 个来源代码、不可比较 ${groups.NOT_COMPARABLE || 0} 个、无已证锚点 ${groups.NO_PROVED_ANCHOR || 0} 个。UNKNOWN、NOT_COMPARABLE 与 NO_PROVED_ANCHOR 不解释为正式未入选或没有行情。未选择后继期限，不读取T+N Raw。`;
+    `${data.target_session} · D1 材料变化 · ${reasonLabel} · ${data.d1_history_session_count} 会话 · 来源池 ${summary.source_pool_symbol_count}，材料变化代码 ${summary.material_change_distinct_symbol_count}、锚点 ${summary.material_change_anchor_count}；不是正式候选。质量与分组：未知 ${groups.UNKNOWN || 0} 个来源代码、不可比较 ${groups.NOT_COMPARABLE || 0} 个、无已证锚点 ${groups.NO_PROVED_ANCHOR || 0} 个。UNKNOWN、NOT_COMPARABLE 与 NO_PROVED_ANCHOR 不解释为正式未入选或没有行情。未选择后继期限，不读取T+N Raw。`;
 
-  const overviewBoards = byId("overviewBoards");
-  overviewBoards.replaceChildren();
-  const changedBoards = data.boards.summaries.filter(
-    (board) => board.material_change_distinct_symbol_count > 0,
-  );
-  overviewBoards.classList.toggle("has-items", !!changedBoards.length);
-  if (!changedBoards.length) {
-    overviewBoards.textContent = Object.values(
-      data.membership_availability || {},
-    ).some((status) => status !== "AVAILABLE")
-      ? "部分成员关系未知，不能据此判断对应板块没有变化。"
-      : "此所选范围无已证明材料变化板块；未知质量不代表没有行情。";
-  } else {
-    changedBoards.slice(0, 15).forEach((board, index) => {
-      const button = element("button", null, "list-row");
-      button.type = "button";
-      const left = element("span", null, "row-main");
-      left.append(
-        element("strong", board.board_name),
-        element(
-          "small",
-          `${board.board_kind === "INDUSTRY" ? "行业" : "GN 概念"} · 成员 ${display(board.snapshot_member_count)} · NON_PIT`,
-        ),
-      );
-      const right = element("span", null, "row-value");
-      right.append(
-        element("span", display(board.material_change_distinct_symbol_count)),
-        element("small", "变化成员"),
-      );
-      button.append(
-        element("span", String(index + 1).padStart(2, "0"), "row-rank"),
-        left,
-        right,
-        element("span", "›", "row-arrow"),
-      );
-      button.addEventListener("click", () => openBoard(board));
-      overviewBoards.append(button);
-    });
-  }
-
-  const stocks = data.stocks.results.slice(0, 30);
-  const overviewStocks = byId("overviewStocks");
-  overviewStocks.replaceChildren();
-  overviewStocks.classList.toggle("has-items", !!stocks.length);
-  if (!stocks.length) {
-    overviewStocks.textContent =
-      "当前筛选没有可展示的变化代码；未知、不可比较或无已证锚点不等于正式未入选。";
-  } else {
-    stocks.forEach((stock, index) => {
-      const button = element("button", null, "list-row");
-      button.type = "button";
-      const left = element("span", null, "row-main");
-      left.append(
-        element("strong", stock.source_symbol),
-        element("small", "D1 材料变化 · RAW_UNADJUSTED · NON_PIT"),
-      );
-      const right = element("span", null, "row-value");
-      right.append(
-        element("span", display(stock.material_change_anchor_count)),
-        element("small", "结构锚点"),
-      );
-      button.append(
-        element("span", String(index + 1).padStart(2, "0"), "row-rank"),
-        left,
-        right,
-        element("span", "›", "row-arrow"),
-      );
-      button.addEventListener("click", () => openStock(stock.source_symbol));
-      overviewStocks.append(button);
-    });
-  }
   const missing = Object.entries(data.membership_availability || {})
     .filter(([, status]) => status !== "AVAILABLE")
     .map(([kind]) => (kind === "INDUSTRY" ? "行业" : "概念"));
