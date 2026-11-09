@@ -169,7 +169,12 @@ def _calculate_core_d1_inputs(
         }[latest.state]
         return {
             name: unknown(reason)
-            for name in ("core.prior_high20", "core.atr20", "core.clv")
+            for name in (
+                "core.prior_high20",
+                "core.atr20",
+                "core.clv",
+                "core.ma_slope20_atr",
+            )
         }
 
     prior_rows, prior_reason = _actual_window(history, 20, exclude_current=True)
@@ -228,6 +233,25 @@ def _calculate_core_d1_inputs(
             )
     atr20 = _known(mean(true_ranges), None) if not atr_reason else unknown(atr_reason)
 
+    slope_rows, slope_reason = _actual_window(history, 25)
+    slope_values, slope_value_reason = (
+        _source_d1_column(slope_rows, "close", row_facts=row_facts)
+        if not slope_reason
+        else (None, slope_reason)
+    )
+    slope_reason = slope_reason or slope_value_reason
+    if not slope_reason and atr20.quality != "OBSERVED":
+        slope_reason = atr20.reason or "UPSTREAM_UNKNOWN"
+    if not slope_reason and atr20.value <= 0:
+        slope_reason = "ZERO_ATR"
+    slope20 = (
+        unknown(slope_reason)
+        if slope_reason
+        else FieldValue(
+            (mean(slope_values[-20:]) - mean(slope_values[-25:-5])) / atr20.value
+        )
+    )
+
     if row_facts is None:
         closes, close_reason = _column([latest], "close")
         highs, high_reason = _extreme_column([latest], "high")
@@ -249,6 +273,7 @@ def _calculate_core_d1_inputs(
         "core.prior_high20": prior_high20,
         "core.atr20": atr20,
         "core.clv": clv,
+        "core.ma_slope20_atr": slope20,
     }
 
 
@@ -388,6 +413,10 @@ def _source_d1_preview_for_target(
         "target_session": target.isoformat(),
         "identity_status": "SOURCE_SYMBOL_ONLY",
         "price_coordinate": "RAW_UNADJUSTED",
+        "structure_core_fields": {
+            name: _render_field(core[name])
+            for name in ("core.atr20", "core.ma_slope20_atr", "core.clv")
+        },
         "target_bar_status": {
             "TARGET_PRESENT": "TDX_TARGET_BAR_PRESENT",
             "TARGET_MISSING": "TDX_TARGET_BAR_MISSING",

@@ -22,6 +22,10 @@ from stock_a.research.core import (
 from stock_a.research.entry import _load_calendar
 from stock_a.research.entry_core.fields import _render_field, _render_value
 from stock_a.research.entry_history.support import _decoded_day_from_pg_raw
+from stock_a.research.entry_history.history_preview import (
+    prepare_source_d1_preview_context,
+    research_stock_pg_d1_history_previews,
+)
 from stock_a.research.facts import boolean
 from stock_a.research.structure import (
     Anchor,
@@ -336,13 +340,36 @@ def _evaluate_generated(
     anchor = value.value
     if kind in _RANGE_TYPES:
         if prior_range_state is None or prior_range_state.quality != "OBSERVED":
-            return {
-                "state": "UNKNOWN",
-                "reason": prior_range_state.reason
+            prior_reason = (
+                prior_range_state.reason
                 if prior_range_state is not None
-                else "RANGE_PRIOR_STATE_UNAVAILABLE",
-                "anchor": None,
-            }
+                else "RANGE_PRIOR_STATE_UNAVAILABLE"
+            )
+            if prior_reason == "RANGE_ANCHOR_LEFT_CENSORED":
+                if prior_range_anchor is None:
+                    return {
+                        "state": "UNKNOWN",
+                        "reason": "RANGE_ANCHOR_LEFT_CENSORED",
+                        "anchor": None,
+                        "carry_anchor": anchor,
+                    }
+                if (prior_range_anchor.lower, prior_range_anchor.upper) == (
+                    anchor.lower,
+                    anchor.upper,
+                ):
+                    return {
+                        "state": "UNKNOWN",
+                        "reason": "RANGE_ANCHOR_LEFT_CENSORED",
+                        "anchor": None,
+                        "carry_anchor": prior_range_anchor,
+                    }
+                return {"state": "GENERATED", "reason": None, "anchor": anchor}
+            else:
+                return {
+                    "state": "UNKNOWN",
+                    "reason": prior_reason,
+                    "anchor": None,
+                }
         if prior_range_state.value is True and prior_range_anchor is None:
             return {
                 "state": "UNKNOWN",
@@ -361,6 +388,29 @@ def _evaluate_generated(
                 "anchor": None,
             }
     return {"state": "GENERATED", "reason": None, "anchor": anchor}
+
+
+def _range_outcome_is_left_censored(
+    *,
+    session_index: int,
+    observations: Sequence[CoreObservation],
+    reason: str | None,
+    core_previous: Mapping[str, FieldValue] | None,
+) -> bool:
+    if session_index >= 25 or any(
+        observation.state != "ACTUAL"
+        for observation in observations[: session_index + 1]
+    ):
+        return False
+    if reason == "RANGE_PRIOR_WINDOW_UNKNOWN" and session_index < 20:
+        return True
+    return reason == "STRUCTURE_INPUT_UNKNOWN" and any(
+        core_previous is None
+        or core_previous.get(name) is None
+        or core_previous[name].quality != "OBSERVED"
+        and core_previous[name].reason == "SHORT_HISTORY"
+        for name in ("core.atr20", "core.ma_slope20_atr")
+    )
 
 
 def _generate_day(
@@ -456,11 +506,26 @@ def _generate_day(
             prior_range_state=prior_state,
             prior_range_anchor=prior_anchor,
         )
+        if (
+            kind in _RANGE_TYPES
+            and classified["state"] == "UNKNOWN"
+            and _range_outcome_is_left_censored(
+                session_index=target_index,
+                observations=observations,
+                reason=classified.get("reason"),
+                core_previous=core_previous,
+            )
+        ):
+            classified["reason"] = "RANGE_ANCHOR_LEFT_CENSORED"
         anchor = classified["anchor"]
         if isinstance(anchor, Anchor):
             anchor_models[kind] = anchor
+        elif kind in _RANGE_TYPES and isinstance(
+            classified.get("carry_anchor"), Anchor
+        ):
+            anchor_models[kind] = classified["carry_anchor"]
         results[kind] = {
-            **classified,
+            **{key: item for key, item in classified.items() if key != "carry_anchor"},
             "anchor": _anchor_payload(anchor, sessions) if anchor else None,
             "generation_evidence": _generation_evidence(
                 kind=kind,
@@ -562,6 +627,34 @@ def _range_candidates_for_previous_session(
     return results, states, anchors
 
 
+def _range_unknown_is_left_censored(
+    *,
+    session_index: int,
+    observations: Sequence[CoreObservation],
+    candidate: Mapping[str, Any],
+    core_previous: Mapping[str, FieldValue] | None,
+) -> bool:
+    """区分请求窗口历史不足与窗口内部的真实缺值断点。"""
+    reason = candidate.get("reason")
+    if session_index >= 25 or any(
+        observation.state != "ACTUAL"
+        for observation in observations[: session_index + 1]
+    ):
+        return False
+    if reason == "RANGE_PRIOR_WINDOW_UNKNOWN" and session_index < 20:
+        return True
+    if reason == "STRUCTURE_INPUT_UNKNOWN":
+        if core_previous is None:
+            return True
+        return any(
+            core_previous.get(name) is not None
+            and core_previous[name].quality != "OBSERVED"
+            and core_previous[name].reason == "SHORT_HISTORY"
+            for name in ("core.atr20", "core.ma_slope20_atr")
+        )
+    return False
+
+
 def _pool_candidate_result(
     *,
     candidate: Mapping[str, Any],
@@ -571,7 +664,7 @@ def _pool_candidate_result(
     package_sha256: str,
     calendar_id: str,
     calendar_revision: str,
-) -> tuple[dict[str, dict[str, Any]], int, int]:
+) -> tuple[dict[str, dict[str, Any]], int, int, int]:
     symbol = candidate["source_symbol"]
     observations, bars, row_map = _history_observations(
         symbol=symbol,
@@ -580,39 +673,22 @@ def _pool_candidate_result(
         namespace_id=namespace_id,
         package_sha256=package_sha256,
     )
-    previous_core = (
-        _core_at(
-            observations,
-            sessions,
-            end_index=target_index - 1,
-            calendar_id=calendar_id,
-            calendar_revision=calendar_revision,
-        )
-        if target_index >= 1
-        else None
-    )
-    prior_previous_core = (
-        _core_at(
-            observations,
-            sessions,
-            end_index=target_index - 2,
-            calendar_id=calendar_id,
-            calendar_revision=calendar_revision,
-        )
-        if target_index >= 2
-        else None
-    )
-    two_sessions_prior_core = (
-        _core_at(
-            observations,
-            sessions,
-            end_index=target_index - 3,
-            calendar_id=calendar_id,
-            calendar_revision=calendar_revision,
-        )
-        if target_index >= 3
-        else None
-    )
+    core_cache: dict[int, dict[str, FieldValue]] = {}
+
+    def core_at(end_index: int) -> dict[str, FieldValue] | None:
+        if end_index < 0:
+            return None
+        if end_index not in core_cache:
+            core_cache[end_index] = _core_at(
+                observations,
+                sessions,
+                end_index=end_index,
+                calendar_id=calendar_id,
+                calendar_revision=calendar_revision,
+            )
+        return core_cache[end_index]
+
+    previous_core = core_at(target_index - 1)
     prior_range_results, prior_range_states, prior_range_anchors = (
         _range_candidates_for_previous_session(
             symbol=symbol,
@@ -624,44 +700,151 @@ def _pool_candidate_result(
             package_sha256=package_sha256,
             calendar_id=calendar_id,
             calendar_revision=calendar_revision,
-            core_previous=prior_previous_core,
+            core_previous=core_at(target_index - 2),
         )
     )
-    _older_range_results, older_range_states, older_range_anchors = (
-        _range_candidates_for_previous_session(
-            symbol=symbol,
-            target_index=target_index - 1,
-            sessions=sessions,
-            observations=observations,
-            bars=bars,
-            namespace_id=namespace_id,
-            package_sha256=package_sha256,
-            calendar_id=calendar_id,
-            calendar_revision=calendar_revision,
-            core_previous=two_sessions_prior_core,
-        )
-    )
-    for kind in _RANGE_TYPES:
-        if (
-            prior_range_states[kind].quality == "OBSERVED"
-            and prior_range_states[kind].value is True
-        ):
-            prior_anchor = prior_range_anchors[kind]
-            older_state = older_range_states[kind]
-            older_anchor = older_range_anchors[kind]
-            known_origin = (
-                older_state.quality == "OBSERVED" and older_state.value is False
-            ) or (
-                older_state.quality == "OBSERVED"
-                and older_state.value is True
-                and prior_anchor is not None
-                and older_anchor is not None
-                and (prior_anchor.lower, prior_anchor.upper)
-                != (older_anchor.lower, older_anchor.upper)
+    range_history_checks = int(target_index > 0)
+    range_history_evidence: dict[str, dict[str, Any]] = {}
+    for kind in sorted(_RANGE_TYPES):
+        prior_candidate = prior_range_results[kind]
+        prior_index = target_index - 1
+        if prior_range_states[kind].quality != "OBSERVED":
+            left_censored = _range_unknown_is_left_censored(
+                session_index=prior_index,
+                observations=observations,
+                candidate=prior_candidate,
+                core_previous=core_at(prior_index - 1),
             )
-            if not known_origin:
-                prior_range_states[kind] = unknown("RANGE_ANCHOR_LEFT_CENSORED")
+            status = "LEFT_CENSORED" if left_censored else "UNKNOWN_DATA"
+            reason = (
+                "RANGE_ANCHOR_LEFT_CENSORED"
+                if left_censored
+                else prior_range_states[kind].reason
+            )
+            prior_range_states[kind] = unknown(reason)
+            prior_range_anchors[kind] = None
+            range_history_evidence[kind] = {
+                "status": status,
+                "reason": reason,
+                "lookback_official_sessions": 1,
+                "created_session": None,
+                "trace_stop_session": sessions[prior_index].isoformat()
+                if prior_index >= 0
+                else None,
+            }
+            continue
+        if prior_range_states[kind].value is not True:
+            range_history_evidence[kind] = {
+                "status": "NO_PRIOR_RANGE",
+                "reason": prior_candidate.get("reason"),
+                "lookback_official_sessions": 1,
+                "created_session": None,
+                "trace_stop_session": sessions[prior_index].isoformat(),
+            }
+            continue
+
+        prior_anchor = prior_range_anchors[kind]
+        if prior_anchor is None:
+            prior_range_states[kind] = unknown("RANGE_PRIOR_ANCHOR_UNAVAILABLE")
+            range_history_evidence[kind] = {
+                "status": "UNKNOWN_DATA",
+                "reason": "RANGE_PRIOR_ANCHOR_UNAVAILABLE",
+                "lookback_official_sessions": 1,
+                "created_session": None,
+                "trace_stop_session": sessions[prior_index].isoformat(),
+            }
+            continue
+
+        cursor = target_index - 2
+        lookback = 1
+        proof = None
+        trace_stop_session = None
+        while cursor >= 0:
+            older_target_index = cursor + 1
+            older_core = core_at(cursor - 1)
+            older_results, older_states, older_anchors = (
+                _range_candidates_for_previous_session(
+                    symbol=symbol,
+                    target_index=older_target_index,
+                    sessions=sessions,
+                    observations=observations,
+                    bars=bars,
+                    namespace_id=namespace_id,
+                    package_sha256=package_sha256,
+                    calendar_id=calendar_id,
+                    calendar_revision=calendar_revision,
+                    core_previous=older_core,
+                )
+            )
+            range_history_checks += 1
+            lookback += 1
+            older_candidate = older_results[kind]
+            older_state = older_states[kind]
+            trace_stop_session = sessions[cursor].isoformat()
+            if older_state.quality != "OBSERVED":
+                left_censored = _range_unknown_is_left_censored(
+                    session_index=cursor,
+                    observations=observations,
+                    candidate=older_candidate,
+                    core_previous=older_core,
+                )
+                reason = (
+                    "RANGE_ANCHOR_LEFT_CENSORED"
+                    if left_censored
+                    else older_state.reason or "RANGE_HISTORY_UNKNOWN"
+                )
+                status = "LEFT_CENSORED" if left_censored else "UNKNOWN_DATA"
+                prior_range_states[kind] = unknown(reason)
+                # Only a continuous, valid candidate immediately before the
+                # target can be carried across the left edge as an identity token.
+                prior_range_anchors[kind] = prior_anchor if left_censored else None
+                proof = {
+                    "status": status,
+                    "reason": reason,
+                    "created_session": None,
+                }
+                break
+            if older_state.value is False:
+                proof = {
+                    "status": "PROVEN_AFTER_NOT_QUALIFIED",
+                    "reason": "PRIOR_RANGE_PREDICATE_FALSE",
+                    "created_session": sessions[prior_index].isoformat(),
+                }
+                break
+            older_anchor = older_anchors[kind]
+            if older_anchor is None:
+                prior_range_states[kind] = unknown("RANGE_PRIOR_ANCHOR_UNAVAILABLE")
                 prior_range_anchors[kind] = None
+                proof = {
+                    "status": "UNKNOWN_DATA",
+                    "reason": "RANGE_PRIOR_ANCHOR_UNAVAILABLE",
+                    "created_session": None,
+                }
+                break
+            if (older_anchor.lower, older_anchor.upper) != (
+                prior_anchor.lower,
+                prior_anchor.upper,
+            ):
+                proof = {
+                    "status": "PROVEN_BOUNDARY_CHANGE",
+                    "reason": "RANGE_BOUNDS_CHANGED_FROM_PREVIOUS_SESSION",
+                    "created_session": sessions[prior_index].isoformat(),
+                }
+                break
+            cursor -= 1
+        if proof is None:
+            prior_range_states[kind] = unknown("RANGE_ANCHOR_LEFT_CENSORED")
+            prior_range_anchors[kind] = prior_anchor
+            proof = {
+                "status": "LEFT_CENSORED",
+                "reason": "RANGE_ANCHOR_LEFT_CENSORED",
+                "created_session": None,
+            }
+        range_history_evidence[kind] = {
+            **proof,
+            "lookback_official_sessions": lookback,
+            "trace_stop_session": trace_stop_session,
+        }
     results, _, _ = _generate_day(
         symbol=symbol,
         target_index=target_index,
@@ -683,6 +866,11 @@ def _pool_candidate_result(
         if (
             prior_range_states[kind].quality != "OBSERVED"
             and results[kind]["state"] != "NOT_GENERATED"
+            and not (
+                prior_range_states[kind].reason == "RANGE_ANCHOR_LEFT_CENSORED"
+                and prior_range_anchors[kind] is not None
+                and results[kind]["state"] == "GENERATED"
+            )
         ):
             results[kind] = {
                 **results[kind],
@@ -690,11 +878,187 @@ def _pool_candidate_result(
                 "reason": prior_range_states[kind].reason,
                 "anchor": None,
             }
+        results[kind]["prior_anchor_evidence"] = range_history_evidence[kind]
     return (
         results,
         len(candidate["history_rows"]),
-        int(target_index >= 1) + int(target_index >= 2) + int(target_index >= 3),
+        len(core_cache),
+        range_history_checks,
     )
+
+
+def _structure_history_core_previews(
+    *,
+    symbol: str,
+    sessions: Sequence[date],
+    history_rows: Sequence[Mapping[str, Any]],
+    namespace_id: str,
+    package_sha256: str,
+    preview_context,
+) -> dict[date, dict[str, Any]]:
+    previews = research_stock_pg_d1_history_previews(
+        symbol=symbol,
+        event_sessions=sessions,
+        followup_session=sessions[-1],
+        session_dates=sessions,
+        package_sha256=package_sha256,
+        history_rows=history_rows,
+        namespace_id=namespace_id,
+        context=preview_context,
+    )
+    return {
+        day: {"core": {"fields": preview["structure_core_fields"]}}
+        for day, preview in previews.items()
+    }
+
+
+def _structure_timeline_changes(
+    *,
+    timeline: Mapping[str, Any],
+    previous_session: date,
+    target_session: date,
+) -> list[dict[str, Any]]:
+    support_fields = (
+        "state",
+        "acceptance",
+        "freshness",
+        "breach_streak",
+        "acceptance_streak",
+        "test_count",
+        "separated_sessions",
+        "retest_qualified",
+    )
+    changes: list[dict[str, Any]] = []
+    for anchor_event in timeline.get("events", []):
+        created_session = date.fromisoformat(anchor_event["created_session"])
+        if created_session >= target_session:
+            continue
+        support_by_session = {
+            item["session"]: item
+            for item in anchor_event.get("support_observations", [])
+        }
+        gap_by_session = {
+            item["session"]: item
+            for item in anchor_event.get("gap_fill_observations", [])
+        }
+        before = support_by_session.get(previous_session.isoformat())
+        after = support_by_session.get(target_session.isoformat())
+        relation = anchor_event.get("relation")
+        if relation != "SUPPORT":
+            support_status = "NOT_APPLICABLE"
+            support_reasons = ["RESISTANCE_ANCHOR_EXCLUDED_FROM_SUPPORT"]
+            support_changed_fields: list[str] = []
+        elif created_session >= previous_session:
+            support_status = "NOT_COMPARABLE"
+            support_reasons = ["ANCHOR_BIRTH_DAY_CANNOT_SELF_PROVE"]
+            support_changed_fields = []
+        elif before is None or after is None:
+            support_status = "NOT_EVALUABLE"
+            support_reasons = ["ADJACENT_SUPPORT_OBSERVATION_MISSING"]
+            support_changed_fields = []
+        elif before.get("state") == "UNKNOWN" or after.get("state") == "UNKNOWN":
+            support_status = "UNKNOWN"
+            support_reasons = ["ADJACENT_SUPPORT_OBSERVATION_UNKNOWN"]
+            support_changed_fields = []
+        else:
+            support_changed_fields = [
+                name for name in support_fields if before.get(name) != after.get(name)
+            ]
+            support_status = "CHANGED" if support_changed_fields else "UNCHANGED"
+            support_reasons = [
+                f"SUPPORT_{name.upper()}_CHANGED" for name in support_changed_fields
+            ] or ["SAME_ANCHOR_SUPPORT_STATE_UNCHANGED"]
+
+        gap_before = gap_by_session.get(previous_session.isoformat())
+        gap_after = gap_by_session.get(target_session.isoformat())
+        if anchor_event.get("type") != "GAP_ZONE":
+            gap_status = "NOT_APPLICABLE"
+            gap_reasons = ["NOT_A_GAP_ANCHOR"]
+        elif created_session >= previous_session:
+            gap_status = "NOT_COMPARABLE"
+            gap_reasons = ["GAP_BIRTH_DAY_CANNOT_SELF_PROVE"]
+        elif gap_before is None or gap_after is None:
+            gap_status = "NOT_EVALUABLE"
+            gap_reasons = ["ADJACENT_GAP_FILL_OBSERVATION_MISSING"]
+        elif (
+            gap_before.get("quality") != "OBSERVED"
+            or gap_after.get("quality") != "OBSERVED"
+            or gap_before.get("state") == "UNKNOWN"
+            or gap_after.get("state") == "UNKNOWN"
+        ):
+            gap_status = "UNKNOWN"
+            gap_reasons = ["ADJACENT_GAP_FILL_OBSERVATION_UNKNOWN"]
+        elif gap_before.get("state") != gap_after.get("state"):
+            gap_status = "CHANGED"
+            gap_reasons = ["GAP_FILL_STATE_CHANGED"]
+        else:
+            gap_status = "UNCHANGED"
+            gap_reasons = ["GAP_FILL_STATE_UNCHANGED"]
+
+        if relation != "SUPPORT":
+            classification = "NOT_APPLICABLE"
+        elif support_status == "CHANGED" or gap_status == "CHANGED":
+            classification = "CHANGED"
+        elif support_status == "UNKNOWN" or gap_status == "UNKNOWN":
+            classification = "UNKNOWN"
+        elif support_status in {"NOT_COMPARABLE", "NOT_EVALUABLE"}:
+            classification = support_status
+        else:
+            classification = "UNCHANGED"
+
+        lower = anchor_event.get("lower")
+        upper = anchor_event.get("upper")
+        changes.append(
+            {
+                "source_symbol": anchor_event["source_symbol"],
+                "type": anchor_event["type"],
+                "relation": relation,
+                "created_session": anchor_event["created_session"],
+                "anchor_id": anchor_event["anchor_id"],
+                "anchor_pairing_identity": {
+                    "source_symbol": anchor_event["source_symbol"],
+                    "type": anchor_event["type"],
+                    "created_session": anchor_event["created_session"],
+                    "coordinate_id": anchor_event.get("coordinate_id"),
+                    "lower": lower,
+                    "upper": upper,
+                },
+                "comparison_context": {
+                    "previous_official_session": previous_session.isoformat(),
+                    "target_session": target_session.isoformat(),
+                    "official_sessions_adjacent": True,
+                    "anchor_birth_before_previous_session": created_session
+                    < previous_session,
+                    "request_window_start": timeline["window"]["start_session"],
+                    "anchor_id_used_across_request_windows": False,
+                },
+                "change_classification": classification,
+                "change_reasons": sorted(set(support_reasons + gap_reasons)),
+                "support_change": {
+                    "classification": support_status,
+                    "reason_codes": support_reasons,
+                    "changed_fields": support_changed_fields,
+                    "before": before,
+                    "after": after,
+                },
+                "gap_fill_change": {
+                    "classification": gap_status,
+                    "reason_codes": gap_reasons,
+                    "before": gap_before,
+                    "after": gap_after,
+                    "independent_of_support_or_formal_invalidation": True,
+                },
+                "generation_evidence": anchor_event.get("generation_evidence"),
+                "source": {
+                    "birth": anchor_event.get("source_row"),
+                    "previous": before.get("source") if before else None,
+                    "target": after.get("source") if after else None,
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "identity_status": "SOURCE_SYMBOL_ONLY",
+                },
+            }
+        )
+    return changes
 
 
 def discover_source_d1_structures(
@@ -707,6 +1071,9 @@ def discover_source_d1_structures(
     offset: int,
     limit: int,
     structure_symbol: str | None = None,
+    structure_changes: bool = False,
+    structure_type: str | None = None,
+    structure_change_status: str | None = None,
 ) -> dict[str, Any]:
     """一遍完整扫描目标日Raw池，统计五种D1结构并按事件分页。"""
     started_wall = time.perf_counter()
@@ -724,6 +1091,23 @@ def discover_source_d1_structures(
         or not 1 <= limit <= 100
         or not isinstance(package_sha256, str)
         or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
+        or type(structure_changes) is not bool
+        or (structure_type is not None and structure_type not in STRUCTURE_TYPES)
+        or (
+            structure_change_status is not None
+            and structure_change_status
+            not in {
+                "CHANGED",
+                "UNCHANGED",
+                "UNKNOWN",
+                "NOT_COMPARABLE",
+                "NOT_EVALUABLE",
+                "NOT_APPLICABLE",
+            }
+        )
+        or (not structure_changes and structure_change_status is not None)
+        or (not structure_changes and structure_type is not None)
+        or (structure_changes and target_session == days[0])
     ):
         raise PgResearchBindingError(
             "D1_STRUCTURE_REQUEST_INVALID", "D1结构全池请求的窗口、版本或分页无效"
@@ -738,9 +1122,17 @@ def discover_source_d1_structures(
             )
         structure_symbol = structure_symbol.strip().upper()
 
-    calendar_payload, calendar_metadata, calendar_revision, _ = _load_calendar(
-        target_session
+    calendar_payload, calendar_metadata, calendar_revision, all_calendar_sessions = (
+        _load_calendar(target_session)
     )
+    official_window = tuple(
+        day for day in all_calendar_sessions if days[0] <= day <= target_session
+    )
+    if days != official_window:
+        raise PgResearchBindingError(
+            "D1_STRUCTURE_CALENDAR_WINDOW_INVALID",
+            "D1结构历史窗口未与版本化官方日历严格闭合",
+        )
     calendar_meta = next(
         item for item in calendar_metadata if item["year"] == target_session.year
     )
@@ -748,6 +1140,10 @@ def discover_source_d1_structures(
     target_calendar_revision = calendar_revision
     target_calendar_sha256 = calendar_meta["resource_sha256"]
     target_index = len(days) - 1
+    previous_session = days[target_index - 1] if target_index >= 1 else None
+    structure_preview_context = (
+        prepare_source_d1_preview_context(days) if structure_changes else None
+    )
     counts = {
         kind: {"GENERATED": 0, "NOT_GENERATED": 0, "UNKNOWN": 0}
         for kind in STRUCTURE_TYPES
@@ -768,6 +1164,16 @@ def discover_source_d1_structures(
     history_rows_decoded = 0
     core_calculations = 0
     generation_calls = 0
+    historical_change_page: list[dict[str, Any]] = []
+    selected_symbol_anchor_changes: list[dict[str, Any]] | None = None
+    filtered_anchor_count = 0
+    historical_anchor_count_by_type: Counter[str] = Counter()
+    change_status_counts: Counter[str] = Counter()
+    support_status_counts: Counter[str] = Counter()
+    changed_source_symbols: set[str] = set()
+    range_history_status_counts = {kind: Counter() for kind in sorted(_RANGE_TYPES)}
+    structure_core_preview_count = 0
+    structure_timeline_candidate_count = 0
 
     while True:
         page = read_raw_daily_history_page(
@@ -846,20 +1252,25 @@ def discover_source_d1_structures(
             )
 
         for candidate in candidates:
-            result, decoded_count, core_count = _pool_candidate_result(
-                candidate=candidate,
-                sessions=days,
-                target_index=target_index,
-                namespace_id=page["namespace_id"],
-                package_sha256=package_sha256,
-                calendar_id=calendar_id,
-                calendar_revision=target_calendar_revision,
+            result, decoded_count, core_count, range_check_count = (
+                _pool_candidate_result(
+                    candidate=candidate,
+                    sessions=days,
+                    target_index=target_index,
+                    namespace_id=page["namespace_id"],
+                    package_sha256=package_sha256,
+                    calendar_id=calendar_id,
+                    calendar_revision=target_calendar_revision,
+                )
             )
             history_rows_decoded += decoded_count
             core_calculations += core_count
-            generation_calls += (
-                5 + (2 if target_index >= 1 else 0) + (2 if target_index >= 2 else 0)
-            )
+            generation_calls += 5 + 2 * range_check_count
+            for kind in _RANGE_TYPES:
+                evidence = result[kind].get("prior_anchor_evidence", {})
+                range_history_status_counts[kind][
+                    evidence.get("status", "UNKNOWN_DATA")
+                ] += 1
             row = next(
                 item
                 for item in candidate["history_rows"]
@@ -872,6 +1283,69 @@ def discover_source_d1_structures(
                 "target_source": _source_row_identity(row),
                 "structures": result,
             }
+
+            if structure_changes:
+                if structure_preview_context is None or previous_session is None:
+                    raise PgResearchBindingError(
+                        "D1_STRUCTURE_CHANGE_CONTEXT_UNAVAILABLE",
+                        "全池结构变化缺少相邻会话Core上下文",
+                    )
+                core_previews = _structure_history_core_previews(
+                    symbol=candidate["source_symbol"],
+                    sessions=days,
+                    history_rows=candidate["history_rows"],
+                    namespace_id=page["namespace_id"],
+                    package_sha256=package_sha256,
+                    preview_context=structure_preview_context,
+                )
+                timeline = evaluate_source_d1_structure_timeline(
+                    symbol=candidate["source_symbol"],
+                    sessions=days,
+                    history_rows=candidate["history_rows"],
+                    namespace_id=page["namespace_id"],
+                    package_sha256=package_sha256,
+                    core_previews_by_session=core_previews,
+                )
+                candidate_changes = _structure_timeline_changes(
+                    timeline=timeline,
+                    previous_session=previous_session,
+                    target_session=target_session,
+                )
+                candidate_changes.sort(
+                    key=lambda item: (
+                        item["source_symbol"],
+                        item["type"],
+                        item["created_session"],
+                        str(item["anchor_pairing_identity"]["lower"]),
+                        str(item["anchor_pairing_identity"]["upper"]),
+                    )
+                )
+                for change in candidate_changes:
+                    change_status_counts[change["change_classification"]] += 1
+                    support_status_counts[
+                        change["support_change"]["classification"]
+                    ] += 1
+                    historical_anchor_count_by_type[change["type"]] += 1
+                    if change["change_classification"] == "CHANGED":
+                        changed_source_symbols.add(candidate["source_symbol"])
+                    if (
+                        structure_type is None or change["type"] == structure_type
+                    ) and (
+                        structure_change_status is None
+                        or change["change_classification"] == structure_change_status
+                    ):
+                        if offset <= filtered_anchor_count < offset + limit:
+                            historical_change_page.append(change)
+                        filtered_anchor_count += 1
+                structure_core_preview_count += len(core_previews)
+                structure_timeline_candidate_count += 1
+                generation_calls += 5 * len(days)
+                if candidate["source_symbol"] == structure_symbol:
+                    selected_symbol_anchor_changes = candidate_changes
+                    detail["historical_anchor_changes"] = candidate_changes
+                    detail["structure_timeline"] = {
+                        key: value for key, value in timeline.items() if key != "points"
+                    }
             for kind, outcome in result.items():
                 counts[kind][outcome["state"]] += 1
                 if outcome["state"] == "UNKNOWN":
@@ -929,10 +1403,44 @@ def discover_source_d1_structures(
                 f"{kind}生成/未生成/未知分母不守恒",
             )
     events.sort(key=lambda item: (item["source_symbol"], item["structure"]))
-    selected_events = events[offset : offset + limit]
+    page_events = (
+        historical_change_page if structure_changes else events[offset : offset + limit]
+    )
+    page_total = filtered_anchor_count if structure_changes else len(events)
+    selected_change_detail = (
+        {
+            "source_symbol": structure_symbol,
+            "status": "AVAILABLE",
+            "anchor_changes": selected_symbol_anchor_changes or [],
+            "filtered_anchor_changes": [
+                item
+                for item in selected_symbol_anchor_changes or []
+                if (structure_type is None or item["type"] == structure_type)
+                and (
+                    structure_change_status is None
+                    or item["change_classification"] == structure_change_status
+                )
+            ],
+        }
+        if selected_symbol_anchor_changes is not None
+        else {
+            "source_symbol": structure_symbol,
+            "status": "NOT_IN_TARGET_SOURCE_POOL"
+            if structure_symbol is not None
+            else "NOT_REQUESTED",
+            "anchor_changes": [],
+            "filtered_anchor_changes": [],
+        }
+        if structure_changes
+        else None
+    )
+    if structure_changes and selected_detail is not None:
+        selected_detail["historical_change_detail"] = selected_change_detail
     return {
         "ok": True,
-        "status": "SOURCE_LEVEL_D1_MULTI_STRUCTURE_DISCOVERY",
+        "status": "SOURCE_LEVEL_D1_STRUCTURE_CHANGE_DISCOVERY"
+        if structure_changes
+        else "SOURCE_LEVEL_D1_MULTI_STRUCTURE_DISCOVERY",
         "contract": STRUCTURE_CONTRACT,
         "scope": "FIVE_SOURCE_LEVEL_RESEARCH_TYPES_NOT_FORMAL_D1_TEN_TYPE_CLOSURE",
         "research_mode": "NON_PIT_RETROSPECTIVE",
@@ -966,14 +1474,55 @@ def discover_source_d1_structures(
             for kind in STRUCTURE_TYPES
         },
         "generated_event_total": len(events),
+        "historical_anchor_changes": {
+            "status": "COMPLETE_FULL_POOL_ADJACENT_SESSION_SCAN"
+            if structure_changes
+            else "NOT_REQUESTED",
+            "previous_official_session": previous_session.isoformat()
+            if previous_session
+            else None,
+            "target_session": target_session.isoformat(),
+            "official_sessions_adjacent": previous_session is not None,
+            "source_pool_symbol_denominator": source_pool_total,
+            "evaluated_source_symbol_count": structure_timeline_candidate_count,
+            "effective_old_anchor_count": sum(historical_anchor_count_by_type.values()),
+            "effective_old_anchor_count_by_type": {
+                kind: historical_anchor_count_by_type.get(kind, 0)
+                for kind in STRUCTURE_TYPES
+            },
+            "support_comparable_anchor_count": support_status_counts.get("CHANGED", 0)
+            + support_status_counts.get("UNCHANGED", 0),
+            "support_status_counts": dict(sorted(support_status_counts.items())),
+            "change_status_counts": dict(sorted(change_status_counts.items())),
+            "changed_anchor_count": change_status_counts.get("CHANGED", 0),
+            "changed_distinct_source_symbol_count": len(changed_source_symbols),
+            "unknown_or_not_applicable_anchor_count": sum(
+                change_status_counts.get(state, 0)
+                for state in ("UNKNOWN", "NOT_APPLICABLE")
+            ),
+            "filters": {
+                "structure_type": structure_type or "ALL",
+                "change_status": structure_change_status or "ALL",
+                "applied_after_full_pool_evaluation": True,
+            },
+            "filtered_anchor_count": filtered_anchor_count,
+            "source_symbol_anchor_details": selected_change_detail,
+        },
+        "range_previous_anchor_evidence_counts": {
+            kind: dict(sorted(range_history_status_counts[kind].items()))
+            for kind in sorted(_RANGE_TYPES)
+        },
         "page": {
             "offset": offset,
             "limit": limit,
-            "result_count": len(selected_events),
-            "event_total": len(events),
-            "next_offset": offset + limit if offset + limit < len(events) else None,
-            "stable_order": "source_symbol ASC, structure ASC",
-            "results": selected_events,
+            "result_count": len(page_events),
+            "event_total": page_total,
+            "next_offset": offset + limit if offset + limit < page_total else None,
+            "stable_order": "source_symbol ASC, type ASC, created_session ASC, lower ASC, upper ASC"
+            if structure_changes
+            else "source_symbol ASC, structure ASC",
+            "pagination_unit": "anchor_event",
+            "results": page_events,
         },
         "selected_source_symbol_detail": selected_detail
         if selected_detail is not None
@@ -984,8 +1533,12 @@ def discover_source_d1_structures(
             else "NOT_REQUESTED",
         },
         "support_followup": {
-            "status": "NOT_AVAILABLE_AT_TARGET_WINDOW_END",
-            "reason": "请求窗口截止于目标日；单股历史模式显示目标日之前已可见的后继状态",
+            "status": "OBSERVED_FOR_ADJACENT_SESSIONS"
+            if structure_changes
+            else "NOT_AVAILABLE_AT_TARGET_WINDOW_END",
+            "reason": "变化模式按同一历史锚比较相邻官方会话；填补单列且不构成正式失效"
+            if structure_changes
+            else "请求窗口截止于目标日；单股历史模式显示目标日之前已可见的后继状态",
             "resistance_types_excluded": ["PIVOT_HIGH", "RANGE_CEILING"],
         },
         "formal_downstream": {
@@ -1009,7 +1562,11 @@ def discover_source_d1_structures(
             "source_version_context_reads": source_context_read_count,
             "full_pool_scan_passes": 1,
             "evaluated_source_rows": len(seen_symbols),
-            "history_raw_rows_decoded_once": history_rows_decoded,
+            "raw_history_rows_decoded": history_rows_decoded
+            * (3 if structure_changes else 1),
+            "target_generation_raw_rows_decoded": history_rows_decoded,
+            "structure_history_core_preview_sessions": structure_core_preview_count,
+            "structure_timeline_candidates": structure_timeline_candidate_count,
             "core_calculations": core_calculations,
             "structure_kernel_calls": generation_calls,
             "wall_seconds": round(time.perf_counter() - started_wall, 6),
@@ -1110,7 +1667,11 @@ def evaluate_source_d1_structure_timeline(
                     range_state[kind] = unknown(
                         outcome.get("reason") or "RANGE_QUALIFICATION_UNKNOWN"
                     )
-                    range_anchor[kind] = None
+                    range_anchor[kind] = (
+                        anchor_models.get(kind)
+                        if outcome.get("reason") == "RANGE_ANCHOR_LEFT_CENSORED"
+                        else None
+                    )
             elif outcome["state"] == "GENERATED":
                 new_anchors.append(anchor_models[kind])
 
@@ -1153,6 +1714,14 @@ def evaluate_source_d1_structure_timeline(
                 "retest_qualified": observation.retest_qualified,
                 "atr_previous": _render_field(atr_previous),
                 "clv": _render_field(clv),
+                "price_inputs": {
+                    "actual": _render_field(actual),
+                    "open": _render_field(observations[index].open),
+                    "high": _render_field(observations[index].high),
+                    "low": _render_field(observations[index].low),
+                    "close": _render_field(observations[index].close),
+                    "price_coordinate": "RAW_UNADJUSTED",
+                },
                 "source": _source_row_identity(row_map.get(day)),
             }
             item["support_observations"].append(observation_payload)
@@ -1183,6 +1752,8 @@ def evaluate_source_d1_structure_timeline(
                     else "UNKNOWN",
                     "quality": next_fill.quality,
                     "reason": next_fill.reason,
+                    "low": _render_field(observations[index].low),
+                    "price_coordinate": "RAW_UNADJUSTED",
                     "source": _source_row_identity(row_map.get(day)),
                 }
                 item["gap_fill_observations"].append(fill_payload)
@@ -1230,6 +1801,7 @@ def evaluate_source_d1_structure_timeline(
         event_payloads.append(
             {
                 **item["birth"],
+                "source_symbol": normalized,
                 "support_observations": item["support_observations"],
                 "gap_fill_observations": item["gap_fill_observations"]
                 if anchor.kind == "GAP_ZONE"

@@ -89,11 +89,30 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
     )
     discover_support_changes = args.discover_support_changes
     discover_structures = args.discover_structures
+    structure_changes = args.structure_changes
+    structure_type = args.structure_type
+    structure_change_status = args.structure_change_status
     include_structures = args.include_structures
-    if args.structure_symbol is not None and not discover_structures:
+    if args.structure_symbol is not None and not (
+        discover_structures or structure_changes
+    ):
         raise DiagnosticError(
             "D1_STRUCTURE_SYMBOL_SELECTION_INVALID",
             "--structure-symbol仅可与--discover-structures配合使用",
+            _EXIT_ARGUMENT,
+        )
+    if structure_changes and not discover_structures:
+        raise DiagnosticError(
+            "D1_STRUCTURE_CHANGE_SELECTION_INVALID",
+            "--structure-changes须与--discover-structures配合使用",
+            _EXIT_ARGUMENT,
+        )
+    if (structure_type is not None or structure_change_status is not None) and not (
+        structure_changes
+    ):
+        raise DiagnosticError(
+            "D1_STRUCTURE_CHANGE_FILTER_INVALID",
+            "结构类型和变化状态过滤须用于--structure-changes",
             _EXIT_ARGUMENT,
         )
     if discover_structures and (
@@ -273,6 +292,12 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 "事件窗口起始须是读取窗口内早于目标日的官方会话",
                 _EXIT_ARGUMENT,
             )
+    if structure_changes and (len(sessions) < 2 or sessions[-2] >= target):
+        raise DiagnosticError(
+            "D1_STRUCTURE_CHANGE_PREVIOUS_SESSION_UNAVAILABLE",
+            "结构相邻变化至少需要窗口内的前一官方会话",
+            _EXIT_ARGUMENT,
+        )
     if history_mode:
         if args.history_last is not None:
             if args.history_last > len(sessions):
@@ -363,6 +388,9 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 offset=offset,
                 limit=limit,
                 structure_symbol=args.structure_symbol,
+                structure_changes=structure_changes,
+                structure_type=structure_type,
+                structure_change_status=structure_change_status,
             )
             _emit(result)
             return _EXIT_OK

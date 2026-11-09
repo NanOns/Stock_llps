@@ -12,6 +12,7 @@ from stock_a.application.pg_price_profiles import (
     run_source_symbol_price_profile,
     source_symbol_price_profile_snapshots,
 )
+from stock_a.application.source_d1_structures import STRUCTURE_TYPES
 
 
 def register_commands(commands):
@@ -254,6 +255,28 @@ def register_commands(commands):
         "--discover-structures",
         action="store_true",
         help="单遍评价完整目标日Raw来源池并分页返回五类新增D1结构",
+    )
+    source_d1_breakout.add_argument(
+        "--structure-changes",
+        action="store_true",
+        help="配合--discover-structures：全池比较同一旧结构锚的相邻会话变化",
+    )
+    source_d1_breakout.add_argument(
+        "--structure-type",
+        choices=STRUCTURE_TYPES,
+        help="结构变化分页按一种D1来源结构类型过滤",
+    )
+    source_d1_breakout.add_argument(
+        "--structure-change-status",
+        choices=(
+            "CHANGED",
+            "UNCHANGED",
+            "UNKNOWN",
+            "NOT_COMPARABLE",
+            "NOT_EVALUABLE",
+            "NOT_APPLICABLE",
+        ),
+        help="全池评估后按同锚变化状态过滤，分母仍为完整旧锚事件集",
     )
     source_d1_breakout.add_argument(
         "--structure-symbol",
