@@ -22,6 +22,10 @@ from stock_a.storage.postgres.source_raw import (
 from stock_a.application.source_d1_support_changes import (
     discover_source_d1_support_changes,
 )
+from stock_a.application.source_d1_structures import (
+    discover_source_d1_structures,
+    evaluate_source_d1_structure_timeline,
+)
 from stock_a.application.pg_research import (
     PgResearchBindingError,
     read_source_version_context,
@@ -84,6 +88,49 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
         (args.history_start, args.history_end, args.history_last is not None)
     )
     discover_support_changes = args.discover_support_changes
+    discover_structures = args.discover_structures
+    include_structures = args.include_structures
+    if args.structure_symbol is not None and not discover_structures:
+        raise DiagnosticError(
+            "D1_STRUCTURE_SYMBOL_SELECTION_INVALID",
+            "--structure-symbol仅可与--discover-structures配合使用",
+            _EXIT_ARGUMENT,
+        )
+    if discover_structures and (
+        args.only_true
+        or args.symbol is not None
+        or history_mode
+        or args.support_anchor_session is not None
+        or args.support_cohort_anchor_session is not None
+        or discover_support_changes
+        or args.change_only
+        or args.previous_state is not None
+        or args.event_window_start is not None
+        or args.offset is None
+        or args.limit is None
+        or include_structures
+    ):
+        raise DiagnosticError(
+            "D1_STRUCTURE_DISCOVERY_SELECTION_INVALID",
+            "全池结构发现须选择目标日分页，不能与单股历史或其他D1模式混用",
+            _EXIT_ARGUMENT,
+        )
+    if include_structures and (
+        not history_mode
+        or args.symbol is None
+        or args.support_anchor_session is not None
+        or args.support_cohort_anchor_session is not None
+        or discover_support_changes
+        or discover_structures
+        or args.only_true
+        or args.change_only
+        or args.previous_state is not None
+    ):
+        raise DiagnosticError(
+            "D1_STRUCTURE_HISTORY_SELECTION_INVALID",
+            "--include-structures须用于单股历史模式，且不能叠加其他锚观察模式",
+            _EXIT_ARGUMENT,
+        )
     if args.event_window_start is not None and not discover_support_changes:
         raise DiagnosticError(
             "D1_SUPPORT_DISCOVERY_SELECTION_INVALID",
@@ -99,6 +146,8 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
         or args.change_only
         or args.previous_state is not None
         or args.event_window_start is None
+        or include_structures
+        or discover_structures
     ):
         raise DiagnosticError(
             "D1_SUPPORT_DISCOVERY_SELECTION_INVALID",
@@ -164,7 +213,6 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             "历史模式须指定单代码及起止会话，或最近1至75个会话",
             _EXIT_ARGUMENT,
         )
-
     if args.symbol is not None:
         if args.limit is not None:
             raise DiagnosticError(
@@ -249,6 +297,12 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     _EXIT_ARGUMENT,
                 )
             history_sessions = tuple(day for day in sessions if start <= day <= end)
+    if include_structures and (not history_sessions or history_sessions[-1] != target):
+        raise DiagnosticError(
+            "D1_STRUCTURE_HISTORY_END_INVALID",
+            "结构后继观察历史必须以目标官方会话结束",
+            _EXIT_ARGUMENT,
+        )
     if support_anchor is not None:
         if support_anchor not in sessions:
             raise DiagnosticError(
@@ -296,6 +350,19 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 event_window_start,
                 offset,
                 limit,
+            )
+            _emit(result)
+            return _EXIT_OK
+        if discover_structures:
+            result = discover_source_d1_structures(
+                config,
+                target_session=target,
+                research_cutoff=cutoff,
+                sessions=sessions,
+                package_sha256=args.package_sha256,
+                offset=offset,
+                limit=limit,
+                structure_symbol=args.structure_symbol,
             )
             _emit(result)
             return _EXIT_OK
@@ -383,8 +450,11 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             rows = candidate["history_rows"]
             points = []
             support_history_points = []
+            structure_previews = {}
             counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0}
-            for day in history_sessions:
+            calculation_sessions = sessions if include_structures else history_sessions
+            history_session_set = set(history_sessions)
+            for day in calculation_sessions:
                 window = tuple(session for session in sessions if session <= day)
                 bounded_rows = tuple(row for row in rows if row["session_date"] <= day)
                 observed = research_stock_pg_history_preview(
@@ -400,35 +470,36 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     allow_missing_target_row=True,
                 )
                 predicate = observed["raw_d1_breakout_predicate"]
-                counts[predicate["predicates"]["result"]["state"]] += 1
+                if day in history_session_set:
+                    counts[predicate["predicates"]["result"]["state"]] += 1
+                if include_structures:
+                    structure_previews[day] = observed
                 row = next(
                     (item for item in bounded_rows if item["session_date"] == day), None
                 )
-                points.append(
-                    {
-                        "session": day.isoformat(),
-                        "source_capture_id": str(row["source_capture_id"])
-                        if row
-                        else None,
-                        "source_entry_sha256": row.get("source_entry_sha256")
-                        if row
-                        else None,
-                        "source_available_at": row.get("source_available_at")
-                        if row
-                        else None,
-                        "source_observed_started_at": row.get("observed_started_at")
-                        if row
-                        else None,
-                        "source_observed_completed_at": row.get("observed_completed_at")
-                        if row
-                        else None,
-                        "target_bar_status": observed["target_bar_status"],
-                        "price_window_status": observed["price_window_status"],
-                        "price_window_reason": observed["price_window_reason"],
-                        "predicate": predicate,
-                    }
-                )
-                if support_anchor is not None:
+                point = {
+                    "session": day.isoformat(),
+                    "source_capture_id": str(row["source_capture_id"]) if row else None,
+                    "source_entry_sha256": row.get("source_entry_sha256")
+                    if row
+                    else None,
+                    "source_available_at": row.get("source_available_at")
+                    if row
+                    else None,
+                    "source_observed_started_at": row.get("observed_started_at")
+                    if row
+                    else None,
+                    "source_observed_completed_at": row.get("observed_completed_at")
+                    if row
+                    else None,
+                    "target_bar_status": observed["target_bar_status"],
+                    "price_window_status": observed["price_window_status"],
+                    "price_window_reason": observed["price_window_reason"],
+                    "predicate": predicate,
+                }
+                if day in history_session_set:
+                    points.append(point)
+                if support_anchor is not None and day in history_session_set:
                     support_history_points.append(
                         {
                             "session": day,
@@ -459,10 +530,36 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     source_context=source_context,
                     official_calendar=official_calendar,
                 )
+            structure_timeline = None
+            if include_structures:
+                structure_timeline = evaluate_source_d1_structure_timeline(
+                    symbol=source_symbol,
+                    sessions=sessions,
+                    history_rows=rows,
+                    namespace_id=page["namespace_id"],
+                    package_sha256=args.package_sha256,
+                    core_previews_by_session=structure_previews,
+                )
+                timeline_points = {
+                    item["session"]: item for item in structure_timeline["points"]
+                }
+                for point in points:
+                    structure_point = timeline_points[point["session"]]
+                    point["structures"] = structure_point["structures"]
+                    point["subsequent_support_observations"] = structure_point[
+                        "subsequent_support_observations"
+                    ]
+                structure_timeline = {
+                    key: value
+                    for key, value in structure_timeline.items()
+                    if key != "points"
+                }
             _emit(
                 {
                     "ok": True,
-                    "status": "SOURCE_LEVEL_RAW_BREAKOUT_HISTORY_WITH_SUPPORT_FOLLOWUP"
+                    "status": "SOURCE_LEVEL_RAW_BREAKOUT_HISTORY_WITH_D1_STRUCTURES"
+                    if include_structures
+                    else "SOURCE_LEVEL_RAW_BREAKOUT_HISTORY_WITH_SUPPORT_FOLLOWUP"
                     if support_anchor is not None
                     else "SOURCE_LEVEL_RAW_BREAKOUT_HISTORY",
                     "research_mode": "NON_PIT_RETROSPECTIVE",
@@ -485,6 +582,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     "n_unknown": counts["UNKNOWN"],
                     "points": points,
                     "support_followup": support_followup,
+                    "structure_timeline": structure_timeline,
                     "formal_downstream": {
                         "d1_anchor": "NOT_EVALUATED",
                         "episode": "NOT_EVALUATED",

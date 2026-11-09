@@ -328,7 +328,7 @@ def unavailable_source_qualification(reason: str) -> dict[str, Any]:
         predicates["no_damage"],
         predicates["no_severe_extension"],
     )
-    source_seed = _and(safety, _or(s1, s2))
+    source_seed = _or(s1, s2)
     public_gate = _and(
         predicates["research_universe"],
         predicates["actual_bar"],
@@ -337,7 +337,7 @@ def unavailable_source_qualification(reason: str) -> dict[str, Any]:
         predicates["limited_price_rule"],
         predicates["coordinate_ready"],
     )
-    seed = _and(safety, _or(s1, s2))
+    seed = _and(safety, source_seed)
     formal_candidate_seed = _and(public_gate, seed)
     prewatch = _and(seed, _tri(None, "MANDATORY_CORE_QUALITY_CONTRACT_UNBOUND"))
     prewatch["implementation_status"] = "NOT_IMPLEMENTED"
@@ -414,7 +414,8 @@ def source_seed_predicates(
     )
     s1 = _and(bias, compression, delta3)
     s2 = _and(bias, delta10, _or(bull, previous_cross))
-    seed = _and(safety, _or(s1, s2))
+    source_seed = _or(s1, s2)
+    seed = _and(safety, source_seed)
     public_gate = _and(
         formal_universe,
         actual,
@@ -450,7 +451,7 @@ def source_seed_predicates(
         safety=safety,
         seed=seed,
         formal_candidate_seed=formal_candidate_seed,
-        source_seed=seed,
+        source_seed=source_seed,
         prewatch=prewatch,
     )
     return {

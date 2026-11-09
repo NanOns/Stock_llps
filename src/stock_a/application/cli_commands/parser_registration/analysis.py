@@ -251,6 +251,20 @@ def register_commands(commands):
         help="遍历显式历史窗口内全部D1 TRUE事件并发现目标日支撑变化",
     )
     source_d1_breakout.add_argument(
+        "--discover-structures",
+        action="store_true",
+        help="单遍评价完整目标日Raw来源池并分页返回五类新增D1结构",
+    )
+    source_d1_breakout.add_argument(
+        "--structure-symbol",
+        help="全池结构发现时附带返回一个来源代码的目标日结构明细",
+    )
+    source_d1_breakout.add_argument(
+        "--include-structures",
+        action="store_true",
+        help="单股历史模式同时输出五类D1锚出生及后继观察",
+    )
+    source_d1_breakout.add_argument(
         "--event-window-start",
         help="多历史事件观察起始官方会话；包含起始日、不含目标日",
     )
