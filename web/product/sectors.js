@@ -48,7 +48,7 @@ export function renderD1Members(data, openStock) {
   byId("boardMeta").textContent =
     `${board.board_kind === "INDUSTRY" ? "行业" : "GN 概念"} · 当前成员快照 NON_PIT · D1材料交集`;
   byId("boardCoverage").textContent =
-    `当前成员 ${display(data.boards.selected_member_count)} · 来源池内 ${display(board.members_in_source_pool)} · 池外 ${display(board.members_outside_source_pool)} · 本页 ${members.length}`;
+    `当前成员 ${display(board.snapshot_member_count)} · 来源池内 ${display(board.members_in_source_pool)} · 池外 ${display(board.members_outside_source_pool)} · 筛选 ${display(data.boards.selected_member_count)} · 本页 ${members.length}`;
   const list = byId("memberList");
   list.replaceChildren();
   list.classList.toggle("has-items", !!members.length);

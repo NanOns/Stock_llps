@@ -1571,6 +1571,36 @@ def prepare_d1_material_observation(
     }
 
 
+def _d1_material_detail_changes(
+    changes: Sequence[Mapping[str, Any]],
+    *,
+    structure_type: str | None,
+    material_change_reason: str | None,
+) -> tuple[list[Mapping[str, Any]], list[Mapping[str, Any]]]:
+    """将所选材料锚和质量锚分开，避免将未知视为变化。"""
+    selected = [
+        item
+        for item in changes
+        if structure_type is None or item["type"] == structure_type
+    ]
+    material = [
+        item
+        for item in selected
+        if item["material_change_classification"] == "MATERIAL_CHANGE"
+        and (
+            material_change_reason is None
+            or material_change_reason in item["material_change_reasons"]
+        )
+    ]
+    quality = [
+        item
+        for item in selected
+        if item["material_change_classification"]
+        in {"UNKNOWN", "NOT_COMPARABLE", "NOT_EVALUABLE"}
+    ]
+    return material, quality
+
+
 def read_d1_material_observation(
     config: Mapping[str, Any],
     *,
@@ -1859,6 +1889,11 @@ def read_d1_material_observation(
     if prepared_facts is not None and symbol is not None:
         material_details = changes.get("source_symbol_d1_details") or {}
         all_stock_changes = material_details.get(symbol, [])
+        material_anchors, quality_anchors = _d1_material_detail_changes(
+            all_stock_changes,
+            structure_type=structure_type,
+            material_change_reason=material_change_reason,
+        )
         selected_stock_detail = {
             "source_symbol": symbol,
             "status": (
@@ -1873,22 +1908,8 @@ def read_d1_material_observation(
                     else "NOT_IN_TARGET_SOURCE_POOL"
                 ),
                 "anchor_changes": all_stock_changes,
-                "filtered_anchor_changes": [
-                    item
-                    for item in all_stock_changes
-                    if (structure_type is None or item["type"] == structure_type)
-                    and (
-                        material_change_reason is None
-                        or material_change_reason in item["material_change_reasons"]
-                    )
-                ],
-                "quality_anchor_changes": [
-                    item
-                    for item in all_stock_changes
-                    if item["material_change_classification"]
-                    in {"UNKNOWN", "NOT_COMPARABLE", "NOT_EVALUABLE"}
-                    and (structure_type is None or item["type"] == structure_type)
-                ],
+                "filtered_anchor_changes": material_anchors,
+                "quality_anchor_changes": quality_anchors,
             },
         }
     selected_stock = None

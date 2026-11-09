@@ -782,7 +782,7 @@ class _BoundedHTTPServer(ThreadingHTTPServer):
         super().server_close()
 
     def process_request(self, request: socket.socket, client_address: Any) -> None:
-        if not self._request_slots.acquire(blocking=False):
+        if not self._request_slots.acquire(timeout=8):
             body = json.dumps(
                 {
                     "ok": False,
@@ -844,6 +844,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
         self.send_header("Cache-Control", "no-store")
+        self.send_header("Connection", "close")
+        self.close_connection = True
         self.send_header("X-Content-Type-Options", "nosniff")
         self.send_header("X-Frame-Options", "DENY")
         self.send_header("Referrer-Policy", "no-referrer")

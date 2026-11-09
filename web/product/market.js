@@ -58,11 +58,15 @@ export function renderD1MaterialMarket(data, openBoard, openStock) {
 
   const overviewBoards = byId("overviewBoards");
   overviewBoards.replaceChildren();
-  overviewBoards.classList.toggle("has-items", !!data.boards.summaries.length);
-  if (!data.boards.summaries.length) {
-    overviewBoards.textContent = "当前筛选没有可展示的变化板块。";
+  const changedBoards = data.boards.summaries.filter(
+    (board) => board.material_change_distinct_symbol_count > 0,
+  );
+  overviewBoards.classList.toggle("has-items", !!changedBoards.length);
+  if (!changedBoards.length) {
+    overviewBoards.textContent =
+      "此所选范围无已证明材料变化板块；未知质量不代表没有行情。";
   } else {
-    data.boards.summaries.slice(0, 15).forEach((board, index) => {
+    changedBoards.slice(0, 15).forEach((board, index) => {
       const button = element("button", null, "list-row");
       button.type = "button";
       const left = element("span", null, "row-main");

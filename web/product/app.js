@@ -15,6 +15,7 @@ const state = {
   stockOffset: 0,
   memberOffset: 0,
   request: 0,
+  contextRequest: 0,
   stockRequest: 0,
   profileChangeRequest: 0,
   researchReady: null,
@@ -224,7 +225,7 @@ async function init() {
 }
 $("versionSelect").addEventListener("change", async () => {
   const selected = $("versionSelect").value;
-  const token = ++state.request;
+  const token = ++state.contextRequest;
   state.context = null;
   for (const id of [
     "profileSelect",
@@ -250,7 +251,7 @@ $("versionSelect").addEventListener("change", async () => {
     const c = await api(
       `/api/preview/sector-change-context?${new URLSearchParams({ target_session: date })}`,
     );
-    if (token !== state.request) return;
+    if (token !== state.contextRequest) return;
     state.context = c;
     for (const [id, kind] of [
       ["industrySelect", "TDX_TDXHY_CFG"],
@@ -274,7 +275,7 @@ $("versionSelect").addEventListener("change", async () => {
     );
     message("contextStatus", `截止 ${c.research_cutoff} · 请明确选择所有版本`);
   } catch (error) {
-    if (token === state.request)
+    if (token === state.contextRequest)
       message("contextStatus", `范围读取失败：${error.message}`);
   }
 });
@@ -320,8 +321,14 @@ $("applyContext").addEventListener("click", () => {
       profile?.history_session_count || Number(history),
     research_cutoff: state.context.research_cutoff,
     namespace_id: state.context.namespace_id,
+    window_options: state.context.window_options,
     mode,
   };
+  ++state.request;
+  state.researchController?.abort();
+  ++state.profileChangeRequest;
+  state.profileChangeController?.abort();
+  ++d1MaterialState.request;
   state.board = null;
   state.boardOffset = state.stockOffset = state.memberOffset = 0;
   state.data = null;
@@ -439,6 +446,7 @@ function openD1Stock(symbol, member = null) {
   void loadD1Material(symbol);
 }
 function clearD1MaterialView(symbol = null) {
+  message("d1MaterialQuality", "正在读取当前范围的质量与分组，旧结果已清除。");
   $("metrics").replaceChildren(
     countCard("来源代码池", "—", "等待D1材料变化"),
     countCard("材料变化代码", "—", "等待全池读取"),
@@ -465,6 +473,11 @@ function clearD1MaterialView(symbol = null) {
     "memberNext",
   ])
     $(id).disabled = true;
+  if (d1MaterialState.board) {
+    message("boardCoverage", "正在读取当前成员范围…");
+    message("memberList", "正在读取当前成员范围，旧结果已清除。");
+    $("memberList").classList.remove("has-items");
+  }
   if (symbol) {
     message("stockStatus", "正在从同一D1全池事实读取所选个股…");
     $("stockContent").replaceChildren();
@@ -555,6 +568,8 @@ async function loadD1Material(symbol = null) {
     }
     for (const id of ["overviewBoards", "overviewStocks", "stockList"])
       message(id, "读取失败；不能据此推断没有变化或正式未入选。");
+    if (d1MaterialState.board)
+      message("memberList", "成员读取失败；不能据此推断没有变化。");
   } finally {
     window.clearInterval(timer);
     if (token === d1MaterialState.request)
@@ -737,7 +752,7 @@ async function loadProfileChanges() {
   message("profileChangeSummary", "读取独立画像变化…");
   message("profileChangeList", "正在读取相邻会话画像变化；不计入 D1 统计。");
   if (!context) return;
-  const previous = (state.context?.window_options || []).find(
+  const previous = (context.window_options || []).find(
     (item) => item.event_session_count === 1,
   );
   if (!previous || previous.event_window_start >= context.target_session) {

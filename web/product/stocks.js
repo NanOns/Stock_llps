@@ -78,7 +78,7 @@ export function renderD1StockDetail(stock) {
     element(
       "p",
       summary.group === "NO_SELECTED_REASON"
-        ? "所选结构内存在其它材料变化，但没有锚点命中当前具名原因；这不是该股票没有 D1 变化。"
+        ? "未命中所选具名原因；不能据此认定有其他材料变化或全股无 D1 变化。"
         : summary.group === "NO_PROVED_ANCHOR"
           ? "所选结构和历史窗内没有已证锚点；不代表正式未入选或没有行情。"
           : "",
