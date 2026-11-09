@@ -1347,11 +1347,11 @@ def query_tdx_sector_memberships_for_symbols(
     *,
     source_symbols: Sequence[str],
     target_session: date,
-    industry_snapshot_id: str,
-    concept_snapshot_id: str,
+    industry_snapshot_id: str | None,
+    concept_snapshot_id: str | None,
     expected_namespace_id: str,
 ) -> dict[str, Any]:
-    """在一个只读事务内批量读取FT来源代码的两个显式TDX成员快照。"""
+    """在一个只读事务内批量读取FT来源代码的可用TDX成员快照。"""
     if isinstance(source_symbols, (str, bytes)) or not isinstance(
         source_symbols, Sequence
     ):
@@ -1383,21 +1383,33 @@ def query_tdx_sector_memberships_for_symbols(
             "TARGET_SESSION_INVALID", "研究目标日必须是有效交易日期"
         )
     try:
-        industry_snapshot_id = str(uuid.UUID(industry_snapshot_id))
-        concept_snapshot_id = str(uuid.UUID(concept_snapshot_id))
+        industry_snapshot_id = (
+            str(uuid.UUID(industry_snapshot_id))
+            if industry_snapshot_id is not None
+            else None
+        )
+        concept_snapshot_id = (
+            str(uuid.UUID(concept_snapshot_id))
+            if concept_snapshot_id is not None
+            else None
+        )
         normalized_namespace_id = str(uuid.UUID(expected_namespace_id))
     except (TypeError, ValueError, AttributeError) as error:
         raise TdxSectorMembersPgError(
             "SECTOR_IDENTITY_INVALID", "双TDX快照和DEV namespace必须是UUID"
         ) from error
-    if industry_snapshot_id == concept_snapshot_id:
+    if industry_snapshot_id is not None and industry_snapshot_id == concept_snapshot_id:
         raise TdxSectorMembersPgError(
             "SECTOR_SNAPSHOT_IDS_NOT_DISTINCT", "行业和概念必须使用两个独立快照"
         )
 
-    expected_snapshots = (
-        (industry_snapshot_id, "TDX_TDXHY_CFG", "INDUSTRY"),
-        (concept_snapshot_id, "TDX_INFOHARBOR_BLOCK_DAT", "CONCEPT"),
+    expected_snapshots = tuple(
+        item
+        for item in (
+            (industry_snapshot_id, "TDX_TDXHY_CFG", "INDUSTRY"),
+            (concept_snapshot_id, "TDX_INFOHARBOR_BLOCK_DAT", "CONCEPT"),
+        )
+        if item[0] is not None
     )
     transaction_started = time.perf_counter()
     select_client_seconds: float | None = None
@@ -1442,6 +1454,7 @@ LEFT JOIN stock.tdx_sector_catalog AS catalog
   ON catalog.snapshot_id=member.snapshot_id
  AND catalog.board_kind=member.board_kind
  AND catalog.board_native_id=member.board_native_id
+WHERE requested.snapshot_id IS NOT NULL
 ORDER BY requested.expected_board_kind COLLATE "C",
          member.board_native_id COLLATE "C",
          member.source_symbol COLLATE "C\"""",

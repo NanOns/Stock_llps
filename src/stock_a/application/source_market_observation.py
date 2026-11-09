@@ -1531,8 +1531,8 @@ def prepare_d1_material_observation(
     research_cutoff: date,
     package_sha256: str,
     d1_history_session_count: int,
-    industry_snapshot_id: str,
-    concept_snapshot_id: str,
+    industry_snapshot_id: str | None,
+    concept_snapshot_id: str | None,
 ) -> dict[str, Any]:
     """一次只读准备全池D1与成员事实，供同进程筛选分页复用。"""
     _target, sessions, calendar_revision = resolve_pg_history_window(
@@ -1557,6 +1557,7 @@ def prepare_d1_material_observation(
             ("INDUSTRY", industry_snapshot_id),
             ("CONCEPT", concept_snapshot_id),
         )
+        if snapshot_id is not None
     ]
     if any(
         snapshot["namespace_id"] != d1["source"]["namespace_id"]
@@ -1608,8 +1609,8 @@ def read_d1_material_observation(
     research_cutoff: date,
     package_sha256: str,
     d1_history_session_count: int,
-    industry_snapshot_id: str,
-    concept_snapshot_id: str,
+    industry_snapshot_id: str | None,
+    concept_snapshot_id: str | None,
     horizon: int | None = None,
     structure_type: str | None = None,
     material_change_reason: str | None = None,
@@ -1676,6 +1677,7 @@ def read_d1_material_observation(
                 ("INDUSTRY", industry_snapshot_id),
                 ("CONCEPT", concept_snapshot_id),
             )
+            if snapshot_id is not None
         ]
     else:
         sessions = prepared_facts["sessions"]
@@ -1861,11 +1863,15 @@ def read_d1_material_observation(
             kind: len(
                 set(all_type_source_symbol_summary) - mapped_by_kind.get(kind, set())
             )
+            if kind in mapped_by_kind
+            else None
             for kind in ("INDUSTRY", "CONCEPT")
         },
         "unmapped_source_symbol_count_across_snapshots": len(
             set(all_type_source_symbol_summary) - set().union(*mapped_by_kind.values())
-        ),
+        )
+        if industry_snapshot_id is not None and concept_snapshot_id is not None
+        else None,
         "board_material_counts_are_non_additive": True,
     }
     comparison = _d1_material_outcomes(
@@ -1924,6 +1930,7 @@ def read_d1_material_observation(
                             "board_native_id": board_id,
                             "board_name": board["name"],
                             "snapshot_id": snapshot["snapshot"]["snapshot_id"],
+                            "observed_at": snapshot["snapshot"]["observed_at"],
                             "membership_status": (
                                 "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"
                             ),
@@ -1969,6 +1976,10 @@ def read_d1_material_observation(
         "research_cutoff": research_cutoff.isoformat(),
         "package_sha256": package_sha256,
         "profile_revision": "NOT_REQUIRED_FOR_D1_RAW_MATERIAL_VIEW",
+        "membership_availability": {
+            "INDUSTRY": "AVAILABLE" if industry_snapshot_id is not None else "UNKNOWN",
+            "CONCEPT": "AVAILABLE" if concept_snapshot_id is not None else "UNKNOWN",
+        },
         "d1_history_session_count": len(sessions),
         "d1_history_start": sessions[0].isoformat(),
         "d1_history_end": sessions[-1].isoformat(),

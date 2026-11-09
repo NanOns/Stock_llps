@@ -28,11 +28,11 @@ def read_tdx_sector_memberships_for_symbols(
     *,
     source_symbols: Sequence[str],
     target_session: date,
-    industry_snapshot_id: str,
-    concept_snapshot_id: str,
+    industry_snapshot_id: str | None,
+    concept_snapshot_id: str | None,
     expected_namespace_id: str,
 ) -> dict[str, Any]:
-    """一次性读取完整FT来源代码在两个显式行业/GN快照中的成员关系。"""
+    """一次性读取完整FT来源代码在可用行业/GN快照中的成员关系。"""
     try:
         return query_tdx_sector_memberships_for_symbols(
             config,
@@ -120,10 +120,7 @@ def build_d0_launch_watch_membership_result(
             )
         snapshot_by_id[snapshot_id] = snapshot
         expected_snapshot_ids[board_kind] = snapshot_id
-    if set(expected_snapshot_ids) != set(_SNAPSHOT_ROLES):
-        raise TdxSectorMembersApplicationError(
-            "SECTOR_SNAPSHOT_PAIR_INCOMPLETE", "必须各有一个行业和GN概念快照"
-        )
+    missing_kinds = set(_SNAPSHOT_ROLES) - set(expected_snapshot_ids)
 
     change_rows = changes.get("results")
     if not isinstance(change_rows, list):
@@ -273,6 +270,11 @@ def build_d0_launch_watch_membership_result(
         all_board_rows=all_board_rows,
     )
     stocks = summary.pop("stocks")
+    if missing_kinds:
+        for stock in stocks:
+            stock["missing_membership_kinds"] = sorted(missing_kinds)
+            if not stock.get("also_in_sectors"):
+                stock["unmapped_reason"] = "MEMBERSHIP_SNAPSHOT_UNAVAILABLE"
     summary.pop("members_by_board")
     board_summaries = []
     for row in all_board_rows:
@@ -328,7 +330,10 @@ def build_d0_launch_watch_membership_result(
             "global_new_stock_count": len(ft_symbols),
             "global_unique_source_symbol_count": len(ft_symbols),
             "mapped_distinct_source_symbol_count": mapped_count,
-            "unmapped_distinct_source_symbol_count": unmapped_count,
+            "unmapped_distinct_source_symbol_count": None
+            if missing_kinds
+            else unmapped_count,
+            "missing_membership_kinds": sorted(missing_kinds),
             "board_membership_relation_count": relation_count,
             "membership_snapshots": list(snapshots),
             "membership_read_execution": membership_read.get("execution"),

@@ -810,7 +810,8 @@ def list_profile_snapshots(
          AND min(r.raw_symbol_count)=min(r.raw_row_count)
          AND min(r.capture_count)=1
          AND count(DISTINCT p.source_capture_id)=1
-         AND min(p.source_capture_id::text)=min(r.raw_capture_id)
+         AND min(p.source_capture_id::text)=min(r.raw_capture_id),
+       p.history_calendar_id, p.history_calendar_revision, p.price_coordinate
 FROM stock.source_symbol_price_profiles p
 LEFT JOIN (
     SELECT namespace_id, session_date, package_sha256,
@@ -824,7 +825,8 @@ LEFT JOIN (
   AND r.package_sha256=p.package_sha256
 WHERE p.namespace_id=%s::uuid AND p.target_session<=%s
 GROUP BY p.target_session, p.package_sha256, p.profile_revision,
-         p.history_window_start, p.history_window_end, p.history_requested_session_count
+         p.history_window_start, p.history_window_end, p.history_requested_session_count,
+         p.history_calendar_id, p.history_calendar_revision, p.price_coordinate
 ORDER BY p.target_session DESC, p.package_sha256, p.profile_revision""",
             (namespace_id, max_target_session),
         )
@@ -839,6 +841,9 @@ ORDER BY p.target_session DESC, p.package_sha256, p.profile_revision""",
                 "source_symbol_count": int(row[6]),
                 "expected_source_symbol_count": int(row[7]),
                 "complete": bool(row[8]),
+                "history_calendar_id": row[9],
+                "history_calendar_revision": row[10],
+                "price_coordinate": row[11],
             }
             for row in cursor.fetchall()
         ]
@@ -1406,6 +1411,11 @@ _BIAS20_ATR_PAIR_REASON_SQL = """CASE
       THEN 'CORE_CALCULATION_SCOPE_MISMATCH:' ||
            COALESCE(before_calculation_scope, 'UNKNOWN') || '->' ||
            COALESCE(after_calculation_scope, 'UNKNOWN')
+    WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
+      OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
+      THEN 'HISTORY_CALENDAR_MISMATCH'
+    WHEN before_window_count IS DISTINCT FROM after_window_count
+      THEN 'HISTORY_WINDOW_LENGTH_MISMATCH'
     WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'
     WHEN before_bias20_atr_state='UNKNOWN'
       AND after_bias20_atr_state='UNKNOWN'
@@ -1575,6 +1585,10 @@ WITH old_rows AS (
            n.history_window_end AS after_window_end,
            o.history_requested_session_count AS before_window_count,
            n.history_requested_session_count AS after_window_count,
+           o.history_calendar_id AS before_history_calendar_id,
+           n.history_calendar_id AS after_history_calendar_id,
+           o.history_calendar_revision AS before_history_calendar_revision,
+           n.history_calendar_revision AS after_history_calendar_revision,
            o.profile_revision::text AS before_profile_revision,
            n.profile_revision::text AS after_profile_revision,
            o.profile_field_ids AS before_profile_field_ids,
@@ -1595,7 +1609,10 @@ WITH old_rows AS (
                AND o.producer_contract_sha256=n.producer_contract_sha256
                AND o.producer_version=n.producer_version
                AND o.calculation_scope=n.calculation_scope
-               AND o.price_coordinate=n.price_coordinate,
+               AND o.price_coordinate=n.price_coordinate
+               AND o.history_calendar_id=n.history_calendar_id
+               AND o.history_calendar_revision=n.history_calendar_revision
+               AND o.history_requested_session_count=n.history_requested_session_count,
                FALSE
            ) AS core_compatible,
            COALESCE(
@@ -1605,6 +1622,9 @@ WITH old_rows AS (
                AND o.producer_version=n.producer_version
                AND o.calculation_scope=n.calculation_scope
                AND o.price_coordinate=n.price_coordinate
+               AND o.history_calendar_id=n.history_calendar_id
+               AND o.history_calendar_revision=n.history_calendar_revision
+               AND o.history_requested_session_count=n.history_requested_session_count
                AND cardinality(o.profile_field_ids)=11
                AND cardinality(n.profile_field_ids)=11
                AND o.profile_field_ids @> n.profile_field_ids
@@ -1747,7 +1767,7 @@ WITH old_rows AS (
                CASE WHEN before_present AND after_present
                          AND before_bar_status IS DISTINCT FROM after_bar_status
                     THEN 'TARGET_BAR_STATUS_CHANGED'::text END,
-               CASE WHEN before_present AND after_present
+               CASE WHEN before_present AND after_present AND core_compatible
                          AND (before_window_status IS DISTINCT FROM after_window_status
                               OR before_window_reason IS DISTINCT FROM after_window_reason)
                     THEN 'PRICE_WINDOW_STATUS_CHANGED'::text END,
@@ -1898,6 +1918,11 @@ WITH old_rows AS (
              WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
                OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
                THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'::text
+             WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
+               OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
+               THEN 'HISTORY_CALENDAR_MISMATCH'::text
+             WHEN before_window_count IS DISTINCT FROM after_window_count
+               THEN 'HISTORY_WINDOW_LENGTH_MISMATCH'::text
              WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'::text
              WHEN NOT before_raw_record_present THEN 'BEFORE_RAW_ROW_MISSING'::text
              WHEN NOT after_raw_record_present THEN 'AFTER_RAW_ROW_MISSING'::text
@@ -2033,6 +2058,11 @@ WITH old_rows AS (
              WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
                OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
                THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'::text
+             WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
+               OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
+               THEN 'HISTORY_CALENDAR_MISMATCH'::text
+             WHEN before_window_count IS DISTINCT FROM after_window_count
+               THEN 'HISTORY_WINDOW_LENGTH_MISMATCH'::text
              WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'::text
              WHEN NOT before_raw_record_present THEN 'BEFORE_RAW_ROW_MISSING'::text
              WHEN NOT after_raw_record_present THEN 'AFTER_RAW_ROW_MISSING'::text
@@ -2124,6 +2154,11 @@ WHEN before_price_coordinate IS DISTINCT FROM after_price_coordinate
 WHEN before_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
   OR after_price_coordinate IS DISTINCT FROM 'RAW_UNADJUSTED'
   THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED'
+WHEN before_history_calendar_id IS DISTINCT FROM after_history_calendar_id
+  OR before_history_calendar_revision IS DISTINCT FROM after_history_calendar_revision
+  THEN 'HISTORY_CALENDAR_MISMATCH'
+WHEN before_window_count IS DISTINCT FROM after_window_count
+  THEN 'HISTORY_WINDOW_LENGTH_MISMATCH'
 WHEN NOT core_compatible THEN 'CORE_SEMANTICS_INCOMPATIBLE'
 WHEN {before}='UNKNOWN' OR {after}='UNKNOWN' THEN concat_ws('; ',
   CASE WHEN {before}='UNKNOWN' THEN 'BEFORE:' || COALESCE(before_{position}_relation_reason, 'UNKNOWN_REASON_NOT_PROVIDED') END,

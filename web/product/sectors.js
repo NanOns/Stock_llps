@@ -2,6 +2,9 @@ import { byId, display, element } from "./state.js";
 
 export function renderD1Boards(data, openBoard) {
   const rows = byId("boardRows");
+  const missing = Object.entries(data.membership_availability || {})
+    .filter(([, status]) => status !== "AVAILABLE")
+    .map(([kind]) => (kind === "INDUSTRY" ? "行业" : "GN 概念"));
   rows.replaceChildren();
   for (const board of data.boards.summaries) {
     const row = element("tr");
@@ -27,13 +30,19 @@ export function renderD1Boards(data, openBoard) {
   }
   if (!data.boards.summaries.length) {
     const row = element("tr");
-    const cell = element("td", "当前筛选没有可展示的板块。", "empty");
+    const cell = element(
+      "td",
+      missing.length
+        ? `未取得${missing.join("、")}成员；当前筛选结果可能不完整。`
+        : "当前筛选没有可展示的板块。",
+      "empty",
+    );
     cell.colSpan = 6;
     row.append(cell);
     rows.append(row);
   }
   byId("boardSummary").textContent =
-    `完整当前板块 ${display(data.boards.total_count)} 个 · 材料变化交集；成员快照 NON_PIT`;
+    `已读取板块 ${display(data.boards.total_count)} 个 · 材料变化交集；成员快照 NON_PIT${missing.length ? ` · ${missing.join("、")}成员 UNKNOWN` : ""}`;
   byId("boardPage").textContent =
     `偏移 ${data.boards.offset} · ${data.boards.summaries.length} 个`;
   byId("boardPrev").disabled = data.boards.offset === 0;
@@ -44,9 +53,12 @@ export function renderD1Members(data, openStock) {
   const board = data.boards.selected;
   if (!board) return;
   const members = data.boards.selected_members;
+  const observed = data.snapshots?.find(
+    (item) => item.board_kind === board.board_kind,
+  )?.snapshot?.observed_at;
   byId("boardTitle").textContent = board.board_name;
   byId("boardMeta").textContent =
-    `${board.board_kind === "INDUSTRY" ? "行业" : "GN 概念"} · 当前成员快照 NON_PIT · D1材料交集`;
+    `${board.board_kind === "INDUSTRY" ? "行业" : "GN 概念"} · 当前成员观测 ${observed || "UNKNOWN"} · NON_PIT 回看 · D1材料交集`;
   byId("boardCoverage").textContent =
     `当前成员 ${display(board.snapshot_member_count)} · 来源池内 ${display(board.members_in_source_pool)} · 池外 ${display(board.members_outside_source_pool)} · 筛选 ${display(data.boards.selected_member_count)} · 本页 ${members.length}`;
   const list = byId("memberList");

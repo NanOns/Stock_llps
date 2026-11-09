@@ -48,13 +48,12 @@ export function renderD1MaterialMarket(data, openBoard, openStock) {
   byId("observationLabel").textContent =
     `${data.target_session} · D1 材料变化 · ${reasonLabel} · ${data.d1_history_session_count} 个官方会话 · NON_PIT`;
   const groups = summary.source_symbol_group_counts || {};
-  byId("d1MaterialQuality").hidden = false;
+  byId("d1MaterialQuality").hidden = !(
+    byId("sectors").classList.contains("active") ||
+    byId("stocks").classList.contains("active")
+  );
   byId("d1MaterialQuality").textContent =
     `质量与分组：未知 ${groups.UNKNOWN || 0} 个来源代码、不可比较 ${groups.NOT_COMPARABLE || 0} 个、无已证锚点 ${groups.NO_PROVED_ANCHOR || 0} 个。UNKNOWN、NOT_COMPARABLE 与 NO_PROVED_ANCHOR 不解释为正式未入选或没有行情。未选择后继期限，不读取T+N Raw。`;
-  byId("profileChangeSummary").textContent = "D1 材料变化不依赖画像修订";
-  byId("profileChangeList").textContent =
-    "当前路径使用同一来源池的原始结构锚与材料变化原因；画像质量不参与D1分母。";
-  byId("profileChangeCard")?.setAttribute("hidden", "");
 
   const overviewBoards = byId("overviewBoards");
   overviewBoards.replaceChildren();
@@ -63,8 +62,11 @@ export function renderD1MaterialMarket(data, openBoard, openStock) {
   );
   overviewBoards.classList.toggle("has-items", !!changedBoards.length);
   if (!changedBoards.length) {
-    overviewBoards.textContent =
-      "此所选范围无已证明材料变化板块；未知质量不代表没有行情。";
+    overviewBoards.textContent = Object.values(
+      data.membership_availability || {},
+    ).some((status) => status !== "AVAILABLE")
+      ? "部分成员关系未知，不能据此判断对应板块没有变化。"
+      : "此所选范围无已证明材料变化板块；未知质量不代表没有行情。";
   } else {
     changedBoards.slice(0, 15).forEach((board, index) => {
       const button = element("button", null, "list-row");
@@ -124,6 +126,10 @@ export function renderD1MaterialMarket(data, openBoard, openStock) {
       overviewStocks.append(button);
     });
   }
-  byId("contextText").textContent =
-    `${data.target_session} · D1材料变化来源视图 · 不代表正式候选或上涨预测。未知、不可比较和未证明锚点保留为独立状态。`;
+  const missing = Object.entries(data.membership_availability || {})
+    .filter(([, status]) => status !== "AVAILABLE")
+    .map(([kind]) => (kind === "INDUSTRY" ? "行业" : "概念"));
+  if (missing.length)
+    byId("d1MaterialQuality").textContent +=
+      ` ${missing.join("、")}成员不可用，该板块范围为 UNKNOWN。`;
 }

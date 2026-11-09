@@ -551,6 +551,44 @@ class _PreviewState:
         self.d1_material_cache_key: tuple[Any, ...] | None = None
         self.d1_material_cache_facts: dict[str, Any] | None = None
         self.d1_material_inflight: threading.Event | None = None
+        self.d0_watch_cache_lock = threading.Lock()
+        self.d0_watch_cache_key: tuple[Any, ...] | None = None
+        self.d0_watch_cache_result: tuple[Any, ...] | None = None
+        self.d0_watch_cache_expires_at = 0.0
+        self.d0_watch_inflight: dict[tuple[Any, ...], threading.Event] = {}
+
+    def source_d0_watch(
+        self, cache_key: tuple[Any, ...], factory: Any
+    ) -> tuple[tuple[Any, ...], bool]:
+        """复用同一双日来源及成员快照的D0全池事实，最多保留十分钟。"""
+        while True:
+            with self.d0_watch_cache_lock:
+                if (
+                    self.d0_watch_cache_key == cache_key
+                    and self.d0_watch_cache_result is not None
+                    and time.monotonic() < self.d0_watch_cache_expires_at
+                ):
+                    return self.d0_watch_cache_result, True
+                event = self.d0_watch_inflight.get(cache_key)
+                if event is None:
+                    event = threading.Event()
+                    self.d0_watch_inflight[cache_key] = event
+                    break
+            event.wait()
+        try:
+            result = factory()
+        except BaseException:
+            with self.d0_watch_cache_lock:
+                self.d0_watch_inflight.pop(cache_key, None)
+                event.set()
+            raise
+        with self.d0_watch_cache_lock:
+            self.d0_watch_cache_key = cache_key
+            self.d0_watch_cache_result = result
+            self.d0_watch_cache_expires_at = time.monotonic() + 600
+            self.d0_watch_inflight.pop(cache_key, None)
+            event.set()
+        return result, False
 
     def source_d1_material_facts(
         self, cache_key: tuple[Any, ...], factory: Any
@@ -571,8 +609,11 @@ class _PreviewState:
                 else:
                     owner = False
             if not owner:
-                event.wait()
-                continue
+                raise PreviewHttpError(
+                    503,
+                    "D1_MATERIAL_BUSY",
+                    "另一项完整来源池研究正在计算，请稍候自动重试",
+                )
             try:
                 facts = factory()
             except BaseException:
@@ -1054,15 +1095,26 @@ class _PreviewHandler(BaseHTTPRequestHandler):
 
         try:
             namespace_id = str(UUID(body["namespace_id"]))
-            industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
-            concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
+            industry_snapshot_id = (
+                str(UUID(body["industry_snapshot_id"]))
+                if body["industry_snapshot_id"] is not None
+                else None
+            )
+            concept_snapshot_id = (
+                str(UUID(body["concept_snapshot_id"]))
+                if body["concept_snapshot_id"] is not None
+                else None
+            )
         except (ValueError, TypeError, AttributeError) as error:
             raise PreviewHttpError(
                 400,
                 "SOURCE_LAUNCH_WATCH_ID_INVALID",
                 "namespace和板块快照须使用有效UUID",
             ) from error
-        if industry_snapshot_id == concept_snapshot_id:
+        if (
+            industry_snapshot_id is not None
+            and industry_snapshot_id == concept_snapshot_id
+        ):
             raise PreviewHttpError(
                 400,
                 "SOURCE_LAUNCH_WATCH_SNAPSHOTS_NOT_DISTINCT",
@@ -1263,7 +1315,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 item.get("snapshot_id")
                 for item in membership_snapshots
                 if isinstance(item, Mapping)
-            } != {industry_snapshot_id, concept_snapshot_id}:
+            } != {
+                value
+                for value in (industry_snapshot_id, concept_snapshot_id)
+                if value is not None
+            }:
                 raise PreviewHttpError(
                     409,
                     "SOURCE_LAUNCH_WATCH_SNAPSHOT_PAIR_INVALID",
@@ -1282,14 +1338,42 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             key: actual_calendar[key]
             for key in ("calendar_id", "calendar_revision", "calendar_sha256")
         }
+        before_source = read_source_version_context(
+            self.preview_server.state.config,
+            target_session=before_session,
+            package_sha256=package_sha256,
+            namespace_id=namespace_id,
+        )
+        after_source = read_source_version_context(
+            self.preview_server.state.config,
+            target_session=target_session,
+            package_sha256=package_sha256,
+            namespace_id=namespace_id,
+        )
+        cache_key = (
+            before_session,
+            target_session,
+            research_cutoff,
+            package_sha256,
+            namespace_id,
+            before_source["source_capture_id"],
+            before_source["source_raw_digest"],
+            after_source["source_capture_id"],
+            after_source["source_raw_digest"],
+            calendar_revision,
+            industry_snapshot_id,
+            concept_snapshot_id,
+        )
+        watch, cache_hit = self.preview_server.state.source_d0_watch(
+            cache_key, build_full_watch
+        )
         (
             changes,
             complete,
             d0_reader_wall_seconds,
             membership_read_wall_seconds,
             aggregation_wall_seconds,
-        ) = build_full_watch()
-        cache_hit = False
+        ) = watch
         transition_counts = changes["transition_counts"]
         stocks = complete["stocks"]
         boards = complete["boards"]
@@ -1370,6 +1454,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "membership_status": {
                 "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
                 "snapshots": complete.get("membership_snapshots"),
+                "missing_membership_kinds": complete.get(
+                    "missing_membership_kinds", []
+                ),
                 "global_new_stock_count": complete["global_new_stock_count"],
                 "mapped_distinct_source_symbol_count": complete[
                     "mapped_distinct_source_symbol_count"
@@ -1402,6 +1489,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "board_membership_read": (
                     "REUSED_COMPLETE_SNAPSHOT"
                     if cache_hit
+                    else "BATCHED_AVAILABLE_SNAPSHOTS_READ_ONLY"
+                    if complete.get("missing_membership_kinds")
                     else "BATCHED_TWO_SNAPSHOT_READ_ONLY"
                 ),
                 "cache_hit": cache_hit,
@@ -1474,6 +1563,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         snapshots = {}
         for field in ("industry_snapshot_id", "concept_snapshot_id"):
             value = body[field]
+            if value is None:
+                snapshots[field] = None
+                continue
             try:
                 parsed_id = str(UUID(value))
             except (ValueError, TypeError, AttributeError) as error:
@@ -1483,7 +1575,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     f"{field}必须是有效成员快照UUID",
                 ) from error
             snapshots[field] = parsed_id
-        if snapshots["industry_snapshot_id"] == snapshots["concept_snapshot_id"]:
+        if snapshots["industry_snapshot_id"] is not None and (
+            snapshots["industry_snapshot_id"] == snapshots["concept_snapshot_id"]
+        ):
             raise PreviewHttpError(
                 400,
                 "D1_MATERIAL_SNAPSHOT_IDS_NOT_DISTINCT",
@@ -1764,7 +1858,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         _require_research_cutoff(target, cutoff)
         _require_research_cutoff(cutoff, self.preview_server.state.research_cutoff)
         package_sha = _sha(body["package_sha256"])
-        profile_revision = _sha(body["profile_revision"])
+        profile_revision = None if d1_only else _sha(body["profile_revision"])
         event_window_start = _iso_date(body["event_window_start"], "event_window_start")
         history_session_count = _positive_int(
             body["pg_history_session_count"], "pg_history_session_count", 75
@@ -1792,25 +1886,27 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             d0_before_session = adjacent_sessions[-2]
             _require_research_cutoff(d0_before_session, cutoff)
 
-        try:
-            industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
-            concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
-        except (ValueError, TypeError, AttributeError) as error:
-            raise PreviewHttpError(
-                400,
-                "SECTOR_CHANGE_SNAPSHOT_ID_INVALID",
-                "行业与GN快照编号必须为规范UUID",
-            ) from error
-        if (
-            industry_snapshot_id != body["industry_snapshot_id"]
-            or concept_snapshot_id != body["concept_snapshot_id"]
-            or industry_snapshot_id == concept_snapshot_id
-        ):
-            raise PreviewHttpError(
-                400,
-                "SECTOR_CHANGE_SNAPSHOT_ID_INVALID",
-                "行业与GN快照编号必须规范且互不相同",
-            )
+        industry_snapshot_id = concept_snapshot_id = None
+        if not d1_only:
+            try:
+                industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
+                concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
+            except (ValueError, TypeError, AttributeError) as error:
+                raise PreviewHttpError(
+                    400,
+                    "SECTOR_CHANGE_SNAPSHOT_ID_INVALID",
+                    "行业与GN快照编号必须为规范UUID",
+                ) from error
+            if (
+                industry_snapshot_id != body["industry_snapshot_id"]
+                or concept_snapshot_id != body["concept_snapshot_id"]
+                or industry_snapshot_id == concept_snapshot_id
+            ):
+                raise PreviewHttpError(
+                    400,
+                    "SECTOR_CHANGE_SNAPSHOT_ID_INVALID",
+                    "行业与GN快照编号必须规范且互不相同",
+                )
 
         board_kind = body["board_kind"]
         if board_kind not in {"ALL", "INDUSTRY", "CONCEPT"}:
@@ -1915,43 +2011,45 @@ class _PreviewHandler(BaseHTTPRequestHandler):
 
         config = self.preview_server.state.config
         try:
-            profile_catalog = source_symbol_price_profile_snapshots(
-                config,
-                max_target_session=cutoff,
-            )
-            exact_profiles = [
-                item
-                for item in profile_catalog["snapshots"]
-                if item.get("target_session") == target.isoformat()
-                and item.get("package_sha256") == package_sha
-                and item.get("profile_revision") == profile_revision
-                and item.get("complete") is True
-            ]
-            if len(exact_profiles) != 1:
-                raise PreviewHttpError(
-                    409,
-                    "SECTOR_CHANGE_PROFILE_REVISION_UNAVAILABLE",
-                    "所选日期、来源包和画像修订没有唯一完整的PG版本",
+            profile_catalog = None
+            if not d1_only:
+                profile_catalog = source_symbol_price_profile_snapshots(
+                    config,
+                    max_target_session=cutoff,
                 )
-            catalog = read_tdx_sector_source_snapshot_catalog(config)
-            snapshots = {item["snapshot_id"]: item for item in catalog["snapshots"]}
-            industry = snapshots.get(industry_snapshot_id)
-            concept = snapshots.get(concept_snapshot_id)
-            if industry is None or concept is None:
-                raise PreviewHttpError(
-                    404,
-                    "SECTOR_CHANGE_SNAPSHOT_NOT_FOUND",
-                    "所选行业或GN快照不在PG真实目录中",
-                )
-            if (
-                industry.get("source_kind") != "TDX_TDXHY_CFG"
-                or concept.get("source_kind") != "TDX_INFOHARBOR_BLOCK_DAT"
-            ):
-                raise PreviewHttpError(
-                    409,
-                    "SECTOR_CHANGE_SNAPSHOT_KIND_MISMATCH",
-                    "所选快照原生来源类型与行业/GN角色不匹配",
-                )
+                exact_profiles = [
+                    item
+                    for item in profile_catalog["snapshots"]
+                    if item.get("target_session") == target.isoformat()
+                    and item.get("package_sha256") == package_sha
+                    and item.get("profile_revision") == profile_revision
+                    and item.get("complete") is True
+                ]
+                if len(exact_profiles) != 1:
+                    raise PreviewHttpError(
+                        409,
+                        "SECTOR_CHANGE_PROFILE_REVISION_UNAVAILABLE",
+                        "所选日期、来源包和画像修订没有唯一完整的PG版本",
+                    )
+                catalog = read_tdx_sector_source_snapshot_catalog(config)
+                snapshots = {item["snapshot_id"]: item for item in catalog["snapshots"]}
+                industry = snapshots.get(industry_snapshot_id)
+                concept = snapshots.get(concept_snapshot_id)
+                if industry is None or concept is None:
+                    raise PreviewHttpError(
+                        404,
+                        "SECTOR_CHANGE_SNAPSHOT_NOT_FOUND",
+                        "所选行业或GN快照不在PG真实目录中",
+                    )
+                if (
+                    industry.get("source_kind") != "TDX_TDXHY_CFG"
+                    or concept.get("source_kind") != "TDX_INFOHARBOR_BLOCK_DAT"
+                ):
+                    raise PreviewHttpError(
+                        409,
+                        "SECTOR_CHANGE_SNAPSHOT_KIND_MISMATCH",
+                        "所选快照原生来源类型与行业/GN角色不匹配",
+                    )
 
             cache_key = (
                 target.isoformat(),
@@ -2394,8 +2492,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/preview/sector-change-context":
-                values = _query(self.path, {"target_session"})
-                if set(values) != {"target_session"}:
+                values = _query(self.path, {"target_session", "package_sha256"})
+                if "target_session" not in values:
                     raise PreviewHttpError(
                         400,
                         "SECTOR_CHANGE_CONTEXT_QUERY_INVALID",
@@ -2414,6 +2512,31 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 catalog = read_tdx_sector_source_snapshot_catalog(
                     self.preview_server.state.config
                 )
+                profile_observation = None
+                if "package_sha256" in values:
+                    package_sha = _sha(values["package_sha256"])
+                    source_context = read_source_version_context(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        package_sha256=package_sha,
+                        namespace_id=catalog["namespace_id"],
+                    )
+                    try:
+                        profile_observation = (
+                            read_source_symbol_price_profile_observation(
+                                self.preview_server.state.config,
+                                self.preview_server.state.profile_contract,
+                                target_session=target,
+                                package_sha256=package_sha,
+                                source_capture_id=source_context["source_capture_id"],
+                            )
+                        )
+                    except PgPriceProfileError as error:
+                        profile_observation = {
+                            "status": "NOT_COMPUTED",
+                            "reason_code": error.code,
+                            "reason": str(error),
+                        }
                 snapshots = []
                 for snapshot in catalog["snapshots"]:
                     observed = datetime.fromisoformat(snapshot["observed_at"])
@@ -2453,6 +2576,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "target_session": target.isoformat(),
                         "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
                         "official_calendar_revision": calendar_revision,
+                        "previous_session": sessions[-2].isoformat(),
+                        "source_history_start": sessions[0].isoformat(),
+                        "source_history_session_count": len(sessions),
+                        "profile_observation": profile_observation,
                         "last_service_error": self.preview_server.state.last_service_error,
                         "window_options": window_options,
                         "snapshots": snapshots,
@@ -3639,14 +3766,42 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 }
                 if membership_fields <= set(body):
                     try:
-                        membership = read_tdx_sector_symbol_membership(
-                            self.preview_server.state.config,
-                            source_symbol=symbol,
-                            target_session=target,
-                            industry_snapshot_id=body["industry_snapshot_id"],
-                            concept_snapshot_id=body["concept_snapshot_id"],
-                            expected_namespace_id=namespace,
-                        )
+                        if (
+                            body["industry_snapshot_id"] is None
+                            or body["concept_snapshot_id"] is None
+                        ):
+                            from stock_a.application.source_d0_tdx_membership import (
+                                read_tdx_sector_memberships_for_symbols,
+                            )
+
+                            membership = read_tdx_sector_memberships_for_symbols(
+                                self.preview_server.state.config,
+                                source_symbols=[symbol],
+                                target_session=target,
+                                industry_snapshot_id=body["industry_snapshot_id"],
+                                concept_snapshot_id=body["concept_snapshot_id"],
+                                expected_namespace_id=namespace,
+                            )
+                            missing = [
+                                kind
+                                for kind, field in (
+                                    ("INDUSTRY", "industry_snapshot_id"),
+                                    ("CONCEPT", "concept_snapshot_id"),
+                                )
+                                if body[field] is None
+                            ]
+                            membership["status"] = "PARTIAL_MEMBERSHIP_UNKNOWN"
+                            membership["missing_membership_kinds"] = missing
+                            membership["reason"] = "缺少成员快照：" + "、".join(missing)
+                        else:
+                            membership = read_tdx_sector_symbol_membership(
+                                self.preview_server.state.config,
+                                source_symbol=symbol,
+                                target_session=target,
+                                industry_snapshot_id=body["industry_snapshot_id"],
+                                concept_snapshot_id=body["concept_snapshot_id"],
+                                expected_namespace_id=namespace,
+                            )
                     except Exception as error:
                         if getattr(error, "code", None) != "SECTOR_SNAPSHOT_NOT_FOUND":
                             mapped = _source_context_preview_error(error)

@@ -54,8 +54,7 @@ export function renderD1Stocks(data, openStock) {
   byId("stockNext").disabled = data.stocks.next_offset == null;
 }
 
-export function renderD1StockDetail(stock) {
-  const root = byId("stockContent");
+export function renderD1StockDetail(stock, root = byId("stockContent")) {
   root.replaceChildren();
   if (!stock || stock.source_pool_status !== "AVAILABLE") {
     root.append(
@@ -65,7 +64,8 @@ export function renderD1StockDetail(stock) {
         "rule",
       ),
     );
-    byId("stockStatus").textContent = "来源池中没有可用D1事实。";
+    if (root.id === "stockContent")
+      byId("stockStatus").textContent = "来源池中没有可用D1事实。";
     return;
   }
   const summary = stock.selected_scope_summary || {};
@@ -193,13 +193,17 @@ export function renderD1StockDetail(stock) {
       "p",
       memberships.length
         ? memberships
-            .map((item) => `${item.board_kind} ${item.board_name} · NON_PIT`)
+            .map(
+              (item) =>
+                `${item.board_kind} ${item.board_name} · 观测 ${item.observed_at || "UNKNOWN"} · NON_PIT`,
+            )
             .join("；")
-        : "当前两个成员快照均未证明该代码属于其中板块；不表示历史成员状态。",
+        : "已读取的成员快照未证明该代码属于其中板块；缺失快照及历史成员状态为未知。",
     ),
   );
-  byId("stockStatus").textContent =
-    `已读取 ${anchors.length} 条所选范围材料锚点；正式候选、上涨预测、Risk、Priority 未计算。`;
+  if (root.id === "stockContent")
+    byId("stockStatus").textContent =
+      `已读取 ${anchors.length} 条所选范围材料锚点；正式候选、上涨预测、Risk、Priority 未计算。`;
 }
 
 function fact(label, value) {
