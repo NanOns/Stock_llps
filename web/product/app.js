@@ -459,7 +459,7 @@ async function selectDate(target_session) {
       `${target_session} · 当前成员回看 NON_PIT ${snapshotText || "成员不可用"} · 画像 ${selected.profile_status}`,
     );
     configureD1Filters();
-    void resolveProfileForDate(
+    selected.profileResolution = resolveProfileForDate(
       selected,
       token,
       snapshotText,
@@ -1442,6 +1442,63 @@ function launchDisplayExplanation(change) {
     return "相邻会话均为真，没有新增启动。";
   return "前态不足以证明新增启动。";
 }
+const seedPredicateLabels = {
+  research_universe: "来源研究范围",
+  actual_bar: "目标日实际K线",
+  non_st: "非ST状态",
+  normal_listing_phase: "正常上市阶段",
+  limited_price_rule: "涨跌幅规则适用",
+  coordinate_ready: "价格坐标连续性",
+  liquidity_mean20: "20日流动性",
+  no_damage: "无价格损伤",
+  no_severe_extension: "无严重乖离",
+  bias_below_3: "乖离低于3",
+  compression: "波动压缩",
+  rps5_delta3_at_least_3: "RPS5三会话变化至少3",
+  rps5_delta3_at_least_10: "RPS5三会话变化至少10",
+  bull_transition: "均线多头转变",
+  previous_ma20_cross: "前一会话MA20上穿",
+};
+function sourceSeedExplanation(seed) {
+  if (!seed) return "来源级Seed：当前请求未返回诊断。";
+  if (seed.status !== "SAVED") {
+    const descriptions = {
+      NOT_COMPUTED:
+        "SEED_NOT_COMPUTED：该日期和精确来源捕获没有已存Seed；Raw、Core和D1状态独立。",
+      NOT_COMPARABLE:
+        "Seed NOT_COMPARABLE：缺少精确画像修订或已存事实来自其他修订。",
+      INCOMPLETE: "Seed INCOMPLETE：分区完整性、窗口或来源键未闭合。",
+      UNAVAILABLE: "Seed UNAVAILABLE：单股Seed只读请求失败。",
+    };
+    return `${descriptions[seed.status] || `Seed ${seed.status || "UNKNOWN"}`} ${seed.reason_code || ""} ${seed.message || ""} 正式候选资格仍为 NOT_EVALUATED。`;
+  }
+  const stateName = (value) =>
+    ({ TRUE: "真", FALSE: "假", UNKNOWN: "未知" })[value] || "未知";
+  const qualification = seed.qualification || {};
+  const reasonList = (value) => (value?.reason_codes || []).join("、") || "无";
+  const routes = [
+    `安全门 ${stateName(qualification.safety?.state)}：${reasonList(qualification.safety)}`,
+    `S1 ${stateName(qualification.s1?.state)}：${reasonList(qualification.s1)}`,
+    `S2 ${stateName(qualification.s2?.state)}：${reasonList(qualification.s2)}`,
+    `Seed ${stateName(qualification.source_seed?.state)}：${reasonList(qualification.source_seed)}`,
+  ].join("；");
+  const unmet = (seed.predicates || [])
+    .filter((item) => item.state !== "TRUE")
+    .map((item) => {
+      const name = seedPredicateLabels[item.predicate_id] || item.predicate_id;
+      return `${name} ${stateName(item.state)}：${(item.reason_codes || []).join("、") || "原因未提供"}`;
+    })
+    .join("；");
+  const quality = seed.quality || {};
+  const qualityReasons = Object.entries(quality.fields || {})
+    .filter(([, field]) => field.quality === "UNKNOWN" || field.reason)
+    .map(
+      ([fieldId, field]) =>
+        `${fieldId} ${field.quality}${field.reason ? `：${field.reason}` : ""}`,
+    )
+    .join("；");
+  return `来源级Seed观察 ${stateName(seed.source_seed_state)}（NON_PIT_RETROSPECTIVE；RAW_UNADJUSTED）。${routes}。未满足/未知谓词：${unmet || "无"}。来源质量 ${quality.source_time_quality} / ${quality.source_clock_role}；目标日实际K线 ${quality.target_actual_quote ? "有" : "未知或缺失"}；收盘质量 ${quality.target_close_quality}${quality.target_close_reason ? `：${quality.target_close_reason}` : ""}${qualityReasons ? `；输入质量原因：${qualityReasons}` : ""}。正式候选资格 NOT_EVALUATED。`;
+}
 async function openStock(symbol, row = {}) {
   state.stockController?.abort();
   currentStockSymbol = symbol;
@@ -1506,11 +1563,15 @@ async function openStock(symbol, row = {}) {
   $("stockContent").replaceChildren();
   if (!$("stockDialog").open) $("stockDialog").showModal();
   try {
+    if (c.profileResolution) await c.profileResolution;
+    if (token !== state.stockRequest || state.selected !== c) return;
     const data = await stockApi("/api/preview/stock", {
       symbol,
       target_session: c.target_session,
       package_sha256: c.package_sha256,
       session_count: c.stock_history_session_count,
+      namespace_id: c.namespace_id,
+      profile_revision: c.profile_revision,
     });
     if (token !== state.stockRequest) return;
     const root = $("stockContent");
@@ -1617,8 +1678,10 @@ async function openStock(symbol, row = {}) {
     const launchInfo = node("p", "LAUNCH 正在读取…");
     const recoveryInfo = node("p", "RECOVERY 等待读取…");
     const membershipInfo = node("p", "当前成员快照正在读取…");
+    const seedInfo = node("p", sourceSeedExplanation(data.source_seed));
     rules.replaceChildren(
       node("strong", "来源级诊断"),
+      seedInfo,
       launchInfo,
       recoveryInfo,
       membershipInfo,

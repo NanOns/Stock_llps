@@ -9,6 +9,7 @@ import random
 import re
 import time
 from typing import Any, Mapping, Sequence
+from uuid import UUID
 
 from stock_a.storage.postgres import source_raw
 from stock_a.storage.postgres.research_day_facts import _insert_rows, _row_matches
@@ -861,6 +862,254 @@ def read_source_pool_seed_facts(
             "STATIC_SEED_DUPLICATE_SOURCE", "PG Seed来源代码重复"
         )
     return result
+
+
+def read_source_stock_seed_fact(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    namespace_id: str,
+    source_capture_id: str,
+    source_content_id: str,
+    profile_revision: str,
+    source_symbol: str,
+    expected_source_count: int,
+    producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R1",
+) -> dict[str, Any]:
+    """按完整来源身份核验分区后，只读取单只股票的已存Seed行。"""
+    if (
+        type(target_session) is not date
+        or not isinstance(package_sha256, str)
+        or _SHA.fullmatch(package_sha256) is None
+        or not isinstance(namespace_id, str)
+        or not isinstance(source_capture_id, str)
+        or not isinstance(source_content_id, str)
+        or _SHA.fullmatch(source_content_id) is None
+        or not isinstance(profile_revision, str)
+        or _SHA.fullmatch(profile_revision) is None
+        or not isinstance(source_symbol, str)
+        or _SYMBOL.fullmatch(source_symbol) is None
+        or type(expected_source_count) is not int
+        or not 1 <= expected_source_count <= 5000
+        or producer_version != "SOURCE_POOL_SEED_CORE_PROFILE_R1"
+    ):
+        raise StaticResearchPgError(
+            "STATIC_SEED_SINGLE_KEY_INVALID", "单股Seed读取必须绑定合法完整业务键"
+        )
+
+    try:
+        canonical_capture_id = str(UUID(source_capture_id))
+    except (ValueError, TypeError, AttributeError) as error:
+        raise StaticResearchPgError(
+            "STATIC_SEED_SINGLE_CAPTURE_INVALID", "Seed捕获UUID无效"
+        ) from error
+    if canonical_capture_id != source_capture_id:
+        raise StaticResearchPgError(
+            "STATIC_SEED_SINGLE_CAPTURE_INVALID", "Seed捕获UUID必须为规范小写格式"
+        )
+
+    with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
+        _,
+        cursor,
+        actual_namespace,
+    ):
+        if namespace_id != actual_namespace:
+            raise StaticResearchPgError(
+                "STATIC_SEED_NAMESPACE_MISMATCH", "单股Seed读取namespace不匹配"
+            )
+        cursor.execute(
+            f"""SELECT count(*)::bigint AS stored_rows,
+       count(DISTINCT source_content_id)::bigint AS content_count,
+       min(source_content_id) AS source_content_id
+FROM {_SEED_TABLE}
+WHERE namespace_id=%s::uuid AND target_session=%s::date
+  AND package_sha256=%s AND source_capture_id=%s::uuid
+  AND profile_revision=%s AND producer_version=%s""",
+            (
+                namespace_id,
+                target_session,
+                package_sha256,
+                canonical_capture_id,
+                profile_revision,
+                producer_version,
+            ),
+        )
+        selected_rows, selected_contents, selected_content = cursor.fetchone()
+        selected_rows = int(selected_rows)
+        if selected_rows == 0:
+            cursor.execute(
+                f"""SELECT EXISTS (
+    SELECT 1 FROM {_SEED_TABLE}
+    WHERE namespace_id=%s::uuid AND target_session=%s::date
+      AND package_sha256=%s AND source_capture_id=%s::uuid
+      AND profile_revision<>%s AND producer_version=%s
+    LIMIT 1
+)""",
+                (
+                    namespace_id,
+                    target_session,
+                    package_sha256,
+                    canonical_capture_id,
+                    profile_revision,
+                    producer_version,
+                ),
+            )
+            another_revision_exists = cursor.fetchone()[0]
+            if another_revision_exists:
+                return {
+                    "status": "NOT_COMPARABLE",
+                    "reason_code": "SEED_PROFILE_REVISION_NOT_STORED",
+                    "message": "Seed事实只存在于其他画像修订，拒绝跨修订读取。",
+                    "partition": {
+                        "stored_rows": 0,
+                        "expected_source_count": expected_source_count,
+                        "closed": False,
+                    },
+                }
+            return {
+                "status": "NOT_COMPUTED",
+                "reason_code": "SEED_NOT_COMPUTED",
+                "message": "该目标日和精确Raw捕获没有已保存Seed事实。",
+                "partition": {
+                    "stored_rows": 0,
+                    "expected_source_count": expected_source_count,
+                    "closed": False,
+                },
+            }
+        if (
+            selected_rows != expected_source_count
+            or selected_contents != 1
+            or str(selected_content).strip() != source_content_id
+        ):
+            return {
+                "status": "INCOMPLETE",
+                "reason_code": "SEED_PARTITION_NOT_CLOSED",
+                "message": "精确画像修订的Seed行数、来源分母或内容摘要未闭合。",
+                "partition": {
+                    "stored_rows": selected_rows,
+                    "expected_source_count": expected_source_count,
+                    "closed": False,
+                },
+            }
+
+        cursor.execute(
+            f"""SELECT {", ".join("s." + name for name in _SEED_COLUMNS)}
+FROM {_SEED_TABLE} s
+JOIN stock.source_symbol_price_profiles p
+  ON p.namespace_id=s.namespace_id AND p.target_session=s.target_session
+ AND p.source_symbol=s.source_symbol AND p.package_sha256=s.package_sha256
+ AND p.source_capture_id=s.source_capture_id
+ AND p.profile_revision=s.profile_revision
+ AND p.history_window_start=s.history_window_start
+ AND p.history_window_end=s.history_window_end
+ AND p.history_requested_session_count=s.history_session_count
+ AND p.history_calendar_id=s.calendar_id
+ AND (
+    p.history_calendar_revision=s.calendar_revision
+    OR strpos('+' || p.history_calendar_revision || '+',
+              '+' || to_char(s.target_session, 'YYYY') || ':' || s.calendar_revision || '+') > 0
+ )
+ AND p.price_coordinate=s.price_coordinate
+WHERE s.namespace_id=%s::uuid AND s.target_session=%s::date
+  AND s.source_symbol=%s AND s.package_sha256=%s
+  AND s.source_capture_id=%s::uuid AND s.profile_revision=%s
+  AND s.producer_version=%s
+LIMIT 2""",
+            (
+                namespace_id,
+                target_session,
+                source_symbol,
+                package_sha256,
+                canonical_capture_id,
+                profile_revision,
+                producer_version,
+            ),
+        )
+        rows = cursor.fetchall()
+
+    if len(rows) != 1:
+        return {
+            "status": "INCOMPLETE",
+            "reason_code": (
+                "SEED_SOURCE_SYMBOL_WINDOW_MISMATCH"
+                if not rows
+                else "SEED_SOURCE_SYMBOL_DUPLICATE"
+            ),
+            "message": (
+                "该股票缺少同画像修订、同捕获和同窗口的Seed行。"
+                if not rows
+                else "精确单股Seed业务键出现重复行。"
+            ),
+            "partition": {
+                "stored_rows": selected_rows,
+                "expected_source_count": expected_source_count,
+                "closed": True,
+            },
+        }
+
+    row = dict(zip(_SEED_COLUMNS, rows[0], strict=True))
+    valid_states = {"TRUE", "FALSE", "UNKNOWN"}
+    predicates = row["predicate_ids"]
+    states = row["predicate_states"]
+    reasons = row["predicate_reasons"]
+    quality_fields = (
+        "core_bias20_atr",
+        "core_liquidity_mean20",
+        "core_price_damage",
+        "profile_compression",
+        "profile_extension",
+        "profile_ma_structure",
+        "rps5_delta3",
+        "target_close",
+    )
+    if (
+        tuple(predicates) != _SEED_PREDICATES
+        or len(states) != len(_SEED_PREDICATES)
+        or len(reasons) != len(_SEED_PREDICATES)
+        or any(state not in valid_states for state in states)
+        or any(
+            state != "TRUE" and not reason
+            for state, reason in zip(states, reasons, strict=True)
+        )
+        or any(
+            row[f"{name}_state"] not in valid_states
+            or row[f"{name}_state"] != "TRUE"
+            and not row[f"{name}_reasons"]
+            for name in ("safety", "s1", "s2", "source_seed")
+        )
+        or any(
+            row[f"{name}_quality"] == "UNKNOWN" and not row[f"{name}_reason"]
+            for name in quality_fields
+        )
+        or row["research_mode"] != "NON_PIT_RETROSPECTIVE"
+        or row["price_coordinate"] != "RAW_UNADJUSTED"
+        or row["source_capture_id"] != UUID(canonical_capture_id)
+        or row["source_content_id"].strip() != source_content_id
+        or row["history_window_end"] != target_session
+        or not row["history_window_start"] <= target_session
+        or not 1 <= row["history_session_count"] <= 75
+    ):
+        return {
+            "status": "INCOMPLETE",
+            "reason_code": "SEED_TYPED_FACT_INVALID",
+            "message": "Seed三态、具名原因、窗口或来源质量字段不符合已存事实合同。",
+            "partition": {
+                "stored_rows": selected_rows,
+                "expected_source_count": expected_source_count,
+                "closed": True,
+            },
+        }
+
+    return {
+        "status": "SAVED",
+        "row": row,
+        "partition": {
+            "stored_rows": selected_rows,
+            "expected_source_count": expected_source_count,
+            "closed": True,
+        },
+    }
 
 
 def read_seed_profile_returns(

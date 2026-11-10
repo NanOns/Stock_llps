@@ -91,6 +91,9 @@ from stock_a.application.source_stock_change_context import (
     SourceStockChangeContextError,
     query_source_stock_change_context,
 )
+from stock_a.application.source_stock_seed_context import (
+    query_source_stock_seed_context,
+)
 from stock_a.application.source_d0_raw import (
     SourceD0RawError,
     _official_calendar,
@@ -4153,17 +4156,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
             source_change_body = expected | {"namespace_id"} | source_change_required
             source_change_allowed = source_change_body | source_change_optional
-            valid_body = isinstance(body, dict) and (
-                set(body) == expected
-                or (
-                    post_path == "/api/preview/stock-timeline"
-                    and set(body) == allowed_timeline
+            stock_seed_fields = {"namespace_id", "profile_revision"}
+            valid_body = isinstance(body, dict)
+            if valid_body and post_path == "/api/preview/stock":
+                valid_body = set(body) in {
+                    frozenset(expected),
+                    frozenset(expected | stock_seed_fields),
+                }
+            elif valid_body:
+                valid_body = (
+                    set(body) == expected
+                    or (
+                        post_path == "/api/preview/stock-timeline"
+                        and set(body) == allowed_timeline
+                    )
+                    or (
+                        post_path == "/api/preview/stock-timeline"
+                        and source_change_body <= set(body) <= source_change_allowed
+                    )
                 )
-                or (
-                    post_path == "/api/preview/stock-timeline"
-                    and source_change_body <= set(body) <= source_change_allowed
-                )
-            )
             if not valid_body:
                 raise PreviewHttpError(
                     400,
@@ -4237,6 +4248,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_IDENTITY_INVALID",
                         "轨迹来源身份须使用有效namespace_id",
                     ) from error
+            profile_revision = None
+            if (
+                post_path == "/api/preview/stock"
+                and body.get("profile_revision") is not None
+            ):
+                profile_revision = _sha(body["profile_revision"])
             resolved_target, sessions, calendar_revision = resolve_pg_history_window(
                 target.isoformat(), session_count
             )
@@ -4424,6 +4441,20 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "official_listing_population": "UNKNOWN_NOT_CONNECTED",
                 "selected_or_excluded": "NOT_EVALUATED",
             }
+            result["source_seed"] = query_source_stock_seed_context(
+                self.preview_server.state.config,
+                target_session=target,
+                package_sha256=package_sha,
+                namespace_id=history["namespace_id"],
+                source_capture_id=source_context["source_capture_id"],
+                source_content_id=source_context["source_content_id"],
+                source_symbol=symbol,
+                profile_revision=profile_revision,
+                expected_source_count=source_context["capture_expected_row_count"],
+                source_time_quality=source_context["source_time_quality"],
+                source_clock_role=source_context["source_clock_role"],
+                source_available_at=source_context["source_available_at"],
+            )
             self._send_json(200, result)
         except Exception as error:
             self._handle_error(error)
