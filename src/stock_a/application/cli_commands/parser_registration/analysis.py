@@ -149,6 +149,17 @@ def register_commands(commands):
         help="D1窗口官方会话数，须与精确研究键一致",
     )
     research_day.add_argument(
+        "--workers",
+        type=int,
+        default=1,
+        help="Seed计算工作进程数；默认串行，最多8个且不超过本机逻辑CPU数",
+    )
+    research_day.add_argument(
+        "--history-session-count",
+        type=int,
+        help="静态画像历史官方会话数；省略时要求现行语义的完整画像窗口唯一",
+    )
+    research_day.add_argument(
         "--persist",
         action="store_true",
         help="以单一串行化事务幂等写入三类typed事实",
@@ -156,7 +167,7 @@ def register_commands(commands):
     research_day.add_argument(
         "--static-only",
         action="store_true",
-        help="仅为既存Raw会话初始化R06 D0场景与Seed typed静态事实，不重算已保存D0/D1",
+        help="仅初始化既存Raw会话的D0场景与Seed静态事实，必须显式指定--persist",
     )
     d0_raw = commands.add_parser(
         "source-d0-raw",

@@ -65,6 +65,8 @@ def _range_sessions(config, start: date, end: date, cutoff: date, package: str):
 
 def _run_source_research_day(args: argparse.Namespace) -> int:
     try:
+        if args.static_only and not args.persist:
+            raise ValueError("--static-only 必须显式指定 --persist")
         config, config_path = load_runtime_config()
         if args.static_only and not args.start_session:
             report = run_source_static_research_day(
@@ -72,6 +74,9 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 target_session=_parse_session_date(args.target_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
                 package_sha256=args.package_sha256,
+                persist=args.persist,
+                history_session_count=args.history_session_count,
+                worker_count=args.workers,
             )
             report["configuration_path"] = str(config_path)
             report["ok"] = True
@@ -101,6 +106,9 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                         target_session=target,
                         research_cutoff=cutoff,
                         package_sha256=args.package_sha256,
+                        persist=args.persist,
+                        history_session_count=args.history_session_count,
+                        worker_count=args.workers,
                     )
                 else:
                     report = run_source_research_day(
@@ -110,6 +118,8 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                         package_sha256=args.package_sha256,
                         d1_history_session_count=args.d1_history_session_count,
                         persist=args.persist,
+                        history_session_count=args.history_session_count,
+                        worker_count=args.workers,
                     )
                 report["configuration_path"] = str(config_path)
                 report["ok"] = True
@@ -121,6 +131,9 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 target_session=_parse_session_date(args.target_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
                 package_sha256=args.package_sha256,
+                persist=args.persist,
+                history_session_count=args.history_session_count,
+                worker_count=args.workers,
             )
         else:
             report = run_source_research_day(
@@ -130,6 +143,8 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 package_sha256=args.package_sha256,
                 d1_history_session_count=args.d1_history_session_count,
                 persist=args.persist,
+                history_session_count=args.history_session_count,
+                worker_count=args.workers,
             )
     except DiagnosticError as error:
         _emit({"ok": False, "code": error.code, "message": str(error)}, error=True)
@@ -160,7 +175,7 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 "message": str(error)
                 if error_code
                 else f"单日研究计算失败：{type(error).__name__}",
-                "database_write_attempted": bool(args.persist or args.static_only),
+                "database_write_attempted": bool(args.persist),
             },
             error=True,
         )

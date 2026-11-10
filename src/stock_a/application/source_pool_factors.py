@@ -42,6 +42,7 @@ def read_source_pool_rps(
     calendar = MarketSessionCalendar(calendar_data["calendar_id"], revision, sessions)
     all_coordinates: dict[str, PriceCoordinate] = {}
     endpoint_data = {}
+    target_histories: dict[str, list[dict[str, Any]]] = {}
     for offset in (0, 3):
         end = sessions[-1 - offset]
         window = sessions[: len(sessions) - offset][-21:]
@@ -54,7 +55,7 @@ def read_source_pool_rps(
                 config,
                 target_session=end,
                 package_sha256=package_sha256,
-                sessions=window,
+                sessions=sessions if offset == 0 else (end,),
                 offset=page_offset,
                 limit=100,
                 market="ALL",
@@ -75,7 +76,44 @@ def read_source_pool_rps(
                 symbol = candidate["source_symbol"]
                 if symbol in histories:
                     raise ValueError("来源池证券重复")
-                rows = candidate["history_rows"]
+                if offset == 0:
+                    target_histories[symbol] = candidate["history_rows"]
+                    rows = [
+                        row
+                        for row in candidate["history_rows"]
+                        if row["session_date"] in window
+                    ]
+                elif symbol in target_histories:
+                    rows = [
+                        row
+                        for row in target_histories[symbol]
+                        if row["session_date"] in window
+                    ]
+                    endpoint_rows = [row for row in rows if row["session_date"] == end]
+                    if (
+                        len(endpoint_rows) != 1
+                        or endpoint_rows[0] != candidate["history_rows"][0]
+                    ):
+                        raise ValueError("来源池前一端点历史与成员不一致")
+                else:
+                    history_page = read_raw_daily_history_page(
+                        config,
+                        target_session=end,
+                        package_sha256=package_sha256,
+                        sessions=window,
+                        offset=0,
+                        limit=1,
+                        market="ALL",
+                        board="ALL",
+                        source_symbol=symbol,
+                    )
+                    if (
+                        history_page["namespace_id"] != expected_namespace_id
+                        or history_page["version_status"] != "CLOSED"
+                        or history_page["total_count"] != 1
+                    ):
+                        raise ValueError("前一端点独有证券的来源历史不完整")
+                    rows = history_page["candidates"][0]["history_rows"]
                 by_key = {(symbol, row["session_date"]): row for row in rows}
                 if len(by_key) != len(rows):
                     raise ValueError("来源历史会话重复")

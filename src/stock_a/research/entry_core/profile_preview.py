@@ -267,6 +267,7 @@ def _build_profile_preview(
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
     source_snapshot_id: str | None = None,
     source_snapshot_role: str = "LOCAL_FILE_SNAPSHOT_ID_NOT_CAPTURED_AVAILABLE_AT",
+    selected_fields: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     """把本次真实Raw/Core读取接到既有规则；显式限于未复权NON_PIT预览。"""
     if not isinstance(contract, dict):
@@ -335,6 +336,8 @@ def _build_profile_preview(
             raise ResearchEntryError(
                 "PROFILE_PREVIEW_CONTRACT_INVALID", "Profile规则缺少field_id"
             )
+        if selected_fields is not None and field_id not in selected_fields:
+            continue
         unavailable = _PROFILE_PERIOD_INPUTS.get(field_id)
         if unavailable is not None:
             period_field_id = unavailable["missing_inputs"][0]

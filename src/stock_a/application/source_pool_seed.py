@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 from collections import Counter
+from concurrent.futures import ProcessPoolExecutor
+from contextlib import ExitStack
 from copy import deepcopy
 from datetime import date
 from fractions import Fraction
 from math import sqrt
+import multiprocessing
+import os
 from statistics import median
 from typing import Any, Mapping
 
@@ -16,6 +20,7 @@ from stock_a.application.pg_price_profiles import (
     SOURCE_SYMBOL_PROFILE_SCOPE,
     _profile_revision,
     _profile_semantics_sha256,
+    _history_window_sha256,
     query_source_symbol_price_profiles,
 )
 from stock_a.application.research_window import resolve_pg_history_window
@@ -24,7 +29,7 @@ from stock_a.application.tdx_sector_members import (
     _raw_window_observation,
     read_tdx_sector_members,
 )
-from stock_a.research.core import MarketSessionCalendar, calculate_core
+from stock_a.research.core import MarketSessionCalendar, calculate_core_ma20
 from stock_a.research.entry_history.history_preview import (
     research_stock_pg_history_preview,
 )
@@ -472,6 +477,126 @@ def source_seed_predicates(
     }
 
 
+_SEED_WORKER_CONTEXT: tuple[Any, ...] | None = None
+
+
+def validate_seed_worker_count(worker_count: int) -> None:
+    if type(worker_count) is not int or not 1 <= worker_count <= min(
+        8, os.cpu_count() or 1
+    ):
+        raise ValueError("工作进程数超出本机有界范围")
+
+
+def _stored_seed_core(candidate: Mapping[str, Any], saved: Mapping[str, Any]):
+    """仅复用同一来源捕获、窗口及精确质量均闭合的画像字段。"""
+    rows = candidate["history_rows"]
+    if (
+        not saved
+        or saved.get("source_symbol") != candidate["source_symbol"]
+        or saved.get("price_coordinate") != "RAW_UNADJUSTED"
+        or not rows
+        or str(saved.get("source_capture_id")) != str(rows[-1].get("source_capture_id"))
+        or saved.get("history_window_sha256") != _history_window_sha256(rows)
+    ):
+        return None
+    names = (
+        "ma5",
+        "ma10",
+        "ma20",
+        "atr20",
+        "ma_slope20_atr",
+        "amount_ratio20",
+        "liquidity_mean20",
+        "bias20_atr",
+        "ret1",
+        "ret5",
+        "ret20",
+        "price_damage",
+    )
+    result = {}
+    for name in names:
+        quality = saved.get(f"{name}_quality")
+        reason = saved.get(f"{name}_reason")
+        if quality == "OBSERVED":
+            if reason is not None:
+                return None
+            if name == "price_damage":
+                value = saved.get(name)
+                if type(value) is not bool:
+                    return None
+            else:
+                numerator = saved.get(f"{name}_exact_numerator")
+                denominator = saved.get(f"{name}_exact_denominator")
+                if numerator is None or denominator is None or denominator <= 0:
+                    return None
+                value = Fraction(int(numerator), int(denominator))
+            result[f"core.{name}"] = FieldValue(value)
+        elif (
+            quality in {"UNKNOWN", "NOT_APPLICABLE"}
+            and isinstance(reason, str)
+            and reason
+        ):
+            result[f"core.{name}"] = FieldValue(
+                None, "UNKNOWN_DATA" if quality == "UNKNOWN" else quality, reason
+            )
+        else:
+            return None
+    return result
+
+
+def _seed_preview_init(context: tuple[Any, ...]) -> None:
+    global _SEED_WORKER_CONTEXT
+    _SEED_WORKER_CONTEXT = context
+
+
+def _seed_preview(candidate: Mapping[str, Any], context: tuple[Any, ...]):
+    target_session, package_sha256, sessions, namespace_id, profile_contract = context
+    try:
+        preview = research_stock_pg_history_preview(
+            symbol=candidate["source_symbol"],
+            target_session=target_session.isoformat(),
+            package_sha256=package_sha256,
+            session_dates=sessions,
+            history_rows=candidate["history_rows"],
+            namespace_id=namespace_id,
+            profile_contract=profile_contract,
+            selected_profile_fields=frozenset(
+                {"profile.compression", "profile.extension", "profile.ma_structure"}
+            ),
+            seed_core_inputs=_stored_seed_core(
+                candidate, candidate.get("saved_profile", {})
+            ),
+        )
+    except ResearchEntryError as error:
+        if error.code != "PG_HISTORY_ENTRY_SHA_CONFLICT":
+            raise
+        return None, error.code
+    return {
+        "window": {"calendar_id": preview["window"]["calendar_id"]},
+        "target_bar_status": preview["target_bar_status"],
+        "price_research_status": preview["price_research_status"],
+        "core": preview["core"],
+        "profile_preview": {
+            "components": [
+                {
+                    key: item.get(key)
+                    for key in ("field_id", "quality", "value", "reason")
+                }
+                for item in preview["profile_preview"]["components"]
+            ]
+        },
+    }, None
+
+
+def _seed_preview_worker(candidate: Mapping[str, Any]):
+    if _SEED_WORKER_CONTEXT is None:
+        raise RuntimeError("Seed工作进程未初始化")
+    try:
+        return _seed_preview(candidate, _SEED_WORKER_CONTEXT)
+    except ResearchEntryError as error:
+        return None, (error.code, str(error))
+
+
 def compute_source_pool_seed(
     config: Mapping[str, Any],
     *,
@@ -485,8 +610,10 @@ def compute_source_pool_seed(
     selected_symbols: frozenset[str] | None = None,
     include_rps_read: bool = False,
     allow_raw_profile_recompute: bool = False,
+    worker_count: int = 1,
 ) -> dict[str, Any]:
     """按现役Core/Profile公式从已存PG原始行计算Seed，供初始化生产使用。"""
+    validate_seed_worker_count(worker_count)
     if selected_symbols is not None and (
         not isinstance(selected_symbols, frozenset)
         or any(not isinstance(symbol, str) or not symbol for symbol in selected_symbols)
@@ -556,181 +683,202 @@ def compute_source_pool_seed(
     )
     seed_facts = {}
     offset = 0
-    while True:
-        page = read_raw_daily_history_page(
-            config,
-            target_session=target_session,
-            package_sha256=package_sha256,
-            sessions=sessions,
-            offset=offset,
-            limit=100,
-            market="ALL",
-            board="ALL",
+    context = (target_session, package_sha256, sessions, namespace_id, profile_contract)
+    with ExitStack() as stack:
+        pool = (
+            stack.enter_context(
+                ProcessPoolExecutor(
+                    max_workers=worker_count,
+                    mp_context=multiprocessing.get_context("spawn"),
+                    initializer=_seed_preview_init,
+                    initargs=(context,),
+                )
+            )
+            if worker_count > 1
+            else None
         )
-        if (
-            page["namespace_id"] != namespace_id
-            or page["total_count"] != len(profiles)
-            or page["version_status"] != "CLOSED"
-        ):
-            raise ValueError("来源池与画像身份不一致")
-        for candidate in page["candidates"]:
-            symbol = candidate["source_symbol"]
-            if selected_symbols is not None and symbol not in selected_symbols:
-                continue
-            rows = candidate["history_rows"]
-            try:
-                preview = research_stock_pg_history_preview(
-                    symbol=symbol,
-                    target_session=target_session.isoformat(),
-                    package_sha256=package_sha256,
-                    session_dates=sessions,
-                    history_rows=rows,
-                    namespace_id=namespace_id,
-                    profile_contract=profile_contract,
-                )
-            except ResearchEntryError as error:
-                if error.code != "PG_HISTORY_ENTRY_SHA_CONFLICT":
-                    raise
-                unavailable = {"state": "UNKNOWN", "reasons": [error.code]}
-                seed_facts[symbol] = {
-                    "predicates": {},
-                    "safety": unavailable,
-                    "s1": unavailable,
-                    "s2": unavailable,
-                    "seed": unavailable,
-                    "raw_prewatch": unavailable,
-                    "formal_eligibility": "NOT_AUTHORIZED",
-                    "qualification": unavailable_source_qualification(error.code),
-                    "reason": error.code,
-                }
-                continue
-            by_key = {(symbol, row["session_date"]): row for row in rows}
-            counts = {
-                key: {"row_count": 1, "package_count": 1, "capture_count": 1}
-                for key in by_key
-            }
-            target_row = by_key[(symbol, target_session)]
-            observations = tuple(
-                _raw_window_observation(
-                    source_symbol=symbol,
-                    session=day,
-                    raw_by_key=by_key,
-                    revision_counts=counts,
-                    target_session=target_session,
-                    target_capture_id=target_row["source_capture_id"],
-                )[0]
-                for day in sessions
+        while True:
+            page = read_raw_daily_history_page(
+                config,
+                target_session=target_session,
+                package_sha256=package_sha256,
+                sessions=sessions,
+                offset=offset,
+                limit=100,
+                market="ALL",
+                board="ALL",
             )
-            previous = None
-            prior_close = None
-            if len(sessions) > 1:
-                prior_calendar = MarketSessionCalendar(
-                    preview["window"]["calendar_id"], revision, sessions[:-1]
-                )
-                previous = calculate_core(
-                    observations[:-1], official_calendar=prior_calendar
-                )["core.ma20"]
-                prior_close = observations[-2].close
-            current_close = observations[-1].close
-            current_bar = observations[-1]
-            quote_fields = (
-                current_bar.open,
-                current_bar.high,
-                current_bar.low,
-                current_bar.close,
-            )
-            valid_quote = current_bar.state == "ACTUAL" and all(
-                value is not None and value.quality == "OBSERVED"
-                for value in quote_fields
-            )
-            if valid_quote:
-                opening, high, low, close = (
-                    Fraction(value.value) for value in quote_fields
-                )
-                valid_quote = (
-                    min(opening, high, low, close) > 0
-                    and low <= min(opening, close)
-                    and high >= max(opening, low, close)
-                )
-            current_ma = preview["core"]["fields"]["core.ma20"]
             if (
-                previous is not None
-                and previous.quality == "OBSERVED"
-                and prior_close
-                and prior_close.quality == "OBSERVED"
-                and current_close
-                and current_close.quality == "OBSERVED"
-                and current_ma["quality"] == "OBSERVED"
+                page["namespace_id"] != namespace_id
+                or page["total_count"] != len(profiles)
+                or page["version_status"] != "CLOSED"
             ):
-                crossed = Fraction(prior_close.value) <= Fraction(
-                    previous.value
-                ) and Fraction(current_close.value) > Fraction(
-                    current_ma["value"]["exact"]
-                )
-                cross = _tri(
-                    crossed,
-                    None if crossed else "PREVIOUS_MA20_CROSS_NOT_MET",
-                )
-            else:
-                cross = _tri(None, "PREVIOUS_MA20_CROSS_INPUT_UNKNOWN")
-            seed = source_seed_predicates(
-                preview, rps["facts"][symbol]["rps5_delta3_pp"], cross
+                raise ValueError("来源池与画像身份不一致")
+            candidates = [
+                {**candidate, "saved_profile": profiles[candidate["source_symbol"]]}
+                for candidate in page["candidates"]
+                if selected_symbols is None
+                or candidate["source_symbol"] in selected_symbols
+            ]
+            previews = (
+                pool.map(_seed_preview_worker, candidates, chunksize=5)
+                if pool is not None
+                else (_seed_preview(candidate, context) for candidate in candidates)
             )
-            seed["core"] = {
-                key: preview["core"]["fields"][key]
-                for key in (
-                    "core.bias20_atr",
-                    "core.liquidity_mean20",
-                    "core.price_damage",
-                    "core.ma20",
-                    "core.range_ratio",
-                    "core.atr_ratio",
-                    "core.vol_ratio",
+            for candidate, (preview, error_code) in zip(
+                candidates, previews, strict=True
+            ):
+                symbol = candidate["source_symbol"]
+                rows = candidate["history_rows"]
+                if isinstance(error_code, tuple):
+                    raise ResearchEntryError(*error_code)
+                if error_code is not None:
+                    unavailable = {"state": "UNKNOWN", "reasons": [error_code]}
+                    seed_facts[symbol] = {
+                        "predicates": {},
+                        "safety": unavailable,
+                        "s1": unavailable,
+                        "s2": unavailable,
+                        "seed": unavailable,
+                        "raw_prewatch": unavailable,
+                        "formal_eligibility": "NOT_AUTHORIZED",
+                        "qualification": unavailable_source_qualification(error_code),
+                        "reason": error_code,
+                    }
+                    continue
+                by_key = {(symbol, row["session_date"]): row for row in rows}
+                counts = {
+                    key: {"row_count": 1, "package_count": 1, "capture_count": 1}
+                    for key in by_key
+                }
+                target_row = by_key[(symbol, target_session)]
+                observations = tuple(
+                    _raw_window_observation(
+                        source_symbol=symbol,
+                        session=day,
+                        raw_by_key=by_key,
+                        revision_counts=counts,
+                        target_session=target_session,
+                        target_capture_id=target_row["source_capture_id"],
+                    )[0]
+                    for day in sessions
                 )
-            }
-            seed["native_price"] = {
-                "actual_quote": valid_quote,
-                "close": str(current_close.value)
-                if current_close and current_close.quality == "OBSERVED"
-                else None,
-                "fields": {
+                previous = None
+                prior_close = None
+                if len(sessions) > 1:
+                    prior_calendar = MarketSessionCalendar(
+                        preview["window"]["calendar_id"], revision, sessions[:-1]
+                    )
+                    previous = calculate_core_ma20(
+                        observations[:-1], official_calendar=prior_calendar
+                    )
+                    prior_close = observations[-2].close
+                current_close = observations[-1].close
+                current_bar = observations[-1]
+                quote_fields = (
+                    current_bar.open,
+                    current_bar.high,
+                    current_bar.low,
+                    current_bar.close,
+                )
+                valid_quote = current_bar.state == "ACTUAL" and all(
+                    value is not None and value.quality == "OBSERVED"
+                    for value in quote_fields
+                )
+                if valid_quote:
+                    opening, high, low, close = (
+                        Fraction(value.value) for value in quote_fields
+                    )
+                    valid_quote = (
+                        min(opening, high, low, close) > 0
+                        and low <= min(opening, close)
+                        and high >= max(opening, low, close)
+                    )
+                current_ma = preview["core"]["fields"]["core.ma20"]
+                if (
+                    previous is not None
+                    and previous.quality == "OBSERVED"
+                    and prior_close
+                    and prior_close.quality == "OBSERVED"
+                    and current_close
+                    and current_close.quality == "OBSERVED"
+                    and current_ma["quality"] == "OBSERVED"
+                ):
+                    crossed = Fraction(prior_close.value) <= Fraction(
+                        previous.value
+                    ) and Fraction(current_close.value) > Fraction(
+                        current_ma["value"]["exact"]
+                    )
+                    cross = _tri(
+                        crossed,
+                        None if crossed else "PREVIOUS_MA20_CROSS_NOT_MET",
+                    )
+                else:
+                    cross = _tri(None, "PREVIOUS_MA20_CROSS_INPUT_UNKNOWN")
+                seed = source_seed_predicates(
+                    preview, rps["facts"][symbol]["rps5_delta3_pp"], cross
+                )
+                seed["core"] = {
                     key: preview["core"]["fields"][key]
-                    for key in ("core.ret1", "core.ret5", "core.ret20", "core.ma20")
-                },
-            }
-            saved = profiles[symbol]
-            seed["saved_profile_core"] = {
-                name: {
-                    "value": str(saved[name]) if saved.get(name) is not None else None,
-                    "quality": "UNKNOWN"
-                    if profile_snapshot_missing
-                    else saved.get(f"{name}_quality"),
-                    "reason": "PROFILE_SNAPSHOT_MISSING"
-                    if profile_snapshot_missing
-                    else saved.get(f"{name}_reason"),
+                    for key in (
+                        "core.bias20_atr",
+                        "core.liquidity_mean20",
+                        "core.price_damage",
+                        "core.ma20",
+                        "core.range_ratio",
+                        "core.atr_ratio",
+                        "core.vol_ratio",
+                    )
                 }
-                for name in ("bias20_atr", "ma20", "price_damage")
-            }
-            seed["profile"] = {
-                item["field_id"]: {
-                    key: item.get(key) for key in ("quality", "value", "reason")
+                seed["native_price"] = {
+                    "actual_quote": valid_quote,
+                    "close": str(current_close.value)
+                    if current_close and current_close.quality == "OBSERVED"
+                    else None,
+                    "fields": {
+                        key: preview["core"]["fields"][key]
+                        for key in ("core.ret1", "core.ret5", "core.ret20", "core.ma20")
+                    },
                 }
-                for item in preview["profile_preview"]["components"]
-                if item["field_id"]
-                in {"profile.compression", "profile.extension", "profile.ma_structure"}
-            }
-            seed["rps"] = {
-                key: {
-                    "quality": value.quality,
-                    "value": str(value.value) if value.value is not None else None,
-                    "reason": value.reason,
+                saved = profiles[symbol]
+                seed["saved_profile_core"] = {
+                    name: {
+                        "value": str(saved[name])
+                        if saved.get(name) is not None
+                        else None,
+                        "quality": "UNKNOWN"
+                        if profile_snapshot_missing
+                        else saved.get(f"{name}_quality"),
+                        "reason": "PROFILE_SNAPSHOT_MISSING"
+                        if profile_snapshot_missing
+                        else saved.get(f"{name}_reason"),
+                    }
+                    for name in ("bias20_atr", "ma20", "price_damage")
                 }
-                for key, value in rps["facts"][symbol].items()
-            }
-            seed_facts[symbol] = seed
-        offset = page["next_offset"]
-        if offset is None:
-            break
+                seed["profile"] = {
+                    item["field_id"]: {
+                        key: item.get(key) for key in ("quality", "value", "reason")
+                    }
+                    for item in preview["profile_preview"]["components"]
+                    if item["field_id"]
+                    in {
+                        "profile.compression",
+                        "profile.extension",
+                        "profile.ma_structure",
+                    }
+                }
+                seed["rps"] = {
+                    key: {
+                        "quality": value.quality,
+                        "value": str(value.value) if value.value is not None else None,
+                        "reason": value.reason,
+                    }
+                    for key, value in rps["facts"][symbol].items()
+                }
+                seed_facts[symbol] = seed
+            offset = page["next_offset"]
+            if offset is None:
+                break
     expected_symbols = (
         set(profiles) if selected_symbols is None else set(profiles) & selected_symbols
     )
@@ -761,7 +909,7 @@ def compute_source_pool_seed(
         "profile_input_note": (
             "该日无已存画像；以同包Raw和现役Core/Profile合同即时计算，标明实际运行修订，未生成画像快照。"
             if profile_snapshot_missing
-            else "所选PG画像用于身份与已存字段读取；Seed分项由当前Core/Profile合同从同包Raw即时计算，并非声称该修订保存了这些分项数值。"
+            else "同源、同窗口摘要且质量完整的已存Core字段直接复用；未保存的比率和画像分项按现役合同从Raw计算，画像不合格时回算。"
         ),
         "stored_profile_status": "MISSING_RAW_RECOMPUTED"
         if profile_snapshot_missing

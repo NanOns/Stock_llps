@@ -12,8 +12,10 @@ from uuid import UUID
 
 from stock_a.application.pg_price_profiles import (
     SOURCE_SYMBOL_PROFILE_SCOPE,
+    PG_PROFILE_MAX_HISTORY_SESSIONS,
     _profile_revision,
     _profile_semantics_sha256,
+    source_symbol_price_profile_snapshots,
 )
 from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.application.source_d0_raw import (
@@ -23,7 +25,10 @@ from stock_a.application.source_d0_raw import (
 from stock_a.application.source_market_observation import (
     prepare_d1_material_observation,
 )
-from stock_a.application.source_pool_seed import compute_source_pool_seed
+from stock_a.application.source_pool_seed import (
+    compute_source_pool_seed,
+    validate_seed_worker_count,
+)
 from stock_a.application.runtime_config import _CONFIG_ROOT
 from stock_a.contracts import load_price_profile_contract
 from stock_a.domain.research_day_facts import (
@@ -66,6 +71,15 @@ class SourceResearchDayError(ValueError):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
+
+
+def _validate_static_history_count(count: int | None) -> None:
+    if count is not None and (
+        type(count) is not int or not 1 <= count <= PG_PROFILE_MAX_HISTORY_SESSIONS
+    ):
+        raise SourceResearchDayError(
+            "STATIC_PROFILE_WINDOW_INVALID", "画像历史会话数超出现有PG表约束"
+        )
 
 
 def _required_text(value: Any, label: str) -> str:
@@ -255,21 +269,59 @@ def _persist_static_research_day(
     namespace_id: str,
     expected_capture_id: str | None,
     expected_source_count: int,
+    history_session_count: int | None = None,
+    worker_count: int = 1,
 ) -> dict[str, Any]:
     """由同一现役Core/Profile、RPS与D0生产者闭合全池静态事实。"""
-    history_count = 75
-    _target, history_window, calendar_revision = resolve_pg_history_window(
-        target_session.isoformat(), history_count
-    )
+    _validate_static_history_count(history_session_count)
     profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
     calendar = _official_calendar(target_session)
-    profile_revision = _profile_revision(
-        scope=SOURCE_SYMBOL_PROFILE_SCOPE,
-        semantics_sha256=_profile_semantics_sha256(profile_contract),
-        calendar_id=calendar["calendar_id"],
-        calendar_revision=calendar_revision,
-        history_session_count=len(history_window),
+    catalog = source_symbol_price_profile_snapshots(
+        config, max_target_session=research_cutoff
     )
+    if catalog["namespace_id"] != namespace_id:
+        raise SourceResearchDayError(
+            "STATIC_PROFILE_NAMESPACE_MISMATCH", "画像目录身份不一致"
+        )
+    matches = []
+    for snapshot in catalog["snapshots"]:
+        if (
+            snapshot["target_session"] != target_session.isoformat()
+            or snapshot["package_sha256"] != package_sha256
+            or not snapshot["complete"]
+            or snapshot["source_symbol_count"] != expected_source_count
+            or snapshot["price_coordinate"] != "RAW_UNADJUSTED"
+            or snapshot["history_calendar_id"] != calendar["calendar_id"]
+            or (
+                history_session_count is not None
+                and snapshot["history_session_count"] != history_session_count
+            )
+        ):
+            continue
+        count = snapshot["history_session_count"]
+        _target, window, revision = resolve_pg_history_window(
+            target_session.isoformat(), count
+        )
+        expected_revision = _profile_revision(
+            scope=SOURCE_SYMBOL_PROFILE_SCOPE,
+            semantics_sha256=_profile_semantics_sha256(profile_contract),
+            calendar_id=calendar["calendar_id"],
+            calendar_revision=revision,
+            history_session_count=count,
+        )
+        if (
+            snapshot["history_calendar_revision"] == revision
+            and snapshot["window_start"] == window[0].isoformat()
+            and snapshot["window_end"] == window[-1].isoformat()
+            and snapshot["profile_revision"] == expected_revision
+        ):
+            matches.append((count, window, expected_revision))
+    if len(matches) != 1:
+        raise SourceResearchDayError(
+            "STATIC_PROFILE_WINDOW_AMBIGUOUS",
+            "目标日没有唯一完整且符合现行语义的画像窗口",
+        )
+    history_count, history_window, profile_revision = matches[0]
     seed = compute_source_pool_seed(
         config,
         target_session=target_session,
@@ -280,6 +332,7 @@ def _persist_static_research_day(
         profile_contract=profile_contract,
         history_session_count=history_count,
         include_rps_read=True,
+        worker_count=worker_count,
     )
     if (
         seed.get("profile_revision_matches_runtime") is not True
@@ -348,8 +401,17 @@ def run_source_static_research_day(
     target_session: date,
     research_cutoff: date,
     package_sha256: str,
+    persist: bool = False,
+    history_session_count: int | None = None,
+    worker_count: int = 1,
 ) -> dict[str, Any]:
     """仅初始化新静态表；读取精确PG Raw目录，不重算已保存D0/D1三类事实。"""
+    if persist is not True:
+        raise SourceResearchDayError(
+            "STATIC_RESEARCH_PERSIST_REQUIRED", "静态事实写入必须显式指定持久化"
+        )
+    validate_seed_worker_count(worker_count)
+    _validate_static_history_count(history_session_count)
     if target_session > research_cutoff or _SHA256.fullmatch(package_sha256) is None:
         raise SourceResearchDayError(
             "STATIC_RESEARCH_SCOPE_INVALID", "静态事实初始化范围或来源SHA无效"
@@ -393,6 +455,8 @@ def run_source_static_research_day(
         namespace_id=namespace_id,
         expected_capture_id=None,
         expected_source_count=version["row_count"],
+        history_session_count=history_session_count,
+        worker_count=worker_count,
     )
     return {
         "status": "PERSISTED",
@@ -1078,8 +1142,12 @@ def run_source_research_day(
     package_sha256: str,
     d1_history_session_count: int,
     persist: bool = False,
+    history_session_count: int | None = None,
+    worker_count: int = 1,
 ) -> dict[str, Any]:
     """执行单日研究；仅显式persist=True时调用PG Writers。"""
+    validate_seed_worker_count(worker_count)
+    _validate_static_history_count(history_session_count)
     facts, report = prepare_source_research_day(
         config,
         target_session=target_session,
@@ -1098,6 +1166,8 @@ def run_source_research_day(
             namespace_id=facts.namespace_id,
             expected_capture_id=facts.target_capture_id,
             expected_source_count=facts.d1_source_count,
+            history_session_count=history_session_count,
+            worker_count=worker_count,
         )
         report["static_persistence"] = static_result
         report["static_persistence"]["wall_seconds"] = round(

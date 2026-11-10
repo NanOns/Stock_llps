@@ -39,6 +39,7 @@ from stock_a.storage.postgres.source_raw import (
 
 
 SOURCE_SYMBOL_PROFILE_SCOPE = "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE"
+PG_PROFILE_MAX_HISTORY_SESSIONS = 75  # 对应已应用PG表约束，并非默认计算窗口。
 _PRODUCER_CONTRACT = "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1"
 _PRODUCER_SEMANTICS_VERSION = "CORE43_PROFILE11_SOURCE_SYMBOL_R6_CONSUMED_CORE_WIRED"
 _FIELD_SEMANTIC_KEYS = (
@@ -475,9 +476,12 @@ def run_source_symbol_price_profile(
             "PROFILE_SCOPE_INVALID",
             "画像计算范围必须显式为SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE",
         )
-    if type(session_count) is not int or not 1 <= session_count <= 75:
+    if (
+        type(session_count) is not int
+        or not 1 <= session_count <= PG_PROFILE_MAX_HISTORY_SESSIONS
+    ):
         raise PgPriceProfileError(
-            "PROFILE_WINDOW_COUNT_INVALID", "历史窗口会话数必须在1至75之间"
+            "PROFILE_WINDOW_COUNT_INVALID", "现有PG画像表只支持1至75个历史会话"
         )
     if type(page_size) is not int or not 1 <= page_size <= 100:
         raise PgPriceProfileError(

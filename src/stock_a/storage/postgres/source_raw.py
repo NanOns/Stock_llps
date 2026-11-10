@@ -1592,14 +1592,15 @@ def _validate_history_query(
         )
     if (
         not isinstance(sessions, (tuple, list))
-        or not 1 <= len(sessions) <= (11 if starts_at_target else 75)
+        or not sessions
+        or (starts_at_target and len(sessions) > 11)
         or any(type(day) is not date for day in sessions)
         or tuple(sorted(set(sessions))) != tuple(sessions)
         or (sessions[0] if starts_at_target else sessions[-1]) != target_session
     ):
         raise RawSourcePgError(
             "HISTORY_SESSION_WINDOW_INVALID",
-            "PG会话窗口须递增；历史最多75个并以目标日结束，后续最多11个并以目标日开始",
+            "PG会话窗口须递增；历史以目标日结束，后续最多11个并以目标日开始",
         )
     return tuple(sessions)
 
@@ -2261,6 +2262,8 @@ def read_raw_daily_history_page(
         raise RawSourcePgError(
             "PG_PAGE_INVALID", "PG历史分页offset须为非负整数且limit为1至100"
         )
+    if len(selected_sessions) * limit > 750_000:
+        raise RawSourcePgError("PG_HISTORY_BUDGET_EXCEEDED", "单页历史行数预算超限")
     if market not in {"ALL", "SH", "SZ"} or board not in {"ALL", "MAIN_BOARD", "GEM"}:
         raise RawSourcePgError("PG_FILTER_INVALID", "PG历史分页市场或板别过滤无效")
     with _transaction(config, write=False, statement_timeout_ms=30000) as (

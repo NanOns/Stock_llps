@@ -13,9 +13,9 @@ from stock_a.research.entry import ResearchEntryError, _load_calendar, _parse_ta
 def resolve_pg_history_window(
     target_text: str, count: int
 ) -> tuple[date, tuple[date, ...], str]:
-    if type(count) is not int or not 1 <= count <= 75:
+    if type(count) is not int or count < 1:
         raise DiagnosticError(
-            "PG_HISTORY_WINDOW_INVALID", "PG历史画像会话数须为1至75", _EXIT_ARGUMENT
+            "PG_HISTORY_WINDOW_INVALID", "PG历史画像会话数须为正整数", _EXIT_ARGUMENT
         )
     try:
         target = _parse_target(target_text)

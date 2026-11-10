@@ -21,6 +21,7 @@ from stock_a.research.core import (
     _number,
     _validate_history,
     calculate_core,
+    calculate_seed_missing_core,
 )
 from stock_a.research.breakout import evaluate_raw_breakout_predicate
 from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
@@ -652,6 +653,8 @@ def research_stock_pg_history_preview(
     profile_contract: dict[str, Any],
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
     include_profile_preview: bool = True,
+    selected_profile_fields: frozenset[str] | None = None,
+    seed_core_inputs: Mapping[str, FieldValue] | None = None,
     include_raw_breakout: bool = False,
     allow_missing_target_row: bool = False,
 ) -> dict[str, Any]:
@@ -674,7 +677,6 @@ def research_stock_pg_history_preview(
     expected_sessions = tuple(session_dates)
     if (
         not expected_sessions
-        or len(expected_sessions) > 75
         or any(type(day) is not date for day in expected_sessions)
         or tuple(sorted(set(expected_sessions))) != expected_sessions
         or expected_sessions[-1] != target
@@ -817,7 +819,23 @@ def research_stock_pg_history_preview(
         revision=calendar_revision,
         sessions=expected_sessions,
     )
-    core = calculate_core(tuple(history), official_calendar=bounded_calendar)
+    if seed_core_inputs is None:
+        core = calculate_core(tuple(history), official_calendar=bounded_calendar)
+    else:
+        if include_raw_breakout or selected_profile_fields != frozenset(
+            {"profile.compression", "profile.extension", "profile.ma_structure"}
+        ):
+            raise ResearchEntryError(
+                "PG_SEED_CORE_SCOPE_INVALID", "已存Core复用仅适用于Seed所需画像"
+            )
+        core = dict(seed_core_inputs)
+        core.update(
+            calculate_seed_missing_core(
+                tuple(history),
+                official_calendar=bounded_calendar,
+                saved_atr20=core["core.atr20"],
+            )
+        )
     _apply_calendar_coverage_to_core(core, tuple(history), coverage_context)
     rendered_core = {name: _render_field(value) for name, value in sorted(core.items())}
     unknown_reasons: dict[str, int] = {}
@@ -825,7 +843,7 @@ def research_stock_pg_history_preview(
         if value.quality != "OBSERVED":
             reason = value.reason or "UNKNOWN_REASON_NOT_PROVIDED"
             unknown_reasons[reason] = unknown_reasons.get(reason, 0) + 1
-    if len(core) != 43:
+    if seed_core_inputs is None and len(core) != 43:
         raise ResearchEntryError(
             "PG_CORE_FIELD_COUNT_INVALID", f"Core现役字段数异常：{len(core)}"
         )
@@ -861,6 +879,7 @@ def research_stock_pg_history_preview(
     profile_preview = None
     if include_profile_preview:
         profile_preview = _build_profile_preview(
+            selected_fields=selected_profile_fields,
             symbol=normalized,
             target_session=target,
             source_last_session=target,
@@ -875,7 +894,12 @@ def research_stock_pg_history_preview(
             source_snapshot_role="PG_CAPTURE_HISTORY_ID_NOT_CAPTURED_AVAILABLE_AT",
         )
         profile_components = profile_preview.get("components", [])
-        if len(profile_components) != 11:
+        if (
+            len(profile_components) != 11
+            if selected_profile_fields is None
+            else {item["field_id"] for item in profile_components}
+            != selected_profile_fields
+        ):
             raise ResearchEntryError(
                 "PG_PROFILE_RULE_COUNT_INVALID", "Profile现役规则数异常"
             )

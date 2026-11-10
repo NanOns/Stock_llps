@@ -295,6 +295,67 @@ def _volatility(rows: Sequence[CoreObservation], periods: int):
         return FieldValue(variance.sqrt())
 
 
+def _moving_average(rows: Sequence[CoreObservation], reason: str | None) -> FieldValue:
+    values, value_reason = _column(rows, "close") if not reason else (None, reason)
+    values = values or []
+    return _known(mean(values) if values else None, reason or value_reason)
+
+
+def _atr(history: Sequence[CoreObservation], period: int) -> FieldValue:
+    rows, reason = _actual_window(history, period + 1)
+    if not reason:
+        # 每个TR只依赖当日高低价和前一有效Bar的收盘价；窗口首Bar的高低价
+        # 与末Bar的收盘价不属于此公式的依赖。
+        if _coordinate_error(rows):
+            reason = _coordinate_error(rows)
+        else:
+            reason = next(
+                (error for row in rows if (error := _known_ohlc_error(row))), None
+            )
+    if not reason:
+        true_ranges = []
+        for previous, current in zip(rows, rows[1:]):
+            highs, high_reason = _extreme_column([current], "high")
+            lows, low_reason = _extreme_column([current], "low")
+            closes, close_reason = _column([previous], "close")
+            dependency_error = high_reason or low_reason or close_reason
+            if dependency_error:
+                reason = dependency_error
+                break
+            cur_high, cur_low, prev_close = highs[0], lows[0], closes[0]
+            true_ranges.append(
+                max(
+                    cur_high - cur_low,
+                    abs(cur_high - prev_close),
+                    abs(cur_low - prev_close),
+                )
+            )
+    if not reason:
+        return _known(mean(true_ranges))
+    else:
+        return unknown(reason)
+
+
+def calculate_core_ma20(
+    history: Sequence[CoreObservation], *, official_calendar: MarketSessionCalendar
+) -> FieldValue:
+    """只计算MA20，沿用完整Core的输入校验和窗口语义。"""
+    if not isinstance(official_calendar, MarketSessionCalendar):
+        raise ContractError("Core计算必须传入版本化官方市场会话日历")
+    _validate_history(history, official_calendar)
+    if history[-1].state != "ACTUAL":
+        reason = {
+            "UNKNOWN": "CURRENT_SESSION_UNKNOWN",
+            "CONFIRMED_SUSPENSION": "CURRENT_SESSION_SUSPENDED",
+            "PRE_LISTING": "CURRENT_SESSION_PRE_LISTING",
+            "ADJUSTMENT_UNKNOWN": "PRICE_IDENTITY_UNKNOWN",
+            "IDENTITY_UNKNOWN": "SECURITY_IDENTITY_UNKNOWN",
+        }[history[-1].state]
+        return unknown(reason)
+    rows, reason = _actual_window(history, 20)
+    return _moving_average(rows, reason)
+
+
 def calculate_core(
     history: Sequence[CoreObservation],
     *,
@@ -318,11 +379,7 @@ def calculate_core(
     result: dict[str, FieldValue] = {}
     for period in _MA_PERIODS:
         rows, reason = _actual_window(history, period)
-        values, value_reason = _column(rows, "close") if not reason else (None, reason)
-        values = values or []
-        result[f"core.ma{period}"] = _known(
-            mean(values) if values else None, reason or value_reason
-        )
+        result[f"core.ma{period}"] = _moving_average(rows, reason)
         if period in (5, 20, 60):
             highs, high_reason = (
                 _extreme_column(rows, "high") if not reason else (None, reason)
@@ -383,39 +440,7 @@ def calculate_core(
         )
 
     for period in (5, 20):
-        rows, reason = _actual_window(history, period + 1)
-        if not reason:
-            # Each TR depends only on that day's high/low and the previous
-            # actual session's close. The oldest bar's high/low and newest
-            # bar's close are outside this formula's dependency set.
-            if _coordinate_error(rows):
-                reason = _coordinate_error(rows)
-            else:
-                reason = next(
-                    (error for row in rows if (error := _known_ohlc_error(row))), None
-                )
-        if not reason:
-            true_ranges = []
-            for previous, current in zip(rows, rows[1:]):
-                highs, high_reason = _extreme_column([current], "high")
-                lows, low_reason = _extreme_column([current], "low")
-                closes, close_reason = _column([previous], "close")
-                dependency_error = high_reason or low_reason or close_reason
-                if dependency_error:
-                    reason = dependency_error
-                    break
-                cur_high, cur_low, prev_close = highs[0], lows[0], closes[0]
-                true_ranges.append(
-                    max(
-                        cur_high - cur_low,
-                        abs(cur_high - prev_close),
-                        abs(cur_low - prev_close),
-                    )
-                )
-        if not reason:
-            result[f"core.atr{period}"] = _known(mean(true_ranges))
-        else:
-            result[f"core.atr{period}"] = unknown(reason)
+        result[f"core.atr{period}"] = _atr(history, period)
 
     # MA slope windows compare current and lagged actual-bar moving averages.
     for period, offset in _MA_SLOPE_WINDOWS:
@@ -562,12 +587,54 @@ def calculate_core_return(
     return _return(history, periods)
 
 
-def _derived_price_ratios(result, current_prices):
+def calculate_seed_missing_core(
+    history: Sequence[CoreObservation],
+    *,
+    official_calendar: MarketSessionCalendar,
+    saved_atr20: FieldValue,
+) -> dict[str, FieldValue]:
+    """复用已存ATR20，只补算Seed实际消费且画像未保存的三个比率。"""
+    if not isinstance(official_calendar, MarketSessionCalendar):
+        raise ContractError("Core计算必须传入版本化官方市场会话日历")
+    _validate_history(history, official_calendar)
+    fields = {"core.range_ratio", "core.atr_ratio", "core.vol_ratio"}
+    if history[-1].state != "ACTUAL":
+        reason = {
+            "UNKNOWN": "CURRENT_SESSION_UNKNOWN",
+            "CONFIRMED_SUSPENSION": "CURRENT_SESSION_SUSPENDED",
+            "PRE_LISTING": "CURRENT_SESSION_PRE_LISTING",
+            "ADJUSTMENT_UNKNOWN": "PRICE_IDENTITY_UNKNOWN",
+            "IDENTITY_UNKNOWN": "SECURITY_IDENTITY_UNKNOWN",
+        }[history[-1].state]
+        return {field: unknown(reason) for field in fields}
+    result = {"core.atr20": saved_atr20, "core.atr5": _atr(history, 5)}
+    for period in (5, 20):
+        rows, reason = _actual_window(history, period)
+        highs, high_reason = (
+            _extreme_column(rows, "high") if not reason else (None, reason)
+        )
+        lows, low_reason = (
+            _extreme_column(rows, "low") if not reason else (None, reason)
+        )
+        result[f"core.hhv{period}"] = _known(
+            max(highs) if highs else None, reason or high_reason
+        )
+        result[f"core.llv{period}"] = _known(
+            min(lows) if lows else None, reason or low_reason
+        )
+        result[f"core.vol{period}"] = _volatility(history, period)
+    _derived_price_ratios(result, None, only=fields)
+    return {field: result[field] for field in fields}
+
+
+def _derived_price_ratios(result, current_prices, *, only=None):
     current = current_prices[0] if current_prices else None
     for target, numerator, denominator in (
         ("core.bias20_atr", "core.ma20", "core.atr20"),
         ("core.dist_high20_atr", "core.prior_high20", "core.atr20"),
     ):
+        if only is not None and target not in only:
+            continue
         a, b = result[numerator], result[denominator]
         reason = (
             a.reason
@@ -595,6 +662,8 @@ def _derived_price_ratios(result, current_prices):
         ("core.atr_ratio", "core.atr5", "core.atr20"),
         ("core.vol_ratio", "core.vol5", "core.vol20"),
     ):
+        if only is not None and target not in only:
+            continue
         if target == "core.range_ratio":
             numerator = (
                 result[num_key].value - result["core.llv5"].value
