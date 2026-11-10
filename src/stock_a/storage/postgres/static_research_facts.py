@@ -877,7 +877,7 @@ def read_source_stock_seed_fact(
     expected_source_count: int,
     producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R1",
 ) -> dict[str, Any]:
-    """按完整来源身份核验分区后，只读取单只股票的已存Seed行。"""
+    """按完整来源身份核验分区后，只读取单股行；分母须来自已闭合的Raw版本目录。"""
     if (
         type(target_session) is not date
         or not isinstance(package_sha256, str)
@@ -891,7 +891,7 @@ def read_source_stock_seed_fact(
         or not isinstance(source_symbol, str)
         or _SYMBOL.fullmatch(source_symbol) is None
         or type(expected_source_count) is not int
-        or not 1 <= expected_source_count <= 5000
+        or expected_source_count <= 0
         or producer_version != "SOURCE_POOL_SEED_CORE_PROFILE_R1"
     ):
         raise StaticResearchPgError(

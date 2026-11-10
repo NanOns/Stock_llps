@@ -15,6 +15,12 @@ from statistics import median
 from typing import Any, Mapping
 
 from stock_a.domain import FieldValue, unknown
+from stock_a.domain.tri_state import (
+    reduce_seed_with_safety,
+    reduce_source_seed_shape,
+    tri_and,
+    tri_or,
+)
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
     SOURCE_SYMBOL_PROFILE_SCOPE,
@@ -52,25 +58,11 @@ def _tri(value: bool | None, reason: str | None = None) -> dict[str, Any]:
 
 
 def _and(*values: dict[str, Any]) -> dict[str, Any]:
-    state = (
-        "FALSE"
-        if any(v["state"] == "FALSE" for v in values)
-        else "UNKNOWN"
-        if any(v["state"] == "UNKNOWN" for v in values)
-        else "TRUE"
-    )
-    return {"state": state, "reasons": _reasons(values)}
+    return tri_and(*values)
 
 
 def _or(*values: dict[str, Any]) -> dict[str, Any]:
-    state = (
-        "TRUE"
-        if any(v["state"] == "TRUE" for v in values)
-        else "UNKNOWN"
-        if any(v["state"] == "UNKNOWN" for v in values)
-        else "FALSE"
-    )
-    return {"state": state, "reasons": _reasons(values)}
+    return tri_or(*values)
 
 
 def _tri_state(value: Mapping[str, Any] | str) -> str:
@@ -82,21 +74,6 @@ def _tri_state(value: Mapping[str, Any] | str) -> str:
 def _state_counts(values) -> dict[str, int]:
     counts = Counter(_tri_state(value) for value in values)
     return {state: counts[state] for state in ("TRUE", "FALSE", "UNKNOWN")}
-
-
-def _reasons(values: tuple[dict[str, Any], ...]) -> list[str]:
-    return list(
-        dict.fromkeys(
-            reason
-            for value in values
-            for reason in (
-                [value.get("reason")]
-                if value.get("reason")
-                else value.get("reasons", [])
-            )
-            if reason
-        )
-    )
 
 
 def _from_field(
@@ -340,7 +317,7 @@ def unavailable_source_qualification(reason: str) -> dict[str, Any]:
         predicates["no_damage"],
         predicates["no_severe_extension"],
     )
-    source_seed = _or(s1, s2)
+    source_seed = reduce_source_seed_shape(s1, s2)
     public_gate = _and(
         predicates["research_universe"],
         predicates["actual_bar"],
@@ -349,7 +326,7 @@ def unavailable_source_qualification(reason: str) -> dict[str, Any]:
         predicates["limited_price_rule"],
         predicates["coordinate_ready"],
     )
-    seed = _and(safety, source_seed)
+    seed = reduce_seed_with_safety(safety, source_seed)
     formal_candidate_seed = _and(public_gate, seed)
     prewatch = _and(seed, _tri(None, "MANDATORY_CORE_QUALITY_CONTRACT_UNBOUND"))
     prewatch["implementation_status"] = "NOT_IMPLEMENTED"
@@ -426,8 +403,8 @@ def source_seed_predicates(
     )
     s1 = _and(bias, compression, delta3)
     s2 = _and(bias, delta10, _or(bull, previous_cross))
-    source_seed = _or(s1, s2)
-    seed = _and(safety, source_seed)
+    source_seed = reduce_source_seed_shape(s1, s2)
+    seed = reduce_seed_with_safety(safety, source_seed)
     public_gate = _and(
         formal_universe,
         actual,
@@ -1108,12 +1085,12 @@ def read_source_pool_seed(
         safety = {"state": row["safety_state"], "reasons": list(row["safety_reasons"])}
         s1 = {"state": row["s1_state"], "reasons": list(row["s1_reasons"])}
         s2 = {"state": row["s2_state"], "reasons": list(row["s2_reasons"])}
-        source_seed = _or(s1, s2)
+        source_seed = reduce_source_seed_shape(s1, s2)
         if source_seed["state"] != row["source_seed_state"]:
             raise StaticResearchPgError(
                 "STATIC_SEED_STATE_CONFLICT", "PG来源Seed状态与S1/S2归约不一致"
             )
-        seed = _and(safety, source_seed)
+        seed = reduce_seed_with_safety(safety, source_seed)
         raw_prewatch = {
             "state": row["raw_prewatch_state"],
             "reasons": list(row["raw_prewatch_reasons"]),

@@ -6,6 +6,10 @@ from datetime import date, datetime, timezone
 import re
 from typing import Any, Mapping
 
+from stock_a.domain.tri_state import (
+    reduce_seed_with_safety,
+    reduce_source_seed_shape,
+)
 from stock_a.storage.postgres.source_raw import RawSourcePgError
 from stock_a.storage.postgres.static_research_facts import (
     StaticResearchPgError,
@@ -190,6 +194,22 @@ def query_source_stock_seed_context(
         }
         for field_id, column_prefix in _SEED_QUALITY_FIELDS
     }
+    safety = {
+        "state": row["safety_state"],
+        "reasons": _reasons(row["safety_reasons"]),
+    }
+    s1 = {"state": row["s1_state"], "reasons": _reasons(row["s1_reasons"])}
+    s2 = {"state": row["s2_state"], "reasons": _reasons(row["s2_reasons"])}
+    source_seed_shape = reduce_source_seed_shape(s1, s2)
+    if source_seed_shape["state"] != row["source_seed_state"]:
+        return _unavailable(
+            status="INCOMPLETE",
+            reason_code="STATIC_SEED_STATE_CONFLICT",
+            message="PG来源形态状态与S1/S2三态归约不一致。",
+            identity=identity,
+            partition=stored["partition"],
+        )
+    seed = reduce_seed_with_safety(safety, source_seed_shape)
     return {
         "status": "SAVED",
         "identity": identity,
@@ -203,24 +223,16 @@ def query_source_stock_seed_context(
             "calendar_id": row["calendar_id"],
             "calendar_revision": row["calendar_revision"],
         },
-        "source_seed_state": row["source_seed_state"],
+        "source_seed_shape_state": row["source_seed_state"],
         "qualification": {
-            "safety": {
-                "state": row["safety_state"],
-                "reason_codes": _reasons(row["safety_reasons"]),
+            "safety": {"state": safety["state"], "reason_codes": safety["reasons"]},
+            "s1": {"state": s1["state"], "reason_codes": s1["reasons"]},
+            "s2": {"state": s2["state"], "reason_codes": s2["reasons"]},
+            "source_seed_shape": {
+                "state": source_seed_shape["state"],
+                "reason_codes": source_seed_shape["reasons"],
             },
-            "s1": {
-                "state": row["s1_state"],
-                "reason_codes": _reasons(row["s1_reasons"]),
-            },
-            "s2": {
-                "state": row["s2_state"],
-                "reason_codes": _reasons(row["s2_reasons"]),
-            },
-            "source_seed": {
-                "state": row["source_seed_state"],
-                "reason_codes": _reasons(row["source_seed_reasons"]),
-            },
+            "seed": {"state": seed["state"], "reason_codes": seed["reasons"]},
         },
         "predicates": predicate_items,
         "quality": {

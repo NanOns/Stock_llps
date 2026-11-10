@@ -1477,10 +1477,11 @@ function sourceSeedExplanation(seed) {
   const qualification = seed.qualification || {};
   const reasonList = (value) => (value?.reason_codes || []).join("、") || "无";
   const routes = [
+    `来源形态 S1 OR S2 ${stateName(qualification.source_seed_shape?.state)}：${reasonList(qualification.source_seed_shape)}`,
     `安全门 ${stateName(qualification.safety?.state)}：${reasonList(qualification.safety)}`,
     `S1 ${stateName(qualification.s1?.state)}：${reasonList(qualification.s1)}`,
     `S2 ${stateName(qualification.s2?.state)}：${reasonList(qualification.s2)}`,
-    `Seed ${stateName(qualification.source_seed?.state)}：${reasonList(qualification.source_seed)}`,
+    `含安全门Seed safety AND (S1 OR S2) ${stateName(qualification.seed?.state)}：${reasonList(qualification.seed)}`,
   ].join("；");
   const unmet = (seed.predicates || [])
     .filter((item) => item.state !== "TRUE")
@@ -1497,7 +1498,7 @@ function sourceSeedExplanation(seed) {
         `${fieldId} ${field.quality}${field.reason ? `：${field.reason}` : ""}`,
     )
     .join("；");
-  return `来源级Seed观察 ${stateName(seed.source_seed_state)}（NON_PIT_RETROSPECTIVE；RAW_UNADJUSTED）。${routes}。未满足/未知谓词：${unmet || "无"}。来源质量 ${quality.source_time_quality} / ${quality.source_clock_role}；目标日实际K线 ${quality.target_actual_quote ? "有" : "未知或缺失"}；收盘质量 ${quality.target_close_quality}${quality.target_close_reason ? `：${quality.target_close_reason}` : ""}${qualityReasons ? `；输入质量原因：${qualityReasons}` : ""}。正式候选资格 NOT_EVALUATED。`;
+  return `${routes}。范围 NON_PIT_RETROSPECTIVE；价格坐标 RAW_UNADJUSTED。未满足/未知谓词：${unmet || "无"}。来源质量 ${quality.source_time_quality} / ${quality.source_clock_role}；目标日实际K线 ${quality.target_actual_quote ? "有" : "未知或缺失"}；收盘质量 ${quality.target_close_quality}${quality.target_close_reason ? `：${quality.target_close_reason}` : ""}${qualityReasons ? `；输入质量原因：${qualityReasons}` : ""}。正式候选资格 NOT_EVALUATED。`;
 }
 async function openStock(symbol, row = {}) {
   state.stockController?.abort();
