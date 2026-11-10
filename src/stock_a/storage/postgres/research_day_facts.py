@@ -5,7 +5,9 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
+import random
 import re
+import time
 from typing import Any, Mapping, Sequence
 from uuid import UUID
 
@@ -768,15 +770,36 @@ def _insert_rows(
         return 0
     placeholders = ", ".join(["%s"] * len(columns))
     conflict = ", ".join(key)
-    cursor.executemany(
-        f"INSERT INTO {table} ({', '.join(columns)}) VALUES ({placeholders}) "
-        f"ON CONFLICT ({conflict}) DO NOTHING",
-        rows,
-    )
-    return cursor.rowcount
+    inserted = 0
+    # 参数数量有界；每一批仍属于同一个单日事务，完整读回后才提交。
+    batch_size = min(100, 60000 // len(columns))
+    for offset in range(0, len(rows), batch_size):
+        batch = rows[offset : offset + batch_size]
+        values = ", ".join(f"({placeholders})" for _ in batch)
+        cursor.execute(
+            f"INSERT INTO {table} ({', '.join(columns)}) VALUES {values} "
+            f"ON CONFLICT ({conflict}) DO NOTHING",
+            tuple(value for row in batch for value in row),
+        )
+        inserted += cursor.rowcount
+    return inserted
 
 
 def persist_source_research_day(
+    config: Mapping[str, Any], facts: ResearchDayFacts
+) -> dict[str, Any]:
+    """序列化冲突时重试完整单日事务。"""
+    for attempt in range(5):
+        try:
+            return _persist_source_research_day_once(config, facts)
+        except source_raw.RawSourcePgError as error:
+            if getattr(error.__cause__, "sqlstate", None) != "40001" or attempt == 4:
+                raise
+            time.sleep(random.uniform(0.1, 0.3) * (2**attempt))
+    raise AssertionError("不可达的研究事实事务重试状态")
+
+
+def _persist_source_research_day_once(
     config: Mapping[str, Any], facts: ResearchDayFacts
 ) -> dict[str, Any]:
     """串行化事务写三张typed事实表；同键异内容拒绝并回滚。"""
@@ -898,6 +921,7 @@ def read_source_research_day(
     board_native_id: str | None = None,
     structure_type: str | None = None,
     material_change_reason: str | None = None,
+    include_all_results: bool = False,
 ) -> dict[str, Any]:
     """只读分页读取PG事实；未迁移或未计算时返回明确状态，不重算回退。"""
     if (
@@ -909,7 +933,9 @@ def read_source_research_day(
         or type(offset) is not int
         or offset < 0
         or type(limit) is not int
+        or type(include_all_results) is not bool
         or not 1 <= limit <= 200
+        and not include_all_results
         or (symbol is not None and _SYMBOL.fullmatch(symbol) is None)
         or (board_kind is not None and board_kind not in {"INDUSTRY", "CONCEPT"})
         or (
@@ -1297,8 +1323,11 @@ def read_source_research_day(
                 "AND a.producer_contract=d.producer_contract AND a.producer_version=d.producer_version "
                 "AND a.material_change_contract=d.material_change_contract "
                 "AND a.material_change_classification='MATERIAL_CHANGE' "
-                "AND %s = ANY(a.material_change_reasons))"
+                + ("AND a.structure_type=%s " if structure_type is not None else "")
+                + "AND %s = ANY(a.material_change_reasons))"
             )
+            if structure_type is not None:
+                filter_params.append(structure_type)
             filter_params.append(material_change_reason)
         if board_kind is not None and board_native_id is not None:
             snapshot_uuid = next(
@@ -1325,6 +1354,9 @@ def read_source_research_day(
             d1_params + tuple(filter_params),
         )
         stock_total = cursor.fetchone()[0]
+        if include_all_results:
+            offset = 0
+            limit = stock_total
         cursor.execute(
             selected_query + " OFFSET %s LIMIT %s",
             d1_params + tuple(filter_params) + (offset, limit),
@@ -1334,11 +1366,23 @@ def read_source_research_day(
         board_summaries = []
         membership_coverage = []
         for snapshot_uuid, kind in snapshot_specs:
+            anchor_filters = ["material_change_classification='MATERIAL_CHANGE'"]
+            anchor_params = []
+            if structure_type is not None:
+                anchor_filters.append("structure_type=%s")
+                anchor_params.append(structure_type)
+            if material_change_reason is not None:
+                anchor_filters.append("%s = ANY(material_change_reasons)")
+                anchor_params.append(material_change_reason)
             cursor.execute(
-                "WITH stock_summary AS (SELECT source_symbol, "
-                "sum(material_change_anchor_count) AS material_anchor_count "
+                "WITH source_symbols AS (SELECT DISTINCT source_symbol "
                 f"FROM stock.source_d1_structure_day_facts WHERE {d1_predicate} "
-                "GROUP BY source_symbol) "
+                "), selected_anchors AS (SELECT source_symbol, count(*) AS material_anchor_count "
+                f"FROM stock.source_d1_material_anchor_day_facts WHERE {d1_predicate} AND "
+                + " AND ".join(anchor_filters)
+                + " GROUP BY source_symbol), stock_summary AS (SELECT s.source_symbol, "
+                "coalesce(a.material_anchor_count, 0) AS material_anchor_count "
+                "FROM source_symbols s LEFT JOIN selected_anchors a USING (source_symbol)) "
                 "SELECT c.board_kind, c.board_native_id, c.board_name, "
                 "count(DISTINCT m.source_symbol) FILTER (WHERE s.source_symbol IS NOT NULL), "
                 "count(DISTINCT m.source_symbol) FILTER (WHERE s.material_anchor_count>0), "
@@ -1350,7 +1394,10 @@ def read_source_research_day(
                 "WHERE c.snapshot_id=%s AND c.board_kind=%s "
                 "GROUP BY c.board_kind, c.board_native_id, c.board_name "
                 "ORDER BY c.board_name, c.board_native_id OFFSET %s LIMIT %s",
-                d1_params + (snapshot_uuid, kind, offset, limit),
+                d1_params
+                + d1_params
+                + tuple(anchor_params)
+                + (snapshot_uuid, kind, offset, limit),
             )
             board_summaries.extend(
                 {
@@ -1359,7 +1406,7 @@ def read_source_research_day(
                     "board_name": row[2],
                     "source_stock_count": row[3],
                     "material_change_stock_count": row[4],
-                    "material_change_anchor_count": row[5],
+                    "material_change_anchor_count": int(row[5]),
                     "snapshot_id": str(snapshot_uuid),
                     "membership_scope": "NON_PIT_CURRENT_SNAPSHOT",
                 }

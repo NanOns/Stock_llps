@@ -4,11 +4,17 @@ from __future__ import annotations
 
 from datetime import date
 from fractions import Fraction
+import hashlib
 import re
 import time
 from typing import Any, Mapping
 from uuid import UUID
 
+from stock_a.application.pg_price_profiles import (
+    SOURCE_SYMBOL_PROFILE_SCOPE,
+    _profile_revision,
+    _profile_semantics_sha256,
+)
 from stock_a.application.research_window import resolve_pg_history_window
 from stock_a.application.source_d0_raw import (
     _official_calendar,
@@ -17,6 +23,9 @@ from stock_a.application.source_d0_raw import (
 from stock_a.application.source_market_observation import (
     prepare_d1_material_observation,
 )
+from stock_a.application.source_pool_seed import compute_source_pool_seed
+from stock_a.application.runtime_config import _CONFIG_ROOT
+from stock_a.contracts import load_price_profile_contract
 from stock_a.domain.research_day_facts import (
     D0LaunchFact,
     D1MaterialAnchorFact,
@@ -27,6 +36,8 @@ from stock_a.domain.research_day_facts import (
 from stock_a.storage.postgres.research_day_facts import (
     persist_source_research_day,
 )
+from stock_a.storage.postgres.static_research_facts import persist_static_research_day
+from stock_a.storage.postgres.source_raw import read_raw_daily_catalog
 
 
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
@@ -233,6 +244,178 @@ def _prepare_d0_facts(changes: Mapping[str, Any]) -> tuple[D0LaunchFact, ...]:
             )
         )
     return tuple(facts)
+
+
+def _persist_static_research_day(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    package_sha256: str,
+    namespace_id: str,
+    expected_capture_id: str | None,
+    expected_source_count: int,
+) -> dict[str, Any]:
+    """由同一现役Core/Profile、RPS与D0生产者闭合全池静态事实。"""
+    history_count = 75
+    _target, history_window, calendar_revision = resolve_pg_history_window(
+        target_session.isoformat(), history_count
+    )
+    profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
+    calendar = _official_calendar(target_session)
+    profile_revision = _profile_revision(
+        scope=SOURCE_SYMBOL_PROFILE_SCOPE,
+        semantics_sha256=_profile_semantics_sha256(profile_contract),
+        calendar_id=calendar["calendar_id"],
+        calendar_revision=calendar_revision,
+        history_session_count=len(history_window),
+    )
+    seed = compute_source_pool_seed(
+        config,
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        package_sha256=package_sha256,
+        namespace_id=namespace_id,
+        profile_revision=profile_revision,
+        profile_contract=profile_contract,
+        history_session_count=history_count,
+        include_rps_read=True,
+    )
+    if (
+        seed.get("profile_revision_matches_runtime") is not True
+        or seed.get("stored_profile_status") != "AVAILABLE"
+        or seed.get("source_pool_total") != expected_source_count
+    ):
+        raise SourceResearchDayError(
+            "STATIC_RESEARCH_PROFILE_OR_DENOMINATOR_MISMATCH",
+            "Seed静态事实必须绑定精确R6画像和完整来源池分母",
+        )
+    scenarios = {}
+    for scenario in ("LAUNCH_CONFIRM", "RECOVERY_TURN"):
+        kwargs = {}
+        if scenario == "RECOVERY_TURN":
+            kwargs["_rps_result"] = seed["rps_read"]
+        page = query_source_d0_raw_launch(
+            config,
+            scenario=scenario,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            package_sha256=package_sha256,
+            offset=0,
+            limit=5000,
+            expected_namespace_id=namespace_id,
+            **kwargs,
+        )
+        source = page.get("source_version", {})
+        if (
+            (
+                expected_capture_id is not None
+                and source.get("source_capture_id") != expected_capture_id
+            )
+            or source.get("package_sha256") != package_sha256
+            or seed.get("namespace_id") != namespace_id
+            or seed.get("package_sha256") != package_sha256
+        ):
+            raise SourceResearchDayError(
+                "STATIC_RESEARCH_SOURCE_IDENTITY_MISMATCH",
+                "D0、Core/Profile与当日持久事实未绑定同一来源捕获",
+            )
+        scenarios[scenario] = page
+    semantics_sha256 = hashlib.sha256(
+        (
+            "SOURCE_POOL_SEED_ALG-19/20_R1:"
+            + _profile_semantics_sha256(profile_contract)
+            + ":CORE_RAW_SOURCE_RPS_R1:"
+            + ":".join(
+                scenarios[name]["producer_version"]
+                for name in ("LAUNCH_CONFIRM", "RECOVERY_TURN")
+            )
+        ).encode("utf-8")
+    ).hexdigest()
+    return persist_static_research_day(
+        config,
+        scenarios=scenarios,
+        seed=seed,
+        history_window=history_window,
+        profile_revision=profile_revision,
+        producer_semantics_sha256=semantics_sha256,
+    )
+
+
+def run_source_static_research_day(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    package_sha256: str,
+) -> dict[str, Any]:
+    """仅初始化新静态表；读取精确PG Raw目录，不重算已保存D0/D1三类事实。"""
+    if target_session > research_cutoff or _SHA256.fullmatch(package_sha256) is None:
+        raise SourceResearchDayError(
+            "STATIC_RESEARCH_SCOPE_INVALID", "静态事实初始化范围或来源SHA无效"
+        )
+    versions = []
+    offset = 0
+    namespace_id = None
+    while True:
+        catalog = read_raw_daily_catalog(
+            config,
+            max_target_session=research_cutoff,
+            offset=offset,
+            limit=200,
+        )
+        namespace_id = catalog["namespace_id"]
+        versions.extend(catalog["versions"])
+        if catalog["next_offset"] is None:
+            break
+        offset = catalog["next_offset"]
+    target_versions = [
+        item for item in versions if item["session_date"] == target_session.isoformat()
+    ]
+    if (
+        namespace_id is None
+        or len(target_versions) != 1
+        or target_versions[0]["package_sha256"] != package_sha256
+        or target_versions[0]["version_status"] != "CLOSED"
+        or target_versions[0]["row_count"] != target_versions[0]["expected_row_count"]
+    ):
+        raise SourceResearchDayError(
+            "STATIC_RESEARCH_RAW_VERSION_UNAVAILABLE",
+            "目标日没有唯一、同包且闭合的已存PG Raw来源版本",
+        )
+    version = target_versions[0]
+    started = time.perf_counter()
+    persistence = _persist_static_research_day(
+        config,
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        package_sha256=package_sha256,
+        namespace_id=namespace_id,
+        expected_capture_id=None,
+        expected_source_count=version["row_count"],
+    )
+    return {
+        "status": "PERSISTED",
+        "target_session": target_session.isoformat(),
+        "research_cutoff": research_cutoff.isoformat(),
+        "package_sha256": package_sha256,
+        "namespace_id": namespace_id,
+        "source_capture_count": version["source_capture_count"],
+        "source_count": version["row_count"],
+        "persistence": persistence,
+        "execution": {
+            "database_target": "127.0.0.1:5432/stock_a",
+            "database_schema": "stock",
+            "database_role": "stock_a",
+            "raw_source_collection": False,
+            "source_zip_opened": False,
+            "existing_d0_d1_recomputed": False,
+            "database_write_attempted": persistence["database_write_attempted"],
+            "ddl_executed": False,
+            "dml_executed": persistence["dml_executed"],
+            "total_wall_seconds": round(time.perf_counter() - started, 6),
+        },
+    }
 
 
 def _prepare_d1_facts(
@@ -896,7 +1079,7 @@ def run_source_research_day(
     d1_history_session_count: int,
     persist: bool = False,
 ) -> dict[str, Any]:
-    """执行单日研究；仅显式persist=True时调用PG Writer。"""
+    """执行单日研究；仅显式persist=True时调用PG Writers。"""
     facts, report = prepare_source_research_day(
         config,
         target_session=target_session,
@@ -906,11 +1089,32 @@ def run_source_research_day(
     )
     if persist:
         write_result = persist_source_research_day(config, facts)
+        static_started = time.perf_counter()
+        static_result = _persist_static_research_day(
+            config,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            package_sha256=package_sha256,
+            namespace_id=facts.namespace_id,
+            expected_capture_id=facts.target_capture_id,
+            expected_source_count=facts.d1_source_count,
+        )
+        report["static_persistence"] = static_result
+        report["static_persistence"]["wall_seconds"] = round(
+            time.perf_counter() - static_started, 6
+        )
+        report["status"] = "PERSISTED"
         report["persistence"] = write_result
-        report["execution"]["database_write_attempted"] = write_result[
-            "database_write_attempted"
-        ]
-        report["execution"]["dml_executed"] = write_result["dml_executed"]
+        report["execution"]["transaction"] = (
+            write_result["transaction"] + "; " + static_result["transaction"]
+        )
+        report["execution"]["database_write_attempted"] = (
+            write_result["database_write_attempted"]
+            or static_result["database_write_attempted"]
+        )
+        report["execution"]["dml_executed"] = (
+            write_result["dml_executed"] or static_result["dml_executed"]
+        )
     return report
 
 

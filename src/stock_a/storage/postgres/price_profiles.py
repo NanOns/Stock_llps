@@ -6,7 +6,9 @@ from datetime import date
 from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 import json
+import random
 import re
+import time
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
 from uuid import UUID
@@ -27,6 +29,9 @@ _CORE_COLUMN_NAMES = (
     "clv",
     "prior_high20",
     "ret20",
+    "ret1",
+    "ret5",
+    "liquidity_mean20",
     "pos60",
     "bias20_atr",
     "ma_slope20_atr",
@@ -544,9 +549,11 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
                 "amount_ratio20",
                 "volume_ratio5",
                 "volume_ratio20",
+                "liquidity_mean20",
             } and (value < 0 or numerator < 0):
                 raise PriceProfilePgError(
-                    "PROFILE_CORE_VALUE_INVALID", "原生量额比值必须为非负精确数值"
+                    "PROFILE_CORE_VALUE_INVALID",
+                    "量额比值或流动性均值必须为非负精确数值",
                 )
         elif (
             value is not None
@@ -662,6 +669,20 @@ def insert_profile_records_in_transaction(
 
 
 def persist_profile_records(
+    config: Mapping[str, Any], records: Sequence[Mapping[str, Any]]
+) -> dict[str, Any]:
+    """序列化冲突时重试完整事务，不覆盖同键异值。"""
+    for attempt in range(5):
+        try:
+            return _persist_profile_records_once(config, records)
+        except RawSourcePgError as error:
+            if getattr(error.__cause__, "sqlstate", None) != "40001" or attempt == 4:
+                raise
+            time.sleep(random.uniform(0.1, 0.3) * (2**attempt))
+    raise AssertionError("不可达的画像事务重试状态")
+
+
+def _persist_profile_records_once(
     config: Mapping[str, Any], records: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
     """同一SERIALIZABLE事务逐键核对内容后只INSERT缺失记录。"""
@@ -1003,11 +1024,10 @@ LIMIT %s""",
         if len(matching_current) == 1:
             selected = matching_current[0]
             selection_rule = "UNIQUE_CURRENT_SEMANTICS_SHA256"
-        elif len(revisions) == 1:
-            selected = revisions[0]
-            selection_rule = "UNIQUE_EXACT_CAPTURE_REVISION"
-        elif revisions:
+        elif len(matching_current) > 1:
             selection_rule = "AMBIGUOUS_NO_UNIQUE_SEMANTICS_MATCH"
+        elif revisions:
+            selection_rule = "NO_MATCHING_CURRENT_SEMANTICS"
         else:
             selection_rule = "NO_STORED_PROFILE_REVISION"
 
@@ -1160,7 +1180,11 @@ LIMIT %s""",
                 )
 
     if selected is None:
-        status = "AMBIGUOUS_STORED_REVISIONS" if revisions else "NOT_COMPUTED"
+        status = (
+            "AMBIGUOUS_STORED_REVISIONS"
+            if len(matching_current) > 1
+            else "NOT_COMPUTED"
+        )
     else:
         status = (
             "PG_SOURCE_PROFILE_STORED"

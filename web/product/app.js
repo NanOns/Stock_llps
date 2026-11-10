@@ -557,7 +557,7 @@ function renderD0Boards() {
   if (!state.d0Result || !Array.isArray(state.d0Result.boards)) {
     const status =
       state.d0Status === "LOADING"
-        ? "D0 计算中；来源宽度可先独立查看。"
+        ? "正在读取已保存 D0 事实；来源宽度可先独立查看。"
         : state.d0Status === "UNKNOWN"
           ? `D0 UNKNOWN：${state.d0Error || "缺少同源相邻会话或变化板块事实"}`
           : "等待当前日期的 D0 结果";
@@ -648,10 +648,10 @@ function renderMarketD0Summary() {
       node(
         "p",
         state.d0Status === "LOADING"
-          ? "D0 计算中；来源宽度已独立加载，完成后本页会自动更新。"
+          ? "正在读取已保存 D0 事实；来源宽度已独立加载，读取完成后本页会自动更新。"
           : state.d0Status === "UNKNOWN"
             ? `D0 UNKNOWN：${state.d0Error || "缺少可核验的同源变化事实"}；来源宽度仍独立可用。`
-            : "D0 计算中；来源宽度已独立加载。",
+            : "正在读取已保存 D0 事实；来源宽度已独立加载。",
       ),
     );
     return;
@@ -1068,8 +1068,8 @@ async function loadD1Material(symbol = null) {
   );
   setD1MaterialStatus(
     hadFacts
-      ? "正在将结构、原因、板块与股票筛选应用到已计算的同一D1事实…"
-      : "正在读取完整来源池D1材料变化。首次计算可能需要数分钟，页面不会显示缩小后的来源池结果。",
+      ? "正在将结构、原因、板块与股票筛选应用到同一批D1保存事实…"
+      : "正在读取PG已保存的完整来源池D1材料变化；页面不会显示缩小后的来源池结果。",
   );
 
   const timer = window.setInterval(() => {
@@ -1078,12 +1078,12 @@ async function loadD1Material(symbol = null) {
       (performance.now() - d1MaterialState.startedAt) / 1000,
     );
     setD1MaterialStatus(
-      `完整来源池仍在读取，已等待 ${seconds} 秒；筛选和分页不会裁剪来源池或另起扫描。`,
+      `PG仍在读取完整来源池事实，已等待 ${seconds} 秒；筛选和分页不会裁剪来源池。`,
     );
   }, 1000);
   try {
     const data = await waitForD1Material(body, controller.signal, () =>
-      setD1MaterialStatus("已有完整来源池正在计算；本次请求将自动继续读取。"),
+      setD1MaterialStatus("PG保存事实仍在读取；本次请求将自动继续。"),
     );
     if (token !== d1MaterialState.request) return;
     const responseSeconds = (performance.now() - requestStartedAt) / 1000;
@@ -1100,7 +1100,7 @@ async function loadD1Material(symbol = null) {
     setD1MaterialStatus(
       execution.reused_process_d1_material_facts
         ? `已复用同进程完整事实 · 本次全池扫描 ${scan} 次 · 首次扫描 ${scanSeconds ?? "—"} 秒 · 服务处理 ${execution.http_request_wall_seconds ?? "—"} 秒 · 请求往返/JSON ${responseSeconds.toFixed(3)} 秒 · 页面渲染 ${renderSeconds.toFixed(3)} 秒。`
-        : `全池计算完成 · 扫描 ${scan} 次 · 耗时 ${scanSeconds ?? "—"} 秒 · 请求往返/JSON ${responseSeconds.toFixed(3)} 秒 · 页面渲染 ${renderSeconds.toFixed(3)} 秒；后续筛选与分页复用同一事实。`,
+        : `PG保存事实读取完成 · 全池重算 ${scan} 次 · 耗时 ${scanSeconds ?? "—"} 秒 · 请求往返/JSON ${responseSeconds.toFixed(3)} 秒 · 页面渲染 ${renderSeconds.toFixed(3)} 秒。`,
     );
 
     if (symbol) renderD1StockDetail(data.selected_stock);
@@ -1636,14 +1636,13 @@ async function openStock(symbol, row = {}) {
       "rule",
     );
     root.append(materialDetail);
-    materialDetail.textContent =
-      "按需读取完整来源池 D1 材料变化，首次可能需要数分钟。";
+    materialDetail.textContent = "按需读取PG已保存的完整来源池 D1 材料变化。";
     const deepen = node("button", "深入 D1 材料变化", "button subtle");
     deepen.type = "button";
     materialDetail.append(deepen);
     deepen.addEventListener("click", () => {
       deepen.disabled = true;
-      materialDetail.textContent = "完整来源池计算中，首次可能需要数分钟…";
+      materialDetail.textContent = "正在读取PG已保存的完整来源池 D1 事实…";
       const materialRequest = buildD1MaterialRequest(
         c,
         d1MaterialState.board,
@@ -1657,7 +1656,7 @@ async function openStock(symbol, row = {}) {
       waitForD1Material(materialRequest, controller.signal, () => {
         if (token === state.stockRequest && state.selected === c)
           materialDetail.textContent =
-            "已有完整来源池正在计算；本次材料将自动继续读取。";
+            "PG保存事实仍在读取；本次材料将自动继续。";
       })
         .then((result) => {
           if (token === state.stockRequest && state.selected === c)
@@ -1912,6 +1911,13 @@ async function loadExtra(page) {
         `/api/product/market?${new URLSearchParams(common)}`,
       );
       if (token !== extraRequest || activePage !== page) return;
+      if (["NOT_COMPUTED", "INCOMPLETE"].includes(data.status)) {
+        message(
+          id,
+          `${data.status}：${data.reason || "该来源的市场宽度尚不可用。"}`,
+        );
+        return;
+      }
       detailRows($(id), [
         ["状态", data.status],
         ["目标日 / 截止", `${data.target_session} / ${data.research_cutoff}`],

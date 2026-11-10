@@ -16,6 +16,8 @@ from stock_a.research.source_market_breadth import (
     SourceCohortIdentity,
     SourceMarketBreadthInput,
     SourceMarketBreadthResult,
+    SourceMarketBreadthSymbol,
+    SOURCE_MARKET_BREADTH_CONTRACT,
     calculate_source_market_breadth,
 )
 from stock_a.storage.postgres.source_raw import (
@@ -71,7 +73,7 @@ def fraction_payload(value: Fraction | None) -> dict[str, Any] | None:
     }
 
 
-def read_source_market_context(
+def compute_source_market_context(
     config: Mapping[str, Any],
     *,
     target_session: date,
@@ -195,6 +197,190 @@ def read_source_market_context(
     )
 
 
+def read_source_market_context(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    package_sha256: str,
+    include_symbols: bool = False,
+) -> SourceMarketContextRead:
+    """直接读取已保存的精确市场宽度，不在读取时重算来源池。"""
+    from stock_a.storage.postgres.market_breadth import read_market_breadth
+
+    if (
+        type(target_session) is not date
+        or type(research_cutoff) is not date
+        or target_session > research_cutoff
+    ):
+        raise SourceMarketContextError(
+            "MARKET_BREADTH_DATE_AFTER_CUTOFF",
+            "目标会话超过研究截止",
+            category="ARGUMENT",
+        )
+    if not isinstance(package_sha256, str) or _SHA256.fullmatch(package_sha256) is None:
+        raise SourceMarketContextError(
+            "MARKET_BREADTH_PACKAGE_SHA_INVALID", "来源包SHA无效", category="ARGUMENT"
+        )
+    try:
+        payload, metadata, revisions, sessions = _load_calendar(target_session)
+        year_metadata = next(
+            item for item in metadata if item["year"] == target_session.year
+        )
+        index = sessions.index(target_session)
+    except (ResearchEntryError, ValueError, StopIteration) as error:
+        raise SourceMarketContextError(
+            "MARKET_BREADTH_CALENDAR_INVALID", str(error), category="ARGUMENT"
+        ) from error
+    saved = read_market_breadth(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        calendar_revision=payload["revision"],
+        calendar_sha256=year_metadata["resource_sha256"],
+        contract_version=SOURCE_MARKET_BREADTH_CONTRACT,
+        include_symbols=include_symbols,
+    )
+    if saved["storage_status"] != "SAVED":
+        raise SourceMarketContextError(
+            "MARKET_BREADTH_" + saved["storage_status"],
+            saved["reason"],
+            category="NOT_EVALUABLE",
+        )
+    day = saved["day"]
+    window = tuple(sessions[index - 4 : index + 1]) if index >= 4 else ()
+    saved_window = tuple(
+        day[name]
+        for name in (
+            "session_t4",
+            "session_t3",
+            "session_t2",
+            "session_t1",
+            "target_session",
+        )
+    )
+    if (
+        window != saved_window
+        or day["calendar_id"] != payload["calendar_id"]
+        or day["calendar_revision"] != payload["revision"]
+        or str(day["calendar_sha256"]).strip() != year_metadata["resource_sha256"]
+    ):
+        raise SourceMarketContextError(
+            "MARKET_BREADTH_INCOMPLETE",
+            "已存宽度的官方日历身份或窗口不匹配",
+            category="NOT_EVALUABLE",
+        )
+
+    def clock(name: str) -> str | None:
+        value = day[name]
+        return value.isoformat() if value is not None else None
+
+    cohort = SourceCohortIdentity(
+        namespace_id=str(day["namespace_id"]),
+        target_session=target_session,
+        package_sha256=package_sha256,
+        source_content_id=str(day["source_content_id"]).strip(),
+        source_capture_id=str(day["source_capture_id"]),
+        source_dataset_id=day["source_dataset_id"],
+        source_byte_count=day["source_byte_count"],
+        parser_contract=day["parser_contract"],
+        source_time_quality=day["source_time_quality"],
+        source_available_at=clock("source_available_at"),
+        capture_read_started_at=clock("capture_read_started_at"),
+        capture_validated_at=clock("capture_validated_at"),
+        source_clock_role=day["source_clock_role"],
+        raw_row_count=day["source_count"],
+        capture_expected_row_count=day["source_count"],
+        target_present_count=day["target_present_count"],
+        target_missing_count=day["target_missing_count"],
+        read_failed_count=day["read_failed_count"],
+        capture_digest=str(day["capture_digest"]).strip(),
+        observed_raw_digest=str(day["capture_digest"]).strip(),
+        calendar_id=day["calendar_id"],
+        calendar_revision=day["calendar_revision"],
+        calendar_sha256=str(day["calendar_sha256"]).strip(),
+    )
+
+    def rational(row: Mapping[str, Any], prefix: str) -> Fraction | None:
+        numerator, denominator = (
+            row[prefix + "_numerator"],
+            row[prefix + "_denominator"],
+        )
+        return None if numerator is None else Fraction(int(numerator), int(denominator))
+
+    symbols = tuple(
+        SourceMarketBreadthSymbol(
+            source_symbol=row["source_symbol"],
+            ret1_t=rational(row, "ret_t"),
+            ret1_t_minus_3=rational(row, "ret_t3"),
+            positive_t=row["positive_t"],
+            positive_t_minus_3=row["positive_t3"],
+            delta_indicator=row["delta_indicator"],
+            classification=row["classification"],
+            primary_unknown_reason=row["primary_unknown_reason"],
+            unknown_reason_detail=row["unknown_reason_detail"],
+        )
+        for row in saved["symbols"]
+    )
+    counts, n, eligible = saved["counts"], day["source_count"], day["eligible_count"]
+    calculation = SourceMarketBreadthResult(
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        session_window=window,
+        contract_version=day["contract_version"],
+        cohort=cohort,
+        n_source=n,
+        n_eligible=eligible,
+        counts=counts,
+        unknown_reason_counts=saved["unknown_reasons"],
+        coverage=Fraction(eligible, n) if n else None,
+        b_fixed_source=Fraction(
+            counts["COMPARABLE_GAIN"] - counts["COMPARABLE_LOSS"], eligible
+        )
+        if eligible
+        else None,
+        symbols=symbols,
+    )
+    source_version = {
+        "source_content_id": cohort.source_content_id,
+        "source_capture_id": cohort.source_capture_id,
+        "observed_raw_digest": cohort.observed_raw_digest,
+        "capture_digest": cohort.capture_digest,
+        "raw_row_count": cohort.raw_row_count,
+        "capture_expected_row_count": cohort.capture_expected_row_count,
+        "source_time_quality": cohort.source_time_quality,
+        "source_available_at": cohort.source_available_at,
+    }
+    pg_result = {
+        "namespace_id": cohort.namespace_id,
+        "target_raw_digest": cohort.capture_digest,
+        "history_row_count": 0,
+        "calculation_history_row_count": day["history_row_count"],
+        "storage_status": "SAVED",
+        "transaction": "REPEATABLE READ READ ONLY",
+        "source_zip_opened": False,
+        "database_write_attempted": False,
+        "ddl_executed": False,
+        "dml_executed": False,
+    }
+    calendar = {
+        "calendar_id": payload["calendar_id"],
+        "calendar_revision": payload["revision"],
+        "calendar_sha256": year_metadata["resource_sha256"],
+        "revision_chain": revisions,
+        "sessions": sessions,
+    }
+    return SourceMarketContextRead(
+        target_session,
+        research_cutoff,
+        calendar,
+        pg_result,
+        source_version,
+        cohort,
+        calculation,
+    )
+
+
 def source_market_context_payload(
     market: SourceMarketContextRead,
 ) -> dict[str, Any]:
@@ -251,6 +437,11 @@ def source_market_context_payload(
             "source_raw_digest": cohort.capture_digest,
             "recomputed_target_raw_digest": cohort.observed_raw_digest,
             "raw_digest_verified": cohort.capture_digest == cohort.observed_raw_digest,
+            "raw_digest_verification_time": (
+                "CALCULATION"
+                if pg_result.get("storage_status") == "SAVED"
+                else "CURRENT_READ"
+            ),
             "raw_row_count": cohort.raw_row_count,
             "target_present_count": cohort.target_present_count,
             "target_missing_count": cohort.target_missing_count,
@@ -297,6 +488,10 @@ def source_market_context_payload(
             "server": "127.0.0.1:5432",
             "transaction": pg_result["transaction"],
             "history_raw_row_count": pg_result["history_row_count"],
+            "source_history_rows_at_calculation": pg_result.get(
+                "calculation_history_row_count", pg_result["history_row_count"]
+            ),
+            "storage_status": pg_result.get("storage_status", "COMPUTED_READ_ONLY"),
             "source_zip_opened": pg_result["source_zip_opened"],
             "database_write_attempted": pg_result["database_write_attempted"],
             "ddl_executed": pg_result["ddl_executed"],

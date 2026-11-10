@@ -41,6 +41,47 @@ _REASON_TEXT = {
     "PHH20_SHADOW_REJECTION_TRUE": "目标日不满足PHH20日线冲高回落拒绝条件。",
     "PHH20_SHADOW_REJECTION_FALSE": "目标日触发PHH20日线冲高回落拒绝条件。",
 }
+D0_PREDICATE_FORMULAS = {
+    "LAUNCH_CONFIRM": {
+        "close_above_phc20": "C[t] > max(C[t-20..t-1])",
+        "positive_ret1": "C[t] / C[t-1] - 1 > 0",
+        "clv_at_least_060": "(C[t]-L[t]) / (H[t]-L[t]) >= 3/5",
+        "amr20_mean_prior_at_least_120": "A[t] / mean(A[t-20..t-1]) >= 6/5",
+        "not_phh20_shadow_rejection": (
+            "NOT(H[t] > max(H[t-20..t-1]) AND C[t] <= max(H[t-20..t-1]))"
+        ),
+    },
+    "RECOVERY_TURN": {
+        "trigger": "R5 OR R20",
+        "positive_ret1": "C[t]>C[t-1]",
+        "clv": "CLV>=0.55",
+        "rps5_delta3": "rps5_delta3_pp>0",
+        "amr": "A[t]/mean(A[t-20..t-1])>=1.05",
+        "close_ma20": "C[t]/MA20[t]>=0.98",
+    },
+}
+
+
+def saved_d0_predicate_presentation(
+    scenario: str, predicate_id: str, state: str, reason_code: str
+) -> dict[str, str]:
+    """从现役公式与原因合同还原已保存谓词的页面说明。"""
+    formula = D0_PREDICATE_FORMULAS.get(scenario, {}).get(predicate_id)
+    if formula is None:
+        raise ValueError("D0保存谓词没有现役公式")
+    if scenario == "RECOVERY_TURN":
+        reason = (
+            "R5或R20的输入不足。"
+            if predicate_id == "trigger" and state == "UNKNOWN"
+            else "已按R5或R20归约。"
+            if predicate_id == "trigger"
+            else "所需严格会话或来源字段不足。"
+            if state == "UNKNOWN"
+            else "已按所列公式计算。"
+        )
+    else:
+        reason = _REASON_TEXT.get(reason_code, "严格原始输入不能确定该谓词。")
+    return {"formula": formula, "reason": reason}
 
 
 def _fraction(value: Any) -> Fraction | None:
@@ -259,13 +300,7 @@ def calculate_d0_launch_confirm_raw(
     window = sessions if valid_window else sessions[-21:]
     rows = dict(history_rows_by_session)
     rows["_target_session"] = target_session
-    formulas = {
-        "close_above_phc20": "C[t] > max(C[t-20..t-1])",
-        "positive_ret1": "C[t] / C[t-1] - 1 > 0",
-        "clv_at_least_060": "(C[t]-L[t]) / (H[t]-L[t]) >= 3/5",
-        "amr20_mean_prior_at_least_120": "A[t] / mean(A[t-20..t-1]) >= 6/5",
-        "not_phh20_shadow_rejection": "NOT(H[t] > max(H[t-20..t-1]) AND C[t] <= max(H[t-20..t-1]))",
-    }
+    formulas = D0_PREDICATE_FORMULAS["LAUNCH_CONFIRM"]
     predicates: dict[str, dict[str, Any]] = {}
     if not valid_window:
         reason = (
@@ -694,31 +729,31 @@ def calculate_d0_recovery_turn_raw(
         "trigger": _predicate(
             trigger,
             reason_code=f"RECOVERY_TRIGGER_{trigger}",
-            formula="R5 OR R20",
+            formula=D0_PREDICATE_FORMULAS["RECOVERY_TURN"]["trigger"],
             inputs={"R5": r5_state, "R20": r20_state},
         ),
         "positive_ret1": predicate(
             "positive_ret1",
             close > previous if close is not None and previous is not None else None,
-            "C[t]>C[t-1]",
+            D0_PREDICATE_FORMULAS["RECOVERY_TURN"]["positive_ret1"],
             {"C_t": close, "C_previous": previous},
         ),
         "clv": predicate(
             "clv",
             clv >= Fraction(11, 20) if clv is not None else None,
-            "CLV>=0.55",
+            D0_PREDICATE_FORMULAS["RECOVERY_TURN"]["clv"],
             {"CLV": clv},
         ),
         "rps5_delta3": predicate(
             "rps5_delta3",
             delta > 0 if delta is not None else None,
-            "rps5_delta3_pp>0",
+            D0_PREDICATE_FORMULAS["RECOVERY_TURN"]["rps5_delta3"],
             {"delta_pp": delta},
         ),
         "amr": predicate(
             "amr",
             amr >= Fraction(21, 20) if amr is not None else None,
-            "A[t]/mean(A[t-20..t-1])>=1.05",
+            D0_PREDICATE_FORMULAS["RECOVERY_TURN"]["amr"],
             {"amr": amr},
         ),
         "close_ma20": predicate(
@@ -726,7 +761,7 @@ def calculate_d0_recovery_turn_raw(
             close / ma20 >= Fraction(49, 50)
             if close is not None and ma20 is not None
             else None,
-            "C[t]/MA20[t]>=0.98",
+            D0_PREDICATE_FORMULAS["RECOVERY_TURN"]["close_ma20"],
             {"C_t": close, "MA20_t": ma20},
         ),
     }

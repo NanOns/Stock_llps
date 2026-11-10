@@ -17,6 +17,7 @@ from stock_a.research.d0_launch_raw import (
     calculate_d0_launch_confirm_raw,
     calculate_d0_recovery_turn_raw,
     fraction_payload,
+    saved_d0_predicate_presentation,
 )
 from stock_a.research.d0_prior_observation import observe_prior_shapes
 from stock_a.application.source_pool_factors import read_source_pool_rps
@@ -63,6 +64,31 @@ _TRANSITIONS = (
     "UNKNOWN_TO_FALSE",
     "UNKNOWN_TO_UNKNOWN",
 )
+
+
+def present_saved_d0_scenario_day(page: Mapping[str, Any]) -> dict[str, Any]:
+    """为PG保存谓词补回现役公式和中文解释，不读取Raw或重算状态。"""
+    scenario = page.get("scenario")
+    results = []
+    for source_result in page.get("results", ()):
+        result = dict(source_result)
+        predicates = {}
+        for name, source_predicate in source_result.get("predicates", {}).items():
+            predicate = dict(source_predicate)
+            predicate.update(
+                saved_d0_predicate_presentation(
+                    scenario,
+                    name,
+                    predicate["state"],
+                    predicate["reason_code"],
+                )
+            )
+            predicates[name] = predicate
+        result["predicates"] = predicates
+        results.append(result)
+    return {**page, "results": results}
+
+
 _CHANGE_SELECTIONS = {*_TRANSITIONS, "BEFORE_ONLY", "AFTER_ONLY", "ALL"}
 _MAX_LIMIT = MAX_SOURCE_SYMBOLS
 _MAX_CHANGE_LIMIT = 2 * MAX_SOURCE_SYMBOLS

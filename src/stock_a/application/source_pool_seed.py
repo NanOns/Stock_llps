@@ -10,6 +10,7 @@ from math import sqrt
 from statistics import median
 from typing import Any, Mapping
 
+from stock_a.domain import FieldValue, unknown
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
     SOURCE_SYMBOL_PROFILE_SCOPE,
@@ -30,6 +31,11 @@ from stock_a.research.entry_history.history_preview import (
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.storage.postgres.source_raw import read_raw_daily_history_page
+from stock_a.storage.postgres.static_research_facts import (
+    StaticResearchPgError,
+    read_source_d0_scenario_day,
+    read_source_pool_seed_facts,
+)
 
 
 def _tri(value: bool | None, reason: str | None = None) -> dict[str, Any]:
@@ -466,7 +472,7 @@ def source_seed_predicates(
     }
 
 
-def read_source_pool_seed(
+def compute_source_pool_seed(
     config: Mapping[str, Any],
     *,
     target_session: date,
@@ -480,7 +486,7 @@ def read_source_pool_seed(
     include_rps_read: bool = False,
     allow_raw_profile_recompute: bool = False,
 ) -> dict[str, Any]:
-    """读取精确已存画像并复用现役Core/Profile计算未持久的Seed输入。"""
+    """按现役Core/Profile公式从已存PG原始行计算Seed，供初始化生产使用。"""
     if selected_symbols is not None and (
         not isinstance(selected_symbols, frozenset)
         or any(not isinstance(symbol, str) or not symbol for symbol in selected_symbols)
@@ -677,6 +683,9 @@ def read_source_pool_seed(
                     "core.liquidity_mean20",
                     "core.price_damage",
                     "core.ma20",
+                    "core.range_ratio",
+                    "core.atr_ratio",
+                    "core.vol_ratio",
                 )
             }
             seed["native_price"] = {
@@ -774,6 +783,305 @@ def read_source_pool_seed(
     }
     if include_rps_read:
         result["rps_read"] = rps
+    return result
+
+
+def read_source_pool_seed(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    package_sha256: str,
+    namespace_id: str,
+    profile_revision: str,
+    profile_contract: dict[str, Any],
+    history_session_count: int,
+    selected_symbols: frozenset[str] | None = None,
+    include_rps_read: bool = False,
+    allow_raw_profile_recompute: bool = False,
+) -> dict[str, Any]:
+    """读取完整PG Seed事实；没有精确已存结果时明确失败，不在GET重算全池。"""
+    if target_session > research_cutoff:
+        raise ValueError("研究目标不得晚于显式截止日")
+    if selected_symbols is not None and (
+        not isinstance(selected_symbols, frozenset)
+        or any(not isinstance(symbol, str) or not symbol for symbol in selected_symbols)
+    ):
+        raise ValueError("来源模式的指定代码集合无效")
+    rows = read_source_pool_seed_facts(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        namespace_id=namespace_id,
+        profile_revision=profile_revision,
+    )
+    d0 = read_source_d0_scenario_day(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        namespace_id=namespace_id,
+        scenario="LAUNCH_CONFIRM",
+    )
+    d0_by_symbol = {item["source_symbol"]: item for item in d0["results"]}
+    if (
+        len(rows) != d0["source_pool"]["source_count"]
+        or {item["source_symbol"] for item in rows} != set(d0_by_symbol)
+        or any(
+            item["source_capture_id"] != d0["source_version"]["source_capture_id"]
+            or item["source_content_id"] != d0["source_version"]["source_content_id"]
+            for item in rows
+        )
+    ):
+        raise StaticResearchPgError(
+            "STATIC_SEED_IDENTITY_OR_PARTITION_MISMATCH",
+            "PG Seed与D0来源捕获或完整分母不一致",
+        )
+    if any(item["history_session_count"] != history_session_count for item in rows):
+        raise StaticResearchPgError(
+            "STATIC_SEED_WINDOW_MISMATCH", "PG Seed历史窗口与请求不一致"
+        )
+
+    def field_value(row: Mapping[str, Any], stem: str) -> FieldValue:
+        quality = row[f"{stem}_quality"]
+        numerator, denominator = (
+            row.get(f"{stem}_numerator"),
+            row.get(f"{stem}_denominator"),
+        )
+        if quality == "OBSERVED" and numerator is not None and denominator is not None:
+            return FieldValue(Fraction(int(numerator), int(denominator)))
+        return unknown(str(row.get(f"{stem}_reason") or f"{stem.upper()}_UNKNOWN"))
+
+    def as_field(row: Mapping[str, Any], stem: str) -> dict[str, Any]:
+        value = field_value(row, stem)
+        return {
+            "quality": "OBSERVED" if value.quality == "OBSERVED" else "UNKNOWN",
+            "value": str(value.value) if value.quality == "OBSERVED" else None,
+            "reason": value.reason,
+        }
+
+    facts: dict[str, dict[str, Any]] = {}
+    rps_facts = {}
+    rps_endpoint_counts: dict[str, dict[str, Any]] = {}
+    core_measures = (
+        "bias20_atr",
+        "liquidity_mean20",
+        "ma20",
+        "ret1",
+        "ret5",
+        "ret20",
+        "range_ratio",
+        "atr_ratio",
+        "vol_ratio",
+    )
+    for row in rows:
+        symbol = row["source_symbol"]
+        predicates = {
+            name: _tri(
+                state == "TRUE" if state in {"TRUE", "FALSE"} else None, reason or None
+            )
+            for name, state, reason in zip(
+                row["predicate_ids"],
+                row["predicate_states"],
+                row["predicate_reasons"],
+                strict=True,
+            )
+        }
+        safety = {"state": row["safety_state"], "reasons": list(row["safety_reasons"])}
+        s1 = {"state": row["s1_state"], "reasons": list(row["s1_reasons"])}
+        s2 = {"state": row["s2_state"], "reasons": list(row["s2_reasons"])}
+        source_seed = _or(s1, s2)
+        if source_seed["state"] != row["source_seed_state"]:
+            raise StaticResearchPgError(
+                "STATIC_SEED_STATE_CONFLICT", "PG来源Seed状态与S1/S2归约不一致"
+            )
+        seed = _and(safety, source_seed)
+        raw_prewatch = {
+            "state": row["raw_prewatch_state"],
+            "reasons": list(row["raw_prewatch_reasons"]),
+            "implementation_status": "NOT_IMPLEMENTED",
+            "unbound_condition": "MANDATORY_CORE_QUALITY_CONTRACT_UNBOUND",
+        }
+        public_gate = _and(
+            *(
+                dict(predicates[key])
+                for key in (
+                    "research_universe",
+                    "actual_bar",
+                    "non_st",
+                    "normal_listing_phase",
+                    "limited_price_rule",
+                    "coordinate_ready",
+                )
+            )
+        )
+        formal_candidate = _and(public_gate, seed)
+        qualification = source_qualification_explanation(
+            predicates,
+            s1=s1,
+            s2=s2,
+            safety=safety,
+            seed=seed,
+            formal_candidate_seed=formal_candidate,
+            source_seed=source_seed,
+            prewatch=raw_prewatch,
+        )
+        core = {}
+        for name in core_measures:
+            item = as_field(row, f"core_{name}")
+            if item["quality"] == "OBSERVED":
+                item["value"] = {"exact": item["value"]}
+            core[f"core.{name}"] = item
+        core["core.price_damage"] = {
+            "quality": row["core_price_damage_quality"],
+            "value": row["core_price_damage"],
+            "reason": row["core_price_damage_reason"],
+        }
+        native_fields = {
+            f"core.{name}": as_field(row, f"core_{name}")
+            for name in ("ret1", "ret5", "ret20", "ma20")
+        }
+        native = {
+            "actual_quote": bool(row["target_actual_quote"]),
+            "close": str(
+                Fraction(
+                    int(row["target_close_numerator"]),
+                    int(row["target_close_denominator"]),
+                )
+            )
+            if row["target_close_numerator"] is not None
+            and row["target_close_denominator"] is not None
+            else None,
+            "fields": native_fields,
+        }
+        profile = {}
+        for name in ("compression", "extension", "ma_structure"):
+            profile[f"profile.{name}"] = {
+                "value": row[f"profile_{name}_value"],
+                "quality": row[f"profile_{name}_quality"],
+                "reason": row[f"profile_{name}_reason"],
+            }
+        rps = {
+            source_name: as_field(row, stored_name)
+            for source_name, stored_name in (
+                ("rps5", "rps5"),
+                ("rps5_delta3_pp", "rps5_delta3"),
+                ("rps20", "rps20"),
+                ("rps20_delta3_pp", "rps20_delta3"),
+            )
+        }
+        fact = {
+            "predicates": predicates,
+            "safety": safety,
+            "s1": s1,
+            "s2": s2,
+            "seed": seed,
+            "source_seed": source_seed,
+            "raw_prewatch": raw_prewatch,
+            "formal_eligibility": "NOT_AUTHORIZED",
+            "qualification": qualification,
+            "core": core,
+            "native_price": native,
+            "profile": profile,
+            "rps": rps,
+        }
+        saved = {}
+        for name in ("bias20_atr", "ma20", "price_damage"):
+            key = f"core_{name}"
+            saved[name] = {
+                "value": str(row[key]) if row[key] is not None else None,
+                "quality": row[f"{key}_quality"],
+                "reason": row[f"{key}_reason"],
+            }
+        fact["saved_profile_core"] = saved
+        facts[symbol] = fact
+        rps_facts[symbol] = {
+            name: field_value(row, stored_name)
+            for name, stored_name in (
+                ("rps5", "rps5"),
+                ("rps5_delta3_pp", "rps5_delta3"),
+                ("rps20", "rps20"),
+                ("rps20_delta3_pp", "rps20_delta3"),
+            )
+        }
+    all_sessions = _load_calendar(target_session)[3]
+    target_index = all_sessions.index(target_session)
+    previous_rps_session = all_sessions[target_index - 3] if target_index >= 3 else None
+    for period in (5, 20):
+        current_key = f"rps{period}"
+        current_known = sum(row[f"{current_key}_quality"] == "OBSERVED" for row in rows)
+        prior_known = sum(
+            row[f"{current_key}_quality"] == "OBSERVED"
+            and row[f"{current_key}_delta3_quality"] == "OBSERVED"
+            for row in rows
+        )
+        rps_endpoint_counts[f"{current_key}_0"] = {
+            "total": len(rows),
+            "known": current_known,
+            "unknown": len(rows) - current_known,
+            "session": target_session.isoformat(),
+        }
+        rps_endpoint_counts[f"{current_key}_3"] = {
+            "total": len(rows),
+            "known": prior_known,
+            "unknown": len(rows) - prior_known,
+            "session": previous_rps_session.isoformat()
+            if previous_rps_session
+            else None,
+        }
+    if selected_symbols is not None:
+        facts = {
+            symbol: facts[symbol] for symbol in sorted(selected_symbols & set(facts))
+        }
+    seed_counts = Counter(item["seed"]["state"] for item in facts.values())
+    first = rows[0]
+    result = {
+        "status": "SAVED",
+        "target_session": target_session,
+        "research_cutoff": research_cutoff,
+        "namespace_id": namespace_id,
+        "package_sha256": package_sha256,
+        "profile_revision": profile_revision,
+        "runtime_profile_revision": profile_revision,
+        "profile_revision_matches_runtime": True,
+        "profile_revision_comparison": {
+            "requested_profile_revision": profile_revision,
+            "stored_profile_revision": profile_revision,
+            "runtime_profile_revision": profile_revision,
+            "status": "MATCH",
+        },
+        "history_session_count": history_session_count,
+        "profile_input_note": "Core、Profile、RPS和Seed谓词全部读取现役单日typed PG事实。",
+        "stored_profile_status": "AVAILABLE",
+        "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "corporate_action_continuity": "UNKNOWN",
+        "formal_research_universe": "UNKNOWN",
+        "calendar_revision": first["calendar_revision"],
+        "endpoint_counts": rps_endpoint_counts,
+        "source_pool_total": len(rows),
+        "seed_evaluated_count": len(facts),
+        "seed_evaluation_scope": "FULL_SOURCE_POOL"
+        if selected_symbols is None
+        else "EXPLICIT_SOURCE_SYMBOLS",
+        "seed_counts": {
+            state: seed_counts[state] for state in ("TRUE", "FALSE", "UNKNOWN")
+        },
+        "facts": facts,
+    }
+    if include_rps_read:
+        result["rps_read"] = {
+            "target_session": target_session,
+            "research_cutoff": research_cutoff,
+            "namespace_id": namespace_id,
+            "package_sha256": package_sha256,
+            "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
+            "coordinate": "RAW_UNADJUSTED",
+            "corporate_action_continuity": "UNKNOWN",
+            "formal_research_universe": "UNKNOWN",
+            "calendar_revision": first["calendar_revision"],
+            "endpoint_counts": rps_endpoint_counts,
+            "facts": rps_facts,
+        }
     return result
 
 

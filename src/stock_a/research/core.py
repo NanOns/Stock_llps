@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, localcontext
+from functools import lru_cache
 from fractions import Fraction
 from statistics import mean
 from typing import Sequence
@@ -158,9 +159,26 @@ def _coordinate_error(rows: Sequence[CoreObservation]) -> str | None:
 
 
 def _known_ohlc_error(row: CoreObservation) -> str | None:
+    fields = tuple(getattr(row, name) for name in _PRICE_FIELDS)
+    try:
+        hash(fields)
+    except TypeError:
+        return _evaluate_known_ohlc_error(fields)
+    return _cached_known_ohlc_error(fields)
+
+
+@lru_cache(maxsize=8192)
+def _cached_known_ohlc_error(
+    fields: tuple[FieldValue | None, ...],
+) -> str | None:
+    return _evaluate_known_ohlc_error(fields)
+
+
+def _evaluate_known_ohlc_error(
+    fields: tuple[FieldValue | None, ...],
+) -> str | None:
     known: dict[str, Fraction] = {}
-    for name in _PRICE_FIELDS:
-        field = getattr(row, name)
+    for name, field in zip(_PRICE_FIELDS, fields, strict=True):
         if not isinstance(field, FieldValue) or field.quality != "OBSERVED":
             continue
         value, reason = _number(field, "DATA_INVALID_OHLC")

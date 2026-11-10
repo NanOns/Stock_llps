@@ -19,12 +19,13 @@ from urllib.parse import parse_qs, urlsplit
 from uuid import UUID, uuid4
 
 from stock_a.application.source_market_context import (
+    SourceMarketContextError,
     read_source_market_context,
     source_market_context_payload,
 )
 from stock_a.application.source_market_observation import (
     SourceObservationError,
-    prepare_d1_material_observation,
+    prepare_saved_d1_material_observation,
     read_d1_material_observation,
 )
 from stock_a.application.source_d1_structures import (
@@ -1184,22 +1185,207 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         def build_full_watch():
             try:
                 d0_started = time.perf_counter()
-                changes = query_source_d0_raw_launch(
-                    self.preview_server.state.config,
-                    scenario="LAUNCH_CONFIRM",
-                    action="changes",
-                    before_session=before_session,
-                    before_package_sha256=package_sha256,
-                    target_session=target_session,
-                    research_cutoff=research_cutoff,
-                    package_sha256=package_sha256,
-                    transition="ALL",
-                    offset=0,
-                    limit=10000,
-                    expected_namespace_id=namespace_id,
+                from stock_a.storage.postgres.static_research_facts import (
+                    read_source_d0_scenario_day,
                 )
+                from stock_a.application.source_d0_raw import (
+                    present_saved_d0_scenario_day,
+                )
+
+                before_day = present_saved_d0_scenario_day(
+                    read_source_d0_scenario_day(
+                        self.preview_server.state.config,
+                        target_session=before_session,
+                        package_sha256=package_sha256,
+                        namespace_id=namespace_id,
+                        scenario="LAUNCH_CONFIRM",
+                    )
+                )
+                after_day = present_saved_d0_scenario_day(
+                    read_source_d0_scenario_day(
+                        self.preview_server.state.config,
+                        target_session=target_session,
+                        package_sha256=package_sha256,
+                        namespace_id=namespace_id,
+                        scenario="LAUNCH_CONFIRM",
+                    )
+                )
+                if (
+                    before_day["source_version"]["source_content_id"]
+                    != after_day["source_version"]["source_content_id"]
+                    or before_day["official_calendar"] != after_day["official_calendar"]
+                    or before_day["session_contract"] != after_day["session_contract"]
+                    or before_day["algorithm_contract"]
+                    != after_day["algorithm_contract"]
+                ):
+                    raise PreviewHttpError(
+                        409,
+                        "SOURCE_LAUNCH_WATCH_SOURCE_IDENTITY_MISMATCH",
+                        "PG保存的D0相邻事实来源、日历或算法合同不一致",
+                    )
+
+                def endpoint(day):
+                    actual = _official_calendar(
+                        date.fromisoformat(day["target_session"])
+                    )
+                    sessions = actual["sessions"]
+                    target_index = sessions.index(
+                        date.fromisoformat(day["target_session"])
+                    )
+                    count = day["history_session_count"]
+                    window = sessions[
+                        max(0, target_index - count + 1) : target_index + 1
+                    ]
+                    states = {name: 0 for name in ("TRUE", "FALSE", "UNKNOWN")}
+                    for result in day["results"]:
+                        states[result["scenario_raw"]] += 1
+                    return {
+                        "target_session": day["target_session"],
+                        "research_cutoff": research_cutoff.isoformat(),
+                        "strict_official_sessions": [
+                            item.isoformat() for item in window
+                        ],
+                        "official_calendar": day["official_calendar"],
+                        "namespace_id": day["namespace_id"],
+                        "source_version": day["source_version"],
+                        "source_pool": {
+                            "source_count": day["source_pool"]["source_count"],
+                            "scenario_state_counts": states,
+                            "scenario_state_partition_closed": True,
+                            "scenario_state_partition_scope": "FULL_SOURCE_POOL",
+                        },
+                        "session_contract": day["session_contract"],
+                        "algorithm_contract": day["algorithm_contract"],
+                        "scenario_role": "DIAGNOSTIC_ONLY",
+                        "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
+                        "research_universe_status": "UNKNOWN",
+                        "absolute_liquidity_cny_status": "UNKNOWN_UNIT_UNVERIFIED",
+                        "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
+                        "pit_status": "NON_PIT_RETROSPECTIVE",
+                        "price_coordinate": "RAW_UNADJUSTED",
+                        "execution": {
+                            "transaction": "READ ONLY PG STORED FACTS",
+                            "database_write_attempted": False,
+                            "ddl_executed": False,
+                            "dml_executed": False,
+                        },
+                    }
+
+                before_index = {
+                    item["source_symbol"]: item for item in before_day["results"]
+                }
+                after_index = {
+                    item["source_symbol"]: item for item in after_day["results"]
+                }
+                transition_names = (
+                    "FALSE_TO_TRUE",
+                    "FALSE_TO_FALSE",
+                    "FALSE_TO_UNKNOWN",
+                    "TRUE_TO_TRUE",
+                    "TRUE_TO_FALSE",
+                    "TRUE_TO_UNKNOWN",
+                    "UNKNOWN_TO_TRUE",
+                    "UNKNOWN_TO_FALSE",
+                    "UNKNOWN_TO_UNKNOWN",
+                )
+                transition_counts = {name: 0 for name in transition_names}
+                changes_rows = []
+                for symbol in sorted(set(before_index) | set(after_index)):
+                    prior = before_index.get(symbol)
+                    current = after_index.get(symbol)
+                    prior_state = prior["scenario_raw"] if prior else None
+                    current_state = current["scenario_raw"] if current else None
+                    transition = (
+                        "BEFORE_ONLY"
+                        if current is None
+                        else "AFTER_ONLY"
+                        if prior is None
+                        else f"{prior_state}_TO_{current_state}"
+                    )
+                    if prior is not None and current is not None:
+                        transition_counts[transition] += 1
+                    changes_rows.append(
+                        {
+                            "market": symbol[:2],
+                            "source_symbol": symbol,
+                            "transition": transition,
+                            "prior_unknown": prior_state == "UNKNOWN",
+                            "before": prior,
+                            "after": current,
+                            "identity_status": "SOURCE_SYMBOL_ONLY",
+                            "price_coordinate": "RAW_UNADJUSTED",
+                            "pit_status": "NON_PIT_RETROSPECTIVE",
+                            "scenario_role": "DIAGNOSTIC_ONLY",
+                            "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
+                        }
+                    )
+                before_symbols, after_symbols = set(before_index), set(after_index)
+                comparable = len(before_symbols & after_symbols)
+                before_only = len(before_symbols - after_symbols)
+                after_only = len(after_symbols - before_symbols)
+                before_endpoint, after_endpoint = (
+                    endpoint(before_day),
+                    endpoint(after_day),
+                )
+                changes = {
+                    "ok": True,
+                    "contract": "STOCK_A_D0_LAUNCH_ADJACENT_TRANSITION_RAW_R1",
+                    "producer_version": after_day["producer_version"],
+                    "action": "changes",
+                    "scenario": "LAUNCH_CONFIRM",
+                    "pair_status": "COMPARABLE",
+                    "transition_semantics": "THREE_VALUED_KLEENE_CROSS_SESSION",
+                    "scenario_role": "DIAGNOSTIC_ONLY",
+                    "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
+                    "research_universe_status": "UNKNOWN",
+                    "absolute_liquidity_cny_status": "UNKNOWN_UNIT_UNVERIFIED",
+                    "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
+                    "pit_status": "NON_PIT_RETROSPECTIVE",
+                    "session_contract": after_day["session_contract"],
+                    "research_cutoff": research_cutoff.isoformat(),
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "entity_identity": "SOURCE_SYMBOL_ONLY",
+                    "before": before_endpoint,
+                    "after": after_endpoint,
+                    "source_key_set": {
+                        "key": "market+source_symbol",
+                        "evaluation_scope": "FULL_SOURCE_POOL",
+                        "before_count": len(before_symbols),
+                        "after_count": len(after_symbols),
+                        "comparable_intersection_count": comparable,
+                        "source_union_count": len(changes_rows),
+                        "before_only_count": before_only,
+                        "after_only_count": after_only,
+                        "pair_not_comparable_count": 0,
+                        "union_partition_closed": comparable + before_only + after_only
+                        == len(changes_rows),
+                    },
+                    "transition_counts": transition_counts,
+                    "transition_counts_scope": "FULL_SOURCE_POOL",
+                    "missing_endpoint_counts": {
+                        "BEFORE_ONLY": before_only,
+                        "AFTER_ONLY": after_only,
+                    },
+                    "selection": {
+                        "transition": "ALL",
+                        "symbol": None,
+                        "matched_count": len(changes_rows),
+                        "offset": 0,
+                        "limit": len(changes_rows),
+                        "page_count": len(changes_rows),
+                        "next_offset": None,
+                        "evaluated_before_filter_and_pagination": True,
+                    },
+                    "results": changes_rows,
+                    "execution": {
+                        "transaction": "READ ONLY PG STORED FACTS",
+                        "database_write_attempted": False,
+                        "ddl_executed": False,
+                        "dml_executed": False,
+                    },
+                }
                 d0_reader_wall_seconds = time.perf_counter() - d0_started
-            except SourceD0RawError as error:
+            except (SourceD0RawError, ValueError) as error:
                 mapped = _source_context_preview_error(error)
                 if mapped is None:
                     raise
@@ -1692,7 +1878,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         try:
             prepared, cache_hit = self.preview_server.state.source_d1_material_facts(
                 cache_key,
-                lambda: prepare_d1_material_observation(
+                lambda: prepare_saved_d1_material_observation(
                     self.preview_server.state.config,
                     target_session=target,
                     research_cutoff=cutoff,
@@ -1785,6 +1971,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "execution": {
                 **result["execution"],
                 "d1_full_pool_scan_passes": full_scan_passes,
+                "d1_pg_saved_fact_read": True,
                 "d1_full_pool_scan_wall_seconds": d1["execution"].get("wall_seconds"),
                 "reused_process_d1_material_facts": cache_hit,
                 "http_request_wall_seconds": round(
@@ -2449,12 +2636,29 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 target = _iso_date(values["target_session"])
                 cutoff = self.preview_server.state.research_cutoff
                 _require_research_cutoff(target, cutoff)
-                market = read_source_market_context(
-                    self.preview_server.state.config,
-                    target_session=target,
-                    research_cutoff=cutoff,
-                    package_sha256=_sha(values["package_sha256"]),
-                )
+                try:
+                    market = read_source_market_context(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        research_cutoff=cutoff,
+                        package_sha256=_sha(values["package_sha256"]),
+                    )
+                except SourceMarketContextError as error:
+                    if error.code not in {
+                        "MARKET_BREADTH_NOT_COMPUTED",
+                        "MARKET_BREADTH_INCOMPLETE",
+                    }:
+                        raise
+                    self._send_json(
+                        200,
+                        {
+                            "ok": True,
+                            "status": error.code.removeprefix("MARKET_BREADTH_"),
+                            "target_session": target.isoformat(),
+                            "reason": str(error),
+                        },
+                    )
+                    return
                 self._send_json(
                     200, {"ok": True, **source_market_context_payload(market)}
                 )

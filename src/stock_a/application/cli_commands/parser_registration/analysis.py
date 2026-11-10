@@ -134,6 +134,9 @@ def register_commands(commands):
         "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
     )
     research_day.add_argument(
+        "--start-session", help="可选：从PG已存来源的此日期起逐日初始化至目标会话"
+    )
+    research_day.add_argument(
         "--research-cutoff", required=True, help="研究数据截止官方会话YYYY-MM-DD"
     )
     research_day.add_argument(
@@ -149,6 +152,11 @@ def register_commands(commands):
         "--persist",
         action="store_true",
         help="以单一串行化事务幂等写入三类typed事实",
+    )
+    research_day.add_argument(
+        "--static-only",
+        action="store_true",
+        help="仅为既存Raw会话初始化R06 D0场景与Seed typed静态事实，不重算已保存D0/D1",
     )
     d0_raw = commands.add_parser(
         "source-d0-raw",
@@ -229,7 +237,7 @@ def register_commands(commands):
 
     source_market_breadth = commands.add_parser(
         "source-market-breadth",
-        help="只读计算固定日期和来源版本的RAW正收益状态差宽度",
+        help="读取或显式计算保存固定来源篮的RAW正收益状态差宽度",
     )
     source_market_breadth.add_argument(
         "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
@@ -239,6 +247,12 @@ def register_commands(commands):
     )
     source_market_breadth.add_argument(
         "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
+    )
+    source_market_breadth.add_argument(
+        "--persist", action="store_true", help="显式计算并原子保存市场宽度事实"
+    )
+    source_market_breadth.add_argument(
+        "--start-session", help="配合--persist从已存日期起逐日计算至目标日"
     )
     source_d1_breakout = commands.add_parser(
         "source-d1-breakout-preview",
@@ -408,6 +422,9 @@ def register_commands(commands):
         help="按Core MA20/ATR斜率精确符号变化筛选完整来源集合",
     )
     price_profile.add_argument("--target-session", help="精确目标交易会话YYYY-MM-DD")
+    price_profile.add_argument(
+        "--start-session", help="compute可选：从PG已存日期起逐日计算至目标日"
+    )
     price_profile.add_argument("--package-sha256", help="精确TDX来源包SHA-256")
     price_profile.add_argument(
         "--scope",

@@ -21,6 +21,7 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_history_stock,
     read_raw_daily_stock,
 )
+from stock_a.storage.postgres.market_breadth import MarketBreadthPgError
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
     SOURCE_SYMBOL_PROFILE_SCOPE,
@@ -31,6 +32,7 @@ from stock_a.application.pg_price_profiles import (
 )
 from stock_a.application.source_market_context import (
     SourceMarketContextError,
+    compute_source_market_context,
     fraction_payload as _fraction_payload,
     read_source_market_context,
     source_market_context_payload,
@@ -68,16 +70,61 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
         )
 
     try:
+        if args.start_session and not args.persist:
+            raise SourceMarketContextError(
+                "MARKET_BREADTH_RANGE_REQUIRES_PERSIST",
+                "日期范围须显式启用持久化",
+                category="ARGUMENT",
+            )
+        if args.persist:
+            from stock_a.storage.postgres.market_breadth import persist_market_breadth
+
+            targets = [target_session]
+            if args.start_session:
+                from stock_a.application.cli_commands.research.research_day import (
+                    _range_sessions,
+                )
+
+                try:
+                    targets = [
+                        day
+                        for day, _ in _range_sessions(
+                            config,
+                            _parse_session_date(args.start_session),
+                            target_session,
+                            research_cutoff,
+                            args.package_sha256,
+                        )
+                    ]
+                except ValueError as error:
+                    raise SourceMarketContextError(
+                        "MARKET_BREADTH_RANGE_INVALID", str(error), category="ARGUMENT"
+                    ) from error
+            for day in targets:
+                calculated = compute_source_market_context(
+                    config,
+                    target_session=day,
+                    research_cutoff=research_cutoff,
+                    package_sha256=args.package_sha256,
+                )
+                _emit({"ok": True, **persist_market_breadth(config, calculated)})
+            return _EXIT_OK
         market_read = read_source_market_context(
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
             package_sha256=args.package_sha256,
+            include_symbols=True,
         )
     except SourceMarketContextError as error:
         payload = {
             "ok": False,
-            "status": "REJECTED",
+            "status": (
+                error.code.removeprefix("MARKET_BREADTH_")
+                if error.code
+                in {"MARKET_BREADTH_NOT_COMPUTED", "MARKET_BREADTH_INCOMPLETE"}
+                else "REJECTED"
+            ),
             "code": error.code,
             "message": str(error),
             "database_write_attempted": False,
@@ -87,11 +134,7 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
         if error.category not in {"ARGUMENT", "NOT_EVALUABLE"}:
             payload["configuration_path"] = str(config_path)
         _emit(payload, error=True)
-        return (
-            _EXIT_ARGUMENT
-            if error.category in {"ARGUMENT", "NOT_EVALUABLE"}
-            else _EXIT_UNAVAILABLE
-        )
+        return _EXIT_ARGUMENT if error.category == "ARGUMENT" else _EXIT_UNAVAILABLE
     except RawSourcePgError as error:
         _emit(
             {
@@ -107,6 +150,17 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
             error=True,
         )
         return _EXIT_ARGUMENT if error.code.endswith("INVALID") else _EXIT_UNAVAILABLE
+    except MarketBreadthPgError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
 
     calculation = market_read.calculation
     market_payload = source_market_context_payload(market_read)
@@ -166,6 +220,12 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 _EXIT_ARGUMENT,
             )
         max_target_session = _parse_session_date(args.research_cutoff)
+        if args.start_session and args.action != "compute":
+            raise DiagnosticError(
+                "PROFILE_RANGE_ACTION_INVALID",
+                "日期范围仅适用于画像compute",
+                _EXIT_ARGUMENT,
+            )
         if args.action == "snapshots":
             result = source_symbol_price_profile_snapshots(
                 config, max_target_session=max_target_session
@@ -259,6 +319,35 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                     "PROFILE_DATE_AFTER_CUTOFF", "画像计算目标日超过显式研究截止日"
                 )
             loaded_contract = load_price_profile_contract(_CONFIG_ROOT)
+            if args.start_session:
+                from stock_a.application.cli_commands.research.research_day import (
+                    _range_sessions,
+                )
+
+                try:
+                    sessions = _range_sessions(
+                        config,
+                        _parse_session_date(args.start_session),
+                        target_session,
+                        max_target_session,
+                        args.package_sha256,
+                    )
+                except ValueError as error:
+                    raise PgPriceProfileError(
+                        "PROFILE_RANGE_INVALID", str(error)
+                    ) from error
+                for day, _has_before in sessions:
+                    item = run_source_symbol_price_profile(
+                        config,
+                        target_session=day,
+                        package_sha256=args.package_sha256,
+                        scope=args.scope,
+                        session_count=args.session_count,
+                        page_size=args.page_size,
+                        profile_contract=loaded_contract.document,
+                    )
+                    _emit({"ok": True, **item})
+                return _EXIT_OK
             result = run_source_symbol_price_profile(
                 config,
                 target_session=target_session,

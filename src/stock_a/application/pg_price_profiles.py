@@ -40,7 +40,7 @@ from stock_a.storage.postgres.source_raw import (
 
 SOURCE_SYMBOL_PROFILE_SCOPE = "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE"
 _PRODUCER_CONTRACT = "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1"
-_PRODUCER_SEMANTICS_VERSION = "CORE43_PROFILE11_SOURCE_SYMBOL_R4_NATIVE_RATIO_WIRED"
+_PRODUCER_SEMANTICS_VERSION = "CORE43_PROFILE11_SOURCE_SYMBOL_R6_CONSUMED_CORE_WIRED"
 _FIELD_SEMANTIC_KEYS = (
     "field_id",
     "producer_symbol",
@@ -70,6 +70,9 @@ _CORE_FIELDS = {
     "core.clv": "clv",
     "core.prior_high20": "prior_high20",
     "core.ret20": "ret20",
+    "core.ret1": "ret1",
+    "core.ret5": "ret5",
+    "core.liquidity_mean20": "liquidity_mean20",
     "core.pos60": "pos60",
     "core.bias20_atr": "bias20_atr",
     "core.ma_slope20_atr": "ma_slope20_atr",
@@ -354,6 +357,11 @@ def _records_for_page(
         for field_id, column in _CORE_FIELDS.items():
             field = core_fields.get(field_id)
             if not isinstance(field, Mapping):
+                if result.get("consumer_status") != "CONSUMER_FAILED":
+                    raise PgPriceProfileError(
+                        "PROFILE_CORE_FIELD_OMITTED",
+                        f"画像生产者未返回已登记字段{field_id}，拒绝伪造未知值",
+                    )
                 field = {
                     "value": None,
                     "quality": "UNKNOWN",
@@ -400,6 +408,11 @@ def _records_for_page(
         for field_id, column in _CORE_BOOLEAN_FIELDS.items():
             field = core_fields.get(field_id)
             if not isinstance(field, Mapping):
+                if result.get("consumer_status") != "CONSUMER_FAILED":
+                    raise PgPriceProfileError(
+                        "PROFILE_CORE_FIELD_OMITTED",
+                        f"画像生产者未返回已登记字段{field_id}，拒绝伪造未知值",
+                    )
                 field = {
                     "value": None,
                     "quality": "UNKNOWN",

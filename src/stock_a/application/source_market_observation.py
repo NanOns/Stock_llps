@@ -9,7 +9,6 @@ from statistics import median
 import time
 from typing import Any, Mapping
 
-from stock_a.application.source_d0_raw import query_source_d0_raw_launch
 from stock_a.application.source_market_context import (
     SourceMarketContextError,
     read_source_market_context,
@@ -49,6 +48,8 @@ from stock_a.application.source_sector_change_research import (
     read_retrospective_rotation,
 )
 from stock_a.storage.postgres.tdx_sector_members import read_rotation_snapshot_members
+from stock_a.storage.postgres.static_research_facts import read_source_d0_scenario_day
+from stock_a.storage.postgres.research_day_facts import read_source_research_day
 
 
 class SourceObservationError(ValueError):
@@ -129,32 +130,14 @@ def read_market_observation_sessions(
         scenarios = {}
         namespace = None
         for scenario in ("LAUNCH_CONFIRM", "RECOVERY_TURN"):
-            page = query_source_d0_raw_launch(
+            page = read_source_d0_scenario_day(
                 config,
-                scenario=scenario,
                 target_session=session,
-                research_cutoff=research_cutoff,
                 package_sha256=package_sha256,
-                limit=5000,
-                expected_namespace_id=namespace,
+                namespace_id=namespace,
+                scenario=scenario,
             )
             namespace = page["namespace_id"]
-            while page["selection"]["next_offset"] is not None:
-                offset = page["selection"]["next_offset"]
-                following = query_source_d0_raw_launch(
-                    config,
-                    scenario=scenario,
-                    target_session=session,
-                    research_cutoff=research_cutoff,
-                    package_sha256=package_sha256,
-                    offset=offset,
-                    limit=5000,
-                    expected_namespace_id=namespace,
-                )
-                if following["source_pool"] != page["source_pool"]:
-                    raise SourceObservationError("来源池分页分母或状态发生变化")
-                page["results"].extend(following["results"])
-                page["selection"]["next_offset"] = following["selection"]["next_offset"]
             scenarios[scenario] = page
         if previous_namespace is not None and namespace != previous_namespace:
             raise SourceObservationError("相邻会话来源namespace不一致")
@@ -1568,6 +1551,236 @@ def prepare_d1_material_observation(
         for snapshot in snapshots
     ):
         raise SourceObservationError("板块当前成员快照与D1来源namespace不一致")
+    return {
+        "d1": d1,
+        "sessions": sessions,
+        "calendar_revision": calendar_revision,
+        "snapshots": snapshots,
+    }
+
+
+def prepare_saved_d1_material_observation(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    package_sha256: str,
+    d1_history_session_count: int,
+    industry_snapshot_id: str | None,
+    concept_snapshot_id: str | None,
+) -> dict[str, Any]:
+    """只从D0/D1 typed PG事实组装现有全池材料视图，不扫描或计算Raw行情。"""
+    _target, sessions, calendar_revision = resolve_pg_history_window(
+        target_session.isoformat(), d1_history_session_count
+    )
+    saved = read_source_research_day(
+        config,
+        target_session=target_session,
+        package_sha256=package_sha256,
+        d1_history_session_count=d1_history_session_count,
+        industry_snapshot_id=industry_snapshot_id,
+        concept_snapshot_id=concept_snapshot_id,
+        include_all_results=True,
+    )
+    if saved.get("storage_status") != "SAVED":
+        raise SourceObservationError("PG没有完整D1 typed事实，拒绝读时重算")
+    rows = saved.get("results") or []
+    source_count = saved.get("d1", {}).get("source_symbol_count")
+    if (
+        type(source_count) is not int
+        or len(rows) != source_count
+        or saved.get("pagination", {}).get("total_count") != source_count
+        or any(len(item.get("structures", [])) != len(STRUCTURE_TYPES) for item in rows)
+    ):
+        raise SourceObservationError("PG D1逐股五类事实没有闭合到完整来源分母")
+    started = time.perf_counter()
+    by_symbol: dict[str, dict[str, Any]] = {}
+    details: dict[str, list[dict[str, Any]]] = {}
+    status_names = (
+        "MATERIAL_CHANGE",
+        "COUNT_ONLY",
+        "UNCHANGED",
+        "UNKNOWN",
+        "NOT_COMPARABLE",
+        "NOT_EVALUABLE",
+        "NOT_APPLICABLE",
+    )
+    status_columns = {
+        "MATERIAL_CHANGE": "material_change_anchor_count",
+        "COUNT_ONLY": "count_only_anchor_count",
+        "UNCHANGED": "unchanged_anchor_count",
+        "UNKNOWN": "unknown_anchor_count",
+        "NOT_COMPARABLE": "not_comparable_anchor_count",
+        "NOT_EVALUABLE": "not_evaluable_anchor_count",
+        "NOT_APPLICABLE": "not_applicable_anchor_count",
+    }
+    for stock in rows:
+        symbol = stock["source_symbol"]
+        anchor_counts = {}
+        material_counts = {}
+        statuses_by_type = {}
+        aggregate_statuses: Counter[str] = Counter()
+        for structure in stock["structures"]:
+            kind = structure["structure_type"]
+            anchor_counts[kind] = structure["historical_anchor_count"]
+            material_counts[kind] = structure["material_change_anchor_count"]
+            statuses = {
+                status: structure[column]
+                for status, column in status_columns.items()
+                if structure[column]
+            }
+            statuses_by_type[kind] = statuses
+            aggregate_statuses.update(statuses)
+        reasons_by_type = {kind: Counter() for kind in STRUCTURE_TYPES}
+        detail_rows = []
+        for anchor in stock.get("material_anchors", []):
+            item = dict(anchor)
+            item["type"] = item.get("structure_type")
+            detail_rows.append(item)
+            if item.get("material_change_classification") == "MATERIAL_CHANGE":
+                for reason in set(item.get("material_change_reasons") or ()):
+                    reasons_by_type[item["structure_type"]][reason] += 1
+        reason_by_type = {kind: dict(reasons_by_type[kind]) for kind in STRUCTURE_TYPES}
+        reason_counts: Counter[str] = Counter()
+        for counts in reason_by_type.values():
+            reason_counts.update(counts)
+        by_symbol[symbol] = {
+            "anchor_counts_by_type": anchor_counts,
+            "material_change_anchor_counts_by_type": material_counts,
+            "material_change_status_counts": dict(aggregate_statuses),
+            "material_change_status_counts_by_type": statuses_by_type,
+            "material_change_reason_anchor_counts": dict(reason_counts),
+            "material_change_reason_anchor_counts_by_type": reason_by_type,
+        }
+        details[symbol] = detail_rows
+
+    summaries = _d1_material_scope_summaries(
+        by_symbol, structure_type=None, material_change_reason=None
+    )
+    totals = _d1_material_scope_totals(
+        summaries, structure_type=None, material_change_reason=None
+    )
+    group_counts = Counter(item["group"] for item in summaries.values())
+    if len(summaries) != source_count or sum(group_counts.values()) != source_count:
+        raise SourceObservationError("PG D1股票互斥分组没有闭合到来源分母")
+    first_structure = rows[0]["structures"][0]
+    structure_counts = {}
+    for kind in STRUCTURE_TYPES:
+        type_rows = [
+            structure
+            for stock in rows
+            for structure in stock["structures"]
+            if structure["structure_type"] == kind
+        ]
+        state_counts = Counter(item["generation_state"] for item in type_rows)
+        structure_counts[kind] = {
+            **{
+                state: state_counts[state]
+                for state in ("GENERATED", "NOT_GENERATED", "UNKNOWN")
+            },
+            "partition_closed": len(type_rows) == source_count,
+        }
+    d1 = {
+        "ok": True,
+        "status": "SOURCE_LEVEL_D1_STRUCTURE_CHANGE_DISCOVERY",
+        "contract": "SOURCE_D1_STRUCTURE_R1",
+        "research_mode": "NON_PIT_RETROSPECTIVE",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "target_session": target_session.isoformat(),
+        "research_cutoff": research_cutoff.isoformat(),
+        "calendar": {
+            "calendar_id": first_structure["calendar_id"],
+            "calendar_revision": saved["calendar_revision"],
+            "calendar_sha256": saved["calendar_sha256"],
+            "official_session_count": len(sessions),
+            "history_start": sessions[0].isoformat(),
+            "history_end": sessions[-1].isoformat(),
+        },
+        "source": {
+            "namespace_id": saved["namespace_id"],
+            "package_sha256": package_sha256,
+            "source_content_id": saved["source_content_id"],
+            "source_capture_id": saved["target_capture_id"],
+            "raw_row_count": source_count,
+            "capture_expected_row_count": source_count,
+            "source_time_quality": first_structure["source_time_quality"],
+            "source_clock_role": first_structure["source_clock_role"],
+        },
+        "source_pool_count": source_count,
+        "evaluated_source_symbol_count": source_count,
+        "source_pool_partition_closed": True,
+        "structure_type_counts": {
+            kind: structure_counts[kind] for kind in STRUCTURE_TYPES
+        },
+        "historical_anchor_changes": {
+            "status": "COMPLETE_FULL_POOL_ADJACENT_SESSION_SCAN",
+            "material_change_contract": saved["d1_material_change_contract"],
+            "previous_official_session": saved["before_session"],
+            "target_session": target_session.isoformat(),
+            "official_sessions_adjacent": True,
+            "source_pool_symbol_denominator": source_count,
+            "evaluated_source_symbol_count": source_count,
+            "effective_old_anchor_count": totals["historical_anchor_count"],
+            "effective_old_anchor_count_by_type": totals[
+                "historical_anchor_count_by_type"
+            ],
+            "material_change_partition_closed": True,
+            "material_change_count": totals["material_change_anchor_count"],
+            "material_change_distinct_source_symbol_count": totals[
+                "material_change_distinct_symbol_count"
+            ],
+            "material_change_status_counts": totals["material_change_status_counts"],
+            "material_change_status_counts_by_type": totals[
+                "material_change_status_counts_by_type"
+            ],
+            "material_change_reason_anchor_counts": totals[
+                "material_change_reason_anchor_counts"
+            ],
+            "material_change_reason_anchor_counts_by_type": totals[
+                "material_change_reason_anchor_counts_by_type"
+            ],
+            "material_change_reason_distinct_source_symbol_counts": totals[
+                "material_change_reason_distinct_symbol_counts"
+            ],
+            "source_symbol_group_counts": dict(sorted(group_counts.items())),
+            "source_symbol_group_partition_closed": True,
+            "source_symbol_material_summary": summaries,
+            "source_symbol_d1_details": details,
+        },
+        "page": {
+            "offset": 0,
+            "limit": 0,
+            "result_count": 0,
+            "event_total": totals["material_change_anchor_count"],
+            "next_offset": None,
+            "pagination_unit": "anchor_event",
+        },
+        "formal_downstream": {
+            "formal_p15_anchor": "NOT_CREATED",
+            "formal_d2": "NOT_CREATED",
+            "priority": "NOT_EVALUATED",
+            "focus": "NOT_EVALUATED",
+            "trade_signal": "NOT_EVALUATED",
+        },
+        "execution": {
+            "full_pool_scan_passes": 0,
+            "database_mode": "READ_ONLY_PG_TYPED_FACTS",
+            "database_write_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+            "wall_seconds": round(time.perf_counter() - started, 6),
+        },
+    }
+    snapshots = [
+        read_rotation_snapshot_members(config, snapshot_id=snapshot_id, board_kind=kind)
+        for kind, snapshot_id in (
+            ("INDUSTRY", industry_snapshot_id),
+            ("CONCEPT", concept_snapshot_id),
+        )
+        if snapshot_id is not None
+    ]
+    if any(snapshot["namespace_id"] != saved["namespace_id"] for snapshot in snapshots):
+        raise SourceObservationError("板块成员快照与PG D1事实namespace不一致")
     return {
         "d1": d1,
         "sessions": sessions,

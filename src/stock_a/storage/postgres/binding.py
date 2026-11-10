@@ -102,6 +102,24 @@ _MIGRATIONS = (
         ("migrations", "0015_r06_source_research_day_facts.sql"),
         "759e4a06c5417dd7f3e52c5430234e49a3addc7a571666970ecd3193510e870c",
     ),
+    (
+        16,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0016_r06_profile_consumed_core.sql"),
+        "705ea6cbe695e30ed0b177c0b9cbb83c74105daa0a408e701aaae5bc6bb18b09",
+    ),
+    (
+        17,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0017_r06_source_market_breadth.sql"),
+        "d4d00de94e6158c84153b20d87c54ec870787fd7529e1b93dadd6510a3cbea28",
+    ),
+    (
+        18,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0018_r06_source_pool_static_facts.sql"),
+        "e78d5057e705e70f7f5c9ee1947c6b099086bdfffe11c250a1665d5d8a6d61a7",
+    ),
 )
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
@@ -115,6 +133,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R04_R05_RESEARCH_FACTS_R2": frozenset({13}),
     "R04_R05_SOURCE_D1_EVENTS_R2": frozenset({14}),
     "R06_BACKEND_D0_D1_PG_PERSISTENCE_CODE_R1": frozenset({15}),
+    "R06_ALL_EXISTING_STATIC_RESEARCH_PG_CLOSED_R1": frozenset({16, 17, 18}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -199,6 +218,15 @@ _RELATIONS_BY_MIGRATION_COUNT[15] = _RELATIONS_BY_MIGRATION_COUNT[14] | {
     "source_d0_launch_day_facts",
     "source_d1_structure_day_facts",
     "source_d1_material_anchor_day_facts",
+}
+_RELATIONS_BY_MIGRATION_COUNT[16] = _RELATIONS_BY_MIGRATION_COUNT[15]
+_RELATIONS_BY_MIGRATION_COUNT[17] = _RELATIONS_BY_MIGRATION_COUNT[16] | {
+    "source_market_breadth_days",
+    "source_market_breadth_symbols",
+}
+_RELATIONS_BY_MIGRATION_COUNT[18] = _RELATIONS_BY_MIGRATION_COUNT[17] | {
+    "source_d0_scenario_day_facts",
+    "source_pool_seed_day_facts",
 }
 
 
