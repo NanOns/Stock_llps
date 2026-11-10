@@ -391,13 +391,35 @@ def _seed_rows(
             "price_coordinate": "RAW_UNADJUSTED",
         }
         for name in _CORE_MEASURES:
-            field = _field(core, f"core.{name}")
+            field = _field(
+                native.get("fields", {}) if name in {"ret1", "ret5", "ret20"} else core,
+                f"core.{name}",
+            )
             numerator, denominator = _fraction_parts(field.get("value"))
+            quality = field.get("quality", "UNKNOWN")
+            if name in {"ret1", "ret5", "ret20"} and quality == "UNKNOWN_DATA":
+                quality = "UNKNOWN"
+            if name in {"ret1", "ret5", "ret20"} and (
+                quality not in {"OBSERVED", "UNKNOWN", "NOT_APPLICABLE"}
+                or (
+                    quality == "OBSERVED"
+                    and (
+                        numerator is None or denominator is None or field.get("reason")
+                    )
+                )
+                or (
+                    quality != "OBSERVED"
+                    and (numerator is not None or not field.get("reason"))
+                )
+            ):
+                raise StaticResearchPgError(
+                    "STATIC_SEED_RETURN_INCOMPLETE", "Seed收益字段缺少精确值或未知原因"
+                )
             values.update(
                 {
                     f"core_{name}_numerator": numerator,
                     f"core_{name}_denominator": denominator,
-                    f"core_{name}_quality": field.get("quality", "UNKNOWN"),
+                    f"core_{name}_quality": quality,
                     f"core_{name}_reason": field.get("reason"),
                 }
             )
@@ -841,9 +863,64 @@ def read_source_pool_seed_facts(
     return result
 
 
+def read_seed_profile_returns(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    package_sha256: str,
+    namespace_id: str,
+    profile_revision: str,
+    producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R1",
+) -> dict[str, dict[str, Any]]:
+    """按完整身份连接旧Seed与同窗口画像，返回来源明确的收益字段。"""
+    columns = tuple(
+        f"{name}_{part}"
+        for name in ("ret1", "ret5", "ret20")
+        for part in ("exact_numerator", "exact_denominator", "quality", "reason")
+    )
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        actual_namespace,
+    ):
+        if namespace_id != actual_namespace:
+            raise StaticResearchPgError(
+                "STATIC_SEED_NAMESPACE_MISMATCH", "Seed读取namespace不匹配"
+            )
+        cursor.execute(
+            f"""SELECT s.source_symbol, {", ".join("p." + name for name in columns)}
+FROM {_SEED_TABLE} s
+JOIN stock.source_symbol_price_profiles p
+  ON p.namespace_id=s.namespace_id AND p.target_session=s.target_session
+ AND p.source_symbol=s.source_symbol AND p.package_sha256=s.package_sha256
+ AND p.profile_revision=s.profile_revision AND p.source_capture_id=s.source_capture_id
+ AND p.history_window_start=s.history_window_start AND p.history_window_end=s.history_window_end
+ AND p.history_requested_session_count=s.history_session_count
+ AND p.history_calendar_id=s.calendar_id
+ AND p.price_coordinate=s.price_coordinate
+WHERE s.namespace_id=%s AND s.target_session=%s AND s.package_sha256=%s
+  AND s.profile_revision=%s AND s.producer_version=%s ORDER BY s.source_symbol""",
+            (
+                namespace_id,
+                target_session,
+                package_sha256,
+                profile_revision,
+                producer_version,
+            ),
+        )
+        rows = cursor.fetchall()
+    result = {row[0]: dict(zip(columns, row[1:], strict=True)) for row in rows}
+    if len(result) != len(rows):
+        raise StaticResearchPgError(
+            "STATIC_SEED_PROFILE_DUPLICATE", "Seed与画像连接出现重复证券"
+        )
+    return result
+
+
 __all__ = [
     "StaticResearchPgError",
     "persist_static_research_day",
     "read_source_d0_scenario_day",
     "read_source_pool_seed_facts",
+    "read_seed_profile_returns",
 ]

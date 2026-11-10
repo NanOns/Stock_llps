@@ -40,6 +40,7 @@ from stock_a.storage.postgres.static_research_facts import (
     StaticResearchPgError,
     read_source_d0_scenario_day,
     read_source_pool_seed_facts,
+    read_seed_profile_returns,
 )
 
 
@@ -975,7 +976,8 @@ def read_source_pool_seed(
         len(rows) != d0["source_pool"]["source_count"]
         or {item["source_symbol"] for item in rows} != set(d0_by_symbol)
         or any(
-            item["source_capture_id"] != d0["source_version"]["source_capture_id"]
+            str(item["source_capture_id"])
+            != str(d0["source_version"]["source_capture_id"])
             or item["source_content_id"] != d0["source_version"]["source_content_id"]
             for item in rows
         )
@@ -988,6 +990,75 @@ def read_source_pool_seed(
         raise StaticResearchPgError(
             "STATIC_SEED_WINDOW_MISMATCH", "PG Seed历史窗口与请求不一致"
         )
+    _target, _sessions, calendar_revision = resolve_pg_history_window(
+        target_session.isoformat(), history_session_count
+    )
+    runtime_revision = _profile_revision(
+        scope=SOURCE_SYMBOL_PROFILE_SCOPE,
+        semantics_sha256=_profile_semantics_sha256(profile_contract),
+        calendar_id=rows[0]["calendar_id"],
+        calendar_revision=calendar_revision,
+        history_session_count=history_session_count,
+    )
+    if profile_revision != runtime_revision:
+        raise StaticResearchPgError(
+            "STATIC_SEED_PROFILE_REVISION_MISMATCH",
+            "已存Seed画像修订与当前计算语义不一致",
+        )
+
+    legacy_returns = any(
+        item[f"core_{name}_quality"] == "UNKNOWN"
+        and item[f"core_{name}_reason"] is None
+        and item[f"core_{name}_numerator"] is None
+        and item[f"core_{name}_denominator"] is None
+        for item in rows
+        for name in ("ret1", "ret5", "ret20")
+    )
+    profile_returns = (
+        read_seed_profile_returns(
+            config,
+            target_session=target_session,
+            package_sha256=package_sha256,
+            namespace_id=namespace_id,
+            profile_revision=profile_revision,
+        )
+        if legacy_returns
+        else {}
+    )
+    for item in rows:
+        profile = profile_returns.get(item["source_symbol"], {})
+        item["return_field_sources"] = {}
+        for name in ("ret1", "ret5", "ret20"):
+            stem = f"core_{name}"
+            if not (
+                item[f"{stem}_quality"] == "UNKNOWN"
+                and item[f"{stem}_reason"] is None
+                and item[f"{stem}_numerator"] is None
+                and item[f"{stem}_denominator"] is None
+            ):
+                item["return_field_sources"][name] = "SAVED_SEED"
+                continue
+            quality = profile.get(f"{name}_quality")
+            reason = profile.get(f"{name}_reason")
+            numerator = profile.get(f"{name}_exact_numerator")
+            denominator = profile.get(f"{name}_exact_denominator")
+            if (
+                quality == "OBSERVED"
+                and numerator is not None
+                and denominator is not None
+                and denominator > 0
+            ):
+                item[f"{stem}_quality"] = quality
+                item[f"{stem}_numerator"] = numerator
+                item[f"{stem}_denominator"] = denominator
+                item["return_field_sources"][name] = "SAME_WINDOW_SAVED_PROFILE"
+            elif quality in {"UNKNOWN", "NOT_APPLICABLE"} and reason:
+                item[f"{stem}_quality"] = quality
+                item[f"{stem}_reason"] = reason
+                item["return_field_sources"][name] = "SAME_WINDOW_SAVED_PROFILE"
+            else:
+                item[f"{stem}_reason"] = "LEGACY_SEED_RETURN_NOT_STORED"
+                item["return_field_sources"][name] = "UNAVAILABLE"
 
     def field_value(row: Mapping[str, Any], stem: str) -> FieldValue:
         quality = row[f"{stem}_quality"]
@@ -1084,10 +1155,12 @@ def read_source_pool_seed(
             "value": row["core_price_damage"],
             "reason": row["core_price_damage_reason"],
         }
-        native_fields = {
-            f"core.{name}": as_field(row, f"core_{name}")
-            for name in ("ret1", "ret5", "ret20", "ma20")
-        }
+        native_fields = {}
+        for name in ("ret1", "ret5", "ret20", "ma20"):
+            item = as_field(row, f"core_{name}")
+            if item["quality"] == "OBSERVED":
+                item["value"] = {"exact": item["value"]}
+            native_fields[f"core.{name}"] = item
         native = {
             "actual_quote": bool(row["target_actual_quote"]),
             "close": str(
@@ -1100,6 +1173,7 @@ def read_source_pool_seed(
             and row["target_close_denominator"] is not None
             else None,
             "fields": native_fields,
+            "return_field_sources": row["return_field_sources"],
         }
         profile = {}
         for name in ("compression", "extension", "ma_structure"):
@@ -1135,11 +1209,15 @@ def read_source_pool_seed(
         saved = {}
         for name in ("bias20_atr", "ma20", "price_damage"):
             key = f"core_{name}"
-            saved[name] = {
-                "value": str(row[key]) if row[key] is not None else None,
-                "quality": row[f"{key}_quality"],
-                "reason": row[f"{key}_reason"],
-            }
+            saved[name] = (
+                {
+                    "value": str(row[key]) if row[key] is not None else None,
+                    "quality": row[f"{key}_quality"],
+                    "reason": row[f"{key}_reason"],
+                }
+                if name == "price_damage"
+                else as_field(row, key)
+            )
         fact["saved_profile_core"] = saved
         facts[symbol] = fact
         rps_facts[symbol] = {
@@ -1154,13 +1232,59 @@ def read_source_pool_seed(
     all_sessions = _load_calendar(target_session)[3]
     target_index = all_sessions.index(target_session)
     previous_rps_session = all_sessions[target_index - 3] if target_index >= 3 else None
+    prior_rows = None
+    if previous_rps_session is not None:
+        try:
+            _, _, prior_calendar_revision = resolve_pg_history_window(
+                previous_rps_session.isoformat(), history_session_count
+            )
+            prior_revision = _profile_revision(
+                scope=SOURCE_SYMBOL_PROFILE_SCOPE,
+                semantics_sha256=_profile_semantics_sha256(profile_contract),
+                calendar_id=rows[0]["calendar_id"],
+                calendar_revision=prior_calendar_revision,
+                history_session_count=history_session_count,
+            )
+            prior_rows = read_source_pool_seed_facts(
+                config,
+                target_session=previous_rps_session,
+                package_sha256=package_sha256,
+                namespace_id=namespace_id,
+                profile_revision=prior_revision,
+            )
+            prior_d0 = read_source_d0_scenario_day(
+                config,
+                target_session=previous_rps_session,
+                package_sha256=package_sha256,
+                namespace_id=namespace_id,
+                scenario="LAUNCH_CONFIRM",
+            )
+            if (
+                len(prior_rows) != prior_d0["source_pool"]["source_count"]
+                or {item["source_symbol"] for item in prior_rows}
+                != {item["source_symbol"] for item in prior_d0["results"]}
+                or any(
+                    str(item["source_capture_id"])
+                    != str(prior_d0["source_version"]["source_capture_id"])
+                    or item["source_content_id"]
+                    != prior_d0["source_version"]["source_content_id"]
+                    for item in prior_rows
+                )
+            ):
+                raise StaticResearchPgError(
+                    "STATIC_PRIOR_RPS_INCOMPLETE", "前一RPS端点来源池未闭合"
+                )
+        except StaticResearchPgError as error:
+            if error.code not in {"STATIC_SEED_NOT_COMPUTED", "STATIC_D0_NOT_COMPUTED"}:
+                raise
+            prior_rows = None
     for period in (5, 20):
         current_key = f"rps{period}"
         current_known = sum(row[f"{current_key}_quality"] == "OBSERVED" for row in rows)
-        prior_known = sum(
-            row[f"{current_key}_quality"] == "OBSERVED"
-            and row[f"{current_key}_delta3_quality"] == "OBSERVED"
-            for row in rows
+        prior_known = (
+            sum(row[f"{current_key}_quality"] == "OBSERVED" for row in prior_rows)
+            if prior_rows is not None
+            else None
         )
         rps_endpoint_counts[f"{current_key}_0"] = {
             "total": len(rows),
@@ -1169,9 +1293,12 @@ def read_source_pool_seed(
             "session": target_session.isoformat(),
         }
         rps_endpoint_counts[f"{current_key}_3"] = {
-            "total": len(rows),
+            "total": len(prior_rows) if prior_rows is not None else None,
             "known": prior_known,
-            "unknown": len(rows) - prior_known,
+            "unknown": len(prior_rows) - prior_known
+            if prior_rows is not None
+            else None,
+            "status": "SAVED" if prior_rows is not None else "NOT_COMPUTED",
             "session": previous_rps_session.isoformat()
             if previous_rps_session
             else None,
@@ -1189,16 +1316,16 @@ def read_source_pool_seed(
         "namespace_id": namespace_id,
         "package_sha256": package_sha256,
         "profile_revision": profile_revision,
-        "runtime_profile_revision": profile_revision,
+        "runtime_profile_revision": runtime_revision,
         "profile_revision_matches_runtime": True,
         "profile_revision_comparison": {
             "requested_profile_revision": profile_revision,
             "stored_profile_revision": profile_revision,
-            "runtime_profile_revision": profile_revision,
+            "runtime_profile_revision": runtime_revision,
             "status": "MATCH",
         },
         "history_session_count": history_session_count,
-        "profile_input_note": "Core、Profile、RPS和Seed谓词全部读取现役单日typed PG事实。",
+        "profile_input_note": "Seed、D0和RPS读取已存事实；旧Seed遗漏的收益字段仅从同捕获、同窗口及精确画像修订补充，保留来源标记。",
         "stored_profile_status": "AVAILABLE",
         "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
         "price_coordinate": "RAW_UNADJUSTED",
