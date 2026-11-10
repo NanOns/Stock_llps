@@ -1180,6 +1180,7 @@ def _d1_material_scope_totals(
     anchor_counts_by_type: Counter[str] = Counter()
     material_anchor_counts_by_type: Counter[str] = Counter()
     reason_anchor_counts: Counter[str] = Counter()
+    reason_symbol_counts: Counter[str] = Counter()
     reason_anchor_counts_by_type = {kind: Counter() for kind in STRUCTURE_TYPES}
     status_counts_by_type = {kind: Counter() for kind in STRUCTURE_TYPES}
     group_counts: Counter[str] = Counter()
@@ -1193,6 +1194,11 @@ def _d1_material_scope_totals(
         for kind, count in item["material_change_anchor_counts_by_type"].items():
             material_anchor_counts_by_type[kind] += count
         reason_anchor_counts.update(item["material_change_reason_anchor_counts"])
+        reason_symbol_counts.update(
+            reason
+            for reason, count in item["material_change_reason_anchor_counts"].items()
+            if count > 0
+        )
         for kind, counts in item[
             "material_change_reason_anchor_counts_by_type"
         ].items():
@@ -1235,6 +1241,9 @@ def _d1_material_scope_totals(
         "not_applicable_anchor_count": status_counts.get("NOT_APPLICABLE", 0),
         "material_change_reason_anchor_counts": dict(
             sorted(reason_anchor_counts.items())
+        ),
+        "material_change_reason_distinct_symbol_counts": dict(
+            sorted(reason_symbol_counts.items())
         ),
         "material_change_reason_anchor_counts_by_type": {
             kind: dict(sorted(counts.items()))
