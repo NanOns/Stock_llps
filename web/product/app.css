@@ -498,6 +498,24 @@ select:focus {
 .table-card {
   overflow: hidden;
 }
+.d0-board-filters {
+  flex-wrap: wrap;
+  padding: 14px 20px;
+}
+.d0-board-filters input {
+  flex: 1 1 220px;
+}
+.d1-sector-panel {
+  margin-top: 26px;
+}
+.market-d0-card #marketD0Result {
+  margin: 14px 0;
+  color: var(--muted);
+  line-height: 1.7;
+}
+.market-d0-card #marketD0Result p {
+  margin: 5px 0;
+}
 .table-caption {
   display: flex;
   justify-content: space-between;

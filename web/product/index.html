@@ -232,54 +232,120 @@
               <div>
                 <span class="section-kicker">SECTOR EXPLORER</span>
                 <h2>行业与 GN 概念</h2>
-                <p>查看变化板块，并打开成员明细。</p>
+                <p>
+                  先浏览同日已证 D0 新增变化；成员快照回看始终标为 NON_PIT。
+                </p>
               </div>
-              <div class="filters">
-                <label class="sr-only" for="boardSearch">搜索板块</label>
-                <input id="boardSearch" placeholder="搜索板块名称或编号" />
-                <button id="searchBoards" class="button subtle">搜索</button>
-                <label class="sr-only" for="boardKind">板块类型</label
-                ><select id="boardKind">
+            </div>
+            <section class="card table-card">
+              <div class="table-caption">
+                <span id="d0BoardSummary">等待当前日期的 D0 结果</span
+                ><span>FALSE→TRUE · 当前成员快照 NON_PIT</span>
+              </div>
+              <div class="filters d0-board-filters">
+                <label class="sr-only" for="d0BoardSearch"
+                  >搜索 D0 变化板块</label
+                >
+                <input id="d0BoardSearch" placeholder="搜索板块名称或编号" />
+                <button id="searchD0Boards" class="button subtle">搜索</button>
+                <button id="clearD0BoardFilters" class="button subtle">
+                  清除筛选
+                </button>
+                <label class="sr-only" for="d0BoardKind">D0 板块类型</label
+                ><select id="d0BoardKind">
                   <option value="ALL">全部类型</option>
                   <option value="INDUSTRY">行业</option>
                   <option value="CONCEPT">GN 概念</option>
                 </select>
               </div>
-            </div>
-            <section class="card table-card">
-              <div class="table-caption">
-                <span id="boardSummary">等待研究结果</span
-                ><span>当前成员快照 · NON_PIT</span>
-              </div>
               <div class="table-scroll">
                 <table>
                   <thead>
                     <tr>
-                      <th>板块名称</th>
+                      <th>变化板块</th>
                       <th>类型</th>
-                      <th>成员总数</th>
-                      <th>映射 / 未映射</th>
-                      <th>变化成员</th>
+                      <th>D0 新增成员</th>
+                      <th>快照观测</th>
+                      <th>身份时态</th>
                       <th></th>
                     </tr>
                   </thead>
-                  <tbody id="boardRows">
+                  <tbody id="d0BoardRows">
                     <tr>
                       <td colspan="6" class="empty">
-                        正在准备当前日期的板块研究。
+                        正在读取当前日期的 D0 变化板块。
                       </td>
                     </tr>
                   </tbody>
                 </table>
               </div>
               <div class="pagination">
-                <button id="boardPrev" class="button subtle" disabled>
-                  上一页</button
-                ><span id="boardPage">—</span
-                ><button id="boardNext" class="button subtle" disabled>
+                <button id="d0BoardPrev" class="button subtle" disabled>
+                  上一页
+                </button>
+                <span id="d0BoardPage">—</span>
+                <button id="d0BoardNext" class="button subtle" disabled>
                   下一页
                 </button>
               </div>
+            </section>
+            <section id="d1SectorPanel" class="d1-sector-panel" hidden>
+              <div class="section-heading">
+                <div>
+                  <span class="section-kicker">DEEPER D1 RESEARCH</span>
+                  <h2>深入 D1 结构变化</h2>
+                  <p>
+                    仅在明确点击顶部“按需深入 D1 结构研究”后读取完整来源池。
+                  </p>
+                </div>
+                <div class="filters">
+                  <label class="sr-only" for="boardSearch">搜索 D1 板块</label>
+                  <input id="boardSearch" placeholder="搜索板块名称或编号" />
+                  <button id="searchBoards" class="button subtle">搜索</button>
+                  <label class="sr-only" for="boardKind">D1 板块类型</label
+                  ><select id="boardKind">
+                    <option value="ALL">全部类型</option>
+                    <option value="INDUSTRY">行业</option>
+                    <option value="CONCEPT">GN 概念</option>
+                  </select>
+                </div>
+              </div>
+              <section class="card table-card">
+                <div class="table-caption">
+                  <span id="boardSummary">等待 D1 深入研究</span
+                  ><span>材料变化交集 · 当前成员快照 NON_PIT</span>
+                </div>
+                <div class="table-scroll">
+                  <table>
+                    <thead>
+                      <tr>
+                        <th>板块名称</th>
+                        <th>类型</th>
+                        <th>成员总数</th>
+                        <th>映射 / 未映射</th>
+                        <th>变化成员</th>
+                        <th></th>
+                      </tr>
+                    </thead>
+                    <tbody id="boardRows">
+                      <tr>
+                        <td colspan="6" class="empty">
+                          等待用户主动触发 D1 深入研究。
+                        </td>
+                      </tr>
+                    </tbody>
+                  </table>
+                </div>
+                <div class="pagination">
+                  <button id="boardPrev" class="button subtle" disabled>
+                    上一页
+                  </button>
+                  <span id="boardPage">—</span>
+                  <button id="boardNext" class="button subtle" disabled>
+                    下一页
+                  </button>
+                </div>
+              </section>
             </section>
           </section>
           <section id="stocks" class="page" aria-label="个股研究">
@@ -392,6 +458,19 @@
               <p>
                 正式市场四轴、指数压力：NOT_COMPUTED，缺少真实消费者及必要输入。
               </p>
+            </section>
+            <section class="card market-d0-card">
+              <h2>同日已证 D0 新增变化</h2>
+              <p>
+                来源级相邻会话
+                FALSE→TRUE；新增股票数按来源代码去重，板块成员关系可重复归属。
+              </p>
+              <div id="marketD0Result" role="status">
+                等待当前日期的 D0 结果。
+              </div>
+              <button class="button primary" data-goto="sectors">
+                查看已证变化板块
+              </button>
             </section>
           </section>
           <section id="diagnostics" class="page" aria-label="数据与诊断">

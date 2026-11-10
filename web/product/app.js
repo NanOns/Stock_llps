@@ -18,6 +18,10 @@ const state = {
   d0Controller: null,
   d0Request: 0,
   d0Offset: 0,
+  d0Result: null,
+  d0Status: "NOT_LOADED",
+  d0Error: null,
+  d0BoardPage: 0,
   d0Board: null,
   d0BoardOffset: 0,
   d0BoardRequest: 0,
@@ -174,8 +178,11 @@ function gotoPage(page) {
   const extra = ["focus", "market", "diagnostics"].includes(page);
   $("refreshResearch").hidden = extra;
   $("contextNotice").hidden = extra;
-  $("d1MaterialFilters").hidden = !["sectors", "stocks"].includes(page);
-  $("d1MaterialQuality").hidden = !["sectors", "stocks"].includes(page);
+  $("d1MaterialFilters").hidden =
+    !state.d1Requested || !["sectors", "stocks"].includes(page);
+  $("d1MaterialQuality").hidden =
+    !state.d1Requested || !["sectors", "stocks"].includes(page);
+  $("d1SectorPanel").hidden = page !== "sectors" || !state.d1Requested;
   ++extraRequest;
   ++cohortRequest;
   ++focusStockRequest;
@@ -190,26 +197,11 @@ function gotoPage(page) {
   message("pageTitle", data[0]);
   message("pageSubtitle", data[1]);
   message("headingIndex", data[2]);
-  if (
-    changed &&
-    ["sectors", "stocks"].includes(page) &&
-    state.selected?.contextReady &&
-    state.d1Requested
-  ) {
-    $("d1StructureType").value = "ALL";
-    $("d1MaterialReason").value = "ALL";
-    $("boardKind").value = "ALL";
-    d1MaterialState.board = null;
-    d1MaterialState.boardOffset =
-      d1MaterialState.memberOffset =
-      d1MaterialState.stockOffset =
-        0;
-    void loadD1Material();
-  }
   if (page === "sectors" && state.selected?.contextReady)
     d1MaterialState.data && renderD1Boards(d1MaterialState.data, openD1Board);
   if (page === "stocks" && state.selected?.contextReady)
     d1MaterialState.data && renderD1Stocks(d1MaterialState.data, openD1Stock);
+  if (page === "market") renderMarketD0Summary();
   if (["focus", "market", "diagnostics"].includes(page)) void loadExtra(page);
 }
 document
@@ -241,6 +233,10 @@ function invalidateDate() {
   state.selected = null;
   state.context = null;
   state.d1Requested = false;
+  state.d0Result = null;
+  state.d0Status = "NOT_LOADED";
+  state.d0Error = null;
+  state.d0BoardPage = 0;
   d1MaterialState.data = null;
   d1MaterialState.board = null;
   d1MaterialState.boardOffset =
@@ -253,6 +249,7 @@ function invalidateDate() {
   for (const id of [
     "overviewBoards",
     "overviewStocks",
+    "d0BoardRows",
     "stockList",
     "memberList",
     "profileChangeList",
@@ -263,6 +260,13 @@ function invalidateDate() {
     "focusStockResult",
   ])
     $(id).replaceChildren();
+  $("d0BoardSearch").value = "";
+  $("d0BoardKind").value = "ALL";
+  const d0EmptyRow = node("tr");
+  const d0EmptyCell = node("td", "正在读取当前日期的 D0 变化板块。", "empty");
+  d0EmptyCell.colSpan = 6;
+  d0EmptyRow.append(d0EmptyCell);
+  $("d0BoardRows").append(d0EmptyRow);
   $("boardRows").replaceChildren();
   $("d0Stocks").replaceChildren();
   message("d0Status", "当前日期的 D0 新增启动尚未读取。");
@@ -278,6 +282,11 @@ function invalidateDate() {
     countCard("变化研究", "—", "尚未加载"),
   );
   message("boardSummary", "当前日期尚未读取。");
+  message("d0BoardSummary", "等待当前日期的 D0 结果");
+  message("d0BoardPage", "—");
+  $("d0BoardPrev").disabled = $("d0BoardNext").disabled = true;
+  $("d1SectorPanel").hidden = true;
+  renderMarketD0Summary();
   message("boardCoverage", "当前日期尚未读取。");
   message("profileChangeSummary", "当前日期尚未读取");
   message("profileChangeList", "正在核验相邻会话画像口径。");
@@ -517,10 +526,198 @@ async function resolveProfileForDate(c, token, snapshotText, signal) {
   }
 }
 
+function provedD0Boards() {
+  const rows = state.d0Result?.boards;
+  if (!Array.isArray(rows)) return null;
+  const seen = new Set();
+  return rows.filter((board) => {
+    if (!board || Number(board.new_member_count) <= 0) return false;
+    const key = `${board.board_kind}:${board.board_native_id}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+}
+
+function missingD0Kinds() {
+  return state.d0Result?.membership_status?.missing_membership_kinds || [];
+}
+
+function renderD0Boards() {
+  const rows = $("d0BoardRows");
+  rows.replaceChildren();
+  const addEmptyRow = (text) => {
+    const row = node("tr");
+    const cell = node("td", text, "empty");
+    cell.colSpan = 6;
+    row.append(cell);
+    rows.append(row);
+  };
+  const boards = provedD0Boards();
+  if (!state.d0Result || !Array.isArray(state.d0Result.boards)) {
+    const status =
+      state.d0Status === "LOADING"
+        ? "D0 计算中；来源宽度可先独立查看。"
+        : state.d0Status === "UNKNOWN"
+          ? `D0 UNKNOWN：${state.d0Error || "缺少同源相邻会话或变化板块事实"}`
+          : "等待当前日期的 D0 结果";
+    message("d0BoardSummary", status);
+    message("d0BoardPage", "—");
+    $("d0BoardPrev").disabled = $("d0BoardNext").disabled = true;
+    addEmptyRow(status);
+    return;
+  }
+
+  const missing = missingD0Kinds();
+  if (boards.length === 0) {
+    const status = missing.length
+      ? `NO_PROVED_D0_CHANGE；成员关系 UNKNOWN：${missing.join("、")}`
+      : "NO_PROVED_D0_CHANGE：当前同源范围没有已证 FALSE→TRUE 变化板块。";
+    message(
+      "d0BoardSummary",
+      `${state.selected?.target_session || ""} · ${status}`,
+    );
+    message("d0BoardPage", "0 个已证变化板块");
+    $("d0BoardPrev").disabled = $("d0BoardNext").disabled = true;
+    addEmptyRow(status);
+    return;
+  }
+
+  const kind = $("d0BoardKind").value;
+  const query = $("d0BoardSearch").value.trim().toLocaleLowerCase();
+  const filtered = boards.filter((board) => {
+    if (kind !== "ALL" && board.board_kind !== kind) return false;
+    const searchable =
+      `${board.board_name || ""} ${board.board_native_id || ""}`.toLocaleLowerCase();
+    return !query || searchable.includes(query);
+  });
+  const lastPage = Math.max(0, Math.ceil(filtered.length / 15) - 1);
+  state.d0BoardPage = Math.min(state.d0BoardPage, lastPage);
+  const start = state.d0BoardPage * 15;
+  const page = filtered.slice(start, start + 15);
+  const industryCount = boards.filter(
+    (item) => item.board_kind === "INDUSTRY",
+  ).length;
+  const conceptCount = boards.filter(
+    (item) => item.board_kind === "CONCEPT",
+  ).length;
+  const missingText = missing.length
+    ? ` · 成员关系 UNKNOWN：${missing.join("、")}`
+    : "";
+  message(
+    "d0BoardSummary",
+    `${state.selected?.target_session || ""} · 已证变化板块 ${boards.length}（行业 ${industryCount} / GN ${conceptCount}） · 筛选 ${filtered.length} · 成员关系可重叠 · NON_PIT${missingText}`,
+  );
+  if (!filtered.length) {
+    addEmptyRow("当前筛选没有匹配的已证 D0 变化板块；清除筛选可恢复完整列表。");
+  } else {
+    for (const [index, board] of page.entries()) {
+      const row = node("tr");
+      row.append(
+        node("td", board.board_name || board.board_native_id),
+        node("td", board.board_kind === "INDUSTRY" ? "行业" : "GN 概念"),
+        node("td", format(board.new_member_count)),
+        node("td", board.observed_at || "UNKNOWN"),
+        node("td", "NON_PIT"),
+      );
+      const action = node("td");
+      const button = node("button", "查看新增成员 →", "text-button");
+      button.type = "button";
+      button.addEventListener("click", () => openD0Board(board));
+      action.append(button);
+      row.append(action);
+      rows.append(row);
+      row.setAttribute("data-d0-board-index", String(start + index));
+    }
+  }
+  const totalPages = Math.max(1, Math.ceil(filtered.length / 15));
+  message(
+    "d0BoardPage",
+    `第 ${state.d0BoardPage + 1}/${totalPages} 页 · ${page.length}/${filtered.length} 个板块`,
+  );
+  $("d0BoardPrev").disabled = state.d0BoardPage === 0;
+  $("d0BoardNext").disabled = state.d0BoardPage >= lastPage;
+}
+
+function renderMarketD0Summary() {
+  const root = $("marketD0Result");
+  if (!root) return;
+  root.replaceChildren();
+  if (!state.d0Result) {
+    root.append(
+      node(
+        "p",
+        state.d0Status === "LOADING"
+          ? "D0 计算中；来源宽度已独立加载，完成后本页会自动更新。"
+          : state.d0Status === "UNKNOWN"
+            ? `D0 UNKNOWN：${state.d0Error || "缺少可核验的同源变化事实"}；来源宽度仍独立可用。`
+            : "D0 计算中；来源宽度已独立加载。",
+      ),
+    );
+    return;
+  }
+  const count = state.d0Result.filter?.global_total;
+  const boards = provedD0Boards();
+  root.append(
+    node(
+      "p",
+      `目标日 ${state.d0Result.target_session || state.selected?.target_session || "UNKNOWN"} · D0 新增 ${format(count)} 只独立来源代码；这不是正式选股结果。`,
+    ),
+  );
+  if (boards === null) {
+    root.append(
+      node("p", "已证变化板块 UNKNOWN；独立股票数仍按 D0 全局去重结果显示。"),
+    );
+  } else {
+    const industry = boards.filter(
+      (board) => board.board_kind === "INDUSTRY",
+    ).length;
+    const concept = boards.filter(
+      (board) => board.board_kind === "CONCEPT",
+    ).length;
+    root.append(
+      node(
+        "p",
+        `已证变化板块 ${boards.length} 个：行业 ${industry} 个，GN 概念 ${concept} 个。板块成员可重复归属；股票数不由板块成员数相加。${missingD0Kinds().length ? ` 成员关系 UNKNOWN：${missingD0Kinds().join("、")}。` : ""} NON_PIT。`,
+      ),
+    );
+  }
+}
+
+function applyD0BoardFilters() {
+  state.d0BoardPage = 0;
+  renderD0Boards();
+}
+
+$("searchD0Boards").addEventListener("click", applyD0BoardFilters);
+$("d0BoardKind").addEventListener("change", applyD0BoardFilters);
+$("d0BoardSearch").addEventListener("keydown", (event) => {
+  if (event.key === "Enter") {
+    event.preventDefault();
+    applyD0BoardFilters();
+  }
+});
+$("clearD0BoardFilters").addEventListener("click", () => {
+  $("d0BoardSearch").value = "";
+  $("d0BoardKind").value = "ALL";
+  applyD0BoardFilters();
+});
+$("d0BoardPrev").addEventListener("click", () => {
+  state.d0BoardPage = Math.max(0, state.d0BoardPage - 1);
+  renderD0Boards();
+});
+$("d0BoardNext").addEventListener("click", () => {
+  state.d0BoardPage += 1;
+  renderD0Boards();
+});
+
 async function loadD0Overview(c) {
   const token = ++state.d0Request;
   const before = uniqueRawVersion(c.previous_session);
   if (!before || before.package_sha256 !== c.package_sha256) {
+    state.d0Result = null;
+    state.d0Status = "UNKNOWN";
+    state.d0Error = "相邻会话没有可确认的同源 Raw";
     message(
       "d0Status",
       "相邻会话没有可确认的同源 Raw，D0 新增状态为 UNKNOWN。",
@@ -530,11 +727,16 @@ async function loadD0Overview(c) {
     $("metrics").lastElementChild.replaceWith(
       countCard("D0 新增", "UNKNOWN", "相邻会话同源 Raw 不可用"),
     );
+    renderD0Boards();
+    renderMarketD0Summary();
     return;
   }
   state.d0Controller?.abort();
   const controller = new AbortController();
   state.d0Controller = controller;
+  if (!state.d0Result) state.d0Status = "LOADING";
+  renderD0Boards();
+  renderMarketD0Summary();
   $("d0Stocks").replaceChildren();
   $("d0Prev").disabled = $("d0Next").disabled = true;
   message("d0Page", "正在读取…");
@@ -556,6 +758,13 @@ async function loadD0Overview(c) {
       controller.signal,
     );
     if (token !== state.d0Request || state.selected !== c) return;
+    state.d0Result = result;
+    state.d0Status = Array.isArray(result.boards) ? "READY" : "UNKNOWN";
+    state.d0Error = Array.isArray(result.boards)
+      ? null
+      : "D0 响应未包含完整变化板块事实";
+    renderD0Boards();
+    renderMarketD0Summary();
     if (state.d0Offset === 0) {
       const boards = result.boards
         .filter((item) => item.new_member_count > 0)
@@ -635,6 +844,12 @@ async function loadD0Overview(c) {
   } catch (error) {
     if (token === state.d0Request && error.name !== "AbortError") {
       message("d0Status", `D0 新增读取失败：${error.message}`);
+      if (!state.d0Result) {
+        state.d0Status = "UNKNOWN";
+        state.d0Error = error.message;
+        renderD0Boards();
+        renderMarketD0Summary();
+      }
       if (state.d0Offset === 0) {
         $("metrics").lastElementChild.replaceWith(
           countCard("D0 新增", "UNKNOWN", "来源读取失败"),
@@ -754,8 +969,11 @@ function supportRequest(c, symbol) {
   };
 }
 function configureD1Filters() {
-  $("d1MaterialFilters").hidden = !["sectors", "stocks"].includes(activePage);
-  $("d1MaterialQuality").hidden = !["sectors", "stocks"].includes(activePage);
+  $("d1MaterialFilters").hidden =
+    !state.d1Requested || !["sectors", "stocks"].includes(activePage);
+  $("d1MaterialQuality").hidden =
+    !state.d1Requested || !["sectors", "stocks"].includes(activePage);
+  $("d1SectorPanel").hidden = activePage !== "sectors" || !state.d1Requested;
   $("profileChangeCard").hidden = false;
   $("memberState").replaceChildren(
     new Option("全部状态", "ALL"),
@@ -921,6 +1139,9 @@ for (const id of ["d1StructureType", "d1MaterialReason"])
 async function loadResearch() {
   if (activePage === "overview") gotoPage("sectors");
   state.d1Requested = true;
+  $("d1MaterialFilters").hidden = !["sectors", "stocks"].includes(activePage);
+  $("d1MaterialQuality").hidden = !["sectors", "stocks"].includes(activePage);
+  $("d1SectorPanel").hidden = activePage !== "sectors";
   await loadD1Material();
 }
 $("refreshResearch").addEventListener("click", loadResearch);
@@ -1641,6 +1862,7 @@ function detailRows(container, entries) {
 async function loadExtra(page) {
   const token = ++extraRequest;
   const c = state.selected;
+  if (page === "market") renderMarketD0Summary();
   const id =
     page === "focus"
       ? "focusStatus"
@@ -1693,6 +1915,8 @@ async function loadExtra(page) {
       detailRows($(id), [
         ["状态", data.status],
         ["目标日 / 截止", `${data.target_session} / ${data.research_cutoff}`],
+        ["观察范围 / 时态", `${data.analysis_scope} / ${data.pit_status}`],
+        ["价格坐标", data.price_coordinate],
         ["公式", data.metric.formula],
         ["精确值", data.metric.exact?.fraction],
         ["来源分母", data.denominator.N_source],
