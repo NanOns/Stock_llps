@@ -127,6 +127,29 @@ def register_commands(commands):
     )
     observation.add_argument("--offset", type=int, default=0, help="观察明细分页偏移")
     observation.add_argument("--limit", type=int, default=30, help="观察明细分页条数")
+    research_day = commands.add_parser(
+        "source-research-day", help="按现役D0/D1计算单日研究并可选保存typed事实"
+    )
+    research_day.add_argument(
+        "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
+    )
+    research_day.add_argument(
+        "--research-cutoff", required=True, help="研究数据截止官方会话YYYY-MM-DD"
+    )
+    research_day.add_argument(
+        "--package-sha256", required=True, help="精确TDX来源包SHA-256"
+    )
+    research_day.add_argument(
+        "--d1-history-session-count",
+        type=int,
+        required=True,
+        help="D1窗口官方会话数，须与精确研究键一致",
+    )
+    research_day.add_argument(
+        "--persist",
+        action="store_true",
+        help="以单一串行化事务幂等写入三类typed事实",
+    )
     d0_raw = commands.add_parser(
         "source-d0-raw",
         help="只读计算Raw来源池D0启动、恢复诊断及启动相邻变化",

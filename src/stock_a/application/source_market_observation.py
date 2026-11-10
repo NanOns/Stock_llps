@@ -1533,6 +1533,7 @@ def prepare_d1_material_observation(
     d1_history_session_count: int,
     industry_snapshot_id: str | None,
     concept_snapshot_id: str | None,
+    include_source_symbol_structure_results: bool = False,
 ) -> dict[str, Any]:
     """一次只读准备全池D1与成员事实，供同进程筛选分页复用。"""
     _target, sessions, calendar_revision = resolve_pg_history_window(
@@ -1550,6 +1551,9 @@ def prepare_d1_material_observation(
         material_changes_only=True,
         include_source_symbol_change_summary=True,
         include_source_symbol_d1_details=True,
+        include_source_symbol_structure_results=(
+            include_source_symbol_structure_results
+        ),
     )
     snapshots = [
         read_rotation_snapshot_members(config, snapshot_id=snapshot_id, board_kind=kind)

@@ -1210,6 +1210,7 @@ def discover_source_d1_structures(
     material_changes_only: bool = False,
     include_source_symbol_change_summary: bool = False,
     include_source_symbol_d1_details: bool = False,
+    include_source_symbol_structure_results: bool = False,
 ) -> dict[str, Any]:
     """一遍完整扫描目标日Raw池，统计五种D1结构并按事件分页。"""
     started_wall = time.perf_counter()
@@ -1231,6 +1232,7 @@ def discover_source_d1_structures(
         or type(material_changes_only) is not bool
         or type(include_source_symbol_change_summary) is not bool
         or type(include_source_symbol_d1_details) is not bool
+        or type(include_source_symbol_structure_results) is not bool
         or (include_source_symbol_d1_details and not structure_changes)
         or (structure_type is not None and structure_type not in STRUCTURE_TYPES)
         or (
@@ -1335,6 +1337,7 @@ def discover_source_d1_structures(
     material_change_source_symbols: set[str] = set()
     source_symbol_change_summaries: dict[str, dict[str, Any]] = {}
     source_symbol_d1_details: dict[str, list[dict[str, Any]]] = {}
+    source_symbol_structure_results: dict[str, dict[str, Any]] = {}
     range_history_status_counts = {kind: Counter() for kind in sorted(_RANGE_TYPES)}
     structure_core_preview_count = 0
     structure_timeline_candidate_count = 0
@@ -1470,6 +1473,21 @@ def discover_source_d1_structures(
                 "target_source": _source_row_identity(row),
                 "structures": result,
             }
+            if include_source_symbol_structure_results:
+                source_symbol_structure_results[candidate["source_symbol"]] = {
+                    "history_row_count": len(candidate["history_rows"]),
+                    "market": candidate.get("market"),
+                    "board": candidate.get("board"),
+                    "target_source": detail["target_source"],
+                    "structures": {
+                        kind: {
+                            "state": outcome["state"],
+                            "reason": outcome.get("reason"),
+                            "anchor": outcome.get("anchor"),
+                        }
+                        for kind, outcome in result.items()
+                    },
+                }
 
             if structure_changes:
                 if structure_preview_context is None or previous_session is None:
@@ -1900,6 +1918,11 @@ def discover_source_d1_structures(
             "source_symbol_material_summary": source_symbol_material_summary,
             "source_symbol_d1_details": (
                 source_symbol_d1_details if include_source_symbol_d1_details else None
+            ),
+            "source_symbol_structure_results": (
+                source_symbol_structure_results
+                if include_source_symbol_structure_results
+                else None
             ),
         },
         "range_previous_anchor_evidence_counts": {

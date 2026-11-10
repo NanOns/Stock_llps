@@ -40,6 +40,10 @@ from stock_a.storage.postgres.research_facts import (
     ResearchFactConflict,
     ResearchFactNotFound,
 )
+from stock_a.storage.postgres.research_day_facts import (
+    ResearchDayPgError,
+    read_source_research_day,
+)
 from stock_a.contracts import PriceProfileContractError, load_price_profile_contract
 from stock_a.application.runtime_config import (
     DiagnosticError,
@@ -2350,6 +2354,91 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(400, "PREVIEW_QUERY_INVALID", message)
                 body, content_type = read_static_asset(asset_name)
                 self._send(200, body, content_type)
+                return
+            if parsed.path == "/api/product/research-day":
+                values = _query(
+                    self.path,
+                    {
+                        "target_session",
+                        "package_sha256",
+                        "d1_history_session_count",
+                        "offset",
+                        "limit",
+                        "symbol",
+                        "industry_snapshot_id",
+                        "concept_snapshot_id",
+                        "board_kind",
+                        "board_native_id",
+                        "structure_type",
+                        "material_change_reason",
+                    },
+                )
+                required = {
+                    "target_session",
+                    "package_sha256",
+                    "d1_history_session_count",
+                }
+                if not required.issubset(values):
+                    raise PreviewHttpError(
+                        400,
+                        "QUERY_REQUIRED",
+                        "须提供目标会话、来源包和D1窗口会话数",
+                    )
+                target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
+                symbol = values.get("symbol") or None
+                if symbol is not None and not _SYMBOL.fullmatch(symbol):
+                    raise PreviewHttpError(400, "SYMBOL_INVALID", "来源代码格式无效")
+                if values.get("board_kind") not in {None, "INDUSTRY", "CONCEPT"}:
+                    raise PreviewHttpError(
+                        400, "BOARD_KIND_INVALID", "板块类型须为INDUSTRY或CONCEPT"
+                    )
+                if values.get("structure_type") not in {None, *STRUCTURE_TYPES}:
+                    raise PreviewHttpError(
+                        400, "STRUCTURE_TYPE_INVALID", "D1结构类型不是现役五类之一"
+                    )
+                if values.get("material_change_reason") not in {
+                    None,
+                    *MATERIAL_CHANGE_REASONS,
+                }:
+                    raise PreviewHttpError(
+                        400,
+                        "MATERIAL_CHANGE_REASON_INVALID",
+                        "D1材料变化原因不在现役枚举中",
+                    )
+                try:
+                    result = read_source_research_day(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        package_sha256=_sha(values["package_sha256"]),
+                        d1_history_session_count=_positive_int(
+                            _nonnegative_int(
+                                values["d1_history_session_count"],
+                                "d1_history_session_count",
+                                32767,
+                            ),
+                            "d1_history_session_count",
+                            32767,
+                        ),
+                        offset=_nonnegative_int(values.get("offset", "0"), "offset"),
+                        limit=_positive_int(
+                            _nonnegative_int(values.get("limit", "30"), "limit", 50),
+                            "limit",
+                            50,
+                        ),
+                        symbol=symbol,
+                        industry_snapshot_id=values.get("industry_snapshot_id"),
+                        concept_snapshot_id=values.get("concept_snapshot_id"),
+                        board_kind=values.get("board_kind"),
+                        board_native_id=values.get("board_native_id"),
+                        structure_type=values.get("structure_type"),
+                        material_change_reason=values.get("material_change_reason"),
+                    )
+                except ResearchDayPgError as error:
+                    raise PreviewHttpError(409, error.code, str(error)) from error
+                self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/product/market":
                 values = _query(self.path, {"target_session", "package_sha256"})

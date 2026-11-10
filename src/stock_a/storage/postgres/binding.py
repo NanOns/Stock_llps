@@ -96,6 +96,12 @@ _MIGRATIONS = (
         ("migrations", "0014_source_research_events.sql"),
         "cba9dc57698ac74487221ee30f097636ab2cfd502bdad20137732da0e80e45f8",
     ),
+    (
+        15,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0015_r06_source_research_day_facts.sql"),
+        "759e4a06c5417dd7f3e52c5430234e49a3addc7a571666970ecd3193510e870c",
+    ),
 )
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
@@ -108,6 +114,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R02_R03_R04_PROFILE_DIRECT_KEY_PG_OLD_CONTROL_CLEANUP_R1": frozenset({12}),
     "R04_R05_RESEARCH_FACTS_R2": frozenset({13}),
     "R04_R05_SOURCE_D1_EVENTS_R2": frozenset({14}),
+    "R06_BACKEND_D0_D1_PG_PERSISTENCE_CODE_R1": frozenset({15}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -187,6 +194,11 @@ _RELATIONS_BY_MIGRATION_COUNT[13] = _RELATIONS_BY_MIGRATION_COUNT[12] | {
 }
 _RELATIONS_BY_MIGRATION_COUNT[14] = _RELATIONS_BY_MIGRATION_COUNT[13] | {
     "source_research_events",
+}
+_RELATIONS_BY_MIGRATION_COUNT[15] = _RELATIONS_BY_MIGRATION_COUNT[14] | {
+    "source_d0_launch_day_facts",
+    "source_d1_structure_day_facts",
+    "source_d1_material_anchor_day_facts",
 }
 
 
