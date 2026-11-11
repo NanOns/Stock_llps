@@ -16,6 +16,8 @@ _FOLLOWUP = "SOURCE_SECTOR_PULSE_FOLLOWUP_CLOSE_R1"
 _PULSE_ALGORITHM = "SOURCE_CROSS_PERIOD_PULSE_R1"
 _KINDS = ("INDUSTRY", "CONCEPT")
 _HORIZONS = (1, 3, 5)
+_PULSE_STATES = ("TRUE", "FALSE", "UNKNOWN")
+_OUTCOME_STATES = ("OBSERVED", "UNKNOWN", "NOT_DUE", "NOT_COMPUTED", "INCOMPLETE")
 _PULSE_COLUMNS = (
     "namespace_id",
     "target_session",
@@ -870,6 +872,266 @@ def _result_payload(row: Mapping[str, Any]) -> dict[str, Any]:
     }
 
 
+def _percent_4dp(value: Fraction) -> str:
+    with localcontext() as context:
+        context.prec = 50
+        return str(
+            (Decimal(value.numerator * 100) / Decimal(value.denominator)).quantize(
+                Decimal("0.0001"), rounding=ROUND_HALF_UP
+            )
+        )
+
+
+def _followup_cohort_comparison(
+    kind_facts: Mapping[str, Mapping[str, Any]], *, expected_count: int
+) -> dict[str, Any]:
+    """按已绑定PULSE与后继事实形成板块关系级描述性分组。"""
+    horizon_groups = []
+    incomplete_reasons: dict[tuple[int, str], int] = {}
+    for horizon in _HORIZONS:
+        state_groups = {}
+        state_mean_values: dict[str, Fraction] = {}
+        for pulse_state in _PULSE_STATES:
+            items = []
+            for board in kind_facts.values():
+                if board.get("pulse_state") != pulse_state:
+                    continue
+                item = next(
+                    (
+                        row
+                        for row in board.get("horizons", ())
+                        if row.get("horizon_sessions") == horizon
+                    ),
+                    None,
+                )
+                items.append(item)
+
+            counts = {status: 0 for status in _OUTCOME_STATES}
+            unknown_reasons: dict[str, int] = {}
+            incomplete_reason_group: dict[str, int] = {}
+            values: list[Fraction] = []
+            fixed_member_denominator = 0
+            observed_member_count = 0
+            unknown_member_count = 0
+            for item in items:
+                if not isinstance(item, Mapping):
+                    counts["INCOMPLETE"] += 1
+                    reason = "FOLLOWUP_HORIZON_FACT_MISSING"
+                    incomplete_reason_group[reason] = (
+                        incomplete_reason_group.get(reason, 0) + 1
+                    )
+                    incomplete_reasons[(horizon, "FOLLOWUP_HORIZON_FACT_MISSING")] = (
+                        incomplete_reasons.get(
+                            (horizon, "FOLLOWUP_HORIZON_FACT_MISSING"), 0
+                        )
+                        + 1
+                    )
+                    continue
+                status = item.get("status")
+                if status not in counts:
+                    status = "INCOMPLETE"
+                counts[status] += 1
+                denominator = item.get("fixed_member_denominator")
+                if type(denominator) is int and denominator >= 0:
+                    fixed_member_denominator += denominator
+                observed = item.get("observed_member_count")
+                if type(observed) is int and observed >= 0:
+                    observed_member_count += observed
+                unknown = item.get("unknown_member_count")
+                if type(unknown) is int and unknown >= 0:
+                    unknown_member_count += unknown
+                if status == "UNKNOWN":
+                    for reason in set(item.get("reason_codes") or ()):
+                        if isinstance(reason, str) and reason:
+                            unknown_reasons[reason] = unknown_reasons.get(reason, 0) + 1
+                elif status == "INCOMPLETE":
+                    for reason in set(item.get("reason_codes") or ()):
+                        if isinstance(reason, str) and reason:
+                            incomplete_reason_group[reason] = (
+                                incomplete_reason_group.get(reason, 0) + 1
+                            )
+                            key = (horizon, reason)
+                            incomplete_reasons[key] = incomplete_reasons.get(key, 0) + 1
+                if status == "OBSERVED":
+                    try:
+                        exact = Fraction(str(item["equal_weight_return"]))
+                    except (KeyError, ValueError, ZeroDivisionError):
+                        counts["INCOMPLETE"] += 1
+                        counts["OBSERVED"] -= 1
+                        key = (horizon, "FOLLOWUP_EXACT_RETURN_INVALID")
+                        incomplete_reasons[key] = incomplete_reasons.get(key, 0) + 1
+                    else:
+                        values.append(exact)
+
+            total = len(items)
+            observed_count = counts["OBSERVED"]
+            incomplete_count = counts["INCOMPLETE"]
+            if total == 0:
+                status = "NOT_COMPARABLE"
+            elif incomplete_count:
+                status = "INCOMPLETE"
+            elif not observed_count and counts["NOT_DUE"] == total:
+                status = "NOT_DUE"
+            elif not observed_count and counts["NOT_COMPUTED"] == total:
+                status = "NOT_COMPUTED"
+            elif observed_count:
+                status = "AVAILABLE"
+            else:
+                status = "NOT_COMPARABLE"
+
+            distribution = {
+                "status": "NOT_COMPARABLE",
+                "sample_scope": "OBSERVED_BOARD_RELATIONS_ONLY",
+                "numeric_method": "EXACT_FRACTION_THEN_PERCENT_4DP",
+                "sample_count": 0,
+                "mean_return_percent_4dp": None,
+                "median_return_percent_4dp": None,
+                "positive_board_relation_count": None,
+                "nonpositive_board_relation_count": None,
+                "minimum_return_percent_4dp": None,
+                "maximum_return_percent_4dp": None,
+            }
+            if status == "AVAILABLE" and len(values) == observed_count:
+                ordered = sorted(values)
+                middle = len(ordered) // 2
+                median_value = (
+                    ordered[middle]
+                    if len(ordered) % 2
+                    else (ordered[middle - 1] + ordered[middle]) / 2
+                )
+                mean_value = sum(ordered, Fraction()) / len(ordered)
+                state_mean_values[pulse_state] = mean_value
+                distribution.update(
+                    {
+                        "status": "AVAILABLE",
+                        "sample_count": len(ordered),
+                        "mean_return_percent_4dp": _percent_4dp(mean_value),
+                        "median_return_percent_4dp": _percent_4dp(median_value),
+                        "positive_board_relation_count": sum(
+                            value > 0 for value in ordered
+                        ),
+                        "nonpositive_board_relation_count": sum(
+                            value <= 0 for value in ordered
+                        ),
+                        "minimum_return_percent_4dp": _percent_4dp(ordered[0]),
+                        "maximum_return_percent_4dp": _percent_4dp(ordered[-1]),
+                    }
+                )
+
+            coverage_percent = (
+                _percent_4dp(Fraction(observed_count, total)) if total else None
+            )
+            state_groups[pulse_state] = {
+                "status": status,
+                "pulse_state": pulse_state,
+                "total_board_relations": total,
+                "outcome_status_counts": counts,
+                "partition_closed": sum(counts.values()) == total,
+                "complete_basket_coverage": {
+                    "observed_board_relations": observed_count,
+                    "all_board_relations": total,
+                    "percent_4dp": coverage_percent,
+                },
+                "fixed_member_denominator_sum": fixed_member_denominator,
+                "observed_member_count_sum": observed_member_count,
+                "unknown_member_count_sum": unknown_member_count,
+                "unknown_reason_scope": "BOARD_RELATIONS_WITH_REASON; REASONS_MAY_OVERLAP",
+                "unknown_reason_counts": [
+                    {
+                        "reason_code": reason,
+                        "board_relation_count": count,
+                    }
+                    for reason, count in sorted(unknown_reasons.items())
+                ],
+                "incomplete_reason_counts": [
+                    {
+                        "reason_code": reason,
+                        "board_relation_count": count,
+                    }
+                    for reason, count in sorted(incomplete_reason_group.items())
+                ],
+                "distribution": distribution,
+            }
+
+        horizon_total = sum(
+            group["total_board_relations"] for group in state_groups.values()
+        )
+        horizon_groups.append(
+            {
+                "horizon_sessions": horizon,
+                "total_board_relations": horizon_total,
+                "pulse_state_partition_closed": (
+                    horizon_total == expected_count
+                    and all(
+                        group["partition_closed"] for group in state_groups.values()
+                    )
+                ),
+                "true_minus_false_observed_coverage_percentage_points": (
+                    _percent_4dp(
+                        Fraction(
+                            state_groups["TRUE"]["complete_basket_coverage"][
+                                "observed_board_relations"
+                            ],
+                            state_groups["TRUE"]["complete_basket_coverage"][
+                                "all_board_relations"
+                            ],
+                        )
+                        - Fraction(
+                            state_groups["FALSE"]["complete_basket_coverage"][
+                                "observed_board_relations"
+                            ],
+                            state_groups["FALSE"]["complete_basket_coverage"][
+                                "all_board_relations"
+                            ],
+                        )
+                    )
+                    if state_groups["TRUE"]["total_board_relations"]
+                    and state_groups["FALSE"]["total_board_relations"]
+                    else None
+                ),
+                "true_minus_false_mean_return_difference_percentage_points": (
+                    _percent_4dp(state_mean_values["TRUE"] - state_mean_values["FALSE"])
+                    if "TRUE" in state_mean_values and "FALSE" in state_mean_values
+                    else None
+                ),
+                "pulse_states": state_groups,
+            }
+        )
+
+    all_statuses = [
+        group["status"]
+        for item in horizon_groups
+        for group in item["pulse_states"].values()
+    ]
+    overall_status = (
+        "INCOMPLETE"
+        if any(value == "INCOMPLETE" for value in all_statuses)
+        else "AVAILABLE"
+        if any(value == "AVAILABLE" for value in all_statuses)
+        else "NOT_COMPUTED"
+        if any(value == "NOT_COMPUTED" for value in all_statuses)
+        else "NOT_DUE"
+        if any(value == "NOT_DUE" for value in all_statuses)
+        else "NOT_COMPARABLE"
+    )
+    return {
+        "status": overall_status,
+        "scope": "SAME_T0_SOURCE_SNAPSHOT_WINDOW_AND_BOARD_KIND",
+        "unit": "BOARD_RELATION; MEMBERS_MAY_OVERLAP_ACROSS_BOARDS",
+        "research_mode": "NON_PIT_EXPLORATORY",
+        "predictive_validation": "NO_PREDICTIVE_VALIDATION",
+        "reason_code_counts": [
+            {
+                "horizon_sessions": horizon,
+                "reason_code": reason,
+                "board_relation_count": count,
+            }
+            for (horizon, reason), count in sorted(incomplete_reasons.items())
+        ],
+        "horizons": horizon_groups,
+    }
+
+
 def read_source_sector_pulse_followups(
     config: Mapping[str, Any],
     *,
@@ -880,14 +1142,28 @@ def read_source_sector_pulse_followups(
 ) -> dict[str, Any]:
     """批量PG只读已存后继事实，并区分到期、未生产和输入未闭合。"""
     groups: dict[str, dict[str, Any]] = {
-        kind: {"status": "NOT_COMPUTED", "reason_codes": [], "facts": {}}
+        kind: {
+            "status": "NOT_COMPUTED",
+            "reason_codes": [],
+            "facts": {},
+            "comparison": {"status": "NOT_COMPUTED", "horizons": []},
+        }
         for kind in _KINDS
     }
     if pulse_day.get("status") != "AVAILABLE":
         status = pulse_day.get("status", "NOT_COMPUTED")
         reasons = pulse_day.get("reason_codes", ["PULSE_INPUT_NOT_AVAILABLE"])
         for kind in _KINDS:
-            groups[kind] = {"status": status, "reason_codes": reasons, "facts": {}}
+            groups[kind] = {
+                "status": status,
+                "reason_codes": reasons,
+                "facts": {},
+                "comparison": {
+                    "status": status,
+                    "reason_codes": reasons,
+                    "horizons": [],
+                },
+            }
         return {"status": status, "by_kind": groups, "database_write_attempted": False}
 
     source = pulse_day.get("source_version")
@@ -966,6 +1242,11 @@ def read_source_sector_pulse_followups(
                     "status": "INCOMPLETE",
                     "reason_codes": ["PULSE_SNAPSHOT_BOARD_PARTITION_NOT_CLOSED"],
                     "facts": {},
+                    "comparison": {
+                        "status": "INCOMPLETE",
+                        "reason_codes": ["PULSE_SNAPSHOT_BOARD_PARTITION_NOT_CLOSED"],
+                        "horizons": [],
+                    },
                 }
                 continue
             kind_facts = {}
@@ -990,6 +1271,16 @@ def read_source_sector_pulse_followups(
                             "unknown_member_count": None,
                             "reason_codes": ["OFFICIAL_CALENDAR_WINDOW_UNAVAILABLE"],
                         }
+                    elif target > research_cutoff:
+                        item = {
+                            "status": "NOT_DUE",
+                            "horizon_sessions": horizon,
+                            "target_session": target.isoformat(),
+                            "fixed_member_denominator": int(pulse_fact["member_count"]),
+                            "observed_member_count": None,
+                            "unknown_member_count": None,
+                            "reason_codes": ["FOLLOWUP_HORIZON_BEYOND_RESEARCH_CUTOFF"],
+                        }
                     elif persisted:
                         row = persisted[0]
                         if row["target_session"] != target:
@@ -1004,6 +1295,18 @@ def read_source_sector_pulse_followups(
                                 "unknown_member_count": None,
                                 "reason_codes": ["FOLLOWUP_TARGET_SESSION_MISMATCH"],
                             }
+                        elif row["pulse_state"] != pulse_fact.get("state"):
+                            item = {
+                                "status": "INCOMPLETE",
+                                "horizon_sessions": horizon,
+                                "target_session": target.isoformat(),
+                                "fixed_member_denominator": int(
+                                    pulse_fact["member_count"]
+                                ),
+                                "observed_member_count": None,
+                                "unknown_member_count": None,
+                                "reason_codes": ["FOLLOWUP_PULSE_STATE_MISMATCH"],
+                            }
                         else:
                             item = _result_payload(row)
                     elif len(scope_rows) > 0:
@@ -1015,16 +1318,6 @@ def read_source_sector_pulse_followups(
                             "observed_member_count": None,
                             "unknown_member_count": None,
                             "reason_codes": ["FOLLOWUP_BOARD_PARTITION_INCOMPLETE"],
-                        }
-                    elif target > research_cutoff:
-                        item = {
-                            "status": "NOT_DUE",
-                            "horizon_sessions": horizon,
-                            "target_session": target.isoformat(),
-                            "fixed_member_denominator": int(pulse_fact["member_count"]),
-                            "observed_member_count": None,
-                            "unknown_member_count": None,
-                            "reason_codes": ["FOLLOWUP_HORIZON_BEYOND_RESEARCH_CUTOFF"],
                         }
                     else:
                         try:
@@ -1072,12 +1365,16 @@ def read_source_sector_pulse_followups(
                 if "NOT_DUE" in kind_statuses
                 else "AVAILABLE"
             )
+            comparison = _followup_cohort_comparison(
+                kind_facts, expected_count=expected_count
+            )
             groups[kind] = {
                 "status": group_status,
                 "reason_codes": [],
                 "expected_board_count": expected_count,
                 "read_board_count": len(kind_facts),
                 "facts": kind_facts,
+                "comparison": comparison,
             }
     statuses = [groups[kind]["status"] for kind in _KINDS]
     overall = (

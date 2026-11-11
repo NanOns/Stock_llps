@@ -1861,6 +1861,22 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 else None,
             },
             "boards": boards,
+            "sector_pulse_followup_comparison": {
+                kind: sector_pulse_followup.get("by_kind", {})
+                .get(kind, {})
+                .get(
+                    "comparison",
+                    {
+                        "status": sector_pulse_followup.get("status", "NOT_COMPUTED"),
+                        "reason_codes": sector_pulse_followup.get(
+                            "reason_codes",
+                            ["PULSE_FOLLOWUP_COMPARISON_NOT_AVAILABLE"],
+                        ),
+                        "horizons": [],
+                    },
+                )
+                for kind in ("INDUSTRY", "CONCEPT")
+            },
             "sector_pulse_status": sector_pulse.get("status", "NOT_COMPUTED"),
             "sector_pulse_transition_status": sector_pulse_transition.get(
                 "status", "NOT_COMPUTED"

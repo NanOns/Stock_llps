@@ -955,9 +955,85 @@ async function openD0Board(board, offset = 0) {
     const pulseFollowupLine = pulseFollowupSummary
       ? `PULSE后继Raw观察（${pulseFollowup.research_mode ?? "NON_PIT_RETROSPECTIVE"}；固定成员分母）${pulseFollowupSummary}`
       : `PULSE后继Raw观察 ${pulseFollowup?.status ?? "NOT_COMPUTED"} · ${(pulseFollowup?.reason_codes ?? ["PULSE_FOLLOWUP_NOT_AVAILABLE"]).join("、")}`;
+    const pulseFollowupComparison =
+      result.sector_pulse_followup_comparison?.[board.board_kind];
+    const comparisonReasonLabels = {
+      T0_RAW_ROW_MISSING: "T0行情行缺失",
+      T0_BAR_NOT_PRESENT: "T0日线缺失",
+      TARGET_RAW_ROW_MISSING: "后继行情行缺失",
+      TARGET_BAR_NOT_PRESENT: "后继日线缺失",
+      EMPTY_FIXED_MEMBER_BASKET: "固定成员篮子为空",
+      FOLLOWUP_SOURCE_IDENTITY_MISMATCH: "后继来源身份不匹配",
+      FOLLOWUP_PULSE_STATE_MISMATCH: "PULSE状态不匹配",
+      FOLLOWUP_BOARD_PARTITION_INCOMPLETE: "板块后继分区不完整",
+      FOLLOWUP_HORIZON_FACT_MISSING: "后继窗口事实缺失",
+    };
+    const comparisonStateLabels = {
+      TRUE: "PULSE TRUE",
+      FALSE: "PULSE FALSE",
+      UNKNOWN: "PULSE UNKNOWN",
+    };
+    const comparisonDistributionText = (distribution) => {
+      if (distribution?.status !== "AVAILABLE") {
+        return distribution?.status === "NOT_DUE"
+          ? "尚未到期，无可比较收益"
+          : distribution?.status === "NOT_COMPUTED"
+            ? "尚未生产，无可比较收益"
+            : distribution?.status === "INCOMPLETE"
+              ? "输入不完整，无可比较收益"
+              : "无可评价收益样本";
+      }
+      const signed = (value) =>
+        `${String(value).startsWith("-") ? "" : "+"}${value}%`;
+      return `均值 ${signed(distribution.mean_return_percent_4dp)}，中位 ${signed(distribution.median_return_percent_4dp)}，正/非正 ${distribution.positive_board_relation_count}/${distribution.nonpositive_board_relation_count}，范围 ${signed(distribution.minimum_return_percent_4dp)} 至 ${signed(distribution.maximum_return_percent_4dp)}`;
+    };
+    const comparisonGroupText = (group) => {
+      if (!group) return "不可用";
+      const coverage = group.complete_basket_coverage;
+      const statusCounts = group.outcome_status_counts ?? {};
+      const extraStates = [
+        ["NOT_DUE", "未到期"],
+        ["NOT_COMPUTED", "未生产"],
+        ["INCOMPLETE", "不完整"],
+      ]
+        .filter(([key]) => statusCounts[key] > 0)
+        .map(([key, label]) => `${label} ${statusCounts[key]}`)
+        .join("、");
+      const reasons = (group.unknown_reason_counts ?? [])
+        .map(
+          (item) =>
+            `${comparisonReasonLabels[item.reason_code] ?? item.reason_code} ${item.board_relation_count}`,
+        )
+        .join("、");
+      const incompleteReasons = (group.incomplete_reason_counts ?? [])
+        .map(
+          (item) =>
+            `${comparisonReasonLabels[item.reason_code] ?? item.reason_code} ${item.board_relation_count}`,
+        )
+        .join("、");
+      return `${comparisonStateLabels[group.pulse_state] ?? group.pulse_state} 完整篮子 ${coverage.observed_board_relations}/${coverage.all_board_relations}（${coverage.percent_4dp ?? "UNKNOWN"}%）；UNKNOWN ${statusCounts.UNKNOWN ?? 0}${extraStates ? `、${extraStates}` : ""}${reasons ? `，未知原因 ${reasons}` : ""}${incompleteReasons ? `，不完整原因 ${incompleteReasons}` : ""}；${comparisonDistributionText(group.distribution)}`;
+    };
+    const comparisonRows = (pulseFollowupComparison?.horizons ?? []).map(
+      (item) => {
+        const groups = item.pulse_states ?? {};
+        const coverageDifference =
+          item.true_minus_false_observed_coverage_percentage_points;
+        const meanDifference =
+          item.true_minus_false_mean_return_difference_percentage_points;
+        return `T+${item.horizon_sessions}：${["TRUE", "FALSE", "UNKNOWN"]
+          .map((status) => comparisonGroupText(groups[status]))
+          .join(
+            "；",
+          )}；TRUE−FALSE完整篮子覆盖差 ${coverageDifference == null ? "不可比较" : `${coverageDifference}个百分点`}，OBSERVED均值差 ${meanDifference == null ? "不可比较" : `${meanDifference}个百分点`}`;
+      },
+    );
+    const pulseFollowupComparisonLine =
+      comparisonRows.length > 0
+        ? `同行类型样本对照（${board.board_kind}；统计板块关系、成员可能重叠；NON_PIT_EXPLORATORY；不验证预测）：${comparisonRows.join(" | ")}`
+        : `同行类型样本对照 ${pulseFollowupComparison?.status ?? "NOT_COMPUTED"} · ${(pulseFollowupComparison?.reason_codes ?? ["PULSE_FOLLOWUP_COMPARISON_NOT_AVAILABLE"]).join("、")}`;
     message(
       "boardMeta",
-      `${board.board_kind} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${pulseSummary} · ${pulseTransitionSummary} · ${pulseFollowupLine} · 正式 Rotation 未评估`,
+      `${board.board_kind} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${pulseSummary} · ${pulseTransitionSummary} · ${pulseFollowupLine} · ${pulseFollowupComparisonLine} · 正式 Rotation 未评估`,
     );
     message(
       "boardCoverage",
