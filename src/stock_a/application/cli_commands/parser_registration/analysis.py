@@ -167,7 +167,18 @@ def register_commands(commands):
     research_day.add_argument(
         "--static-only",
         action="store_true",
-        help="仅初始化既存Raw会话的D0场景与Seed静态事实，必须显式指定--persist",
+        help="按既存Raw会话运行单日D0/Seed静态生产链，必须显式指定--persist",
+    )
+    research_day.add_argument(
+        "--include-sector-pulse",
+        action="store_true",
+        help="在现役单日静态生产链中计算并保存行业与GN概念完整同类板块跨日PULSE",
+    )
+    research_day.add_argument(
+        "--industry-snapshot-id", help="板块PULSE使用的精确TDX行业成员快照UUID"
+    )
+    research_day.add_argument(
+        "--concept-snapshot-id", help="板块PULSE使用的精确TDX GN概念成员快照UUID"
     )
     d0_raw = commands.add_parser(
         "source-d0-raw",

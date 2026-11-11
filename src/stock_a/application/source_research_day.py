@@ -385,7 +385,7 @@ def _persist_static_research_day(
             )
         ).encode("utf-8")
     ).hexdigest()
-    return persist_static_research_day(
+    result = persist_static_research_day(
         config,
         scenarios=scenarios,
         seed=seed,
@@ -393,6 +393,8 @@ def _persist_static_research_day(
         profile_revision=profile_revision,
         producer_semantics_sha256=semantics_sha256,
     )
+    result["profile_revision"] = profile_revision
+    return result
 
 
 def run_source_static_research_day(
@@ -404,11 +406,33 @@ def run_source_static_research_day(
     persist: bool = False,
     history_session_count: int | None = None,
     worker_count: int = 1,
+    include_sector_pulse: bool = False,
+    sector_snapshot_ids: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """仅初始化新静态表；读取精确PG Raw目录，不重算已保存D0/D1三类事实。"""
+    """由现役单日生产链写入静态事实，可附加双快照板块跨日脉冲。"""
     if persist is not True:
         raise SourceResearchDayError(
             "STATIC_RESEARCH_PERSIST_REQUIRED", "静态事实写入必须显式指定持久化"
+        )
+    if (
+        type(include_sector_pulse) is not bool
+        or (
+            include_sector_pulse
+            and (
+                not isinstance(sector_snapshot_ids, Mapping)
+                or set(sector_snapshot_ids) != {"INDUSTRY", "CONCEPT"}
+                or not all(
+                    isinstance(value, str) and value
+                    for value in sector_snapshot_ids.values()
+                )
+                or sector_snapshot_ids["INDUSTRY"] == sector_snapshot_ids["CONCEPT"]
+            )
+        )
+        or (not include_sector_pulse and sector_snapshot_ids is not None)
+    ):
+        raise SourceResearchDayError(
+            "STATIC_RESEARCH_SECTOR_PULSE_ARGUMENT_INVALID",
+            "板块PULSE必须同时绑定行业与GN概念快照，且仅能显式启用",
         )
     validate_seed_worker_count(worker_count)
     _validate_static_history_count(history_session_count)
@@ -458,6 +482,22 @@ def run_source_static_research_day(
         history_session_count=history_session_count,
         worker_count=worker_count,
     )
+    sector_pulse = None
+    if include_sector_pulse:
+        from stock_a.application.source_sector_pulse import (
+            run_source_sector_pulse_day,
+        )
+
+        sector_pulse = run_source_sector_pulse_day(
+            config,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            package_sha256=package_sha256,
+            profile_revision=persistence["profile_revision"],
+            industry_snapshot_id=sector_snapshot_ids["INDUSTRY"],
+            concept_snapshot_id=sector_snapshot_ids["CONCEPT"],
+        )
+    pulse_persistence = sector_pulse["persistence"] if sector_pulse else {}
     return {
         "status": "PERSISTED",
         "target_session": target_session.isoformat(),
@@ -467,6 +507,7 @@ def run_source_static_research_day(
         "source_capture_count": version["source_capture_count"],
         "source_count": version["row_count"],
         "persistence": persistence,
+        "sector_pulse": sector_pulse,
         "execution": {
             "database_target": "127.0.0.1:5432/stock_a",
             "database_schema": "stock",
@@ -474,9 +515,13 @@ def run_source_static_research_day(
             "raw_source_collection": False,
             "source_zip_opened": False,
             "existing_d0_d1_recomputed": False,
-            "database_write_attempted": persistence["database_write_attempted"],
+            "database_write_attempted": persistence["database_write_attempted"]
+            or pulse_persistence.get("database_write_attempted", False),
             "ddl_executed": False,
-            "dml_executed": persistence["dml_executed"],
+            "dml_executed": persistence["dml_executed"]
+            or pulse_persistence.get("dml_executed", False),
+            "sector_pulse_full_pool_calculated": include_sector_pulse,
+            "sector_pulse_source_collection": False,
             "total_wall_seconds": round(time.perf_counter() - started, 6),
         },
     }

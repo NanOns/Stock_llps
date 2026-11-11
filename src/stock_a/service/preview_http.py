@@ -1570,6 +1570,56 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         transition_counts = changes["transition_counts"]
         stocks = complete["stocks"]
         boards = complete["boards"]
+        from stock_a.storage.postgres.sector_pulse_facts import (
+            SectorPulsePgError,
+            read_source_sector_pulse_day,
+        )
+
+        try:
+            sector_pulse = read_source_sector_pulse_day(
+                self.preview_server.state.config,
+                target_session=target_session,
+                package_sha256=package_sha256,
+                namespace_id=namespace_id,
+                source_capture_id=after_source["source_capture_id"],
+                source_content_id=after_source["source_content_id"],
+                source_raw_digest=after_source["source_raw_digest"],
+                source_pool_count=after_source["raw_row_count"],
+                snapshot_ids={
+                    "INDUSTRY": industry_snapshot_id,
+                    "CONCEPT": concept_snapshot_id,
+                },
+            )
+        except (SectorPulsePgError, RawSourcePgError) as error:
+            sector_pulse = {
+                "status": "READ_ERROR",
+                "reason_codes": [getattr(error, "code", "PULSE_PG_READ_FAILED")],
+                "by_kind": {},
+                "database_write_attempted": False,
+                "cross_period_recalculated": False,
+            }
+        for board in boards:
+            kind = board.get("board_kind")
+            group = sector_pulse.get("by_kind", {}).get(kind, {})
+            board_id = board.get("board_native_id")
+            fact = group.get("facts", {}).get(board_id)
+            if group.get("status") == "AVAILABLE" and isinstance(fact, Mapping):
+                board["cross_period_pulse"] = fact
+            else:
+                board["cross_period_pulse"] = {
+                    "status": group.get(
+                        "status",
+                        "NOT_COMPUTED"
+                        if group
+                        else sector_pulse.get("status", "NOT_COMPUTED"),
+                    ),
+                    "reason_codes": group.get(
+                        "reason_codes", ["PULSE_BOARD_FACT_NOT_AVAILABLE"]
+                    ),
+                    "snapshot_id": group.get("snapshot_id"),
+                    "formal_rotation_state": "NOT_EVALUATED",
+                    "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                }
         filtered = stocks
         if board_kind is not None and board_native_id is not None:
             filtered = [
@@ -1676,6 +1726,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 else None,
             },
             "boards": boards,
+            "sector_pulse_status": sector_pulse.get("status", "NOT_COMPUTED"),
             "results": page,
             "execution": {
                 "d0_full_pool_computed_before_selection": True,
@@ -1701,6 +1752,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     time.process_time() - request_cpu_started
                 ),
                 "d1_full_universe_scan": False,
+                "cross_period_calculation_triggered": False,
+                "sector_pulse_pg_read_only": True,
+                "sector_pulse_cross_period_recalculated": False,
+                "sector_pulse_database_write_attempted": False,
                 "database_write": False,
                 "ddl_executed": False,
                 "dml_executed": False,

@@ -514,6 +514,7 @@ def read_retrospective_rotation(
     profile_contract: dict[str, Any] | None = None,
     profile_history_session_count: int = 75,
     peer_target_only: bool = False,
+    peer_snapshot_ids: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """固定后验同类成员，逐会话计算pulse并追踪每个触发日的等权篮子。"""
     if (
@@ -556,16 +557,56 @@ def read_retrospective_rotation(
             "Rotation候选窗须为1至15个会话，且至少有8个前态会话",
         )
     sessions = tuple(all_sessions[start_index - lookback : end_index + 1])
-    snapshot = read_rotation_snapshot_members(
-        config, snapshot_id=snapshot_id, board_kind=board_kind
+    if peer_snapshot_ids is not None and (
+        not peer_target_only
+        or set(peer_snapshot_ids) != {"INDUSTRY", "CONCEPT"}
+        or peer_snapshot_ids.get(board_kind) != snapshot_id
+    ):
+        raise TdxSectorMembersApplicationError(
+            "ROTATION_PEER_SNAPSHOTS_INVALID",
+            "批量同行读取须同时绑定行业和GN快照，并与主快照一致",
+        )
+    snapshots_by_kind = (
+        {
+            kind: read_rotation_snapshot_members(
+                config,
+                snapshot_id=peer_snapshot_ids[kind],
+                board_kind=kind,
+            )
+            for kind in ("INDUSTRY", "CONCEPT")
+        }
+        if peer_snapshot_ids is not None
+        else {
+            board_kind: read_rotation_snapshot_members(
+                config, snapshot_id=snapshot_id, board_kind=board_kind
+            )
+        }
     )
+    namespace_ids = {item["namespace_id"] for item in snapshots_by_kind.values()}
+    if len(namespace_ids) != 1:
+        raise TdxSectorMembersPgError(
+            "ROTATION_PEER_NAMESPACE_MISMATCH", "同类板块快照不属于同一来源namespace"
+        )
+    snapshot = snapshots_by_kind[board_kind]
     boards = snapshot["boards"]
     if board_native_id not in boards or not boards[board_native_id]["members"]:
         raise TdxSectorMembersPgError(
             "ROTATION_BOARD_NOT_FOUND", "指定板块在快照中不存在或没有成员"
         )
-    peer_members = {key: row["members"] for key, row in boards.items()}
-    wanted = {symbol for members in peer_members.values() for symbol in members}
+    peer_members_by_kind = {
+        kind: {key: row["members"] for key, row in item["boards"].items()}
+        for kind, item in snapshots_by_kind.items()
+    }
+    board_names_by_kind = {
+        kind: {key: row["name"] for key, row in item["boards"].items()}
+        for kind, item in snapshots_by_kind.items()
+    }
+    wanted = {
+        symbol
+        for members_by_board in peer_members_by_kind.values()
+        for members in members_by_board.values()
+        for symbol in members
+    }
     observations = {}
     raw_by_symbol = {}
     offset = 0
@@ -733,7 +774,7 @@ def read_retrospective_rotation(
             }
         endpoints[i] = per_symbol
 
-    members = peer_members[board_native_id]
+    members = boards[board_native_id]["members"]
     candidates = []
     peer_pulses = []
     rps_by_session = {}
@@ -806,18 +847,32 @@ def read_retrospective_rotation(
             }
             for symbol in wanted
         }
-        all_rotations = _cross_period_boards(peer_members, inputs)
+        all_rotations_by_kind = {
+            kind: _cross_period_boards(members_by_board, inputs)
+            for kind, members_by_board in peer_members_by_kind.items()
+        }
         if peer_target_only:
+            all_rotations = all_rotations_by_kind[board_kind]
             return {
                 "namespace_id": snapshot["namespace_id"],
                 "snapshot": snapshot["snapshot"],
+                "snapshots_by_kind": {
+                    kind: item["snapshot"] for kind, item in snapshots_by_kind.items()
+                },
+                "board_names_by_kind": board_names_by_kind,
                 "target_session": target_session.isoformat(),
+                "comparison_sessions": {
+                    "prior_ret5": sessions[-4],
+                    "prior_breadth": sessions[-2],
+                },
                 "board_kind": board_kind,
                 "package_sha256": package_sha256,
                 "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
                 "peer_target": all_rotations,
+                "peer_target_by_kind": all_rotations_by_kind,
                 "database_write_attempted": False,
             }
+        all_rotations = all_rotations_by_kind[board_kind]
         rotation = all_rotations[board_native_id]["rotation"]
         peer_pulses.append(
             {

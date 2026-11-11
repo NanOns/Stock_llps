@@ -67,6 +67,23 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
     try:
         if args.static_only and not args.persist:
             raise ValueError("--static-only 必须显式指定 --persist")
+        snapshot_ids = {
+            "INDUSTRY": args.industry_snapshot_id,
+            "CONCEPT": args.concept_snapshot_id,
+        }
+        snapshot_ids_supplied = any(snapshot_ids.values())
+        if args.include_sector_pulse and (
+            not args.static_only
+            or args.start_session
+            or not all(snapshot_ids.values())
+            or snapshot_ids["INDUSTRY"] == snapshot_ids["CONCEPT"]
+        ):
+            raise ValueError(
+                "--include-sector-pulse 仅用于单日--static-only，并须提供不同的行业与GN快照UUID"
+            )
+        if snapshot_ids_supplied and not args.include_sector_pulse:
+            raise ValueError("板块快照UUID只能与 --include-sector-pulse 同时使用")
+        sector_snapshot_ids = snapshot_ids if args.include_sector_pulse else None
         config, config_path = load_runtime_config()
         if args.static_only and not args.start_session:
             report = run_source_static_research_day(
@@ -77,6 +94,8 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 persist=args.persist,
                 history_session_count=args.history_session_count,
                 worker_count=args.workers,
+                include_sector_pulse=args.include_sector_pulse,
+                sector_snapshot_ids=sector_snapshot_ids,
             )
             report["configuration_path"] = str(config_path)
             report["ok"] = True
@@ -109,6 +128,7 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                         persist=args.persist,
                         history_session_count=args.history_session_count,
                         worker_count=args.workers,
+                        include_sector_pulse=False,
                     )
                 else:
                     report = run_source_research_day(
@@ -134,6 +154,8 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 persist=args.persist,
                 history_session_count=args.history_session_count,
                 worker_count=args.workers,
+                include_sector_pulse=args.include_sector_pulse,
+                sector_snapshot_ids=sector_snapshot_ids,
             )
         else:
             report = run_source_research_day(

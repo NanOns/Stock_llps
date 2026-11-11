@@ -908,6 +908,20 @@ async function openD0Board(board, offset = 0) {
       !$("boardDialog").open
     )
       return;
+    const pulseBoard = result.boards?.find(
+      (item) =>
+        item.board_kind === board.board_kind &&
+        item.board_native_id === board.board_native_id,
+    );
+    const pulse = pulseBoard?.cross_period_pulse ?? board.cross_period_pulse;
+    const pulseSummary =
+      pulse?.status === "AVAILABLE"
+        ? `跨日 PULSE ${pulse.state} · dq5 ${pulse.dq5_pp?.decimal_4dp ?? "UNKNOWN"} · breadth Δ ${pulse.breadth_delta1?.decimal_4dp ?? "UNKNOWN"}`
+        : `跨日 PULSE ${pulse?.status ?? "NOT_COMPUTED"} · ${(pulse?.reason_codes ?? ["PULSE_FACTS_NOT_SAVED_FOR_EXACT_INPUT"]).join("、")}`;
+    message(
+      "boardMeta",
+      `${board.board_kind} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${pulseSummary} · 正式 Rotation 未评估`,
+    );
     message(
       "boardCoverage",
       `D0 新增成员 ${result.filter.filtered_total} · 全市场独立新增 ${result.filter.global_total} · 板块关系可重叠 · NON_PIT`,
