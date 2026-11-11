@@ -953,16 +953,12 @@ def read_source_sector_pulse_day(
                 "read_board_count": len(group),
                 "facts": {row["board_native_id"]: _pulse_payload(row) for row in group},
             }
-    statuses = [
-        result_by_kind[kind]["status"]
-        for kind in _KINDS
-        if normalized_snapshots[kind] is not None
-    ]
+    statuses = [result_by_kind[kind]["status"] for kind in _KINDS]
     overall = (
         "AVAILABLE"
-        if statuses and all(item == "AVAILABLE" for item in statuses)
+        if all(item == "AVAILABLE" for item in statuses)
         else "INCOMPLETE"
-        if any(item == "INCOMPLETE" for item in statuses)
+        if any(item in {"AVAILABLE", "INCOMPLETE"} for item in statuses)
         else "NOT_COMPUTED"
     )
     return {
