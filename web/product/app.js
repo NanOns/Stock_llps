@@ -915,6 +915,7 @@ async function openD0Board(board, offset = 0) {
     );
     const pulse = pulseBoard?.cross_period_pulse ?? board.cross_period_pulse;
     const pulseTransition = pulseBoard?.cross_period_pulse_transition;
+    const pulseFollowup = pulseBoard?.cross_period_pulse_followup;
     const pulseSummary =
       pulse?.status === "AVAILABLE"
         ? `跨日 PULSE ${pulse.state} · dq5 ${pulse.dq5_pp?.decimal_4dp ?? "UNKNOWN"} · breadth Δ ${pulse.breadth_delta1?.decimal_4dp ?? "UNKNOWN"}`
@@ -934,9 +935,29 @@ async function openD0Board(board, offset = 0) {
       pulseTransition?.status === "AVAILABLE"
         ? `相邻 PULSE ${c.previous_session}→${c.target_session} ${pulseTransitionLabels[pulseTransition.transition_state] ?? pulseTransition.transition_state}（${pulseTransition.previous_state}→${pulseTransition.target_state}）${pulseTransitionReasons.length ? ` · ${[...new Set(pulseTransitionReasons)].join("、")}` : ""}`
         : `相邻 PULSE ${c.previous_session}→${c.target_session} ${pulseTransition?.status ?? "NOT_COMPUTED"} · ${(pulseTransition?.reason_codes ?? ["PULSE_TRANSITION_FACTS_NOT_SAVED_FOR_EXACT_INPUT"]).join("、")}`;
+    const pulseFollowupSummary = (pulseFollowup?.horizons ?? [])
+      .map((item) => {
+        const label = `T+${item.horizon_sessions ?? "?"} ${item.target_session ?? ""}`;
+        const denominator = item.fixed_member_denominator;
+        const observed = item.observed_member_count;
+        if (item.status === "OBSERVED") {
+          const percent = item.equal_weight_return_percent_4dp;
+          const signed = Number(percent) >= 0 ? `+${percent}` : percent;
+          return `${label} ${signed}%（${observed}/${denominator}）`;
+        }
+        if (item.status === "NOT_DUE") return `${label}尚未到期`;
+        if (item.status === "NOT_COMPUTED") return `${label}尚未生产`;
+        if (item.status === "UNKNOWN")
+          return `${label}未知（${observed}/${denominator}，${(item.reason_codes ?? []).join("、")}）`;
+        return `${label}${item.status ?? "INCOMPLETE"}（${(item.reason_codes ?? []).join("、")}）`;
+      })
+      .join(" · ");
+    const pulseFollowupLine = pulseFollowupSummary
+      ? `PULSE后继Raw观察（${pulseFollowup.research_mode ?? "NON_PIT_RETROSPECTIVE"}；固定成员分母）${pulseFollowupSummary}`
+      : `PULSE后继Raw观察 ${pulseFollowup?.status ?? "NOT_COMPUTED"} · ${(pulseFollowup?.reason_codes ?? ["PULSE_FOLLOWUP_NOT_AVAILABLE"]).join("、")}`;
     message(
       "boardMeta",
-      `${board.board_kind} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${pulseSummary} · ${pulseTransitionSummary} · 正式 Rotation 未评估`,
+      `${board.board_kind} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${pulseSummary} · ${pulseTransitionSummary} · ${pulseFollowupLine} · 正式 Rotation 未评估`,
     );
     message(
       "boardCoverage",

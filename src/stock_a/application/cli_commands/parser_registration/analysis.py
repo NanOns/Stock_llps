@@ -215,6 +215,25 @@ def register_commands(commands):
     pulse_transition.add_argument(
         "--concept-snapshot-id", required=True, help="精确TDX GN概念成员快照UUID"
     )
+    pulse_followup = commands.add_parser(
+        "source-sector-pulse-followup-day",
+        help="读取已存PULSE与实际后继Raw并原子保存固定成员T+1/T+3/T+5结果",
+    )
+    pulse_followup.add_argument(
+        "--target-session", required=True, help="已保存PULSE的T0官方会话YYYY-MM-DD"
+    )
+    pulse_followup.add_argument(
+        "--research-cutoff", required=True, help="明确的Raw研究截止官方会话YYYY-MM-DD"
+    )
+    pulse_followup.add_argument(
+        "--package-sha256", required=True, help="T0及后继Raw的精确来源包SHA-256"
+    )
+    pulse_followup.add_argument(
+        "--persist",
+        action="store_true",
+        required=True,
+        help="在唯一PG以单一SERIALIZABLE事务幂等保存完整板块与到期窗口",
+    )
     d0_raw = commands.add_parser(
         "source-d0-raw",
         help="只读计算Raw来源池D0启动、恢复诊断及启动相邻变化",

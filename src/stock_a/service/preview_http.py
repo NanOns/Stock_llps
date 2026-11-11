@@ -1577,6 +1577,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         from stock_a.storage.postgres.sector_pulse_transitions import (
             read_source_sector_pulse_transitions,
         )
+        from stock_a.storage.postgres.sector_pulse_followups import (
+            SectorPulseFollowupPgError,
+            read_source_sector_pulse_followups,
+        )
 
         try:
             sector_pulse = read_source_sector_pulse_day(
@@ -1617,6 +1621,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 target_result=sector_pulse,
                 calendar_identity=calendar_identity,
             )
+            followup_calendar = _official_calendar(research_cutoff)
+            followup_sessions = tuple(followup_calendar["sessions"])
+            try:
+                followup_index = followup_sessions.index(target_session)
+                followup_targets = {
+                    horizon: followup_sessions[followup_index + horizon]
+                    if followup_index + horizon < len(followup_sessions)
+                    else None
+                    for horizon in (1, 3, 5)
+                }
+            except ValueError:
+                followup_targets = {horizon: None for horizon in (1, 3, 5)}
+            sector_pulse_followup = read_source_sector_pulse_followups(
+                self.preview_server.state.config,
+                pulse_day=sector_pulse,
+                research_cutoff=research_cutoff,
+                horizon_targets=followup_targets,
+                calendar_identity=followup_calendar,
+            )
         except (SectorPulsePgError, RawSourcePgError) as error:
             sector_pulse = {
                 "status": "READ_ERROR",
@@ -1632,6 +1655,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "database_write_attempted": False,
                 "cross_period_recalculated": False,
             }
+            sector_pulse_followup = {
+                "status": "READ_ERROR",
+                "reason_codes": [
+                    getattr(error, "code", "PULSE_FOLLOWUP_PG_READ_FAILED")
+                ],
+                "by_kind": {},
+                "database_write_attempted": False,
+                "cross_session_recalculated": False,
+            }
+        except SectorPulseFollowupPgError as error:
+            sector_pulse_followup = {
+                "status": "READ_ERROR",
+                "reason_codes": [
+                    getattr(error, "code", "PULSE_FOLLOWUP_PG_READ_FAILED")
+                ],
+                "by_kind": {},
+                "database_write_attempted": False,
+                "cross_session_recalculated": False,
+            }
         except Exception as error:
             sector_pulse_transition = {
                 "status": "READ_ERROR",
@@ -1641,6 +1683,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "by_kind": {},
                 "database_write_attempted": False,
                 "cross_period_recalculated": False,
+            }
+            sector_pulse_followup = {
+                "status": "READ_ERROR",
+                "reason_codes": [getattr(error, "code", "PULSE_FOLLOWUP_READ_FAILED")],
+                "by_kind": {},
+                "database_write_attempted": False,
+                "cross_session_recalculated": False,
             }
         for board in boards:
             kind = board.get("board_kind")
@@ -1685,6 +1734,26 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "snapshot_id": transition_group.get("snapshot_id"),
                     "formal_rotation_state": "NOT_EVALUATED",
                     "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                }
+            followup_group = sector_pulse_followup.get("by_kind", {}).get(kind, {})
+            followup_fact = followup_group.get("facts", {}).get(board_id)
+            if isinstance(followup_fact, Mapping):
+                board["cross_period_pulse_followup"] = followup_fact
+            else:
+                board["cross_period_pulse_followup"] = {
+                    "status": followup_group.get(
+                        "status", sector_pulse_followup.get("status", "NOT_COMPUTED")
+                    ),
+                    "reason_codes": followup_group.get(
+                        "reason_codes",
+                        sector_pulse_followup.get(
+                            "reason_codes", ["PULSE_FOLLOWUP_NOT_AVAILABLE"]
+                        ),
+                    ),
+                    "horizons": [],
+                    "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                    "research_mode": "NON_PIT_RETROSPECTIVE",
+                    "price_coordinate": "RAW_UNADJUSTED",
                 }
         filtered = stocks
         if board_kind is not None and board_native_id is not None:
@@ -1796,6 +1865,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "sector_pulse_transition_status": sector_pulse_transition.get(
                 "status", "NOT_COMPUTED"
             ),
+            "sector_pulse_followup_status": sector_pulse_followup.get(
+                "status", "NOT_COMPUTED"
+            ),
             "results": page,
             "execution": {
                 "d0_full_pool_computed_before_selection": True,
@@ -1828,6 +1900,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "sector_pulse_transition_pg_read_only": True,
                 "sector_pulse_transition_cross_period_recalculated": False,
                 "sector_pulse_transition_database_write_attempted": False,
+                "sector_pulse_followup_pg_read_only": True,
+                "sector_pulse_followup_cross_session_recalculated": False,
+                "sector_pulse_followup_raw_scan_triggered": False,
+                "sector_pulse_followup_database_write_attempted": False,
+                "sector_pulse_followup_ddl_executed": False,
+                "sector_pulse_followup_dml_executed": False,
                 "database_write": False,
                 "ddl_executed": False,
                 "dml_executed": False,

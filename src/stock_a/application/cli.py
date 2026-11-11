@@ -29,6 +29,9 @@ from stock_a.application.cli_commands.research.research_day import (
 from stock_a.application.cli_commands.research.sector_pulse import (
     _run_source_sector_pulse_transition_day,
 )
+from stock_a.application.cli_commands.research.sector_pulse_followup import (
+    _run_source_sector_pulse_followup_day,
+)
 from stock_a.application.cli_commands.research.market_research import (
     _run_source_market_breadth,
     _run_source_symbol_price_profile,
@@ -113,6 +116,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_research_day(args)
         if args.command == "source-sector-pulse-transition-day":
             return _run_source_sector_pulse_transition_day(args)
+        if args.command == "source-sector-pulse-followup-day":
+            return _run_source_sector_pulse_followup_day(args)
         if args.command == "source-d1-breakout-preview":
             return _run_source_d1_breakout_preview(args)
         if args.command in ("product-serve", "preview-serve"):
