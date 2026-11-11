@@ -122,6 +122,8 @@ Seed宽度记录k/n/未知与Wilson下界启发式(z=1.96)，其值为`(p+z²/(2
 
 Rotation有NONE/PULSE/IN/ACCEPTED/EXPANDING/REACCELERATING/OUT/FAILED/UNKNOWN；pulse使用dq5≥10且breadth_delta1≥0.05，冻结pulse前基准/当时成员/Seed和上涨集合。价格retention用固定篮子，不将每日中位收益拼成指数。
 
+来源级板块PULSE相邻变化只在两日均有完整现存PULSE事实、使用严格相邻官方会话且引用相同板块快照时比较；类型化结果保存两端Raw捕获/内容/摘要与Profile修订、日历修订、PULSE三态及原因。FALSE→TRUE、TRUE→TRUE、TRUE→FALSE、FALSE→FALSE分别标为新出现、连续成立、不再成立、连续未成立；任一端UNKNOWN则变化为UNKNOWN，缺少精确日期PULSE事实保持NOT_COMPUTED，不映射为FALSE。此变化是NON_PIT描述事实，正式Rotation状态固定为NOT_EVALUATED，不更改PULSE阈值或生命周期。
+
 early与mature retention分开，前强势分母0只影响mature；单龙头高集中且无扩散不得通过接受/扩散。脉冲后至少1个可评估会话才IN、至少2个才ACCEPTED，成熟留存/扩散才EXPANDING或REACCELERATING；失败/连续衰退/第6个可评估会话仍未接受按冻结有序规则终止；未知暂停计数。新项目已采用`ROTATION_RESEARCH_DEFAULTS_R1`阈值并由ROTATION_EXECUTION_R2限定执行，继承旧R5工程候选数值但重新登记采用状态：early_seed_retention≥2/3、early_breadth_retention≥0.6、breadth_delta≥0、early_top1_concentration≤1/3、mature_strong_retention≥0.75、diffusion_top1≤0.5。emergence HIGH阈值为dq5≥10、breadth_delta3≥0.05、adjusted_seed_width≥0.1。各字段分母、冻结pulse基准与未知规则按前述固定篮子/共同成员合同执行，不能仅有阈值而缺公式。旧配置formal_consumer_enabled=false不继承；以上阈值在本项目已采用，精确篮子/计时/转换见算法§11.3，不是旧系统权限继承或市场效果证明。
 
 ## S10 市场轴、三族风险与Priority
@@ -191,6 +193,8 @@ ENTRY与DAILY_LANDMARK分开；所有候选今日排序使用当天feature/预�
 来源导入将验证后的Raw行与采集时间写入stock.source_raw_daily；Core/Profile和研究查询按日期、来源代码、包摘要及实际捕获事实读取。业务范围和计算窗口由调用者明确。
 
 数据库中保留具备实际消费者的来源、Core、Profile和市场/板块/个股结果。使用明确业务键、类型化字段和普通数据库事务；重复输入按唯一键幂等处理。同一输入修订时仅重算受影响日期和消费者。错误在具体输入或结果范围内返回，不生成全局候选发布状态、恢复状态机或后台控制计划。
+
+相邻板块PULSE变化作为现有板块详情的来源修订绑定事实持久化；两端行业/GN结果在同一事务写入并完成异事务读回，使用现有板块API只读完整PG行。页面读取不补算脉冲、不写数据库、不执行DDL；缺少任一精确端点时明确返回NOT_COMPUTED，存在部分分区或不一致时返回INCOMPLETE。
 
 全市场、跨日或历史计算的静态研究事实由初始化/日更生产链计算并持久化至有业务键的PG表；初始化与日更复用同一正式生产者。页面/API默认只读PG中可证明完整的指定日期/来源/算法结果并使用真实分页。单股特殊下钻、轻量SQL聚合/筛选和小范围比较可即时计算；HTTP请求不得隐式触发全市场历史计算。缺少事实分别返回NOT_COMPUTED、INCOMPLETE、NO_CHANGE或UNKNOWN，不以空列表推定零变化。
 

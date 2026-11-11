@@ -180,6 +180,41 @@ def register_commands(commands):
     research_day.add_argument(
         "--concept-snapshot-id", help="板块PULSE使用的精确TDX GN概念成员快照UUID"
     )
+    pulse_transition = commands.add_parser(
+        "source-sector-pulse-transition-day",
+        help="仅补算必要的缺失PULSE并保存两日完整行业与概念相邻变化",
+    )
+    pulse_transition.add_argument(
+        "--previous-session", required=True, help="前一官方交易会话YYYY-MM-DD"
+    )
+    pulse_transition.add_argument(
+        "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
+    )
+    pulse_transition.add_argument(
+        "--research-cutoff", required=True, help="显式研究数据截止会话YYYY-MM-DD"
+    )
+    pulse_transition.add_argument(
+        "--previous-package-sha256", required=True, help="前一会话Raw来源包SHA-256"
+    )
+    pulse_transition.add_argument(
+        "--target-package-sha256", required=True, help="目标会话Raw来源包SHA-256"
+    )
+    pulse_transition.add_argument(
+        "--previous-profile-revision",
+        required=True,
+        help="前一会话Seed/Profile修订SHA-256",
+    )
+    pulse_transition.add_argument(
+        "--target-profile-revision",
+        required=True,
+        help="目标会话Seed/Profile修订SHA-256",
+    )
+    pulse_transition.add_argument(
+        "--industry-snapshot-id", required=True, help="精确TDX行业成员快照UUID"
+    )
+    pulse_transition.add_argument(
+        "--concept-snapshot-id", required=True, help="精确TDX GN概念成员快照UUID"
+    )
     d0_raw = commands.add_parser(
         "source-d0-raw",
         help="只读计算Raw来源池D0启动、恢复诊断及启动相邻变化",

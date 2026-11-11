@@ -914,13 +914,29 @@ async function openD0Board(board, offset = 0) {
         item.board_native_id === board.board_native_id,
     );
     const pulse = pulseBoard?.cross_period_pulse ?? board.cross_period_pulse;
+    const pulseTransition = pulseBoard?.cross_period_pulse_transition;
     const pulseSummary =
       pulse?.status === "AVAILABLE"
         ? `跨日 PULSE ${pulse.state} · dq5 ${pulse.dq5_pp?.decimal_4dp ?? "UNKNOWN"} · breadth Δ ${pulse.breadth_delta1?.decimal_4dp ?? "UNKNOWN"}`
         : `跨日 PULSE ${pulse?.status ?? "NOT_COMPUTED"} · ${(pulse?.reason_codes ?? ["PULSE_FACTS_NOT_SAVED_FOR_EXACT_INPUT"]).join("、")}`;
+    const pulseTransitionLabels = {
+      PULSE_APPEARED: "新出现",
+      PULSE_PERSISTED: "连续成立",
+      PULSE_CEASED: "本日不再成立",
+      PULSE_NOT_PRESENT_BOTH: "连续未成立",
+      PULSE_TRANSITION_UNKNOWN: "无法比较（含 UNKNOWN）",
+    };
+    const pulseTransitionReasons = [
+      ...(pulseTransition?.previous_reason_codes ?? []),
+      ...(pulseTransition?.target_reason_codes ?? []),
+    ];
+    const pulseTransitionSummary =
+      pulseTransition?.status === "AVAILABLE"
+        ? `相邻 PULSE ${c.previous_session}→${c.target_session} ${pulseTransitionLabels[pulseTransition.transition_state] ?? pulseTransition.transition_state}（${pulseTransition.previous_state}→${pulseTransition.target_state}）${pulseTransitionReasons.length ? ` · ${[...new Set(pulseTransitionReasons)].join("、")}` : ""}`
+        : `相邻 PULSE ${c.previous_session}→${c.target_session} ${pulseTransition?.status ?? "NOT_COMPUTED"} · ${(pulseTransition?.reason_codes ?? ["PULSE_TRANSITION_FACTS_NOT_SAVED_FOR_EXACT_INPUT"]).join("、")}`;
     message(
       "boardMeta",
-      `${board.board_kind} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${pulseSummary} · 正式 Rotation 未评估`,
+      `${board.board_kind} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${pulseSummary} · ${pulseTransitionSummary} · 正式 Rotation 未评估`,
     );
     message(
       "boardCoverage",

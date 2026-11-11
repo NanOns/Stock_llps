@@ -126,6 +126,12 @@ _MIGRATIONS = (
         ("migrations", "0019_r06_sector_cross_period_pulse_facts.sql"),
         "9938e29d8e7e4652d72390d44efb0e4848591bd2f01732e3cc6fb99f2f46e6f0",
     ),
+    (
+        20,
+        "STOCK_A_INITIAL_R1",
+        ("migrations", "0020_r06_sector_pulse_adjacent_transitions.sql"),
+        "9a6603d0b0c58fd25b4ccf2d840652b4e686ef6f70c0bc42003790cdc233abfc",
+    ),
 )
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
@@ -141,6 +147,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R06_BACKEND_D0_D1_PG_PERSISTENCE_CODE_R1": frozenset({15}),
     "R06_ALL_EXISTING_STATIC_RESEARCH_PG_CLOSED_R1": frozenset({16, 17, 18}),
     "R06_SECTOR_CROSS_PERIOD_PULSE_FACTS_R1": frozenset({19}),
+    "R06_SECTOR_PULSE_ADJACENT_TRANSITION_R1": frozenset({20}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -237,6 +244,9 @@ _RELATIONS_BY_MIGRATION_COUNT[18] = _RELATIONS_BY_MIGRATION_COUNT[17] | {
 }
 _RELATIONS_BY_MIGRATION_COUNT[19] = _RELATIONS_BY_MIGRATION_COUNT[18] | {
     "source_sector_cross_period_pulse_facts",
+}
+_RELATIONS_BY_MIGRATION_COUNT[20] = _RELATIONS_BY_MIGRATION_COUNT[19] | {
+    "source_sector_pulse_adjacent_transitions",
 }
 
 

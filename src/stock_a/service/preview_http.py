@@ -1574,6 +1574,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             SectorPulsePgError,
             read_source_sector_pulse_day,
         )
+        from stock_a.storage.postgres.sector_pulse_transitions import (
+            read_source_sector_pulse_transitions,
+        )
 
         try:
             sector_pulse = read_source_sector_pulse_day(
@@ -1590,10 +1593,51 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "CONCEPT": concept_snapshot_id,
                 },
             )
+            sector_pulse["target_session"] = target_session.isoformat()
+            sector_pulse["source_version"] = after_source
+            previous_sector_pulse = read_source_sector_pulse_day(
+                self.preview_server.state.config,
+                target_session=before_session,
+                package_sha256=package_sha256,
+                namespace_id=namespace_id,
+                source_capture_id=before_source["source_capture_id"],
+                source_content_id=before_source["source_content_id"],
+                source_raw_digest=before_source["capture_digest"],
+                source_pool_count=before_source["raw_row_count"],
+                snapshot_ids={
+                    "INDUSTRY": industry_snapshot_id,
+                    "CONCEPT": concept_snapshot_id,
+                },
+            )
+            previous_sector_pulse["target_session"] = before_session.isoformat()
+            previous_sector_pulse["source_version"] = before_source
+            sector_pulse_transition = read_source_sector_pulse_transitions(
+                self.preview_server.state.config,
+                previous_result=previous_sector_pulse,
+                target_result=sector_pulse,
+                calendar_identity=calendar_identity,
+            )
         except (SectorPulsePgError, RawSourcePgError) as error:
             sector_pulse = {
                 "status": "READ_ERROR",
                 "reason_codes": [getattr(error, "code", "PULSE_PG_READ_FAILED")],
+                "by_kind": {},
+                "database_write_attempted": False,
+                "cross_period_recalculated": False,
+            }
+            sector_pulse_transition = {
+                "status": "READ_ERROR",
+                "reason_codes": [getattr(error, "code", "PULSE_PG_READ_FAILED")],
+                "by_kind": {},
+                "database_write_attempted": False,
+                "cross_period_recalculated": False,
+            }
+        except Exception as error:
+            sector_pulse_transition = {
+                "status": "READ_ERROR",
+                "reason_codes": [
+                    getattr(error, "code", "PULSE_TRANSITION_PG_READ_FAILED")
+                ],
                 "by_kind": {},
                 "database_write_attempted": False,
                 "cross_period_recalculated": False,
@@ -1617,6 +1661,28 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "reason_codes", ["PULSE_BOARD_FACT_NOT_AVAILABLE"]
                     ),
                     "snapshot_id": group.get("snapshot_id"),
+                    "formal_rotation_state": "NOT_EVALUATED",
+                    "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                }
+            transition_group = sector_pulse_transition.get("by_kind", {}).get(kind, {})
+            transition_fact = transition_group.get("facts", {}).get(board_id)
+            if transition_group.get("status") == "AVAILABLE" and isinstance(
+                transition_fact, Mapping
+            ):
+                board["cross_period_pulse_transition"] = transition_fact
+            else:
+                board["cross_period_pulse_transition"] = {
+                    "status": transition_group.get(
+                        "status", sector_pulse_transition.get("status", "NOT_COMPUTED")
+                    ),
+                    "reason_codes": transition_group.get(
+                        "reason_codes",
+                        sector_pulse_transition.get(
+                            "reason_codes",
+                            ["PULSE_TRANSITION_FACTS_NOT_SAVED_FOR_EXACT_INPUT"],
+                        ),
+                    ),
+                    "snapshot_id": transition_group.get("snapshot_id"),
                     "formal_rotation_state": "NOT_EVALUATED",
                     "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
                 }
@@ -1727,6 +1793,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             },
             "boards": boards,
             "sector_pulse_status": sector_pulse.get("status", "NOT_COMPUTED"),
+            "sector_pulse_transition_status": sector_pulse_transition.get(
+                "status", "NOT_COMPUTED"
+            ),
             "results": page,
             "execution": {
                 "d0_full_pool_computed_before_selection": True,
@@ -1756,6 +1825,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "sector_pulse_pg_read_only": True,
                 "sector_pulse_cross_period_recalculated": False,
                 "sector_pulse_database_write_attempted": False,
+                "sector_pulse_transition_pg_read_only": True,
+                "sector_pulse_transition_cross_period_recalculated": False,
+                "sector_pulse_transition_database_write_attempted": False,
                 "database_write": False,
                 "ddl_executed": False,
                 "dml_executed": False,
