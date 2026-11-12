@@ -1064,6 +1064,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "limit",
         }
         board_fields = {"board_kind", "board_native_id"}
+        evidence_fields = {"d1_history_session_count"}
         if not isinstance(body, dict) or not required.issubset(body):
             raise PreviewHttpError(
                 400,
@@ -1074,6 +1075,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         if body_fields not in {
             frozenset(required),
             frozenset(required | board_fields),
+            frozenset(required | evidence_fields),
+            frozenset(required | board_fields | evidence_fields),
         }:
             raise PreviewHttpError(
                 400,
@@ -1127,6 +1130,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "offset必须为0至允许上限之间的整数",
             )
         limit = _positive_int(body["limit"], "limit", 30)
+        d1_history_session_count = (
+            _positive_int(
+                body["d1_history_session_count"], "d1_history_session_count", 75
+            )
+            if "d1_history_session_count" in body
+            else None
+        )
 
         board_kind: str | None = None
         board_native_id: str | None = None
@@ -1467,6 +1477,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "SOURCE_LAUNCH_WATCH_MEMBERSHIP_RESULT_INCOMPLETE",
                     "板块关系联结没有闭合到完整D0新增来源股票集合",
                 )
+            from stock_a.storage.postgres.source_launch_watch_evidence import (
+                read_source_launch_watch_evidence,
+            )
+
+            evidence = read_source_launch_watch_evidence(
+                self.preview_server.state.config,
+                target_session=target_session,
+                source_package_id=source_package_id,
+                source_capture_id=after_source["source_capture_id"],
+                expected_source_count=after_source["raw_row_count"],
+                source_symbols=source_symbols,
+                d1_history_session_count=d1_history_session_count,
+            )
             ordered_symbols = [stock.get("source_symbol") for stock in stocks]
             if (
                 any(not isinstance(symbol, str) for symbol in ordered_symbols)
@@ -1499,6 +1522,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 d0_reader_wall_seconds,
                 membership_read_wall_seconds,
                 aggregation_wall_seconds,
+                evidence,
             )
 
         actual_calendar = _official_calendar(target_session)
@@ -1525,6 +1549,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             calendar_revision,
             industry_snapshot_id,
             concept_snapshot_id,
+            d1_history_session_count,
         )
         watch, cache_hit = self.preview_server.state.source_d0_watch(
             cache_key, build_full_watch
@@ -1535,6 +1560,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             d0_reader_wall_seconds,
             membership_read_wall_seconds,
             aggregation_wall_seconds,
+            evidence,
         ) = watch
         transition_counts = changes["transition_counts"]
         stocks = complete["stocks"]
@@ -1730,6 +1756,35 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "research_mode": "NON_PIT_RETROSPECTIVE",
                     "price_coordinate": "RAW_UNADJUSTED",
                 }
+        from stock_a.application.source_launch_watch_order import (
+            order_source_launch_watch,
+        )
+
+        ordered = order_source_launch_watch(
+            stocks,
+            boards,
+            evidence.get("by_symbol", {}),
+            evidence_status=evidence.get("status", "UNKNOWN"),
+        )
+        stocks = ordered["stocks"]
+        boards = ordered["boards"]
+        quality_by_kind = {}
+        for snapshot in complete.get("membership_snapshots", []):
+            counts = snapshot.get("source_quality_counts")
+            counts = counts if isinstance(counts, dict) else {}
+            quality_by_kind[snapshot.get("board_kind")] = {
+                "snapshot_id": snapshot.get("snapshot_id"),
+                "source_kind": snapshot.get("source_kind"),
+                "quality": counts.get("quality", "UNKNOWN"),
+                "source_unmapped_rows": counts.get("unmapped_source_rows"),
+                "membership_mode": snapshot.get("membership_mode")
+                or "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+            }
+        for board in boards:
+            board["membership_source_quality"] = quality_by_kind.get(
+                board.get("board_kind"),
+                {"quality": "UNKNOWN", "source_unmapped_rows": None},
+            )
         filtered = stocks
         if board_kind is not None and board_native_id is not None:
             filtered = [
@@ -1834,6 +1889,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 else None,
             },
             "boards": boards,
+            "observation_ordering": ordered["stock_summary"],
+            "board_selection": ordered["board_summary"],
+            "stored_evidence_status": {
+                "status": evidence.get("status", "UNKNOWN"),
+                "seed": evidence.get("seed_status", "UNKNOWN"),
+                "d1": evidence.get("d1_status", "UNKNOWN"),
+                "rules": evidence.get("rules_status", "UNKNOWN"),
+                "seed_scope": evidence.get("seed_scope"),
+                "rule_scope": evidence.get("rule_scope"),
+                "d1_scope": evidence.get("d1_scope"),
+            },
             "sector_pulse_followup_comparison": {
                 kind: sector_pulse_followup.get("by_kind", {})
                 .get(kind, {})
@@ -1898,6 +1964,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "sector_pulse_followup_database_write_attempted": False,
                 "sector_pulse_followup_ddl_executed": False,
                 "sector_pulse_followup_dml_executed": False,
+                "stored_research_evidence_execution": evidence.get("execution"),
                 "database_write": False,
                 "ddl_executed": False,
                 "dml_executed": False,

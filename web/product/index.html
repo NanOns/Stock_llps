@@ -156,8 +156,9 @@
                     <span class="section-kicker">SECTOR MOVES</span>
                     <h3>发生变化的板块</h3>
                     <p>
-                      D0 来源级新增启动，按已证新增成员数展示，最多 15
-                      个；成员回看 NON_PIT。
+                      D0 来源级新增成员关系数降序，首页最多 15
+                      个；完整板块仍可搜索、分页。成员回看 NON_PIT，PULSE
+                      只作上下文。
                     </p>
                   </div>
                   <button class="text-button" data-goto="sectors">
@@ -174,8 +175,9 @@
                     <span class="section-kicker">STOCK MOVES</span>
                     <h3>独立个股变化</h3>
                     <p>
-                      D0 相邻官方会话 FALSE→TRUE，按来源代码去重，最多 30
-                      只；尚未排序为正式候选。
+                      D0 相邻官方会话 FALSE→TRUE；按已存
+                      Seed、D1、九规则完整度、价格质量与板块上下文分层观察，首页最多
+                      30 只，不代表正式候选或收益预测。
                     </p>
                   </div>
                   <button class="text-button" data-goto="stocks">
@@ -268,6 +270,7 @@
                       <th>变化板块</th>
                       <th>类型</th>
                       <th>D0 新增成员</th>
+                      <th>跨日 PULSE</th>
                       <th>快照观测</th>
                       <th>身份时态</th>
                       <th></th>
@@ -275,7 +278,7 @@
                   </thead>
                   <tbody id="d0BoardRows">
                     <tr>
-                      <td colspan="6" class="empty">
+                      <td colspan="7" class="empty">
                         正在读取当前日期的 D0 变化板块。
                       </td>
                     </tr>

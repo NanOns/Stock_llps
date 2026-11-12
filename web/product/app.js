@@ -74,6 +74,133 @@ function format(value) {
 function boardKindLabel(kind) {
   return kind === "INDUSTRY" ? "行业" : kind === "CONCEPT" ? "概念" : "板块";
 }
+function evidenceStateLabel(value) {
+  return (
+    {
+      TRUE: "TRUE",
+      FALSE: "FALSE",
+      UNKNOWN: "UNKNOWN",
+      NOT_COMPUTED: "未计算",
+    }[value] || "UNKNOWN"
+  );
+}
+function stockObservationSummary(item) {
+  const order = item.observation_order || {};
+  return [
+    `${order.layer_label || "证据 UNKNOWN"}`,
+    `Seed ${evidenceStateLabel(order.seed_rule_state)}`,
+    `D1 锚 ${evidenceStateLabel(order.d1_anchor_state)}`,
+    `九规则已知 ${order.known_rule_count ?? 0}/${order.expected_rule_count ?? 9}`,
+    `D1 价格 ${order.d1_target_price_quality || "UNKNOWN"}`,
+    `PULSE ${order.pulse_status || "UNKNOWN"}`,
+  ].join(" · ");
+}
+function boardPulseSummary(board) {
+  const pulse = board.cross_period_pulse || {};
+  return pulse.status === "AVAILABLE"
+    ? `PULSE ${evidenceStateLabel(pulse.state)}`
+    : `PULSE ${pulse.status || "UNKNOWN"}`;
+}
+function boardSourceQualitySummary(board) {
+  const source = board.membership_source_quality || {};
+  return `成员源 ${source.quality || "UNKNOWN"} · 快照未映射 ${source.source_unmapped_rows ?? "UNKNOWN"}`;
+}
+function membershipScopeSummary(status) {
+  const snapshots = Array.isArray(status?.snapshots) ? status.snapshots : [];
+  const sourceSummary = snapshots
+    .map(
+      (snapshot) =>
+        `${boardKindLabel(snapshot.board_kind)} ${snapshot.source_quality_counts?.quality || "UNKNOWN"}（快照未映射 ${snapshot.source_quality_counts?.unmapped_source_rows ?? "UNKNOWN"}）`,
+    )
+    .join("；");
+  return `D0映射 ${status?.mapped_distinct_source_symbol_count ?? "UNKNOWN"}/${status?.global_new_stock_count ?? "UNKNOWN"} 只；未映射代码 ${status?.unmapped_distinct_source_symbol_count ?? "UNKNOWN"} · ${sourceSummary || "成员快照 UNKNOWN"}`;
+}
+function evidenceReasons(fact) {
+  const reasons = Array.isArray(fact?.reasons) ? fact.reasons : [];
+  return reasons.length ? reasons.join("、") : "未提供原因";
+}
+function renderStoredD0Evidence(row) {
+  const evidence = row.research_evidence;
+  const panel = node("div", null, "rule");
+  if (!evidence) {
+    panel.textContent =
+      "当前入口没有携带 D0 全池证据行；可从首页精选或板块新增成员进入以查看该日已存 Seed、D1、九规则与 PULSE。";
+    return panel;
+  }
+
+  const seed = evidence.seed || {};
+  const d1 = evidence.d1 || {};
+  const rules = evidence.rules || {};
+  const sector = evidence.sector_context || {};
+  panel.append(
+    node(
+      "strong",
+      `已保存 D0 观察证据 · ${evidence.status || "UNKNOWN"} · ${row.transition || "FALSE_TO_TRUE"}`,
+    ),
+    node(
+      "p",
+      `D0 ${row.before?.scenario_raw || "FALSE"} → ${row.after?.scenario_raw || "TRUE"}；${row.home_selection_reason || row.observation_reason || "按稳定来源代码分页观察"}。`,
+    ),
+    node(
+      "p",
+      `Seed ${seed.status || "UNKNOWN"} · S1 ${evidenceStateLabel(seed.s1?.state)}（${evidenceReasons(seed.s1)}）· S2 ${evidenceStateLabel(seed.s2?.state)}（${evidenceReasons(seed.s2)}）· Seed ${evidenceStateLabel(seed.source_seed?.state)} · 安全 ${evidenceStateLabel(seed.safety?.state)} · 目标收盘质量 ${seed.target_close_quality || "UNKNOWN"}${seed.reason_codes?.length ? ` · ${seed.reason_codes.join("、")}` : ""}`,
+    ),
+    node(
+      "p",
+      `D1 ${d1.status || "UNKNOWN"} · 目标价格 ${d1.target_price_quality || "UNKNOWN"} · 结构事实 ${d1.structure_fact_count ?? 0}/${d1.expected_structure_fact_count ?? 5} · 材料锚 ${d1.material_change_anchor_count ?? 0} · 已存明细 ${d1.persisted_detail_count ?? 0} · 缺失结构 ${d1.missing_structure_types?.join("、") || "无"} · ${(d1.reason_codes || []).join("、") || "无已记录缺项原因"}`,
+    ),
+    node(
+      "p",
+      `九规则 ${rules.status || "UNKNOWN"} · TRUE/FALSE ${rules.known_state_count ?? 0}/${rules.expected_rule_count ?? 9} · 缺失 ${rules.missing_rule_ids?.join("、") || "无"} · ${(rules.reason_codes || []).join("、") || "范围可用"}`,
+    ),
+  );
+
+  const ruleDetails = node("details", null, "evidence-details");
+  ruleDetails.append(node("summary", "展开九规则及各自保存原因"));
+  for (const [ruleId, fact] of Object.entries(rules.facts || {})) {
+    ruleDetails.append(
+      node(
+        "p",
+        `${ruleId} · ${evidenceStateLabel(fact.state)} · ${evidenceReasons(fact)} · 事件数 ${fact.event_count ?? 0}`,
+      ),
+    );
+  }
+  panel.append(ruleDetails);
+
+  const memberships = Array.isArray(sector.memberships)
+    ? sector.memberships
+    : [];
+  panel.append(
+    node(
+      "p",
+      `当前板块关系 ${sector.membership_count ?? memberships.length} 条 · ${sector.membership_mode || "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"} · 缺失类型 ${(row.missing_membership_kinds || []).join("、") || "无"} · 可读 PULSE ${sector.pulse_available_count ?? 0} 条 · 未计算 ${sector.pulse_not_computed_count ?? 0} 条。`,
+    ),
+  );
+  if (memberships.length) {
+    const membershipDetails = node("details", null, "evidence-details");
+    membershipDetails.append(
+      node("summary", "展开当前行业 / 概念成员与 PULSE"),
+    );
+    for (const membership of memberships) {
+      const pulse = membership.pulse_context || {};
+      membershipDetails.append(
+        node(
+          "p",
+          `${boardKindLabel(membership.board_kind)} ${membership.board_name || membership.board_native_id || "未知板块"} · PULSE ${pulse.status || "UNKNOWN"}/${evidenceStateLabel(pulse.state)} · 相邻 ${pulse.transition_status || "NOT_COMPUTED"}/${pulse.transition_state || "UNKNOWN"} · ${pulse.transition_reason_codes?.join("、") || pulse.reason_codes?.join("、") || "无原因码"} · NON_PIT`,
+        ),
+      );
+    }
+    panel.append(membershipDetails);
+  } else {
+    panel.append(
+      node(
+        "p",
+        `板块关系 ${sector.status || "UNKNOWN"} · ${(row.missing_membership_kinds || []).join("、") || row.unmapped_reason || "未发现映射"}；不推断历史板外。`,
+      ),
+    );
+  }
+  return panel;
+}
 let lastApiError = null;
 let activeRequests = 0;
 const requestWaiters = [];
@@ -571,7 +698,7 @@ function renderD0Boards() {
   const addEmptyRow = (text) => {
     const row = node("tr");
     const cell = node("td", text, "empty");
-    cell.colSpan = 6;
+    cell.colSpan = 7;
     row.append(cell);
     rows.append(row);
   };
@@ -625,24 +752,43 @@ function renderD0Boards() {
   const missingText = missing.length
     ? ` · 成员关系 UNKNOWN：${missing.join("、")}`
     : "";
+  const orderText = state.d0Result.board_selection?.precedence?.[0]
+    ? ` · ${state.d0Result.board_selection.precedence[0]}`
+    : " · 按 D0 新增成员关系数降序";
+  const membershipQuality = membershipScopeSummary(
+    state.d0Result.membership_status,
+  );
   message(
     "d0BoardSummary",
-    `${state.selected?.target_session || ""} · 已证变化板块 ${boards.length}（行业 ${industryCount} / 概念 ${conceptCount}） · 筛选 ${filtered.length} · 成员关系可重叠 · NON_PIT${missingText}`,
+    `${state.selected?.target_session || ""} · 已证变化板块 ${boards.length}（行业 ${industryCount} / 概念 ${conceptCount}） · 首页精选 ${state.d0Result.board_selection?.home_featured_count ?? Math.min(boards.length, 15)} · 筛选 ${filtered.length}${orderText} · ${membershipQuality} · 成员关系可重叠 · NON_PIT${missingText}`,
   );
   if (!filtered.length) {
     addEmptyRow("当前筛选没有匹配的已证 D0 变化板块；清除筛选可恢复完整列表。");
   } else {
     for (const [index, board] of page.entries()) {
       const row = node("tr");
+      const name = node("td");
+      name.append(
+        node("strong", displayBoardName(board)),
+        node(
+          "small",
+          `${board.home_selection_reason || board.observation_basis} · ${boardSourceQualitySummary(board)}`,
+        ),
+      );
       row.append(
-        node("td", displayBoardName(board)),
+        name,
         node("td", board.board_kind === "INDUSTRY" ? "行业" : "概念"),
         node("td", format(board.new_member_count)),
+        node("td", boardPulseSummary(board)),
         node("td", board.observed_at || "UNKNOWN"),
         node("td", "NON_PIT"),
       );
       const action = node("td");
-      const button = node("button", "查看新增成员 →", "text-button");
+      const button = node(
+        "button",
+        board.home_featured ? "首页精选 · 查看成员 →" : "完整列表 · 查看成员 →",
+        "text-button",
+      );
       button.type = "button";
       button.addEventListener("click", () => openD0Board(board));
       action.append(button);
@@ -772,6 +918,11 @@ async function loadD0Overview(c) {
         source_package_id: c.source_package_id,
         industry_snapshot_id: c.industry_snapshot_id,
         concept_snapshot_id: c.concept_snapshot_id,
+        ...(Number.isInteger(c.d1_history_session_count) &&
+        c.d1_history_session_count >= 1 &&
+        c.d1_history_session_count <= 75
+          ? { d1_history_session_count: c.d1_history_session_count }
+          : {}),
         offset: state.d0Offset,
         limit: 30,
       },
@@ -789,11 +940,7 @@ async function loadD0Overview(c) {
       const boards = result.boards
         .filter((item) => item.new_member_count > 0)
         .slice(0, 15);
-      const uniqueStocks = [
-        ...new Map(
-          result.results.map((item) => [item.source_symbol, item]),
-        ).values(),
-      ].slice(0, 30);
+      const uniqueStocks = result.results;
       fillList(
         "overviewBoards",
         boards,
@@ -801,7 +948,7 @@ async function loadD0Overview(c) {
         (item, index) =>
           rowButton(
             item.board_name,
-            `${boardKindLabel(item.board_kind)} · 观测 ${item.observed_at || "UNKNOWN"} · NON_PIT`,
+            `第 ${item.observation_rank || index + 1} 位 · ${item.home_selection_reason || "按 D0 新增成员关系数排序"} · ${boardKindLabel(item.board_kind)} · ${boardSourceQualitySummary(item)} · ${boardPulseSummary(item)} · 观测 ${item.observed_at || "UNKNOWN"} · NON_PIT`,
             item.new_member_count,
             "D0 新增成员",
             () => openD0Board(item),
@@ -815,10 +962,10 @@ async function loadD0Overview(c) {
         (item, index) =>
           rowButton(
             displayStockName(item),
-            `代码 ${displayStockCode(item)} · D0 来源级新增启动 · 相邻会话 FALSE→TRUE`,
-            "D0",
-            "查看原因",
-            () => openStock(item.source_symbol),
+            `${stockObservationSummary(item)} · ${item.home_selection_reason || ""}`,
+            `第 ${item.observation_order?.rank || "?"} 位`,
+            "研究观察顺序",
+            () => openStock(item.source_symbol, item),
             index,
           ),
       );
@@ -835,11 +982,13 @@ async function loadD0Overview(c) {
     }
     const count = result.filter?.global_total;
     $("metrics").lastElementChild.replaceWith(
-      countCard("D0 新增", count, "独立来源代码 · 尚未排序为正式候选"),
+      countCard("D0 新增", count, "独立来源代码 · 证据分层观察，不是正式候选"),
     );
+    const ordering = result.observation_ordering || {};
+    const evidence = result.stored_evidence_status || {};
     message(
       "d0Status",
-      `${c.target_session} · 新增 ${format(count)} 只 · 展示 ${result.results.length} 只 · NON_PIT${missing.length ? ` · 部分成员关系 UNKNOWN：${missing.join("、")}` : ""}`,
+      `${c.target_session} · D0 FALSE→TRUE ${format(count)} 只 · 首页 ${ordering.home_featured_count ?? Math.min(count || 0, 30)}/${ordering.candidate_count ?? count} · Seed ${evidence.seed || "UNKNOWN"} / D1 ${evidence.d1 || "UNKNOWN"} / 九规则 ${evidence.rules || "UNKNOWN"} · ${membershipScopeSummary(result.membership_status)} · 未进首页者按同一顺序分页读取；NON_PIT${missing.length ? ` · 部分成员关系 UNKNOWN：${missing.join("、")}` : ""}`,
     );
     message(
       "d0Page",
@@ -854,10 +1003,10 @@ async function loadD0Overview(c) {
       (item, index) =>
         rowButton(
           displayStockName(item),
-          `代码 ${displayStockCode(item)} · 来源级新增启动 · NON_PIT`,
-          "D0",
-          "查看原因",
-          () => openStock(item.source_symbol),
+          `代码 ${displayStockCode(item)} · ${stockObservationSummary(item)} · ${item.home_selection_reason || "完整结果分页"}`,
+          `第 ${item.observation_order?.rank || "?"} 位`,
+          item.observation_order?.home_featured ? "首页优先观察" : "完整分页",
+          () => openStock(item.source_symbol, item),
           index,
         ),
     );
@@ -915,6 +1064,11 @@ async function openD0Board(board, offset = 0) {
       source_package_id: c.source_package_id,
       industry_snapshot_id: c.industry_snapshot_id,
       concept_snapshot_id: c.concept_snapshot_id,
+      ...(Number.isInteger(c.d1_history_session_count) &&
+      c.d1_history_session_count >= 1 &&
+      c.d1_history_session_count <= 75
+        ? { d1_history_session_count: c.d1_history_session_count }
+        : {}),
       board_kind: board.board_kind,
       board_native_id: board.board_native_id,
       offset,
@@ -1052,11 +1206,11 @@ async function openD0Board(board, offset = 0) {
         : `同行类型样本对照 ${pulseFollowupComparison?.status ?? "NOT_COMPUTED"} · ${(pulseFollowupComparison?.reason_codes ?? ["PULSE_FOLLOWUP_COMPARISON_NOT_AVAILABLE"]).join("、")}`;
     message(
       "boardMeta",
-      `${displayBoardName(board)} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${pulseSummary} · ${pulseTransitionSummary} · ${pulseFollowupLine} · ${pulseFollowupComparisonLine} · 正式 Rotation 未评估`,
+      `${displayBoardName(board)} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · ${boardSourceQualitySummary(pulseBoard || board)} · NON_PIT 回看 · ${pulseSummary} · ${pulseTransitionSummary} · ${pulseFollowupLine} · ${pulseFollowupComparisonLine} · 正式 Rotation 未评估`,
     );
     message(
       "boardCoverage",
-      `D0 新增成员 ${result.filter.filtered_total} · 全市场独立新增 ${result.filter.global_total} · 板块关系可重叠 · NON_PIT`,
+      `D0 新增成员 ${result.filter.filtered_total} · 全市场独立新增 ${result.filter.global_total} · ${membershipScopeSummary(result.membership_status)} · 板块关系可重叠 · NON_PIT`,
     );
     fillList(
       "memberList",
@@ -1065,10 +1219,10 @@ async function openD0Board(board, offset = 0) {
       (item, index) =>
         rowButton(
           displayStockName(item),
-          `代码 ${displayStockCode(item)} · 来源池内 · D0 FALSE→TRUE · NON_PIT`,
-          "D0",
-          "查看同日个股",
-          () => openStock(item.source_symbol),
+          `代码 ${displayStockCode(item)} · ${stockObservationSummary(item)} · ${item.observation_reason || ""}`,
+          `第 ${item.observation_order?.rank || "?"} 位`,
+          "查看九规则与同日个股",
+          () => openStock(item.source_symbol, item),
           index,
         ),
     );
@@ -1872,6 +2026,7 @@ async function openStock(symbol, row = {}) {
     rules.replaceChildren(
       node("strong", "来源级诊断"),
       seedInfo,
+      renderStoredD0Evidence(row),
       launchInfo,
       recoveryInfo,
       membershipInfo,
