@@ -2923,12 +2923,13 @@ def read_profile_relation_screen(
             "PROFILE_RELATION_END_FILTER_INVALID", "两个结束日位置条件不能重复字段"
         )
     if any(
-        not isinstance(value, str) or not value
-        for value in (
-            before_source_package_id,
-            before_profile_revision,
-            after_source_package_id,
-            after_profile_revision,
+        type(package_id) is not int
+        or package_id <= 0
+        or not isinstance(revision, str)
+        or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
+        for package_id, revision in (
+            (before_source_package_id, before_profile_revision),
+            (after_source_package_id, after_profile_revision),
         )
     ):
         raise PriceProfilePgError(
@@ -3703,12 +3704,16 @@ def read_profile_breadth_members(
         )
 
     identities = (
-        before_source_package_id,
-        before_profile_revision,
-        after_source_package_id,
-        after_profile_revision,
+        (before_source_package_id, before_profile_revision),
+        (after_source_package_id, after_profile_revision),
     )
-    if any(not isinstance(value, str) or not value for value in identities):
+    if any(
+        type(package_id) is not int
+        or package_id <= 0
+        or not isinstance(revision, str)
+        or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
+        for package_id, revision in identities
+    ):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
             "广度明细必须显式提供前后来源包数字ID和profile revision",
