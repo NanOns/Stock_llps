@@ -28,6 +28,7 @@ const state = {
   d0Request: 0,
   d0Offset: 0,
   d0Result: null,
+  d0Featured: null,
   d0Status: "NOT_LOADED",
   d0Error: null,
   d0BoardPage: 0,
@@ -119,41 +120,158 @@ function evidenceReasons(fact) {
   const reasons = Array.isArray(fact?.reasons) ? fact.reasons : [];
   return reasons.length ? reasons.join("、") : "未提供原因";
 }
+function storedFactStateLabel(status, fact) {
+  return status === "NOT_COMPUTED" ? "未计算" : evidenceStateLabel(fact?.state);
+}
+function storedFactReasons(status, fact) {
+  return status === "NOT_COMPUTED" ? "该项没有已存事实" : evidenceReasons(fact);
+}
+function evidenceStatusLabel(status) {
+  return (
+    {
+      AVAILABLE: "已保存可读",
+      AVAILABLE_EMPTY: "已核验为空",
+      PARTIAL: "部分已保存",
+      PARTIAL_MEMBERSHIP_UNKNOWN: "成员关系部分未知",
+      UNKNOWN: "UNKNOWN",
+      NOT_COMPUTED: "未计算",
+      NOT_COMPARABLE: "版本或窗口不匹配",
+      AMBIGUOUS: "范围不唯一",
+      INCOMPLETE: "事实不完整",
+    }[status] ||
+    status ||
+    "UNKNOWN"
+  );
+}
+function homeObservationFor(row, evidence, context) {
+  const order = row.observation_order;
+  if (Number.isInteger(order?.rank))
+    return {
+      status: order.home_featured ? "FEATURED" : "CAPACITY_NOT_SHOWN",
+      rank: order.rank,
+      reason: row.home_selection_reason || row.observation_reason || "",
+    };
+  const cached = state.d0Featured;
+  if (
+    cached?.target_session === context.target_session &&
+    cached?.source_package_id === context.source_package_id
+  ) {
+    const homeRow = cached.rows.get(row.source_symbol);
+    if (homeRow) {
+      return {
+        status: "FEATURED",
+        rank: homeRow.observation_order?.rank,
+        reason:
+          homeRow.home_selection_reason || "首页容量内的已证 D0 新增观察。",
+      };
+    }
+    if (evidence.d0?.transition_kind === "D0_NEW")
+      return {
+        status:
+          cached.candidate_count > cached.home_featured_count
+            ? "CAPACITY_NOT_SHOWN"
+            : "INCOMPLETE",
+        candidate_count: cached.candidate_count,
+        home_featured_count: cached.home_featured_count,
+        reason:
+          cached.candidate_count > cached.home_featured_count
+            ? `D0 新增共 ${cached.candidate_count} 只；首页容量为 ${cached.home_featured_count} 只，该代码未在首页展示。`
+            : "已存 D0 新增与首页完整列表不一致，首页位置保持 UNKNOWN。",
+      };
+  }
+  if (["CONTINUING", "NOT_NEW"].includes(evidence.d0?.transition_kind))
+    return { status: "NOT_D0_NEW", reason: "目标日不是 FALSE→TRUE 新增。" };
+  if (evidence.d0?.transition_kind === "D0_NEW")
+    return {
+      status: "NOT_EVALUATED",
+      reason: "已保存为 D0 新增；首页顺位尚未由当前首页结果核验。",
+    };
+  return {
+    status:
+      evidence.d0?.transition_kind === "NOT_COMPUTED"
+        ? "NOT_COMPUTED"
+        : "UNKNOWN",
+    reason: "缺少可用于判定首页容量的同日完整首页结果。",
+  };
+}
 function renderStoredD0Evidence(row) {
   const evidence = row.research_evidence;
   const panel = node("div", null, "rule");
   if (!evidence) {
     panel.textContent =
-      "当前入口没有携带 D0 全池证据行；可从首页精选或板块新增成员进入以查看该日已存 Seed、D1、九规则与 PULSE。";
+      "该来源代码没有可读取的同日保存研究证据；请区分未计算、UNKNOWN 与未满足。";
     return panel;
   }
 
+  const d0 = evidence.d0 || {};
+  const before = d0.before || row.before || {};
+  const after = d0.after || row.after || {};
+  const launchScenario = d0.scenarios?.LAUNCH_CONFIRM || {};
+  const recoveryScenario = d0.scenarios?.RECOVERY_TURN || {};
   const seed = evidence.seed || {};
   const d1 = evidence.d1 || {};
   const rules = evidence.rules || {};
   const sector = evidence.sector_context || {};
+  const home = row.home_observation || {};
+  const transitionText =
+    {
+      D0_NEW: "D0 新增",
+      CONTINUING: "持续满足，不是新增",
+      NOT_NEW: "目标日未形成新增（当前状态不满足新增条件）",
+      UNKNOWN: "UNKNOWN，证据不足",
+      NOT_COMPUTED: "未计算",
+    }[d0.transition_kind] || evidenceStatusLabel(d0.status);
   panel.append(
     node(
       "strong",
-      `已保存 D0 观察证据 · ${evidence.status || "UNKNOWN"} · ${row.transition || "FALSE_TO_TRUE"}`,
+      `同日已保存研究证据 · ${evidenceStatusLabel(evidence.status)}`,
     ),
     node(
       "p",
-      `D0 ${row.before?.scenario_raw || "FALSE"} → ${row.after?.scenario_raw || "TRUE"}；${row.home_selection_reason || row.observation_reason || "按稳定来源代码分页观察"}。`,
+      `D0 LAUNCH_CONFIRM ${before.state || "UNKNOWN"} → ${after.state || launchScenario.state || "UNKNOWN"} · ${d0.transition || "NOT_COMPUTED"} · ${transitionText}；前态原因 ${before.reason || "无已存原因"}；今态原因 ${after.reason || evidenceReasons(launchScenario)}。`,
     ),
     node(
       "p",
-      `Seed ${seed.status || "UNKNOWN"} · S1 ${evidenceStateLabel(seed.s1?.state)}（${evidenceReasons(seed.s1)}）· S2 ${evidenceStateLabel(seed.s2?.state)}（${evidenceReasons(seed.s2)}）· Seed ${evidenceStateLabel(seed.source_seed?.state)} · 安全 ${evidenceStateLabel(seed.safety?.state)} · 目标收盘质量 ${seed.target_close_quality || "UNKNOWN"}${seed.reason_codes?.length ? ` · ${seed.reason_codes.join("、")}` : ""}`,
+      `今日 LAUNCH_CONFIRM ${evidenceStateLabel(launchScenario.state)}（${evidenceReasons(launchScenario)}）· RECOVERY_TURN ${evidenceStateLabel(recoveryScenario.state)}（${evidenceReasons(recoveryScenario)}）· 正式入选/未入选判定 ${d0.formal_selection_status || "NOT_EVALUATED"}。`,
     ),
     node(
       "p",
-      `D1 ${d1.status || "UNKNOWN"} · 目标价格 ${d1.target_price_quality || "UNKNOWN"} · 结构事实 ${d1.structure_fact_count ?? 0}/${d1.expected_structure_fact_count ?? 5} · 材料锚 ${d1.material_change_anchor_count ?? 0} · 已存明细 ${d1.persisted_detail_count ?? 0} · 缺失结构 ${d1.missing_structure_types?.join("、") || "无"} · ${(d1.reason_codes || []).join("、") || "无已记录缺项原因"}`,
+      `首页观察：${home.status || "UNKNOWN"} · ${home.reason || "首页容量位置未核验"}${home.rank ? ` · 第 ${home.rank} 位` : ""}。`,
     ),
     node(
       "p",
-      `九规则 ${rules.status || "UNKNOWN"} · TRUE/FALSE ${rules.known_state_count ?? 0}/${rules.expected_rule_count ?? 9} · 缺失 ${rules.missing_rule_ids?.join("、") || "无"} · ${(rules.reason_codes || []).join("、") || "范围可用"}`,
+      `Seed ${evidenceStatusLabel(seed.status)} · S1 ${storedFactStateLabel(seed.status, seed.s1)}（${storedFactReasons(seed.status, seed.s1)}）· S2 ${storedFactStateLabel(seed.status, seed.s2)}（${storedFactReasons(seed.status, seed.s2)}）· Seed ${storedFactStateLabel(seed.status, seed.source_seed)}（${storedFactReasons(seed.status, seed.source_seed)}）· 安全 ${storedFactStateLabel(seed.status, seed.safety)}（${storedFactReasons(seed.status, seed.safety)}）· 收盘质量 ${seed.target_close_quality || "UNKNOWN"} · Profile ${seed.scope?.profile_revision || "UNKNOWN"} / ${seed.scope?.history_session_count ?? "UNKNOWN"} 会话 · ${seed.scope?.calendar_revision || "日历 UNKNOWN"}${seed.reason_codes?.length ? ` · ${seed.reason_codes.join("、")}` : ""}`,
+    ),
+    node(
+      "p",
+      `已存 D1 ${evidenceStatusLabel(d1.status)} · 窗口 ${d1.scope?.history_window_start || "UNKNOWN"} 至 ${d1.scope?.history_window_end || "UNKNOWN"}（${d1.scope?.history_session_count ?? "UNKNOWN"} 会话）· 结构事实 ${d1.structure_fact_count ?? 0}/${d1.expected_structure_fact_count ?? 5} · 目标价格 ${d1.target_price_quality || "UNKNOWN"} · 材料锚 ${d1.material_change_anchor_count ?? 0} · 已存明细 ${d1.persisted_detail_count ?? 0} · 缺失 ${d1.missing_structure_types?.join("、") || "无"} · ${(d1.reason_codes || []).join("、") || "无已记录缺项原因"}`,
+    ),
+    node(
+      "p",
+      `九规则 ${evidenceStatusLabel(rules.status)} · TRUE/FALSE ${rules.known_state_count ?? 0}/${rules.expected_rule_count ?? 9} · 缺失 ${rules.missing_rule_ids?.join("、") || "无"} · ${(rules.reason_codes || []).join("、") || "范围可用"}`,
     ),
   );
+
+  const d1Details = node("details", null, "evidence-details");
+  d1Details.append(node("summary", "展开五类 D1 已存结构状态"));
+  if (!d1.structures?.length)
+    d1Details.append(
+      node(
+        "p",
+        d1.status === "NOT_COMPUTED"
+          ? "该日期没有已存 D1 结构事实；本次读取未重新计算。"
+          : "该日期没有可读取的 D1 结构行；状态保持 UNKNOWN。",
+      ),
+    );
+  for (const structure of d1.structures || []) {
+    d1Details.append(
+      node(
+        "p",
+        `${structure.structure_type} · ${structure.generation_state || "UNKNOWN"} · ${structure.relation || "无结构方向"} · 锚 ${structure.anchor_created_session || "无"} / 生效 ${structure.anchor_available_from_session || "无"} · 材料变化 ${structure.material_change_anchor_count ?? 0} · ${structure.generation_reason || structure.target_price_reason || "无原因码"}`,
+      ),
+    );
+  }
+  panel.append(d1Details);
 
   const ruleDetails = node("details", null, "evidence-details");
   ruleDetails.append(node("summary", "展开九规则及各自保存原因"));
@@ -161,7 +279,7 @@ function renderStoredD0Evidence(row) {
     ruleDetails.append(
       node(
         "p",
-        `${ruleId} · ${evidenceStateLabel(fact.state)} · ${evidenceReasons(fact)} · 事件数 ${fact.event_count ?? 0}`,
+        `${ruleId} · ${storedFactStateLabel(rules.status, fact)} · ${storedFactReasons(rules.status, fact)} · 事件数 ${fact.event_count ?? 0}`,
       ),
     );
   }
@@ -173,7 +291,7 @@ function renderStoredD0Evidence(row) {
   panel.append(
     node(
       "p",
-      `当前板块关系 ${sector.membership_count ?? memberships.length} 条 · ${sector.membership_mode || "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"} · 缺失类型 ${(row.missing_membership_kinds || []).join("、") || "无"} · 可读 PULSE ${sector.pulse_available_count ?? 0} 条 · 未计算 ${sector.pulse_not_computed_count ?? 0} 条。`,
+      `当前板块关系 ${sector.membership_count ?? memberships.length} 条 · ${evidenceStatusLabel(sector.status)} · ${sector.membership_mode || "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"} · 缺失类型 ${(sector.missing_membership_kinds || row.missing_membership_kinds || []).join("、") || "无"} · 可读 PULSE ${sector.pulse_available_count ?? 0} 条 · 未计算 ${sector.pulse_not_computed_count ?? 0} 条。`,
     ),
   );
   if (memberships.length) {
@@ -186,7 +304,7 @@ function renderStoredD0Evidence(row) {
       membershipDetails.append(
         node(
           "p",
-          `${boardKindLabel(membership.board_kind)} ${membership.board_name || membership.board_native_id || "未知板块"} · PULSE ${pulse.status || "UNKNOWN"}/${evidenceStateLabel(pulse.state)} · 相邻 ${pulse.transition_status || "NOT_COMPUTED"}/${pulse.transition_state || "UNKNOWN"} · ${pulse.transition_reason_codes?.join("、") || pulse.reason_codes?.join("、") || "无原因码"} · NON_PIT`,
+          `${boardKindLabel(membership.board_kind)} ${membership.board_name || membership.board_native_id || "未知板块"} · PULSE ${evidenceStatusLabel(pulse.status)}/${evidenceStateLabel(pulse.state)} · dq5 ${pulse.dq5_pp?.decimal_4dp ?? "UNKNOWN"} · breadth Δ ${pulse.breadth_delta1?.decimal_4dp ?? "UNKNOWN"} · ${pulse.reason_codes?.join("、") || pulse.transition_reason_codes?.join("、") || "无原因码"} · NON_PIT`,
         ),
       );
     }
@@ -195,7 +313,7 @@ function renderStoredD0Evidence(row) {
     panel.append(
       node(
         "p",
-        `板块关系 ${sector.status || "UNKNOWN"} · ${(row.missing_membership_kinds || []).join("、") || row.unmapped_reason || "未发现映射"}；不推断历史板外。`,
+        `板块关系 ${evidenceStatusLabel(sector.status)} · ${(sector.missing_membership_kinds || row.missing_membership_kinds || []).join("、") || row.unmapped_reason || "当前快照未发现关系"}；不推断历史板外。`,
       ),
     );
   }
@@ -383,6 +501,7 @@ function invalidateDate() {
   state.context = null;
   state.d1Requested = false;
   state.d0Result = null;
+  state.d0Featured = null;
   state.d0Status = "NOT_LOADED";
   state.d0Error = null;
   state.d0BoardPage = 0;
@@ -592,7 +711,9 @@ async function selectDate(target_session) {
       event_window_start: c.source_history_start,
       pg_history_session_count: c.source_history_session_count,
       stock_history_session_count: c.source_history_session_count,
-      d1_history_session_count: c.d1_history_session_count,
+      d1_history_session_count: Number.isInteger(c.d1_history_session_count)
+        ? c.d1_history_session_count
+        : null,
       research_cutoff: c.research_cutoff,
       contextReady: true,
     });
@@ -930,6 +1051,28 @@ async function loadD0Overview(c) {
     );
     if (token !== state.d0Request || state.selected !== c) return;
     state.d0Result = result;
+    if (state.d0Offset === 0) {
+      const candidateCount = result.observation_ordering?.candidate_count;
+      const homeFeaturedCount =
+        result.observation_ordering?.home_featured_count ??
+        (Number.isInteger(candidateCount)
+          ? Math.min(candidateCount, result.results?.length || 0)
+          : null);
+      const homeRows = Array.isArray(result.results) ? result.results : [];
+      state.d0Featured =
+        Number.isInteger(candidateCount) &&
+        Number.isInteger(homeFeaturedCount) &&
+        result.pagination?.offset === 0 &&
+        homeRows.length === Math.min(candidateCount, homeFeaturedCount)
+          ? {
+              target_session: c.target_session,
+              source_package_id: c.source_package_id,
+              candidate_count: candidateCount,
+              home_featured_count: homeFeaturedCount,
+              rows: new Map(homeRows.map((item) => [item.source_symbol, item])),
+            }
+          : null;
+    }
     state.d0Status = Array.isArray(result.boards) ? "READY" : "UNKNOWN";
     state.d0Error = Array.isArray(result.boards)
       ? null
@@ -1236,37 +1379,6 @@ async function openD0Board(board, offset = 0) {
     if (token === state.d0BoardRequest && c === state.selected)
       message("memberList", `D0 成员 UNKNOWN：${error.message}`);
   }
-}
-function supportRequest(c, symbol) {
-  return {
-    observation_mode: "D1",
-    target_session: c.target_session,
-    research_cutoff: c.research_cutoff,
-    source_package_id: c.source_package_id,
-    profile_revision: null,
-    industry_snapshot_id: null,
-    concept_snapshot_id: null,
-    event_window_start: c.event_window_start,
-    pg_history_session_count: c.pg_history_session_count,
-    board_kind: "ALL",
-    board_search: null,
-    changed_only: false,
-    sort_by: "changed_stocks",
-    direction: "STRONGER",
-    offset: 0,
-    limit: 15,
-    detail_board_kind: null,
-    detail_board_native_id: null,
-    member_state: "ALL",
-    member_search: null,
-    member_offset: 0,
-    member_limit: 0,
-    include_changed_stock_page: true,
-    stock_offset: 0,
-    stock_limit: 30,
-    explain_symbol: symbol,
-    d1_only_explanation: true,
-  };
 }
 function configureD1Filters() {
   $("d1MaterialFilters").hidden =
@@ -1735,27 +1847,6 @@ const qualityLabel = (quality) =>
   })[quality] ||
   quality ||
   "UNKNOWN";
-function ruleText(item) {
-  if (!item) return "来源缺行或未评价";
-  const reasons = Object.entries(item.predicates || {})
-    .filter(([, p]) => ["FALSE", "UNKNOWN"].includes(p.state))
-    .map(
-      ([key, p]) =>
-        `${key} ${p.state} · ${p.formula || ""} · ${p.reason || p.reason_code || "原因未提供"}`,
-    );
-  return `${item.scenario_raw} · ${reasons.join("；") || item.main_reason || "所有条件已满足"}`;
-}
-function launchDisplayExplanation(change) {
-  const stateNow = change?.after?.scenario_raw;
-  if (stateNow === "FALSE") return "来源启动条件未满足；这不是正式选股淘汰。";
-  if (stateNow === "UNKNOWN") return "来源条件不可判；不能解释为未入选。";
-  if (stateNow !== "TRUE") return "目标日来源状态尚未评价。";
-  if (change.transition === "FALSE_TO_TRUE")
-    return "相邻会话由假转真，属于来源级新增启动。";
-  if (change.transition === "TRUE_TO_TRUE")
-    return "相邻会话均为真，没有新增启动。";
-  return "前态不足以证明新增启动。";
-}
 const seedPredicateLabels = {
   research_universe: "来源研究范围",
   actual_bar: "目标日实际K线",
@@ -1893,11 +1984,6 @@ async function openStock(symbol, row = {}) {
   const controller = new AbortController();
   state.stockController = controller;
   const stockApi = (path, body) => api(path, body, controller.signal);
-  const d1State =
-    row.change_state ||
-    (row.changed_anchor_event_count ? "CHANGED" : "NOT_EVALUATED");
-  const displayReason = "同日支撑变化按该代码的完整历史独立读取";
-  const d1IsPending = true;
   message("stockTitle", displayStockTitle(row, symbol));
   message(
     "stockMeta",
@@ -1915,8 +2001,26 @@ async function openStock(symbol, row = {}) {
       source_package_id: c.source_package_id,
       session_count: c.stock_history_session_count,
       profile_revision: c.profile_revision,
+      d1_history_session_count: Number.isInteger(c.d1_history_session_count)
+        ? c.d1_history_session_count
+        : null,
+      industry_snapshot_id: c.industry_snapshot_id,
+      concept_snapshot_id: c.concept_snapshot_id,
     });
     if (token !== state.stockRequest) return;
+    const storedEvidence = data.stored_research_evidence;
+    const d1State = storedEvidence?.d1?.status || "NOT_COMPUTED";
+    const d1Scope = storedEvidence?.d1?.scope || {};
+    const evidenceRow = {
+      ...row,
+      source_symbol: symbol,
+      research_evidence: storedEvidence || row.research_evidence,
+      home_observation: homeObservationFor(
+        { ...row, source_symbol: symbol },
+        storedEvidence || {},
+        c,
+      ),
+    };
     message("stockTitle", displayStockTitle(data, symbol));
     const root = $("stockContent");
     const grid = node("div", null, "fact-grid");
@@ -2014,27 +2118,17 @@ async function openStock(symbol, row = {}) {
       periodResults,
     );
     root.append(periods, node("h3", "来源级规则与未展示原因"));
-    const rules = node(
-      "div",
-      `LAUNCH / RECOVERY 正在读取；D1 ${d1IsPending ? "CALCULATING" : d1State}；正式 Priority、Risk、D2 与 Focus NOT_EVALUATED。`,
-      "rule",
-    );
-    const launchInfo = node("p", "LAUNCH 正在读取…");
-    const recoveryInfo = node("p", "RECOVERY 等待读取…");
-    const membershipInfo = node("p", "当前成员快照正在读取…");
+    const rules = node("div", null, "rule");
     const seedInfo = node("p", sourceSeedExplanation(data.source_seed));
     rules.replaceChildren(
       node("strong", "来源级诊断"),
       seedInfo,
-      renderStoredD0Evidence(row),
-      launchInfo,
-      recoveryInfo,
-      membershipInfo,
+      renderStoredD0Evidence(evidenceRow),
       node("p", "正式 Priority / Risk / D2 / Focus：NOT_EVALUATED"),
     );
     const d1Info = node(
       "p",
-      `D1 ${d1IsPending ? "CALCULATING" : d1State} · ${d1IsPending ? "正在读取该代码的精确历史窗口" : displayReason}。`,
+      `D1 已存结构 ${evidenceStatusLabel(d1State)} · ${d1Scope.history_window_start || "UNKNOWN"} 至 ${d1Scope.history_window_end || "UNKNOWN"} · ${storedEvidence?.d1?.structure_fact_count ?? 0}/${storedEvidence?.d1?.expected_structure_fact_count ?? 5} 类；正式 D1 事件评估不在本次替代计算。`,
     );
     root.append(rules, d1Info);
     root.append(node("h3", "D1 材料变化"));
@@ -2145,101 +2239,6 @@ async function openStock(symbol, row = {}) {
         if (token === state.stockRequest && history.selected === "day")
           periodResults.textContent = `日线 UNKNOWN：${error.message}`;
       });
-    const observationRequest = {
-      source_observation_only: true,
-      symbol,
-      target_session: c.target_session,
-      source_package_id: c.source_package_id,
-      research_cutoff: c.research_cutoff,
-      industry_snapshot_id: c.industry_snapshot_id,
-      concept_snapshot_id: c.concept_snapshot_id,
-    };
-    stockApi("/api/preview/stock-timeline", {
-      ...observationRequest,
-      diagnostic_scope: "LAUNCH",
-    })
-      .then((result) => {
-        if (token !== state.stockRequest) return;
-        const launch = result.d0_change;
-        const membership = result.current_tdx_membership;
-        const boards = (membership?.memberships || [])
-          .map((b) => b.board_name)
-          .join("、");
-        const renderLaunch = () => {
-          if (token === state.stockRequest)
-            launchInfo.textContent = `LAUNCH 当前：${ruleText(launch?.after)}；前态 → 当前：${launch?.transition || "NOT_EVALUATED"}。${launchDisplayExplanation(launch)}`;
-        };
-        renderLaunch();
-        const membershipText =
-          boards ||
-          (membership?.status === "AVAILABLE_EMPTY"
-            ? "当前快照未匹配成员关系，不代表历史板外"
-            : membership?.reason || membership?.status || "NOT_EVALUATED");
-        const missing = membership?.missing_membership_kinds || [];
-        membershipInfo.textContent = `当前成员快照（NON_PIT）：${membershipText}${missing.length ? `；缺失 ${missing.join("、")}，对应关系 UNKNOWN` : ""}`;
-      })
-      .catch((e) => {
-        if (token === state.stockRequest)
-          launchInfo.textContent = `LAUNCH UNKNOWN：${e.message}`;
-      })
-      .then(() => {
-        if (token !== state.stockRequest) return null;
-        recoveryInfo.textContent = "RECOVERY 正在读取…";
-        return stockApi("/api/preview/stock-timeline", {
-          ...observationRequest,
-          diagnostic_scope: "RECOVERY",
-        });
-      })
-      .then((result) => {
-        if (token === state.stockRequest && result)
-          recoveryInfo.textContent = `RECOVERY 当前：${ruleText(result.recovery)}`;
-      })
-      .catch((error) => {
-        if (token === state.stockRequest)
-          recoveryInfo.textContent = `RECOVERY UNKNOWN：${error.message}`;
-      });
-    if (c.contextReady) {
-      const request = supportRequest(c, symbol);
-      const requestD1 = async () => {
-        try {
-          const result = await stockApi(
-            "/api/preview/sector-change-stocks",
-            request,
-          );
-          if (token !== state.stockRequest || !result) return;
-          const item = result.symbol_observation;
-          const d1 = item?.d1;
-          if (!d1) {
-            d1Info.textContent = "D1 NOT_EVALUATED：未返回该代码的观察结果。";
-            return;
-          }
-          const changed = d1.change_state === "CHANGED";
-          const pageContains = (result.changed_stock_page?.stocks || []).some(
-            (x) => x.source_symbol === symbol,
-          );
-          const reason = pageContains
-            ? "位于当前变化代码页"
-            : result.scope === "SOURCE_SYMBOL_ONLY_D1_SUPPORT_EXPLANATION"
-              ? "已按该代码精确Raw历史计算；全池研究单独进行"
-              : changed
-                ? "已知有变化，不在当前代码页；请检查分页"
-                : d1.change_state === "UNCHANGED"
-                  ? "当前观察窗没有新增支撑变化"
-                  : "本次未能判定为变化，原因见状态";
-          const events = (d1.anchor_events || [])
-            .map(
-              (event) =>
-                `${event.session} ${event.change_state} ${event.unknown_reason || ""}`,
-            )
-            .join("；");
-          d1Info.textContent = `D1 ${d1.change_state} · ${reason} · ${(d1.unknown_reasons || []).join("、") || events || "无锚事件"}。正式 Priority 尚未计算。`;
-        } catch (error) {
-          if (token === state.stockRequest)
-            d1Info.textContent = `D1 UNKNOWN：${error.message}`;
-        }
-      };
-      void requestD1();
-    }
   } catch (error) {
     if (token === state.stockRequest)
       message("stockStatus", `个股读取失败：${error.message}`);

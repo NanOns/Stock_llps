@@ -4489,12 +4489,26 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             source_change_body = expected | source_change_required
             source_change_allowed = source_change_body | source_change_optional
             stock_seed_fields = {"profile_revision"}
+            stock_evidence_fields = {"industry_snapshot_id", "concept_snapshot_id"}
+            stock_d1_evidence_field = {"d1_history_session_count"}
             valid_body = isinstance(body, dict)
             if valid_body and post_path == "/api/preview/stock":
-                valid_body = set(body) in {
+                allowed_stock_bodies = {
                     frozenset(expected),
                     frozenset(expected | stock_seed_fields),
+                    frozenset(expected | stock_evidence_fields),
+                    frozenset(expected | stock_seed_fields | stock_evidence_fields),
+                    frozenset(
+                        expected | stock_evidence_fields | stock_d1_evidence_field
+                    ),
+                    frozenset(
+                        expected
+                        | stock_seed_fields
+                        | stock_evidence_fields
+                        | stock_d1_evidence_field
+                    ),
                 }
+                valid_body = frozenset(body) in allowed_stock_bodies
             elif valid_body:
                 valid_body = (
                     set(body) == expected
@@ -4568,11 +4582,32 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         body["after_profile_revision"]
                     )
             profile_revision = None
+            d1_history_session_count = None
+            membership_snapshot_ids = None
             if (
                 post_path == "/api/preview/stock"
                 and body.get("profile_revision") is not None
             ):
                 profile_revision = _profile_revision(body["profile_revision"])
+            if post_path == "/api/preview/stock" and stock_evidence_fields <= set(body):
+                if body.get("d1_history_session_count") is not None:
+                    d1_history_session_count = _positive_int(
+                        body["d1_history_session_count"],
+                        "d1_history_session_count",
+                        75,
+                    )
+                membership_snapshot_ids = {
+                    "INDUSTRY": (
+                        _snapshot_id(body["industry_snapshot_id"])
+                        if body["industry_snapshot_id"] is not None
+                        else None
+                    ),
+                    "CONCEPT": (
+                        _snapshot_id(body["concept_snapshot_id"])
+                        if body["concept_snapshot_id"] is not None
+                        else None
+                    ),
+                }
             resolved_target, sessions, calendar_revision = resolve_pg_history_window(
                 target.isoformat(), session_count
             )
@@ -4752,6 +4787,29 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 source_clock_role=source_context["source_clock_role"],
                 source_available_at=source_context["source_available_at"],
             )
+            if post_path == "/api/preview/stock":
+                from stock_a.storage.postgres.source_launch_watch_evidence import (
+                    read_source_launch_watch_evidence,
+                )
+
+                saved_evidence = read_source_launch_watch_evidence(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    source_package_id=source_package_id,
+                    source_capture_id=source_context["source_capture_id"],
+                    expected_source_count=source_context["capture_expected_row_count"],
+                    source_symbols=(symbol,),
+                    d1_history_session_count=d1_history_session_count,
+                    single_symbol_only=True,
+                    expected_before_session=sessions[-2] if len(sessions) > 1 else None,
+                    selected_profile_revision=profile_revision,
+                    membership_snapshot_ids=membership_snapshot_ids,
+                )
+                result["stored_research_evidence"] = saved_evidence["by_symbol"][symbol]
+                result["stored_research_evidence_execution"] = saved_evidence[
+                    "execution"
+                ]
+                result["stored_research_evidence_status"] = saved_evidence["status"]
             self._send_json(200, result)
         except Exception as error:
             self._handle_error(error)
