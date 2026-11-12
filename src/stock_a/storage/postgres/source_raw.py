@@ -299,9 +299,10 @@ def _validate_source_input(
         raise RawSourcePgError(
             "TARGET_SESSION_INVALID", "必须显式提供date类型目标交易会话"
         )
+    from stock_a.sources.tdx.vipdata import VerifiedVipdataPackage
+
     if (
-        not isinstance(getattr(package, "sha256", None), str)
-        or _PACKAGE_SHA256.fullmatch(package.sha256) is None
+        not isinstance(package, VerifiedVipdataPackage)
         or getattr(package, "zip_crc", None) != "PASS"
         or getattr(package, "file_size", 0) <= 0
     ):
@@ -321,7 +322,9 @@ def validate_source_candidate_limit(candidate_total: int) -> None:
 
 def _register_source_package(config: Mapping[str, Any], package: Any) -> int:
     """在原件接收入口校验一次包摘要，再只向下游返回数据库数字包ID。"""
-    package_sha256 = getattr(package, "sha256", None)
+    from stock_a.sources.tdx.vipdata import vipdata_package_entry_sha256
+
+    package_sha256 = vipdata_package_entry_sha256(package)
     byte_count = getattr(package, "file_size", None)
     if (
         not isinstance(package_sha256, str)

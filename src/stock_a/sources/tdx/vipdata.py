@@ -1231,7 +1231,7 @@ def verify_existing_vipdata_package(
     *,
     budgets: VipdataBudgets = VipdataBudgets(),
 ) -> VerifiedVipdataPackage:
-    """只读核验已接收的TDX原始包、完整目录与CRC，并计算入口包字节校验值。"""
+    """只读核验已接收的TDX原始包、完整目录和CRC，返回不含摘要的句柄。"""
     path = _safe_temp_file(zip_path)
     before = path.stat()
     if before.st_size <= 0 or before.st_size > budgets.max_package_bytes:
@@ -1273,6 +1273,30 @@ def verify_existing_vipdata_package(
         verified_at=datetime.now(timezone.utc),
         file_identity=identity_after,
     )
+
+
+def vipdata_package_entry_sha256(package: VerifiedVipdataPackage) -> str:
+    """仅供原始包登记入口计算摘要，不放入解析或研究句柄。"""
+    if not isinstance(package, VerifiedVipdataPackage):
+        raise VipdataError("PACKAGE_HANDLE_INVALID", "原始包登记必须使用已验证包句柄")
+    path = _safe_temp_file(package.file_path)
+    if _file_identity(path) != package.file_identity:
+        raise VipdataError("PACKAGE_CHANGED", "登记前原始包文件身份已变化")
+    digest = hashlib.sha256()
+    started = time.monotonic()
+    try:
+        with path.open("rb") as source:
+            while chunk := source.read(1024 * 1024):
+                if time.monotonic() - started > 300:
+                    raise VipdataError("PACKAGE_VERIFY_TIMEOUT", "原始包摘要校验超时")
+                digest.update(chunk)
+        if _file_identity(path) != package.file_identity:
+            raise VipdataError("PACKAGE_CHANGED", "登记校验期间原始包文件身份已变化")
+    except OSError as error:
+        raise VipdataError(
+            "PACKAGE_VERIFY_IO_ERROR", "读取原始包进行入口校验失败"
+        ) from error
+    return digest.hexdigest()
 
 
 def vipdata_research_candidate_pool(
