@@ -36,6 +36,7 @@ _MIGRATION_FILES = (
     "0022_r06_pg_identity_simplification.sql",
     "0023_r06_pulse_remove_legacy_content_ids.sql",
     "0024_r06_profile_window_revision.sql",
+    "0025_r06_profile_revision_encoding.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -59,6 +60,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R06_SECTOR_PULSE_FOLLOWUP_REAL_OUTCOMES_R1": frozenset({21}),
     "R06_STOCK_A_PG_ID_SHA_KEY_SIMPLIFICATION_R1": frozenset({22}),
     "R06_PG_EMPTY_SCHEMA_CODE_CHAIN_REPAIR_R1": frozenset({23, 24}),
+    "R06_PROFILE_REVISION_LENGTH_CHAIN_R1": frozenset({25}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -176,6 +178,7 @@ _RELATIONS_BY_MIGRATION_COUNT[22] = (
 ) | {"source_packages"}
 _RELATIONS_BY_MIGRATION_COUNT[23] = _RELATIONS_BY_MIGRATION_COUNT[22]
 _RELATIONS_BY_MIGRATION_COUNT[24] = _RELATIONS_BY_MIGRATION_COUNT[23]
+_RELATIONS_BY_MIGRATION_COUNT[25] = _RELATIONS_BY_MIGRATION_COUNT[24]
 
 
 class BindingRefused(Exception):
