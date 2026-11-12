@@ -188,6 +188,8 @@ _TABLES = (
 class ResearchDayPgError(ValueError):
     """单日研究事实存储缺迁移、来源不一致或已存在内容冲突。"""
 
+    preserve_transaction_error = True
+
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)

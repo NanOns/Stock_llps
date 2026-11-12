@@ -177,6 +177,8 @@ _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 class StaticResearchPgError(ValueError):
     """静态研究事实缺失、不完整或与既存PG事实冲突。"""
 
+    preserve_transaction_error = True
+
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
@@ -559,6 +561,7 @@ def _persist_once(config, scenarios, groups) -> dict[str, Any]:
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _,
         cursor,
+        _connection_identity,
     ):
         first = scenarios["LAUNCH_CONFIRM"]
         cursor.execute(
@@ -607,7 +610,7 @@ def _persist_once(config, scenarios, groups) -> dict[str, Any]:
             )
         if not all(item[-1] for item in scopes):
             for table, columns, key, rows, *_ in scopes:
-                inserted[table.rsplit(".", 1)[1]] = _insert_rows(
+                inserted[table.rsplit(".", 1)[-1]] = _insert_rows(
                     cursor, table, columns, key, rows
                 )
         for table, columns, key, rows, predicate, params, _ in scopes:
@@ -629,7 +632,7 @@ def _persist_once(config, scenarios, groups) -> dict[str, Any]:
         if all(item[-1] for item in scopes)
         else "WRITTEN_AND_TYPED_READBACK_VERIFIED",
         "rows_expected": {
-            table.rsplit(".", 1)[1]: len(rows) for table, _, _, rows, *_ in scopes
+            table.rsplit(".", 1)[-1]: len(rows) for table, _, _, rows, *_ in scopes
         },
         "rows_inserted": inserted,
         "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED"
@@ -655,6 +658,7 @@ def read_source_d0_scenario_day(
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
+        _connection_identity,
     ):
         cursor.execute(
             f"SELECT {', '.join(_D0_COLUMNS)} FROM {_D0_TABLE} WHERE target_session=%s AND source_package_id=%s AND scenario=%s ORDER BY source_symbol, producer_version, calendar_revision",
@@ -687,7 +691,10 @@ def read_source_d0_scenario_day(
         != 1
     ):
         raise StaticResearchPgError("STATIC_D0_SCOPE_AMBIGUOUS", "该日D0保存修订不唯一")
-    if len(rows) != first["source_count"] or len({row[2] for row in rows}) != len(rows):
+    symbol_index = _D0_COLUMNS.index("source_symbol")
+    if len(rows) != first["source_count"] or len(
+        {row[symbol_index] for row in rows}
+    ) != len(rows):
         raise StaticResearchPgError(
             "STATIC_D0_PARTITION_OPEN", "PG D0事实没有闭合到来源分母"
         )
@@ -790,6 +797,7 @@ def read_source_pool_seed_facts(
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
+        _connection_identity,
     ):
         cursor.execute(
             f"SELECT {', '.join(_SEED_COLUMNS)} FROM {_SEED_TABLE} WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s AND profile_revision=%s AND producer_version=%s ORDER BY source_symbol",
@@ -847,6 +855,7 @@ def read_source_stock_seed_fact(
     with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
         _,
         cursor,
+        _connection_identity,
     ):
         cursor.execute(
             f"""SELECT count(*)::bigint AS stored_rows,
@@ -1057,6 +1066,7 @@ def read_seed_profile_returns(
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
+        _connection_identity,
     ):
         cursor.execute(
             f"""SELECT s.source_symbol, {", ".join("p." + name for name in columns)}

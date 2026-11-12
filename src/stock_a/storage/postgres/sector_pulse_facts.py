@@ -577,7 +577,7 @@ def _persist_once(
                 "行业和GN完整同行快照未处于同一原子业务批次，拒绝补写",
             )
         if not all(scope[2] for scope in scopes):
-            inserted[_TABLE.rsplit(".", 1)[1]] = _insert_rows(
+            inserted[_TABLE.rsplit(".", 1)[-1]] = _insert_rows(
                 cursor, _TABLE, _COLUMNS, _KEY, rows
             )
         for kind, group, _ in scopes:
