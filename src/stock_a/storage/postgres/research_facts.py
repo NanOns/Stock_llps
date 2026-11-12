@@ -272,7 +272,7 @@ def write_research_rows(config, *, rules, paths, events=None):
             (target, package),
         )
         raw = cursor.fetchall()
-        expected = {row[0] for row in rules}
+        expected = {row[1] for row in rules}
         if (
             len(raw) != len(expected)
             or {row[0] for row in raw} != expected
