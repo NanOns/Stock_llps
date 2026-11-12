@@ -38,6 +38,9 @@ from stock_a.application.source_persisted_research import (
     read_persisted_cohort,
     read_persisted_cohort_keys,
 )
+from stock_a.application.source_symbol_display_names import (
+    decorate_api_source_symbols,
+)
 from stock_a.storage.postgres.research_facts import (
     ResearchFactConflict,
     ResearchFactNotFound,
@@ -111,6 +114,7 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_page,
     read_raw_daily_stock,
     read_raw_daily_history_stock,
+    resolve_raw_stock_code,
 )
 from stock_a.research import core as research_core
 from stock_a.research import entry as research_entry
@@ -147,6 +151,7 @@ _DIAGNOSTIC_ROUTES = frozenset(
         "/api/preview/stock",
         "/api/product/cohort-keys",
         "/api/product/cohort",
+        "/api/product/resolve-stock-code",
         "/api/product/market",
         "/api/product/d1-material",
         "/api/source-symbol-price-profile-breadth-members",
@@ -907,6 +912,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 pass
 
     def _send_json(self, status: int, payload: Mapping[str, Any]) -> None:
+        if payload.get("ok") is True:
+            payload = decorate_api_source_symbols(
+                self.preview_server.state.config, payload
+            )
         body = json.dumps(
             _json_value(payload),
             ensure_ascii=False,
@@ -2843,6 +2852,41 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self._send_json(
                     200, {"ok": True, **source_market_context_payload(market)}
                 )
+                return
+            if parsed.path == "/api/product/resolve-stock-code":
+                allowed = {"target_session", "source_package_id", "stock_code"}
+                values = _query(self.path, allowed)
+                if set(values) != allowed:
+                    raise PreviewHttpError(
+                        400,
+                        "QUERY_REQUIRED",
+                        "须提供目标交易日、来源包和六位股票代码",
+                    )
+                target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
+                try:
+                    resolved = resolve_raw_stock_code(
+                        self.preview_server.state.config,
+                        stock_code=values["stock_code"],
+                        target_session=target,
+                        source_package_id=_package_id(values["source_package_id"]),
+                    )
+                except RawSourcePgError as error:
+                    if error.code == "STOCK_CODE_INVALID":
+                        status = 400
+                    elif error.code == "STOCK_CODE_NOT_FOUND":
+                        status = 404
+                    elif error.code in {
+                        "SOURCE_CODE_POOL_INCOMPLETE",
+                        "STOCK_CODE_AMBIGUOUS",
+                    }:
+                        status = 409
+                    else:
+                        raise
+                    raise PreviewHttpError(status, error.code, str(error)) from error
+                self._send_json(200, {"ok": True, "status": "AVAILABLE", **resolved})
                 return
             if parsed.path == "/api/product/cohort-keys":
                 values = _query(self.path, {"target_session", "source_package_id"})

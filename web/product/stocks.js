@@ -1,4 +1,10 @@
-import { byId, display, element } from "./state.js";
+import {
+  byId,
+  display,
+  displayStockCode,
+  displayStockName,
+  element,
+} from "./state.js";
 
 const typeNames = {
   PIVOT_LOW: "枢轴低点",
@@ -30,8 +36,11 @@ export function renderD1Stocks(data, openStock) {
       button.type = "button";
       const left = element("span", null, "row-main");
       left.append(
-        element("strong", stock.source_symbol),
-        element("small", "来源材料观察 · 非正式候选"),
+        element("strong", displayStockName(stock)),
+        element(
+          "small",
+          `代码 ${displayStockCode(stock)} · 来源材料观察 · 非正式候选`,
+        ),
       );
       const right = element("span", null, "row-value");
       right.append(
@@ -186,7 +195,7 @@ export function renderD1StockDetail(stock, root = byId("stockContent")) {
       root.append(card);
     }
   }
-  root.append(element("h3", "当前行业与 GN 成员关系"));
+  root.append(element("h3", "当前行业与概念成员关系"));
   const memberships = stock.current_snapshot_memberships || [];
   root.append(
     element(
@@ -195,7 +204,7 @@ export function renderD1StockDetail(stock, root = byId("stockContent")) {
         ? memberships
             .map(
               (item) =>
-                `${item.board_kind} ${item.board_name} · 观测 ${item.observed_at || "UNKNOWN"} · NON_PIT`,
+                `${item.board_name || "板块名称未知"} · 观测 ${item.observed_at || "UNKNOWN"} · NON_PIT`,
             )
             .join("；")
         : "已读取的成员快照未证明该代码属于其中板块；缺失快照及历史成员状态为未知。",

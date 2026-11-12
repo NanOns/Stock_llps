@@ -31,6 +31,24 @@ export function display(value) {
   return String(value);
 }
 
+export function displayStockName(item) {
+  return item?.display_name?.trim() || "名称未知";
+}
+
+export function displayStockCode(item, fallback = "") {
+  const code = item?.source_symbol || item?.symbol || fallback;
+  return typeof code === "string" ? code.replace(/^(SH|SZ|BJ)\./, "") : "";
+}
+
+export function displayStockTitle(item, fallback = "") {
+  const code = displayStockCode(item, fallback);
+  return `${displayStockName(item)}${code ? `（${code}）` : ""}`;
+}
+
+export function displayBoardName(item) {
+  return item?.board_name?.trim() || "板块名称未知";
+}
+
 export function buildD1MaterialRequest(context, board, offsets, symbol = null) {
   return {
     target_session: context.target_session,

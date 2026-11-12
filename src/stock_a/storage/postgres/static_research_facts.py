@@ -609,6 +609,36 @@ def _scope_predicate(
     )
 
 
+def _existing_rows_match_expected_subset(
+    *,
+    columns: Sequence[str],
+    key: Sequence[str],
+    expected_rows: Sequence[Sequence[Any]],
+    existing_rows: Sequence[Sequence[Any]],
+) -> bool:
+    """仅接受与预期逐键相等的既存子集，供事务内补齐缺失事实。"""
+    key_positions = tuple(columns.index(name) for name in key)
+    expected_by_key = {
+        tuple(row[index] for index in key_positions): row for row in expected_rows
+    }
+    if len(expected_by_key) != len(expected_rows) or len(existing_rows) > len(
+        expected_rows
+    ):
+        return False
+    existing_keys = set()
+    for actual in existing_rows:
+        row_key = tuple(actual[index] for index in key_positions)
+        expected = expected_by_key.get(row_key)
+        if (
+            row_key in existing_keys
+            or expected is None
+            or not _row_matches(expected, actual)
+        ):
+            return False
+        existing_keys.add(row_key)
+    return True
+
+
 def persist_static_research_day(
     config: Mapping[str, Any],
     *,
@@ -666,11 +696,11 @@ def _persist_once(config, scenarios, groups) -> dict[str, Any]:
                 params,
             )
             existing = cursor.fetchall()
-            if existing and (
-                len(existing) != len(rows)
-                or any(
-                    not _row_matches(a, b) for a, b in zip(rows, existing, strict=True)
-                )
+            if not _existing_rows_match_expected_subset(
+                columns=columns,
+                key=key,
+                expected_rows=rows,
+                existing_rows=existing,
             ):
                 raise StaticResearchPgError(
                     "STATIC_RESEARCH_CONTENT_CONFLICT",
@@ -686,11 +716,6 @@ def _persist_once(config, scenarios, groups) -> dict[str, Any]:
                     params,
                     len(existing) == len(rows),
                 )
-            )
-        if any(item[-1] for item in scopes) and not all(item[-1] for item in scopes):
-            raise StaticResearchPgError(
-                "STATIC_RESEARCH_PARTIAL_SCOPE",
-                "D0场景和Seed事实范围不完整，拒绝跨表补写",
             )
         if not all(item[-1] for item in scopes):
             for table, columns, key, rows, *_ in scopes:

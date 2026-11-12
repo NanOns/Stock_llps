@@ -38,6 +38,7 @@ _MIGRATION_FILES = (
     "0024_r06_profile_window_revision.sql",
     "0025_r06_profile_revision_encoding.sql",
     "0026_numeric_installation_identity.sql",
+    "0027_source_symbol_display_names.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -63,6 +64,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R06_PG_EMPTY_SCHEMA_CODE_CHAIN_REPAIR_R1": frozenset({23, 24}),
     "R06_PROFILE_REVISION_LENGTH_CHAIN_R1": frozenset({25}),
     "R06_NUMERIC_INSTALLATION_IDENTITY_R1": frozenset({26}),
+    "R06_SYMBOL_DISPLAY_NAMES_R1": frozenset({27}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -182,6 +184,9 @@ _RELATIONS_BY_MIGRATION_COUNT[23] = _RELATIONS_BY_MIGRATION_COUNT[22]
 _RELATIONS_BY_MIGRATION_COUNT[24] = _RELATIONS_BY_MIGRATION_COUNT[23]
 _RELATIONS_BY_MIGRATION_COUNT[25] = _RELATIONS_BY_MIGRATION_COUNT[24]
 _RELATIONS_BY_MIGRATION_COUNT[26] = _RELATIONS_BY_MIGRATION_COUNT[25]
+_RELATIONS_BY_MIGRATION_COUNT[27] = _RELATIONS_BY_MIGRATION_COUNT[26] | {
+    "source_symbol_display_names",
+}
 
 
 class BindingRefused(Exception):

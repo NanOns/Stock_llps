@@ -18,6 +18,23 @@ from stock_a.application.cli_commands.parser import ChineseParser
 
 
 def register_commands(commands):
+    display_names = commands.add_parser(
+        "source-symbol-display-names",
+        help="只读解析本机TDX中文名称并写入非PIT页面标签",
+        description="只读唯一配置的TDX根；名称仅作为未验证的展示标签，不证明证券实体、上市状态或PIT身份。",
+    )
+    display_names.add_argument(
+        "--confirm-task-scope",
+        required=True,
+        choices=("R06_SYMBOL_DISPLAY_NAMES_R1",),
+        help="显式绑定当前已授权R06名称标签任务",
+    )
+    display_names.add_argument(
+        "--persist",
+        action="store_true",
+        help="以一个PG事务整体替换当前标签快照并完整读回",
+    )
+
     raw_import = commands.add_parser(
         "source-vipdata-persist",
         help="按稳定Raw每日APPEND操作将已验证VIPDATA单日观察写入固定PG typed表",

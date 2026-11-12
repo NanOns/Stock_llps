@@ -44,6 +44,9 @@ from stock_a.application.cli_commands.source.sector_members import (
     _run_source_raw_catalog,
     _run_source_tdx_sector_members,
 )
+from stock_a.application.cli_commands.source.display_names import (
+    run_source_symbol_display_names,
+)
 from stock_a.application.cli_commands.source.source_diagnostics import (
     _run_doctor,
     _run_pg_bind,
@@ -104,6 +107,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_raw_catalog(args)
         if args.command == "source-tdx-sector-members":
             return _run_source_tdx_sector_members(args)
+        if args.command == "source-symbol-display-names":
+            return run_source_symbol_display_names(args)
         if args.command == "source-symbol-price-profile":
             return _run_source_symbol_price_profile(args)
         if args.command == "source-market-breadth":

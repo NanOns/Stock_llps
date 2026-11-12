@@ -926,17 +926,23 @@ def read_source_pool_seed(
         or any(not isinstance(symbol, str) or not symbol for symbol in selected_symbols)
     ):
         raise ValueError("来源模式的指定代码集合无效")
-    rows = read_source_pool_seed_facts(
-        config,
-        target_session=target_session,
-        source_package_id=source_package_id,
-        profile_revision=profile_revision,
-    )
     d0 = read_source_d0_scenario_day(
         config,
         target_session=target_session,
         source_package_id=source_package_id,
         scenario="LAUNCH_CONFIRM",
+    )
+    source_capture_id = d0["source_version"]["source_capture_id"]
+    if type(source_capture_id) is not int or source_capture_id <= 0:
+        raise StaticResearchPgError(
+            "STATIC_SEED_CAPTURE_INVALID", "D0来源捕获ID不是有效数字业务键"
+        )
+    rows = read_source_pool_seed_facts(
+        config,
+        target_session=target_session,
+        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        profile_revision=profile_revision,
     )
     d0_by_symbol = {item["source_symbol"]: item for item in d0["results"]}
     if (
@@ -985,6 +991,7 @@ def read_source_pool_seed(
             config,
             target_session=target_session,
             source_package_id=source_package_id,
+            source_capture_id=source_capture_id,
             profile_revision=profile_revision,
         )
         if legacy_returns
@@ -1209,17 +1216,23 @@ def read_source_pool_seed(
                 calendar_revision=prior_calendar_revision,
                 history_session_count=history_session_count,
             )
-            prior_rows = read_source_pool_seed_facts(
-                config,
-                target_session=previous_rps_session,
-                source_package_id=source_package_id,
-                profile_revision=prior_revision,
-            )
             prior_d0 = read_source_d0_scenario_day(
                 config,
                 target_session=previous_rps_session,
                 source_package_id=source_package_id,
                 scenario="LAUNCH_CONFIRM",
+            )
+            prior_capture_id = prior_d0["source_version"]["source_capture_id"]
+            if type(prior_capture_id) is not int or prior_capture_id <= 0:
+                raise StaticResearchPgError(
+                    "STATIC_SEED_CAPTURE_INVALID", "前一D0来源捕获ID不是有效数字业务键"
+                )
+            prior_rows = read_source_pool_seed_facts(
+                config,
+                target_session=previous_rps_session,
+                source_package_id=source_package_id,
+                source_capture_id=prior_capture_id,
+                profile_revision=prior_revision,
             )
             if (
                 len(prior_rows) != prior_d0["source_pool"]["source_count"]

@@ -45,7 +45,10 @@
           <span class="status-dot"></span>
           <div>
             <b>只读研究环境</b>
-            <p>来源数据与成员关系按实际质量展示，不构成交易建议。</p>
+            <p>来源数据按实际质量展示，不构成交易建议。</p>
+            <p id="displayNameObservation">
+              中文名为非PIT显示标签，不代表稳定证券身份。
+            </p>
           </div>
         </div>
         <div class="sidebar-foot">STOCK A <span> / </span> RESEARCH</div>
@@ -142,7 +145,7 @@
                 <span>变化事件</span><strong>—</strong><small>当前交易日</small>
               </article>
               <article>
-                <span>行业 / GN 板块</span><strong>—</strong
+                <span>行业 / 概念板块</span><strong>—</strong
                 ><small>当前快照，非历史成员</small>
               </article>
             </div>
@@ -231,7 +234,7 @@
             <div class="section-heading">
               <div>
                 <span class="section-kicker">SECTOR EXPLORER</span>
-                <h2>行业与 GN 概念</h2>
+                <h2>行业与概念</h2>
                 <p>
                   先浏览同日已证 D0 新增变化；成员快照回看始终标为 NON_PIT。
                 </p>
@@ -246,7 +249,7 @@
                 <label class="sr-only" for="d0BoardSearch"
                   >搜索 D0 变化板块</label
                 >
-                <input id="d0BoardSearch" placeholder="搜索板块名称或编号" />
+                <input id="d0BoardSearch" placeholder="搜索板块中文名" />
                 <button id="searchD0Boards" class="button subtle">搜索</button>
                 <button id="clearD0BoardFilters" class="button subtle">
                   清除筛选
@@ -255,7 +258,7 @@
                 ><select id="d0BoardKind">
                   <option value="ALL">全部类型</option>
                   <option value="INDUSTRY">行业</option>
-                  <option value="CONCEPT">GN 概念</option>
+                  <option value="CONCEPT">概念</option>
                 </select>
               </div>
               <div class="table-scroll">
@@ -300,13 +303,13 @@
                 </div>
                 <div class="filters">
                   <label class="sr-only" for="boardSearch">搜索 D1 板块</label>
-                  <input id="boardSearch" placeholder="搜索板块名称或编号" />
+                  <input id="boardSearch" placeholder="搜索板块中文名" />
                   <button id="searchBoards" class="button subtle">搜索</button>
                   <label class="sr-only" for="boardKind">D1 板块类型</label
                   ><select id="boardKind">
                     <option value="ALL">全部类型</option>
                     <option value="INDUSTRY">行业</option>
-                    <option value="CONCEPT">GN 概念</option>
+                    <option value="CONCEPT">概念</option>
                   </select>
                 </div>
               </div>
@@ -352,34 +355,37 @@
             <div class="section-heading">
               <div>
                 <span class="section-kicker">STOCK RESEARCH</span>
-                <h2>搜索来源代码</h2>
-                <p>
-                  使用 SH. / SZ. 加六位代码，查看同日价格、画像和来源规则解释。
-                </p>
+                <h2>搜索股票</h2>
+                <p>输入六位股票代码，查看同日价格、画像和来源规则解释。</p>
               </div>
             </div>
             <div class="card search-card">
               <form id="stockSearch">
-                <label for="stockSymbol">来源股票代码</label>
+                <label for="stockSymbol">股票代码</label>
                 <div class="search-line">
                   <input
                     id="stockSymbol"
                     autocomplete="off"
-                    placeholder="输入 SH. 或 SZ. 来源代码"
+                    inputmode="numeric"
+                    maxlength="6"
+                    pattern="[0-9]{6}"
+                    title="请输入六位数字股票代码"
+                    placeholder="输入六位数字代码"
                   /><button class="button primary" type="submit">
                     查看个股 <span>↗</span>
                   </button>
                 </div>
               </form>
+              <p id="stockSearchStatus" class="muted" role="status"></p>
               <p class="muted">
-                名称与稳定证券身份尚未可靠绑定；请使用来源代码。数据缺失时会保留
+                中文名为未验证的本机观察标签（NON_PIT），仅供展示；缺少标签时显示“名称未知”。股票代码用于辅助定位，不代表稳定证券身份。数据缺失时保留
                 UNKNOWN 原因。
               </p>
             </div>
             <div class="section-heading lower">
               <div>
                 <span class="section-kicker">OBSERVED CHANGES</span>
-                <h2>当日变化代码</h2>
+                <h2>当日变化股票</h2>
               </div>
               <span class="muted">按来源代码去重</span>
             </div>
@@ -422,8 +428,14 @@
                 </select></label
               >
               <label
-                >来源代码（可选）
-                <input id="cohortSymbol" placeholder="输入来源代码"
+                >股票代码（六位数字，可选）
+                <input
+                  id="cohortSymbol"
+                  inputmode="numeric"
+                  maxlength="6"
+                  pattern="[0-9]{6}"
+                  title="请输入六位数字股票代码，无需市场前缀"
+                  placeholder="输入六位数字代码"
               /></label>
               <button id="readCohort" class="button primary">
                 读取冻结研究
@@ -435,7 +447,7 @@
                 在个股研究打开该代码
               </button>
               <div id="focusStockStatus" role="status">
-                输入来源代码后可独立读取 Raw 观察；正式 Focus 未计算。
+                输入六位股票代码后可独立读取 Raw 观察；正式 Focus 未计算。
               </div>
               <div id="focusStockResult"></div>
               <div id="cohortSummary"></div>
@@ -505,11 +517,10 @@
         <div id="boardCoverage" class="coverage">—</div>
         <div class="drawer-tools" id="memberTools">
           <label class="sr-only" for="memberSearch">搜索成员代码</label
-          ><input id="memberSearch" placeholder="搜索成员来源代码" /><button
-            id="searchMembers"
-            class="button subtle"
-          >
-            搜索</button
+          ><input
+            id="memberSearch"
+            placeholder="搜索成员中文名或六位股票代码"
+          /><button id="searchMembers" class="button subtle">搜索</button
           ><select id="memberState">
             <option value="ALL">全部状态</option>
             <option value="CHANGED">有变化</option>

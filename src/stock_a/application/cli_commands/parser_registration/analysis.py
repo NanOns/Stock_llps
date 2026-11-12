@@ -26,6 +26,9 @@ def register_commands(commands):
     observation.add_argument("--end-session", required=True, help="结束官方交易会话")
     observation.add_argument("--research-cutoff", required=True, help="研究数据截止日")
     observation.add_argument(
+        "--source-package-id", type=int, required=True, help="明确绑定的数字来源包ID"
+    )
+    observation.add_argument(
         "--profile-revision", help="精确画像修订；D1材料视图不需要画像"
     )
     observation.add_argument(

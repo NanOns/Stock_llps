@@ -1,5 +1,13 @@
 import { requestD1Material } from "./api.js";
-import { buildD1MaterialRequest, byId, d1MaterialState } from "./state.js";
+import {
+  buildD1MaterialRequest,
+  byId,
+  d1MaterialState,
+  displayBoardName,
+  displayStockCode,
+  displayStockName,
+  displayStockTitle,
+} from "./state.js";
 import { renderD1MaterialMarket, setD1MaterialStatus } from "./market.js";
 import { renderD1Boards, renderD1Members } from "./sectors.js";
 import { renderD1StockDetail, renderD1Stocks } from "./stocks.js";
@@ -8,6 +16,7 @@ const state = {
   versions: [],
   profiles: [],
   context: null,
+  displayNameContext: null,
   selected: null,
   contextRequest: 0,
   contextController: null,
@@ -28,7 +37,7 @@ const state = {
 };
 const names = {
   overview: ["今日总览", "从真实变化出发，了解市场中正在发生什么。", "01"],
-  sectors: ["板块研究", "从行业与 GN 概念进入成员与个股。", "02"],
+  sectors: ["板块研究", "从行业与概念进入成员与个股。", "02"],
   stocks: ["个股研究", "查看来源画像、价格结构和规则解释。", "03"],
   focus: ["关注跟踪", "读取来源级冻结规则与后继观察。", "04"],
   market: ["市场研究", "查看来源池宽度和覆盖。", "05"],
@@ -61,6 +70,9 @@ function format(value) {
         : JSON.stringify(value))
     );
   return String(value);
+}
+function boardKindLabel(kind) {
+  return kind === "INDUSTRY" ? "行业" : kind === "CONCEPT" ? "概念" : "板块";
 }
 let lastApiError = null;
 let activeRequests = 0;
@@ -114,6 +126,16 @@ async function api(path, body, signal) {
             },
       );
       const result = await response.json();
+      if (result.display_name_context) {
+        state.displayNameContext = result.display_name_context;
+        const context = state.displayNameContext;
+        message(
+          "displayNameObservation",
+          context.status === "AVAILABLE"
+            ? `中文名为本机TDX观察标签（NON_PIT，${context.captured_at || "观察时钟未知"}）；不是稳定证券身份。`
+            : "中文名来源暂无可用观察；以名称未知和来源代码展示。",
+        );
+      }
       if (result.code === "PREVIEW_CONCURRENCY_LIMIT" && attempt < 10) {
         await delayWithAbort(2000, signal);
         continue;
@@ -587,8 +609,7 @@ function renderD0Boards() {
   const query = $("d0BoardSearch").value.trim().toLocaleLowerCase();
   const filtered = boards.filter((board) => {
     if (kind !== "ALL" && board.board_kind !== kind) return false;
-    const searchable =
-      `${board.board_name || ""} ${board.board_native_id || ""}`.toLocaleLowerCase();
+    const searchable = displayBoardName(board).toLocaleLowerCase();
     return !query || searchable.includes(query);
   });
   const lastPage = Math.max(0, Math.ceil(filtered.length / 15) - 1);
@@ -606,7 +627,7 @@ function renderD0Boards() {
     : "";
   message(
     "d0BoardSummary",
-    `${state.selected?.target_session || ""} · 已证变化板块 ${boards.length}（行业 ${industryCount} / GN ${conceptCount}） · 筛选 ${filtered.length} · 成员关系可重叠 · NON_PIT${missingText}`,
+    `${state.selected?.target_session || ""} · 已证变化板块 ${boards.length}（行业 ${industryCount} / 概念 ${conceptCount}） · 筛选 ${filtered.length} · 成员关系可重叠 · NON_PIT${missingText}`,
   );
   if (!filtered.length) {
     addEmptyRow("当前筛选没有匹配的已证 D0 变化板块；清除筛选可恢复完整列表。");
@@ -614,8 +635,8 @@ function renderD0Boards() {
     for (const [index, board] of page.entries()) {
       const row = node("tr");
       row.append(
-        node("td", board.board_name || board.board_native_id),
-        node("td", board.board_kind === "INDUSTRY" ? "行业" : "GN 概念"),
+        node("td", displayBoardName(board)),
+        node("td", board.board_kind === "INDUSTRY" ? "行业" : "概念"),
         node("td", format(board.new_member_count)),
         node("td", board.observed_at || "UNKNOWN"),
         node("td", "NON_PIT"),
@@ -678,7 +699,7 @@ function renderMarketD0Summary() {
     root.append(
       node(
         "p",
-        `已证变化板块 ${boards.length} 个：行业 ${industry} 个，GN 概念 ${concept} 个。板块成员可重复归属；股票数不由板块成员数相加。${missingD0Kinds().length ? ` 成员关系 UNKNOWN：${missingD0Kinds().join("、")}。` : ""} NON_PIT。`,
+        `已证变化板块 ${boards.length} 个：行业 ${industry} 个，概念 ${concept} 个。板块成员可重复归属；股票数不由板块成员数相加。${missingD0Kinds().length ? ` 成员关系 UNKNOWN：${missingD0Kinds().join("、")}。` : ""} NON_PIT。`,
       ),
     );
   }
@@ -780,7 +801,7 @@ async function loadD0Overview(c) {
         (item, index) =>
           rowButton(
             item.board_name,
-            `${item.board_kind} · 观测 ${item.observed_at || "UNKNOWN"} · NON_PIT`,
+            `${boardKindLabel(item.board_kind)} · 观测 ${item.observed_at || "UNKNOWN"} · NON_PIT`,
             item.new_member_count,
             "D0 新增成员",
             () => openD0Board(item),
@@ -793,8 +814,8 @@ async function loadD0Overview(c) {
         "没有已证 D0 新增股票；UNKNOWN 不代表无变化。",
         (item, index) =>
           rowButton(
-            item.source_symbol,
-            "D0 来源级新增启动 · 相邻会话 FALSE→TRUE",
+            displayStockName(item),
+            `代码 ${displayStockCode(item)} · D0 来源级新增启动 · 相邻会话 FALSE→TRUE`,
             "D0",
             "查看原因",
             () => openStock(item.source_symbol),
@@ -832,8 +853,8 @@ async function loadD0Overview(c) {
       "没有已证明的 D0 新增启动；未知状态不等于未入选。",
       (item, index) =>
         rowButton(
-          item.source_symbol,
-          "来源级新增启动 · NON_PIT",
+          displayStockName(item),
+          `代码 ${displayStockCode(item)} · 来源级新增启动 · NON_PIT`,
           "D0",
           "查看原因",
           () => openStock(item.source_symbol),
@@ -877,10 +898,10 @@ async function openD0Board(board, offset = 0) {
   $("memberTools").style.display = "none";
   state.d0BoardOffset = offset;
   const token = ++state.d0BoardRequest;
-  message("boardTitle", board.board_name);
+  message("boardTitle", displayBoardName(board));
   message(
     "boardMeta",
-    `${board.board_kind} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · D0 新增`,
+    `${boardKindLabel(board.board_kind)} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · D0 新增`,
   );
   message("boardCoverage", "正在读取该板块 D0 新增成员…");
   message("memberList", "正在读取…");
@@ -1027,11 +1048,11 @@ async function openD0Board(board, offset = 0) {
     );
     const pulseFollowupComparisonLine =
       comparisonRows.length > 0
-        ? `同行类型样本对照（${board.board_kind}；统计板块关系、成员可能重叠；NON_PIT_EXPLORATORY；不验证预测）：${comparisonRows.join(" | ")}`
+        ? `同行类型样本对照（${boardKindLabel(board.board_kind)}；统计板块关系、成员可能重叠；NON_PIT_EXPLORATORY；不验证预测）：${comparisonRows.join(" | ")}`
         : `同行类型样本对照 ${pulseFollowupComparison?.status ?? "NOT_COMPUTED"} · ${(pulseFollowupComparison?.reason_codes ?? ["PULSE_FOLLOWUP_COMPARISON_NOT_AVAILABLE"]).join("、")}`;
     message(
       "boardMeta",
-      `${board.board_kind} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${pulseSummary} · ${pulseTransitionSummary} · ${pulseFollowupLine} · ${pulseFollowupComparisonLine} · 正式 Rotation 未评估`,
+      `${displayBoardName(board)} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${pulseSummary} · ${pulseTransitionSummary} · ${pulseFollowupLine} · ${pulseFollowupComparisonLine} · 正式 Rotation 未评估`,
     );
     message(
       "boardCoverage",
@@ -1043,8 +1064,8 @@ async function openD0Board(board, offset = 0) {
       "没有已证明的新增成员；未知不等于无变化。",
       (item, index) =>
         rowButton(
-          item.source_symbol,
-          "来源池内 · D0 FALSE→TRUE · NON_PIT",
+          displayStockName(item),
+          `代码 ${displayStockCode(item)} · 来源池内 · D0 FALSE→TRUE · NON_PIT`,
           "D0",
           "查看同日个股",
           () => openStock(item.source_symbol),
@@ -1125,10 +1146,10 @@ function openD1Board(board) {
   $("boardKind").value = board.board_kind;
   $("memberSearch").value = "";
   $("memberState").value = "ALL";
-  message("boardTitle", board.board_name);
+  message("boardTitle", displayBoardName(board));
   message(
     "boardMeta",
-    `${board.board_kind === "INDUSTRY" ? "行业" : "GN 概念"} · 当前成员快照 NON_PIT · D1材料变化`,
+    `${board.board_kind === "INDUSTRY" ? "行业" : "概念"} · 当前成员快照 NON_PIT · D1材料变化`,
   );
   message("memberList", "正在读取同一D1筛选范围的板块成员…");
   $("memberList").classList.remove("has-items");
@@ -1235,13 +1256,13 @@ async function loadD1Material(symbol = null) {
     d1MaterialState.data = null;
     state.d1Requested = false;
     setD1MaterialStatus(
-      `读取失败：${error.message}。可修正筛选或来源代码后重新读取。`,
+      `读取失败：${error.message}。可修正筛选或六位股票代码后重新读取。`,
     );
 
     if (symbol) {
       message("stockStatus", `个股材料读取失败：${error.message}`);
       $("stockContent").replaceChildren(
-        node("p", "修正来源代码或研究范围后可重新读取。", "rule"),
+        node("p", "修正六位股票代码或研究范围后可重新读取。", "rule"),
       );
     }
     for (const id of ["stockList"])
@@ -1355,8 +1376,8 @@ async function loadProfileChanges() {
     const selection =
       beforeContext.profile_observation?.profile_revision_selection;
     beforeRevision =
-      selection?.selected_semantics_match &&
-      selection?.current_semantics_match_count === 1
+      selection?.selected_version_match === true &&
+      selection?.current_version_match_count === 1
         ? selection.selected_profile_revision
         : null;
     const beforeProfiles = state.profiles.filter(
@@ -1376,11 +1397,25 @@ async function loadProfileChanges() {
     const beforeProfile =
       beforeProfiles.length === 1 ? beforeProfiles[0] : null;
     const afterProfile = afterProfiles.length === 1 ? afterProfiles[0] : null;
+    if (!beforeProfile || !afterProfile) {
+      message("profileChangeSummary", "NOT_COMPARABLE");
+      message(
+        "profileChangeList",
+        "相邻日缺少唯一适用的完整画像；不把来源或画像缺口当成股票状态变化。",
+      );
+      return;
+    }
     if (
-      !beforeProfile ||
-      !afterProfile ||
-      beforeProfile.history_session_count !==
-        afterProfile.history_session_count ||
+      beforeProfile.history_session_count !== afterProfile.history_session_count
+    ) {
+      message("profileChangeSummary", "NOT_COMPARABLE");
+      message(
+        "profileChangeList",
+        `相邻画像窗口不等长：前一会话 ${beforeProfile.history_session_count} 个官方会话，目标会话 ${afterProfile.history_session_count} 个官方会话；现有Raw不足以提供同长度窗口，不把窗口差异当成股票状态变化。`,
+      );
+      return;
+    }
+    if (
       beforeProfile.history_calendar_id !== afterProfile.history_calendar_id ||
       beforeProfile.history_calendar_revision !==
         afterProfile.history_calendar_revision ||
@@ -1389,7 +1424,7 @@ async function loadProfileChanges() {
       message("profileChangeSummary", "NOT_COMPARABLE");
       message(
         "profileChangeList",
-        "相邻日没有唯一适用的同窗口画像；不把窗口差异当成股票状态变化。",
+        "相邻画像的官方日历或价格坐标合同不一致；不把口径差异当成股票状态变化。",
       );
       return;
     }
@@ -1434,8 +1469,8 @@ async function loadProfileChanges() {
       (item, index) => {
         const types = (item.change_types || []).map(profileChangeTypeLabel);
         return rowButton(
-          item.source_symbol,
-          `${previousDate} → ${context.target_session} · ${types.join("、") || "状态不可比较"} · RAW_UNADJUSTED · NON_PIT`,
+          displayStockName(item),
+          `代码 ${displayStockCode(item)} · ${previousDate} → ${context.target_session} · ${types.join("、") || "状态不可比较"} · RAW_UNADJUSTED · NON_PIT`,
           (item.change_types || []).length,
           "项变化",
           () =>
@@ -1625,15 +1660,27 @@ function sourceSeedExplanation(seed) {
     .join("；");
   return `${routes}。范围 NON_PIT_RETROSPECTIVE；价格坐标 RAW_UNADJUSTED。未满足/未知谓词：${unmet || "无"}。来源质量 ${quality.source_time_quality} / ${quality.source_clock_role}；目标日实际K线 ${quality.target_actual_quote ? "有" : "未知或缺失"}；收盘质量 ${quality.target_close_quality}${quality.target_close_reason ? `：${quality.target_close_reason}` : ""}${qualityReasons ? `；输入质量原因：${qualityReasons}` : ""}。正式候选资格 NOT_EVALUATED。`;
 }
+async function resolveStockCodeInput(value, context) {
+  const input = value.trim().toUpperCase();
+  if (/^(SH|SZ|BJ)\.\d{6}$/.test(input))
+    return { source_symbol: input, display_name: null };
+  if (!/^\d{6}$/.test(input))
+    throw new Error("请输入六位数字股票代码，无需市场前缀。");
+  if (!context?.contextReady)
+    throw new Error("当前研究日期的真实来源池尚未就绪。");
+  const result = await api(
+    `/api/product/resolve-stock-code?${new URLSearchParams({
+      target_session: context.target_session,
+      source_package_id: context.source_package_id,
+      stock_code: input,
+    })}`,
+  );
+  return result;
+}
 async function openStock(symbol, row = {}) {
   state.stockController?.abort();
-  currentStockSymbol = symbol;
-  currentStockSource = state.selected
-    ? {
-        target_session: state.selected.target_session,
-        source_package_id: state.selected.source_package_id,
-      }
-    : null;
+  const resolveToken = ++state.stockRequest;
+  const selected = state.selected;
   if (!state.selected) {
     message("contextText", "当前日期的研究上下文尚未就绪。");
     return;
@@ -1642,12 +1689,29 @@ async function openStock(symbol, row = {}) {
     message("contextText", "当前日期的研究上下文尚未就绪。");
     return;
   }
+  try {
+    const resolved = await resolveStockCodeInput(symbol, selected);
+    symbol = resolved.source_symbol;
+    if (resolved.display_name)
+      row = { ...row, display_name: resolved.display_name };
+  } catch (error) {
+    if (resolveToken === state.stockRequest)
+      message("stockSearchStatus", `股票代码解析失败：${error.message}`);
+    return;
+  }
+  if (resolveToken !== state.stockRequest || selected !== state.selected)
+    return;
+  currentStockSymbol = symbol;
+  currentStockSource = {
+    target_session: selected.target_session,
+    source_package_id: selected.source_package_id,
+  };
   if (
     /^BJ\.\d{6}$/.test(symbol) &&
     (row.change_state || row.source_pool_status)
   ) {
     ++state.stockRequest;
-    message("stockTitle", symbol);
+    message("stockTitle", displayStockTitle(row, symbol));
     message(
       "stockMeta",
       `${state.selected.target_session} · 当前成员快照 · NON_PIT`,
@@ -1667,7 +1731,7 @@ async function openStock(symbol, row = {}) {
     return;
   }
   if (!/^(SH|SZ)\.\d{6}$/.test(symbol)) {
-    message("contextText", "请输入 SH. 或 SZ. 加六位数字的来源代码。");
+    message("stockSearchStatus", "请输入六位数字股票代码。");
     return;
   }
   const c = state.selected,
@@ -1680,7 +1744,7 @@ async function openStock(symbol, row = {}) {
     (row.changed_anchor_event_count ? "CHANGED" : "NOT_EVALUATED");
   const displayReason = "同日支撑变化按该代码的完整历史独立读取";
   const d1IsPending = true;
-  message("stockTitle", symbol);
+  message("stockTitle", displayStockTitle(row, symbol));
   message(
     "stockMeta",
     `${c.target_session} · RAW_UNADJUSTED · SOURCE_SYMBOL_ONLY · NON_PIT`,
@@ -1699,6 +1763,7 @@ async function openStock(symbol, row = {}) {
       profile_revision: c.profile_revision,
     });
     if (token !== state.stockRequest) return;
+    message("stockTitle", displayStockTitle(data, symbol));
     const root = $("stockContent");
     const grid = node("div", null, "fact-grid");
     for (const [key, label] of [
@@ -2027,7 +2092,13 @@ async function openStock(symbol, row = {}) {
 }
 $("stockSearch").addEventListener("submit", (e) => {
   e.preventDefault();
-  openStock($("stockSymbol").value.trim().toUpperCase());
+  const stockCode = $("stockSymbol").value.trim();
+  if (!/^\d{6}$/.test(stockCode)) {
+    message("stockSearchStatus", "请输入六位数字股票代码，无需市场前缀。");
+    return;
+  }
+  message("stockSearchStatus", "正在按所选交易日的真实来源池解析代码…");
+  void openStock(stockCode);
 });
 $("stockDialog").addEventListener("close", () => {
   ++state.stockRequest;
@@ -2084,7 +2155,7 @@ async function loadExtra(page) {
     $("focusStockResult").replaceChildren();
     message(
       "focusStockStatus",
-      "输入来源代码后可独立读取 Raw 观察；正式 Focus 未计算。",
+      "输入六位股票代码后可独立读取 Raw 观察；正式 Focus 未计算。",
     );
   }
   const common = {
@@ -2216,15 +2287,20 @@ async function loadExtra(page) {
 }
 async function readCohort() {
   const c = state.selected,
-    raw = $("cohortKey").value;
+    raw = $("cohortKey").value,
+    stockCode = $("cohortSymbol").value.trim().toUpperCase();
   if (!c || !raw) return;
   const token = ++cohortRequest,
-    key = JSON.parse(raw),
-    symbol = $("cohortSymbol").value.trim().toUpperCase();
+    key = JSON.parse(raw);
   message("focusStatus", "正在读取冻结研究…");
   $("cohortSummary").replaceChildren();
   $("cohortRows").replaceChildren();
   try {
+    const resolved = stockCode
+      ? await resolveStockCodeInput(stockCode, c)
+      : null;
+    const symbol = resolved?.source_symbol ?? null;
+    if (token !== cohortRequest || activePage !== "focus") return;
     const query = {
       target_session: c.target_session,
       source_package_id: c.source_package_id,
@@ -2261,7 +2337,7 @@ async function readCohort() {
       [
         "所选代码后继事实",
         d.frozen_candidate_followup
-          ? `${d.frozen_candidate_followup.source_symbol} · ${d.frozen_candidate_followup.maturity} · 路径 ${d.frozen_candidate_followup.path_quality} · 收盘变化 ${format(d.frozen_candidate_followup.endpoint?.raw_close_relative_change?.value)} · 首次触及 ${d.frozen_candidate_followup.first_touch_status}`
+          ? `${displayStockTitle(d.frozen_candidate_followup)} · ${d.frozen_candidate_followup.maturity} · 路径 ${d.frozen_candidate_followup.path_quality} · 收盘变化 ${format(d.frozen_candidate_followup.endpoint?.raw_close_relative_change?.value)} · 首次触及 ${d.frozen_candidate_followup.first_touch_status}`
           : "未选择来源代码",
       ],
       ...(d.d1_anchor_events || []).map((a) => [
@@ -2273,9 +2349,10 @@ async function readCohort() {
     rows.replaceChildren();
     for (const row of d.results) {
       const p = node("p");
-      const button = node("button", row.source_symbol, "text-button");
+      const button = node("button", displayStockName(row), "text-button");
+      button.title = `代码 ${displayStockCode(row)}`;
       button.addEventListener("click", () => {
-        $("cohortSymbol").value = row.source_symbol;
+        $("cohortSymbol").value = displayStockCode(row);
         cohortOffset = 0;
         void readCohort();
       });
@@ -2283,7 +2360,7 @@ async function readCohort() {
         button,
         node(
           "span",
-          ` · ${{ TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[row.state] || row.state} · ${row.maturity} · ${format(row.reasons)} · ${format(row.endpoint_reason)}`,
+          ` · 代码 ${displayStockCode(row)} · ${{ TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[row.state] || row.state} · ${row.maturity} · ${format(row.reasons)} · ${format(row.endpoint_reason)}`,
         ),
       );
       rows.append(p);
@@ -2317,33 +2394,41 @@ function focusSourceSelection() {
 }
 $("stockToFocus").addEventListener("click", () => {
   if (!currentStockSource || !currentStockSymbol) return;
-  $("cohortSymbol").value = currentStockSymbol;
+  $("cohortSymbol").value = displayStockCode({
+    source_symbol: currentStockSymbol,
+  });
   $("stockDialog").close();
   if ($("boardDialog").open) $("boardDialog").close();
   gotoPage("focus");
 });
 $("focusBackStock").addEventListener("click", () => {
   const c = focusSourceSelection(),
-    symbol = $("cohortSymbol").value.trim().toUpperCase();
-  if (!c || !/^(SH|SZ)\.\d{6}$/.test(symbol)) {
-    message("focusStockStatus", "请等待交易日就绪并输入有效来源代码。");
+    stockCode = $("cohortSymbol").value.trim();
+  if (!c || !/^\d{6}$/.test(stockCode)) {
+    message("focusStockStatus", "请等待交易日就绪并输入六位数字股票代码。");
     return;
   }
   gotoPage("stocks");
-  $("stockSymbol").value = symbol;
-  void openStock(symbol);
+  $("stockSymbol").value = stockCode;
+  void openStock(stockCode);
 });
 $("focusReadStock").addEventListener("click", async () => {
   const c = focusSourceSelection(),
-    symbol = $("cohortSymbol").value.trim().toUpperCase();
+    stockCode = $("cohortSymbol").value.trim().toUpperCase();
   const token = ++focusStockRequest;
   $("focusStockResult").replaceChildren();
-  if (!c || !/^(SH|SZ)\.\d{6}$/.test(symbol)) {
-    message("focusStockStatus", "请等待交易日就绪并输入有效来源代码。");
+  if (!c || !/^\d{6}$/.test(stockCode)) {
+    message("focusStockStatus", "请等待交易日就绪并输入六位数字股票代码。");
     return;
   }
-  message("focusStockStatus", "正在读取来源价格；不等待全池 D1。");
+  message(
+    "focusStockStatus",
+    "正在解析六位代码并读取该来源价格；不等待全池 D1。",
+  );
   try {
+    const resolved = await resolveStockCodeInput(stockCode, c);
+    const symbol = resolved.source_symbol;
+    if (token !== focusStockRequest || activePage !== "focus") return;
     const context = await api(
       `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session })}`,
     );
@@ -2359,7 +2444,7 @@ $("focusReadStock").addEventListener("click", async () => {
     if (token !== focusStockRequest || activePage !== "focus") return;
     message(
       "focusStockStatus",
-      `${symbol} · ${c.target_session} · RAW_UNADJUSTED · SOURCE_SYMBOL_ONLY · NON_PIT；来源观察已计算，冻结规则及正式 Focus 的状态分别以规则结果为准。`,
+      `${displayStockTitle({ ...data, display_name: resolved.display_name }, stockCode)} · ${c.target_session} · RAW_UNADJUSTED · SOURCE_SYMBOL_ONLY · NON_PIT；来源观察已计算，冻结规则及正式 Focus 的状态分别以规则结果为准。`,
     );
     detailRows($("focusStockResult"), [
       [
@@ -2392,7 +2477,7 @@ for (const id of ["cohortKey", "cohortHorizon", "cohortSymbol"]) {
     $("focusStockResult").replaceChildren();
     message(
       "focusStockStatus",
-      "输入来源代码后可独立读取 Raw 观察；正式 Focus 未计算。",
+      "输入六位股票代码后可独立读取 Raw 观察；正式 Focus 未计算。",
     );
     message(
       "focusStatus",

@@ -38,6 +38,8 @@ TDX本地日线/合法官方包为核心，GBBQ及本地仿射引擎生成复权
 
 security_entity_id与当前symbol分离；源记录保留source_instrument_id。官方事件/稳定身份不足时隔离provisional/unmapped，不靠代码形状/行情连续自动合并实体。指纹只作候选发现，盲测少量成功不证明全市场误报率；合并/吸收后继与纯换码区分。
 
+页面优先显示PG已保存的中文display_name，来源代码作为次级标识；代码仍是来源查询键。板块只显示中文board_name，native_id只留在接口和PG查询中。现有本机TDX .tnf可作为未验证、非PIT的显示标签来源，必须记录实际captured_at并标记source_available_at未知、identity_status=SOURCE_SYMBOL_ONLY_NOT_STABLE_ENTITY、pit_status=NON_PIT。它不证明稳定实体、名称生效区间、上市/退市、历史身份或预测资格，也不得进入公式、排序、成员身份或历史回填。文件缺失、名称字段截断或代码未覆盖均显示名称未知，不手写映射或猜测。PG仅保留一份当前标签快照，整体事务替换；历史显示不假称PIT。
+
 Data Universe、制度可交易Universe、Research Universe分别登记日期、成员、排除与明确版本。全市场画像基于有效身份来源，未知身份原行保留在隔离分母；当前query_all_stock不得覆盖已绑定历史Lifecycle。
 
 交易日历来自有版本的交易所事实；窗口索引越界明确失败，不将自然工作日当交易日、不使用负索引环绕。ST/停复牌/IPO特殊期/退市/板别有当日有效来源和known time，现行ST不证明过去ST，代码首次观测不证明IPO。

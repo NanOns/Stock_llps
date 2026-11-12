@@ -28,6 +28,7 @@ _PARSER_CONTRACT = "stock_a.sources.tdx.vipdata.scan_vipdata_target_quality|TDX_
 _CLOCK_ROLE = "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT"
 _PACKAGE_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
+_NUMERIC_STOCK_CODE = re.compile(r"^[0-9]{6}$")
 _PRICE_FACT_SYMBOL = re.compile(r"^(SH|SZ|BJ)\.[0-9]{6}$")
 _BAR_STATUSES = {"TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED"}
 _QUALITY = {"OBSERVED", "UNKNOWN", "NOT_APPLICABLE", "BAD_VALUE"}
@@ -1456,6 +1457,100 @@ FROM source_raw_daily r
         return result
 
 
+def resolve_raw_stock_code(
+    config: Mapping[str, Any],
+    *,
+    stock_code: str,
+    target_session: date,
+    source_package_id: int,
+) -> dict[str, Any]:
+    """在精确、完整的目标日Raw来源池中将六位代码解析为内部来源键。"""
+    if (
+        not isinstance(stock_code, str)
+        or _NUMERIC_STOCK_CODE.fullmatch(stock_code) is None
+    ):
+        raise RawSourcePgError(
+            "STOCK_CODE_INVALID", "股票代码须为六位数字，无需市场前缀"
+        )
+    if (
+        type(target_session) is not date
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+    ):
+        raise RawSourcePgError(
+            "PG_QUERY_KEY_INVALID", "股票代码解析必须绑定精确目标会话与来源包ID"
+        )
+    with _transaction(config, write=False, statement_timeout_ms=30000) as (
+        _connection,
+        cursor,
+        _scope,
+    ):
+        cursor.execute(
+            """SELECT count(*)::bigint, count(DISTINCT r.source_symbol)::bigint,
+       count(DISTINCT r.source_capture_id)::bigint,
+       min(r.source_capture_id), max(r.source_capture_id),
+       min(c.normalized_count), max(c.normalized_count),
+       count(*) FILTER (WHERE c.capture_id IS NULL OR p.source_package_id IS NULL
+             OR c.source_package_id IS DISTINCT FROM r.source_package_id
+             OR c.target_session IS DISTINCT FROM r.session_date
+             OR p.dataset_id IS DISTINCT FROM %s)::bigint
+FROM source_raw_daily r
+LEFT JOIN source_captures c ON c.capture_id=r.source_capture_id
+LEFT JOIN source_packages p ON p.source_package_id=r.source_package_id
+WHERE r.session_date=%s AND r.source_package_id=%s""",
+            (_DATASET_ID, target_session, source_package_id),
+        )
+        (
+            row_count,
+            distinct_symbol_count,
+            capture_count,
+            minimum_capture_id,
+            maximum_capture_id,
+            expected_count,
+            expected_count_max,
+            broken_reference_count,
+        ) = cursor.fetchone()
+        if (
+            row_count == 0
+            or distinct_symbol_count != row_count
+            or capture_count != 1
+            or expected_count is None
+            or expected_count != expected_count_max
+            or row_count != expected_count
+            or broken_reference_count != 0
+        ):
+            raise RawSourcePgError(
+                "SOURCE_CODE_POOL_INCOMPLETE",
+                "目标日Raw来源池不完整或来源捕获不唯一，不能解析股票代码",
+            )
+        cursor.execute(
+            """SELECT DISTINCT source_symbol
+FROM source_raw_daily
+WHERE session_date=%s AND source_package_id=%s
+  AND source_capture_id=%s AND right(source_symbol, 6)=%s
+ORDER BY source_symbol
+LIMIT 2""",
+            (target_session, source_package_id, minimum_capture_id, stock_code),
+        )
+        matches = [row[0] for row in cursor.fetchall()]
+    if not matches:
+        raise RawSourcePgError(
+            "STOCK_CODE_NOT_FOUND", "所选交易日的真实来源池中没有该六位股票代码"
+        )
+    if len(matches) != 1:
+        raise RawSourcePgError(
+            "STOCK_CODE_AMBIGUOUS", "该六位股票代码在所选来源池中对应多个来源键"
+        )
+    return {
+        "stock_code": stock_code,
+        "source_symbol": matches[0],
+        "source_capture_id": int(minimum_capture_id),
+        "source_package_id": source_package_id,
+        "target_session": target_session.isoformat(),
+        "resolution_scope": "EXACT_COMPLETE_TARGET_SESSION_SOURCE_POOL",
+    }
+
+
 def _validate_history_query(
     *,
     source_symbol: str | None,
@@ -1575,6 +1670,7 @@ def read_raw_daily_forward_pool(
     sessions: Sequence[date],
     research_cutoff: date,
     source_package_id: int,
+    include_parser_contract: bool = False,
 ) -> dict[str, Any]:
     """一次只读事务批量读取已冻结来源池的T0及后继Raw行。"""
     days = tuple(sessions)
@@ -1594,6 +1690,7 @@ def read_raw_daily_forward_pool(
         )
         or type(source_package_id) is not int
         or source_package_id <= 0
+        or type(include_parser_contract) is not bool
     ):
         raise RawSourcePgError("FORWARD_POOL_INPUT_INVALID", "后继来源池或会话绑定无效")
     with _transaction(config, write=False, statement_timeout_ms=30000) as (
@@ -1606,6 +1703,7 @@ def read_raw_daily_forward_pool(
             source_symbols=symbols,
             sessions=days,
             source_package_id=source_package_id,
+            include_parser_contract=include_parser_contract,
         )
         session_versions = {}
         for day in days:
