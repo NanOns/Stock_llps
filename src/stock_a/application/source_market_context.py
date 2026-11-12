@@ -25,7 +25,6 @@ from stock_a.storage.postgres.source_raw import (
     read_source_market_breadth_history,
 )
 
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _ELIGIBLE_CLASSES = (
     "COMPARABLE_GAIN",
     "COMPARABLE_LOSS",
@@ -78,7 +77,7 @@ def compute_source_market_context(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
 ) -> SourceMarketContextRead:
     """按固定官方日历和精确Raw来源包读取并计算一次来源宽度。"""
     if (
@@ -91,10 +90,10 @@ def compute_source_market_context(
             "目标交易会话不得晚于显式研究截止日",
             category="ARGUMENT",
         )
-    if not isinstance(package_sha256, str) or _SHA256.fullmatch(package_sha256) is None:
+    if type(source_package_id) is not int or source_package_id <= 0:
         raise SourceMarketContextError(
-            "MARKET_BREADTH_PACKAGE_SHA_INVALID",
-            "完整TDX来源包SHA必须是64位小写十六进制值",
+            "MARKET_BREADTH_PACKAGE_ID_INVALID",
+            "来源包ID必须是正数BIGINT",
             category="ARGUMENT",
         )
 
@@ -106,7 +105,6 @@ def compute_source_market_context(
         calendar = {
             "calendar_id": payload["calendar_id"],
             "calendar_revision": payload["revision"],
-            "calendar_sha256": year_metadata["resource_sha256"],
             "revision_chain": revisions,
             "sessions": sessions,
         }
@@ -130,7 +128,7 @@ def compute_source_market_context(
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             session_window=session_window,
         )
     except RawSourcePgError:
@@ -139,10 +137,8 @@ def compute_source_market_context(
     source_version = pg_result["source_version"]
     status_counts = source_version["target_status_counts"]
     cohort = SourceCohortIdentity(
-        namespace_id=pg_result["namespace_id"],
         target_session=target_session,
-        package_sha256=package_sha256,
-        source_content_id=source_version["source_content_id"],
+        source_package_id=source_package_id,
         source_capture_id=source_version["source_capture_id"],
         source_dataset_id=source_version["source_dataset_id"],
         source_byte_count=source_version["source_byte_count"],
@@ -157,11 +153,8 @@ def compute_source_market_context(
         target_present_count=status_counts["TARGET_PRESENT"],
         target_missing_count=status_counts["TARGET_MISSING"],
         read_failed_count=status_counts["READ_FAILED"],
-        capture_digest=source_version["capture_digest"],
-        observed_raw_digest=source_version["observed_raw_digest"],
         calendar_id=calendar["calendar_id"],
         calendar_revision=calendar["calendar_revision"],
-        calendar_sha256=calendar["calendar_sha256"],
     )
     observations = tuple(
         RawPriceObservation(**row) for row in pg_result["history_rows"]
@@ -174,7 +167,6 @@ def compute_source_market_context(
                 research_cutoff=research_cutoff,
                 calendar_id=calendar["calendar_id"],
                 calendar_revision=calendar["calendar_revision"],
-                calendar_sha256=calendar["calendar_sha256"],
                 official_sessions=calendar["sessions"],
                 observations=observations,
             )
@@ -202,7 +194,7 @@ def read_source_market_context(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     include_symbols: bool = False,
 ) -> SourceMarketContextRead:
     """直接读取已保存的精确市场宽度，不在读取时重算来源池。"""
@@ -218,9 +210,9 @@ def read_source_market_context(
             "目标会话超过研究截止",
             category="ARGUMENT",
         )
-    if not isinstance(package_sha256, str) or _SHA256.fullmatch(package_sha256) is None:
+    if type(source_package_id) is not int or source_package_id <= 0:
         raise SourceMarketContextError(
-            "MARKET_BREADTH_PACKAGE_SHA_INVALID", "来源包SHA无效", category="ARGUMENT"
+            "MARKET_BREADTH_PACKAGE_ID_INVALID", "来源包ID无效", category="ARGUMENT"
         )
     try:
         payload, metadata, revisions, sessions = _load_calendar(target_session)
@@ -235,9 +227,8 @@ def read_source_market_context(
     saved = read_market_breadth(
         config,
         target_session=target_session,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         calendar_revision=payload["revision"],
-        calendar_sha256=year_metadata["resource_sha256"],
         contract_version=SOURCE_MARKET_BREADTH_CONTRACT,
         include_symbols=include_symbols,
     )
@@ -263,7 +254,6 @@ def read_source_market_context(
         window != saved_window
         or day["calendar_id"] != payload["calendar_id"]
         or day["calendar_revision"] != payload["revision"]
-        or str(day["calendar_sha256"]).strip() != year_metadata["resource_sha256"]
     ):
         raise SourceMarketContextError(
             "MARKET_BREADTH_INCOMPLETE",
@@ -276,11 +266,9 @@ def read_source_market_context(
         return value.isoformat() if value is not None else None
 
     cohort = SourceCohortIdentity(
-        namespace_id=str(day["namespace_id"]),
         target_session=target_session,
-        package_sha256=package_sha256,
-        source_content_id=str(day["source_content_id"]).strip(),
-        source_capture_id=str(day["source_capture_id"]),
+        source_package_id=source_package_id,
+        source_capture_id=int(day["source_capture_id"]),
         source_dataset_id=day["source_dataset_id"],
         source_byte_count=day["source_byte_count"],
         parser_contract=day["parser_contract"],
@@ -294,11 +282,8 @@ def read_source_market_context(
         target_present_count=day["target_present_count"],
         target_missing_count=day["target_missing_count"],
         read_failed_count=day["read_failed_count"],
-        capture_digest=str(day["capture_digest"]).strip(),
-        observed_raw_digest=str(day["capture_digest"]).strip(),
         calendar_id=day["calendar_id"],
         calendar_revision=day["calendar_revision"],
-        calendar_sha256=str(day["calendar_sha256"]).strip(),
     )
 
     def rational(row: Mapping[str, Any], prefix: str) -> Fraction | None:
@@ -342,18 +327,14 @@ def read_source_market_context(
         symbols=symbols,
     )
     source_version = {
-        "source_content_id": cohort.source_content_id,
+        "source_package_id": cohort.source_package_id,
         "source_capture_id": cohort.source_capture_id,
-        "observed_raw_digest": cohort.observed_raw_digest,
-        "capture_digest": cohort.capture_digest,
         "raw_row_count": cohort.raw_row_count,
         "capture_expected_row_count": cohort.capture_expected_row_count,
         "source_time_quality": cohort.source_time_quality,
         "source_available_at": cohort.source_available_at,
     }
     pg_result = {
-        "namespace_id": cohort.namespace_id,
-        "target_raw_digest": cohort.capture_digest,
         "history_row_count": 0,
         "calculation_history_row_count": day["history_row_count"],
         "storage_status": "SAVED",
@@ -366,7 +347,6 @@ def read_source_market_context(
     calendar = {
         "calendar_id": payload["calendar_id"],
         "calendar_revision": payload["revision"],
-        "calendar_sha256": year_metadata["resource_sha256"],
         "revision_chain": revisions,
         "sessions": sessions,
     }
@@ -409,7 +389,6 @@ def source_market_context_payload(
         "official_calendar": {
             "calendar_id": market.calendar["calendar_id"],
             "revision": market.calendar["calendar_revision"],
-            "sha256": market.calendar["calendar_sha256"],
             "lookback_sessions": {
                 "t_minus_4": window[0].isoformat(),
                 "t_minus_3": window[1].isoformat(),
@@ -425,23 +404,12 @@ def source_market_context_payload(
             ],
         },
         "source_cohort": {
-            "namespace_id": cohort.namespace_id,
             "target_session": market.target_session.isoformat(),
-            "package_sha256": cohort.package_sha256,
-            "source_content_id": cohort.source_content_id,
+            "source_package_id": cohort.source_package_id,
             "source_capture_id": cohort.source_capture_id,
             "source_dataset_id": cohort.source_dataset_id,
             "source_byte_count": cohort.source_byte_count,
             "parser_contract": cohort.parser_contract,
-            "capture_digest": cohort.capture_digest,
-            "source_raw_digest": cohort.capture_digest,
-            "recomputed_target_raw_digest": cohort.observed_raw_digest,
-            "raw_digest_verified": cohort.capture_digest == cohort.observed_raw_digest,
-            "raw_digest_verification_time": (
-                "CALCULATION"
-                if pg_result.get("storage_status") == "SAVED"
-                else "CURRENT_READ"
-            ),
             "raw_row_count": cohort.raw_row_count,
             "target_present_count": cohort.target_present_count,
             "target_missing_count": cohort.target_missing_count,
@@ -541,7 +509,7 @@ def validate_source_market_context_binding(
     strength_results: Sequence[Mapping[str, Any]],
     discovery: Mapping[str, Any],
 ) -> None:
-    """拒绝将不同来源修订、Raw摘要或日历的市场值拼入组合结果。"""
+    """拒绝将不同数字来源包、捕获、会话或日历修订拼入组合结果。"""
     d1_source = discovery.get("source")
     d1_calendar = discovery.get("official_calendar")
     if not isinstance(d1_source, Mapping) or not isinstance(d1_calendar, Mapping):
@@ -552,12 +520,9 @@ def validate_source_market_context_binding(
         )
 
     market_identity = {
-        "namespace_id": market.pg_result["namespace_id"],
         "source_capture_id": market.source_version["source_capture_id"],
         "target_session": market.target_session.isoformat(),
-        "package_sha256": market.cohort.package_sha256,
-        "source_content_id": market.source_version["source_content_id"],
-        "source_raw_digest": market.source_version["observed_raw_digest"],
+        "source_package_id": market.source_version["source_package_id"],
         "raw_row_count": int(market.source_version["raw_row_count"]),
         "capture_expected_row_count": int(
             market.source_version["capture_expected_row_count"]
@@ -570,24 +535,20 @@ def validate_source_market_context_binding(
     market_calendar = {
         "calendar_id": market.calendar["calendar_id"],
         "calendar_revision": market.calendar["calendar_revision"],
-        "calendar_sha256": market.calendar["calendar_sha256"],
     }
     d1_calendar_identity = {
         "calendar_id": d1_calendar.get("calendar_id"),
         "calendar_revision": d1_calendar.get("calendar_revision"),
-        "calendar_sha256": d1_calendar.get("calendar_sha256"),
     }
     if (
         d1_identity != expected_identity
-        or d1_source.get("target_raw_binding_verified") is not True
-        or market.pg_result["target_raw_digest"] != d1_source.get("source_raw_digest")
         or market_calendar != d1_calendar_identity
         or _clock_identity(market.source_version.get("source_available_at"))
         != _clock_identity(d1_source.get("source_available_at"))
     ):
         raise SourceMarketContextError(
             "SOURCE_MARKET_CONTEXT_IDENTITY_MISMATCH",
-            "市场宽度与D1来源捕获、Raw摘要、时钟或官方日历不一致",
+            "市场宽度与D1来源包、捕获、时钟或官方日历修订不一致",
             category="IDENTITY_MISMATCH",
         )
 
@@ -603,10 +564,9 @@ def validate_source_market_context_binding(
                 category="IDENTITY_MISMATCH",
             )
         strength_identity = {
-            "namespace_id": strength.get("namespace_id"),
             "source_capture_id": strength_source.get("source_capture_id"),
             "target_session": strength.get("target_session"),
-            "package_sha256": strength_source.get("package_sha256"),
+            "source_package_id": strength_source.get("source_package_id"),
         }
         expected_strength_identity = {
             key: market_identity[key] for key in strength_identity
@@ -657,17 +617,13 @@ def source_market_not_evaluable_payload(
         "official_calendar": {
             "calendar_id": official_calendar.get("calendar_id"),
             "revision": official_calendar.get("calendar_revision"),
-            "sha256": official_calendar.get("calendar_sha256"),
             "lookback_sessions": None,
             "not_evaluable_reason": reason,
         },
         "source_cohort": {
-            "namespace_id": source_identity.get("namespace_id"),
             "target_session": target_session.isoformat(),
-            "package_sha256": source_identity.get("package_sha256"),
-            "source_content_id": source_identity.get("source_content_id"),
+            "source_package_id": source_identity.get("source_package_id"),
             "source_capture_id": source_identity.get("source_capture_id"),
-            "source_raw_digest": source_identity.get("observed_raw_digest"),
             "raw_row_count": n_source,
             "source_time_quality": source_identity.get("source_time_quality"),
             "source_available_at": source_identity.get("source_available_at"),

@@ -1804,7 +1804,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "cross_input_version"
@@ -1844,7 +1843,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "cross_input_version"
@@ -1884,7 +1882,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "cross_input_version"
@@ -1921,7 +1918,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "cross_input_version"
@@ -1961,7 +1957,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "cross_input_version"
@@ -2001,7 +1996,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "cross_input_version"
@@ -2038,7 +2032,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "cross_input_version"
@@ -2075,7 +2068,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "cross_input_version"
@@ -2112,7 +2104,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "cross_input_version"
@@ -2149,7 +2140,6 @@
           "finite_numeric_only": true
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "cross_input_version"
@@ -2201,7 +2191,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"
@@ -2245,7 +2234,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"
@@ -2290,7 +2278,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"
@@ -2339,7 +2326,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"
@@ -2385,7 +2371,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"
@@ -2430,7 +2415,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"
@@ -2476,7 +2460,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"
@@ -2518,7 +2501,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"
@@ -2559,7 +2541,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"
@@ -2599,7 +2580,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"
@@ -2641,7 +2621,6 @@
           ]
         },
         "business_key": [
-          "namespace_id",
           "entity_id",
           "session_date",
           "profile_input_version"

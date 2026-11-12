@@ -5,7 +5,7 @@ from __future__ import annotations
 from stock_a.storage.postgres.binding import (
     BindingCommittedConfigError,
     BindingRefused,
-    bind_stock_namespace,
+    apply_stock_migration,
     registered_migration_ids,
     registered_task_scopes,
 )
@@ -44,8 +44,8 @@ def register_commands(commands):
     bind.add_argument(
         "--timeout-seconds",
         type=float,
-        default=20.0,
-        help="身份绑定总耗时上限，默认20秒，最大30秒",
+        default=600.0,
+        help="集中迁移事务总耗时上限，默认600秒；普通迁移最大900秒，R06大表迁移22最大14400秒",
     )
     phase0 = commands.add_parser(
         "source-phase0",

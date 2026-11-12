@@ -57,10 +57,10 @@ function dayOhlc(point) {
 }
 function periodOhlc(period, binding) {
   const samePackage =
-    Array.isArray(period.source_package_sha256s) &&
-    period.source_package_sha256s.length > 0 &&
-    period.source_package_sha256s.every(
-      (value) => value === binding.package_sha256,
+    Array.isArray(period.source_source_package_ids) &&
+    period.source_source_package_ids.length > 0 &&
+    period.source_source_package_ids.every(
+      (value) => value === binding.source_package_id,
     );
   if (
     !samePackage ||
@@ -111,16 +111,12 @@ function pointDetail(point) {
       `${state.timeline?.price_coordinate || "RAW_UNADJUSTED"} · ${state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · ${state.timeline?.identity_status || "SOURCE_SYMBOL_ONLY"}`,
     ],
     [
-      "目标 / 代码 / 包SHA",
-      `${state.timeline?.target_session || "—"} · ${state.timeline?.symbol || "—"} · ${point.package_sha256}`,
+      "目标 / 代码 / 来源包ID",
+      `${state.timeline?.target_session || "—"} · ${state.timeline?.symbol || "—"} · ${point.source_package_id}`,
     ],
     [
-      "namespace / 来源包SHA",
-      `${point.namespace_id || state.timeline?.namespace_id || "—"} · ${point.package_sha256 || "UNKNOWN"}`,
-    ],
-    [
-      "来源捕获 / 内容 / 条目SHA",
-      `${text(point.source_capture_id)} · ${text(point.source_content_id)} · ${text(point.source_entry_sha256)}`,
+      "来源捕获ID",
+      `${text(point.source_capture_id)} · 来源包 ${text(point.source_package_id)}`,
     ],
     [
       "MA20窗口",
@@ -152,13 +148,12 @@ function pointDetail(point) {
   const exactOption = state.versions.some(
     (version) =>
       version.session_date === point.session_date &&
-      version.package_sha256 === point.package_sha256,
+      version.source_package_id === point.source_package_id,
   );
   button.disabled = !exactOption;
   if (exactOption)
     button.addEventListener("click", () => openTimelineSession(point));
-  else
-    button.title = "目录中没有相同日期和完整SHA的来源版本，不能回退其他版本。";
+  else button.title = "目录中没有相同日期和来源包ID的版本，不能回退其他版本。";
   root.append(button);
 }
 function periodDetail(period, mode) {
@@ -181,7 +176,7 @@ function periodDetail(period, mode) {
   appendText(
     root,
     "p",
-    `官方会话 ${period.elapsed_expected_session_count}/${period.calendar_expected_session_count} · 有效Bar ${period.valid_price_bar_count} · 缺Bar ${period.target_missing_count} · 读取失败 ${period.read_failed_count} · PG未保存 ${period.missing_history_count} · package SHA ${state.rawPeriods?.snapshot_identity?.package_sha256 || "UNKNOWN"}`,
+    `官方会话 ${period.elapsed_expected_session_count}/${period.calendar_expected_session_count} · 有效Bar ${period.valid_price_bar_count} · 缺Bar ${period.target_missing_count} · 读取失败 ${period.read_failed_count} · PG未保存 ${period.missing_history_count} · 来源包ID ${state.rawPeriods?.snapshot_identity?.source_package_id || "UNKNOWN"}`,
     "muted",
   );
   if (!period.daily_rows?.length) {
@@ -208,7 +203,7 @@ function periodDetail(period, mode) {
       daily.valid_price_bar
         ? `O ${text(daily.open)} · H ${text(daily.high)} · L ${text(daily.low)} · C ${text(daily.close)}`
         : "无有效OHLC",
-      `${text(daily.package_sha256)} · ${text(daily.source_capture_id)} · ${text(daily.source_content_id)} · ${text(daily.source_entry_sha256)}`,
+      `${text(daily.source_package_id)} · ${text(daily.source_capture_id)}`,
       "",
     ]);
     const action = row.lastElementChild;
@@ -225,7 +220,7 @@ function periodDetail(period, mode) {
     const exactOption = state.versions.some(
       (version) =>
         version.session_date === daily.session &&
-        version.package_sha256 === state.rawPeriodContext?.package_sha256,
+        version.source_package_id === state.rawPeriodContext?.source_package_id,
     );
     button.disabled = !point || !point.raw_row_present || !exactOption;
     if (!button.disabled)
@@ -242,9 +237,9 @@ function periodDetail(period, mode) {
 function chartContextForTimeline(data) {
   return {
     target_session: data?.selection?.target_session || data?.target_session,
-    package_sha256: data?.selection?.package_sha256 || data?.package_sha256,
+    source_package_id:
+      data?.selection?.source_package_id || data?.source_package_id,
     symbol: data?.selection?.source_symbol || data?.symbol,
-    namespace_id: data?.selection?.namespace_id || data?.namespace_id,
   };
 }
 function chartSlotLabel(item, mode) {
@@ -280,7 +275,7 @@ function renderCandlestickChart(data) {
   }
   const timelineBinding = chartContextForTimeline(data);
   const periodBinding = state.chartPeriodContext || timelineBinding;
-  identity.textContent = `${mode === "day" ? "日K轨迹" : mode === "week" ? "自然周K" : "自然月K"} · ${periodBinding.symbol} · 截止 ${periodBinding.target_session} · ${periodBinding.package_sha256} · namespace ${periodBinding.namespace_id} · RAW_UNADJUSTED / NON_PIT / SOURCE_SYMBOL_ONLY`;
+  identity.textContent = `${mode === "day" ? "日K轨迹" : mode === "week" ? "自然周K" : "自然月K"} · ${periodBinding.symbol} · 截止 ${periodBinding.target_session} · 来源包ID ${periodBinding.source_package_id} · RAW_UNADJUSTED / NON_PIT / SOURCE_SYMBOL_ONLY`;
   let items = [];
   let periods = [];
   if (mode === "day") {
@@ -294,7 +289,7 @@ function renderCandlestickChart(data) {
   } else {
     if (!rawPeriodsMatch(periodBinding)) {
       notice.textContent =
-        "尚无与当前轨迹日期、完整SHA、来源代码和namespace完全一致的周期结果；切换后按当前身份进行一次只读读取。";
+        "尚无与当前轨迹日期、来源包ID和来源代码一致的周期结果；切换后按当前身份进行一次只读读取。";
       if (!state.chartSelection) detail.replaceChildren();
       return;
     }
@@ -544,15 +539,13 @@ async function setChartMode(mode) {
   if (rawPeriodsMatch(binding)) return;
   const version = {
     target_session: binding.target_session,
-    package_sha256: binding.package_sha256,
+    source_package_id: binding.source_package_id,
   };
   try {
     await loadRawPeriods(
       version,
       binding.symbol,
-      {
-        namespace_id: binding.namespace_id,
-      },
+      {},
       () =>
         state.timeline !== null &&
         rawPeriodCacheKey(
@@ -652,7 +645,7 @@ function renderTimeline(data, errorMessage = "") {
     const exactOption = state.versions.some(
       (version) =>
         version.session_date === point.session_date &&
-        version.package_sha256 === point.package_sha256,
+        version.source_package_id === point.source_package_id,
     );
     button.disabled = point.raw_row_present !== true || !exactOption;
     if (!point.raw_row_present) {
@@ -661,7 +654,7 @@ function renderTimeline(data, errorMessage = "") {
         "该官方会话没有此来源代码的PG Raw行，不会发起单日Core请求。";
     } else if (!exactOption) {
       button.textContent = "缺少精确目录版本";
-      button.title = "目录中没有同日期、同完整包SHA的版本，不能回退其他版本。";
+      button.title = "目录中没有同日期、来源包ID一致的版本，不能回退其他版本。";
     } else {
       button.textContent = "查看当日Core / 周月";
       button.addEventListener("click", () => openTimelineSession(point));
@@ -696,7 +689,6 @@ async function queryTimeline(binding = null) {
     ...version,
     symbol,
     session_count: sessionCount,
-    namespace_id: binding?.namespace_id || null,
     origin: binding?.origin || "manual",
     persistedProfileSnapshot: binding?.persistedProfileSnapshot || null,
     returnSelection: binding?.returnSelection || null,
@@ -704,14 +696,14 @@ async function queryTimeline(binding = null) {
   };
   state.timelineContext = context;
   renderCandlestickChart(null);
-  const requestKey = `${version.target_session}|${version.package_sha256}|${symbol}|${sessionCount}`;
+  const requestKey = `${version.target_session}|${version.source_package_id}|${symbol}|${sessionCount}`;
   const requestIsCurrent = () => {
     const currentVersion = selectedVersion();
     return (
       requestId === state.timelineRequest &&
       state.timelineContext === context &&
       requestKey ===
-        `${currentVersion?.target_session}|${currentVersion?.package_sha256}|${$("symbolInput").value.trim()}|${Number($("windowInput").value)}`
+        `${currentVersion?.target_session}|${currentVersion?.source_package_id}|${$("symbolInput").value.trim()}|${Number($("windowInput").value)}`
     );
   };
   $("queryTimeline").disabled = true;
@@ -726,28 +718,22 @@ async function queryTimeline(binding = null) {
       body: JSON.stringify({
         symbol,
         target_session: version.target_session,
-        package_sha256: version.package_sha256,
+        source_package_id: version.source_package_id,
         session_count: sessionCount,
-        ...(context.namespace_id ? { namespace_id: context.namespace_id } : {}),
       }),
     });
     if (!requestIsCurrent()) return;
     const relationHistory = data.price_relation_history;
-    const identityRef = data.snapshot_identity?.identity_sha256;
     if (
-      data.snapshot_identity?.namespace_id !== data.namespace_id ||
       data.snapshot_identity?.target_session !== version.target_session ||
-      data.snapshot_identity?.package_sha256 !== version.package_sha256 ||
+      data.snapshot_identity?.source_package_id !== version.source_package_id ||
       data.selection?.source_symbol !== symbol ||
       data.selection?.target_session !== version.target_session ||
-      data.selection?.package_sha256 !== version.package_sha256 ||
-      data.selection?.namespace_id !== data.namespace_id ||
-      (context.namespace_id && data.namespace_id !== context.namespace_id)
+      data.selection?.source_package_id !== version.source_package_id
     )
       throw new Error("轨迹响应身份与精确变化快照不一致，已拒绝展示。");
     if (
       !relationHistory ||
-      relationHistory.identity_ref !== identityRef ||
       relationHistory.official_session_count !== data.total_session_count ||
       relationHistory.comparison_count !==
         Math.max(0, data.total_session_count - 1) * 5
@@ -758,11 +744,7 @@ async function queryTimeline(binding = null) {
     const pointDates = (data.points || []).map((point) => point.session_date);
     for (const item of relationHistory.observations || []) {
       const index = pointDates.indexOf(item.session_date);
-      if (
-        item.identity_ref !== identityRef ||
-        index < 1 ||
-        pointDates[index - 1] !== item.previous_official_session
-      )
+      if (index < 1 || pointDates[index - 1] !== item.previous_official_session)
         throw new Error(
           "价格变化记录不是同一精确轨迹中的紧邻官方会话，已拒绝展示。",
         );

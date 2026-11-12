@@ -5,8 +5,6 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
-from hashlib import sha256
-import json
 from typing import Any, Mapping
 
 from stock_a.canonical.adjustment_periods import PERIOD_AGGREGATION_VERSION
@@ -42,26 +40,7 @@ SOURCE_SYMBOL_PROFILE_SCOPE = "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE"
 PG_PROFILE_MAX_HISTORY_SESSIONS = 75  # 对应已应用PG表约束，并非默认计算窗口。
 _PRODUCER_CONTRACT = "STOCK_A_PG_SOURCE_SYMBOL_CORE_PROFILE_PREVIEW_R1"
 _PRODUCER_SEMANTICS_VERSION = "CORE43_PROFILE11_SOURCE_SYMBOL_R6_CONSUMED_CORE_WIRED"
-_FIELD_SEMANTIC_KEYS = (
-    "field_id",
-    "producer_symbol",
-    "value_type",
-    "unit",
-    "expression_ref",
-    "algorithm_version",
-    "parameter_version",
-    "input_fields",
-    "window_contract",
-    "coordinate_role",
-    "temporal_binding",
-    "context_dependencies",
-    "output_artifact",
-    "period_selection",
-    "minimum_closed_period_count",
-    "value_schema",
-    "formula",
-    "parameters",
-)
+_PROFILE_REVISION = "PROFILE_R08"
 _CORE_FIELDS = {
     "core.ma5": "ma5",
     "core.ma10": "ma10",
@@ -83,27 +62,6 @@ _CORE_FIELDS = {
     "core.volume_ratio20": "volume_ratio20",
 }
 _CORE_BOOLEAN_FIELDS = {"core.price_damage": "price_damage"}
-_HISTORY_HASH_FIELDS = (
-    "session_date",
-    "bar_status",
-    "bar_reason",
-    "raw_open",
-    "raw_high",
-    "raw_low",
-    "raw_close",
-    "price_quality",
-    "price_reason",
-    "raw_amount",
-    "raw_amount_quality",
-    "raw_amount_reason",
-    "raw_volume",
-    "raw_volume_quality",
-    "raw_volume_reason",
-    "source_content_id",
-    "source_capture_id",
-    "source_entry_sha256",
-    "package_sha256",
-)
 
 
 class PgPriceProfileError(Exception):
@@ -114,41 +72,8 @@ class PgPriceProfileError(Exception):
         super().__init__(message)
 
 
-def _canonical(value: Any) -> Any:
-    if isinstance(value, (date, datetime)):
-        return value.isoformat()
-    if isinstance(value, Decimal):
-        return format(value, "f")
-    return value
-
-
-def _semantic_json_value(value: Any) -> Any:
-    if isinstance(value, (date, datetime, Decimal)):
-        return _canonical(value)
-    if isinstance(value, Mapping):
-        return {str(key): _semantic_json_value(item) for key, item in value.items()}
-    if isinstance(value, (tuple, list)):
-        return [_semantic_json_value(item) for item in value]
-    return value
-
-
-def _history_window_sha256(rows: list[Mapping[str, Any]]) -> str:
-    inputs = [
-        {name: _canonical(row.get(name)) for name in _HISTORY_HASH_FIELDS}
-        for row in rows
-    ]
-    payload = json.dumps(
-        inputs,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-    return sha256(payload).hexdigest()
-
-
-def _profile_semantics_sha256(profile_contract: Mapping[str, Any]) -> str:
-    """摘要Core字段与Profile11公式的实际数值语义。"""
+def _validate_profile_semantics(profile_contract: Mapping[str, Any]) -> None:
+    """核验当前Core/Profile字段合同完整，并用显式修订号标识计算语义。"""
     registry = profile_contract.get("field_registry", ())
     rules = profile_contract.get("profile_expression_registry", {})
     if not isinstance(registry, (tuple, list)) or not isinstance(rules, Mapping):
@@ -194,70 +119,36 @@ def _profile_semantics_sha256(profile_contract: Mapping[str, Any]) -> str:
         if isinstance(dependencies, (tuple, list)):
             pending.update(item for item in dependencies if isinstance(item, str))
 
-    fields = {
-        field_id: {
-            key: definitions[field_id][key]
-            for key in _FIELD_SEMANTIC_KEYS
-            if key in definitions[field_id]
-        }
-        for field_id in sorted(consumed_fields)
-        if field_id in definitions
-    }
     missing_fields = sorted(consumed_fields - definitions.keys())
     if missing_fields:
         raise PgPriceProfileError(
             "PROFILE_SEMANTICS_UNBOUND",
             "画像计算使用了未登记字段：" + ", ".join(missing_fields),
         )
-    payload = {
-        "producer_semantics_version": _PRODUCER_SEMANTICS_VERSION,
-        "persisted_core_field_ids": sorted(
-            (*_CORE_FIELDS.keys(), *_CORE_BOOLEAN_FIELDS.keys())
-        ),
-        "profile_rules": rule_semantics,
-        "consumed_field_definitions": fields,
-        "unregistered_consumed_field_ids": missing_fields,
-        "period_aggregation_version": PERIOD_AGGREGATION_VERSION,
-    }
-    encoded = json.dumps(
-        _semantic_json_value(payload),
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    ).encode("utf-8")
-    return sha256(encoded).hexdigest()
+    if set(rule_semantics) != set(
+        profile_contract.get("profile_expression_registry", {})
+    ):
+        raise PgPriceProfileError("PROFILE_SEMANTICS_UNBOUND", "Profile规则登记不完整")
 
 
 def _profile_revision(
     *,
     scope: str,
-    semantics_sha256: str,
     calendar_id: str,
     calendar_revision: str,
     history_session_count: int,
 ) -> str:
-    identity = {
-        "scope": scope,
-        "producer_contract": _PRODUCER_CONTRACT,
-        "producer_semantics_version": _PRODUCER_SEMANTICS_VERSION,
-        "producer_contract_sha256": semantics_sha256,
-        "price_coordinate": "RAW_UNADJUSTED",
-        "window_contract": "TECH_ACTUAL_R1",
-        "calendar_id": calendar_id,
-        "calendar_revision": calendar_revision,
-        "history_session_count": history_session_count,
-        "core_fields": sorted((*_CORE_FIELDS.keys(), *_CORE_BOOLEAN_FIELDS.keys())),
-    }
-    return sha256(
-        json.dumps(
-            identity,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
+    if (
+        scope != SOURCE_SYMBOL_PROFILE_SCOPE
+        or not isinstance(calendar_id, str)
+        or not calendar_id
+        or not isinstance(calendar_revision, str)
+        or not calendar_revision
+        or type(history_session_count) is not int
+        or not 1 <= history_session_count <= PG_PROFILE_MAX_HISTORY_SESSIONS
+    ):
+        raise PgPriceProfileError("PROFILE_REVISION_INPUT_INVALID", "画像修订入参无效")
+    return _PROFILE_REVISION
 
 
 def _records_for_page(
@@ -265,9 +156,8 @@ def _records_for_page(
     page: Mapping[str, Any],
     preview: Mapping[str, Any],
     target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str,
-    producer_contract_sha256: str,
     source_context: Mapping[str, Any],
 ) -> list[dict[str, Any]]:
     candidates = {item["source_symbol"]: item for item in page.get("candidates", ())}
@@ -301,18 +191,17 @@ def _records_for_page(
         if isinstance(source_available_at, str):
             source_available_at = datetime.fromisoformat(source_available_at)
         record: dict[str, Any] = {
-            "namespace_id": page["namespace_id"],
-            "source_capture_id": str(target_row["source_capture_id"]),
+            "source_raw_id": int(target_row["id"]),
+            "source_capture_id": int(target_row["source_capture_id"]),
             "source_symbol": symbol,
             "market": candidate["market"],
             "board": candidate["board"],
             "target_session": target_session,
-            "package_sha256": package_sha256,
+            "source_package_id": source_package_id,
             "profile_revision": profile_revision,
             "calculation_scope": SOURCE_SYMBOL_PROFILE_SCOPE,
             "producer_contract": _PRODUCER_CONTRACT,
             "producer_version": _PRODUCER_SEMANTICS_VERSION,
-            "producer_contract_sha256": producer_contract_sha256,
             "price_coordinate": "RAW_UNADJUSTED",
             "identity_status": "SOURCE_SYMBOL_ONLY",
             "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
@@ -351,7 +240,6 @@ def _records_for_page(
             "price_window_usable": bool(result["price_window_usable"]),
             "price_window_status": result["price_window_status"],
             "price_window_reason": result["price_window_reason"],
-            "history_window_sha256": _history_window_sha256(rows),
             "amount_unit_status": "UNIT_UNVERIFIED",
             "volume_unit_status": "UNIT_UNVERIFIED",
         }
@@ -464,7 +352,7 @@ def run_source_symbol_price_profile(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     scope: str,
     session_count: int,
     page_size: int,
@@ -501,7 +389,7 @@ def run_source_symbol_price_profile(
         raise PgPriceProfileError(
             "PROFILE_CONTRACT_INVALID", "现役画像字段合同不是Core43/Profile11"
         )
-    semantics_sha256 = _profile_semantics_sha256(profile_contract)
+    _validate_profile_semantics(profile_contract)
     try:
         resolved_target, session_dates, calendar_revision = resolve_pg_history_window(
             target_session.isoformat(), session_count
@@ -513,8 +401,7 @@ def run_source_symbol_price_profile(
         source_context = read_source_version_context(
             config,
             target_session=target_session,
-            package_sha256=package_sha256,
-            namespace_id=None,
+            source_package_id=source_package_id,
         )
         offset = 0
         raw_total: int | None = None
@@ -524,7 +411,7 @@ def run_source_symbol_price_profile(
             page = read_raw_daily_history_page(
                 config,
                 target_session=target_session,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 sessions=session_dates,
                 offset=offset,
                 limit=page_size,
@@ -550,7 +437,7 @@ def run_source_symbol_price_profile(
                 break
             preview = research_universe_pg_history_preview(
                 target_session=target_session.isoformat(),
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 session_dates=session_dates,
                 page=page,
                 profile_contract=profile_contract,
@@ -559,9 +446,8 @@ def run_source_symbol_price_profile(
                 page=page,
                 preview=preview,
                 target_session=target_session,
-                package_sha256=package_sha256,
-                profile_revision="0" * 64,
-                producer_contract_sha256=semantics_sha256,
+                source_package_id=source_package_id,
+                profile_revision=_PROFILE_REVISION,
                 source_context=source_context,
             )
             consumer_failures += sum(
@@ -590,7 +476,6 @@ def run_source_symbol_price_profile(
             )
         profile_revision = _profile_revision(
             scope=scope,
-            semantics_sha256=semantics_sha256,
             calendar_id=calendar_id,
             calendar_revision=calendar_revision,
             history_session_count=len(first_window),
@@ -657,33 +542,34 @@ def read_source_symbol_price_profile_observation(
     profile_contract: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    source_capture_id: str,
+    source_package_id: int,
+    source_capture_id: int,
 ) -> dict[str, Any]:
     """按Raw捕获、来源包和现存画像修订投影已保存Core/Profile画像及质量。"""
-    if not isinstance(source_capture_id, str):
+    if type(source_capture_id) is not int or source_capture_id <= 0:
         return {
             "status": "NOT_COMPUTED",
             "reason_code": "RAW_SOURCE_VERSION_UNAVAILABLE",
             "target_session": target_session.isoformat(),
-            "package_sha256": package_sha256,
+            "source_package_id": source_package_id,
             "profile_revision_selection": {
                 "rule": "REQUIRES_EXACT_RAW_CAPTURE_AND_STORED_PROFILE_REVISION",
                 "selected_profile_revision": None,
                 "candidate_revision_count": 0,
-                "current_semantics_match_count": 0,
+                "current_version_match_count": 0,
             },
             "database_write": False,
             "ddl_executed": False,
         }
     try:
-        semantics_sha256 = _profile_semantics_sha256(profile_contract)
+        _validate_profile_semantics(profile_contract)
         observation = read_source_profile_observability(
             config,
             target_session=target_session,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             source_capture_id=source_capture_id,
-            current_semantics_sha256=semantics_sha256,
+            current_profile_revision=_PROFILE_REVISION,
+            current_producer_version=_PRODUCER_SEMANTICS_VERSION,
         )
     except (RawSourcePgError, PriceProfilePgError) as error:
         raise PgPriceProfileError(
@@ -751,8 +637,8 @@ def read_source_symbol_price_profile_observation(
             )
         ),
     }
-    observation["profile_revision_selection"]["current_semantics_sha256"] = (
-        semantics_sha256
+    observation["profile_revision_selection"]["current_profile_revision"] = (
+        _PROFILE_REVISION
     )
     if isinstance(selected, Mapping):
         observation["profile_revision_selection"]["selected_producer_contract"] = (
@@ -761,8 +647,9 @@ def read_source_symbol_price_profile_observation(
         observation["profile_revision_selection"]["selected_producer_version"] = (
             selected.get("producer_version")
         )
-        observation["profile_revision_selection"]["selected_semantics_match"] = (
-            selected.get("producer_contract_sha256") == semantics_sha256
+        observation["profile_revision_selection"]["selected_version_match"] = (
+            selected.get("profile_revision") == _PROFILE_REVISION
+            and selected.get("producer_version") == _PRODUCER_SEMANTICS_VERSION
         )
         observation["history_window"] = {
             "records_complete_rows": selected["history_records_complete_rows"],
@@ -775,7 +662,7 @@ def read_source_symbol_price_profile_observation(
             "price_window_usable_rows": selected["price_window_usable_rows"],
         }
     else:
-        observation["profile_revision_selection"]["selected_semantics_match"] = False
+        observation["profile_revision_selection"]["selected_version_match"] = False
         observation["history_window"] = {
             "records_complete_rows": 0,
             "eligible_24_session_rows": 0,

@@ -28,7 +28,7 @@ from stock_a.storage.postgres.source_raw import (
 )
 
 
-def _read_t0_d1(config, day, package_sha256, history_count):
+def _read_t0_d1(config, day, source_package_id, history_count):
     target = day["session"]
     _, sessions, _ = resolve_pg_history_window(target.isoformat(), history_count)
     context = prepare_source_d1_preview_context((target,))
@@ -40,16 +40,16 @@ def _read_t0_d1(config, day, package_sha256, history_count):
         page = read_raw_daily_history_page(
             config,
             target_session=target,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             sessions=sessions,
             offset=offset,
             limit=100,
             market="ALL",
             board="ALL",
+            include_parser_contract=True,
         )
         if (
-            page["namespace_id"] != day["namespace_id"]
-            or page["total_count"] != len(expected)
+            page["total_count"] != len(expected)
             or page["version_status"] != "CLOSED"
             or not page["partition_closed"]
         ):
@@ -62,30 +62,19 @@ def _read_t0_d1(config, day, package_sha256, history_count):
                 symbol not in expected
                 or symbol in states
                 or birth is None
-                or birth["source_content_id"] != source["source_content_id"]
+                or birth["source_package_id"] != source["source_package_id"]
                 or birth["source_capture_id"] != source["source_capture_id"]
             ):
                 raise SourceObservationError("D1来源代码或T0捕获不一致")
             mismatches = []
             safe_rows = []
             for row in rows:
-                if row.get("bar_status") == "TARGET_PRESENT" and not birth.get(
-                    "source_entry_sha256"
-                ):
-                    safe_rows.append(
-                        {
-                            **row,
-                            "bar_status": "READ_FAILED",
-                            "bar_reason": "T0_SOURCE_IDENTITY_UNPROVED",
-                        }
-                    )
-                elif (
+                if (
                     row["session_date"] != target
                     and row.get("bar_status") == "TARGET_PRESENT"
-                    and birth.get("source_entry_sha256")
                     and (
-                        row.get("source_entry_sha256") != birth["source_entry_sha256"]
-                        or row.get("source_content_id") != birth["source_content_id"]
+                        row.get("source_package_id") != birth["source_package_id"]
+                        or row.get("parser_contract") != birth.get("parser_contract")
                     )
                 ):
                     mismatches.append(row["session_date"].isoformat())
@@ -103,9 +92,8 @@ def _read_t0_d1(config, day, package_sha256, history_count):
                 event_sessions=(target,),
                 followup_session=target,
                 session_dates=sessions,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 history_rows=safe_rows,
-                namespace_id=day["namespace_id"],
                 context=context,
             )[target]["raw_d1_breakout_predicate"]
             predicate = preview["predicates"]["result"]
@@ -124,7 +112,9 @@ def _read_t0_d1(config, day, package_sha256, history_count):
                 "reasons": reasons,
                 "predicate": preview,
                 "source_mismatch_sessions": mismatches,
-                "source_identity_bound": bool(birth.get("source_entry_sha256")),
+                "source_identity_bound": birth.get("source_package_id")
+                == source["source_package_id"]
+                and birth.get("source_capture_id") == source["source_capture_id"],
             }
         offset = page["next_offset"]
         if offset is None:
@@ -268,7 +258,7 @@ def read_source_cohort_forward(
     d1_discovery: Mapping[str, Any],
     *,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     horizons: tuple[int, ...],
     d1_history_count: int,
     symbol: str | None = None,
@@ -292,8 +282,7 @@ def read_source_cohort_forward(
     source = day["scenarios"]["LAUNCH_CONFIRM"]["source_version"]
     if (
         d1_discovery["source_pool_count"] != len(symbols)
-        or d1_discovery["source"]["namespace_id"] != day["namespace_id"]
-        or d1_discovery["source"]["source_content_id"] != source["source_content_id"]
+        or d1_discovery["source"]["source_package_id"] != source["source_package_id"]
         or d1_discovery["source"]["source_capture_id"] != source["source_capture_id"]
     ):
         raise SourceObservationError("D1历史锚与T0来源池不一致")
@@ -302,9 +291,12 @@ def read_source_cohort_forward(
     }
     if set(details) != set(symbols):
         raise SourceObservationError("D1历史锚来源代码集合不一致")
-    d1 = _read_t0_d1(config, day, package_sha256, d1_history_count)
+    d1 = _read_t0_d1(config, day, source_package_id, d1_history_count)
     diagnostic_shapes = read_source_shape_cohort(
-        config, day, research_cutoff=research_cutoff, package_sha256=package_sha256
+        config,
+        day,
+        research_cutoff=research_cutoff,
+        source_package_id=source_package_id,
     )
     indexes = {
         rule: {item["source_symbol"]: item for item in page["results"]}
@@ -376,11 +368,8 @@ def read_source_cohort_forward(
             }
             identity = anchor.get("source", {})
             compatible = (
-                d1[code]["source_identity_bound"]
-                and identity.get("anchor_entry_sha256")
-                and identity.get("anchor_entry_sha256")
-                == identity.get("target_entry_sha256")
-                and identity.get("source_content_id") == source["source_content_id"]
+                identity.get("source_package_id") == source["source_package_id"]
+                and identity.get("parser_contract") == source.get("parser_contract")
                 and not (dependency_days & mismatch_dates)
             )
             if compatible:
@@ -417,18 +406,17 @@ def read_source_cohort_forward(
             scenario="RECOVERY_TURN",
             target_session=target,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             symbol=symbol,
             limit=1,
-            expected_namespace_id=day["namespace_id"],
             _include_shape_observation=True,
         )
         if (
             len(diagnostic["results"]) != 1
             or diagnostic["source_version"]["source_capture_id"]
             != source["source_capture_id"]
-            or diagnostic["source_version"]["source_content_id"]
-            != source["source_content_id"]
+            or diagnostic["source_version"]["source_package_id"]
+            != source["source_package_id"]
         ):
             raise SourceObservationError("T0诊断形态与冻结来源捕获不一致")
         shape = diagnostic["results"][0]["prior_shape_observation"]
@@ -449,7 +437,7 @@ def read_source_cohort_forward(
             target=target,
             followup=available[min(10, len(available) - 1)],
             cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
         )
         shape["rolling_followup_limit"] = "最多10个官方会话；逐日峰值滚动重算"
     forward_pool = read_raw_daily_forward_pool(
@@ -457,8 +445,8 @@ def read_source_cohort_forward(
         source_symbols=symbols,
         sessions=available,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
-        expected_namespace_id=day["namespace_id"],
+        source_package_id=source_package_id,
+        include_parser_contract=True,
     )
     outcomes = {}
     for code in symbols:
@@ -598,7 +586,6 @@ def read_source_cohort_forward(
         consumed = consumer(
             target=target,
             source=source,
-            namespace_id=day["namespace_id"],
             calendar_revision=calendar_revision,
             session_versions=forward_pool["session_versions"],
             frozen=frozen,

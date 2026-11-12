@@ -4,17 +4,14 @@ from __future__ import annotations
 
 from datetime import date
 from fractions import Fraction
-import hashlib
 import re
 import time
 from typing import Any, Mapping
-from uuid import UUID
 
 from stock_a.application.pg_price_profiles import (
     SOURCE_SYMBOL_PROFILE_SCOPE,
     PG_PROFILE_MAX_HISTORY_SESSIONS,
     _profile_revision,
-    _profile_semantics_sha256,
     source_symbol_price_profile_snapshots,
 )
 from stock_a.application.research_window import resolve_pg_history_window
@@ -46,7 +43,6 @@ from stock_a.storage.postgres.source_raw import read_raw_daily_catalog
 
 
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _D1_STATUS_COUNTS = (
     "MATERIAL_CHANGE",
     "COUNT_ONLY",
@@ -119,20 +115,14 @@ def _session(value: Any, label: str, *, optional: bool = False) -> date | None:
         ) from error
 
 
-def _uuid_text(value: Any, label: str, *, optional: bool = False) -> str | None:
+def _numeric_id(value: Any, label: str, *, optional: bool = False) -> int | None:
     if value is None and optional:
         return None
-    try:
-        canonical = str(UUID(str(value)))
-    except (TypeError, ValueError, AttributeError) as error:
+    if type(value) is not int or value <= 0:
         raise SourceResearchDayError(
-            "RESEARCH_DAY_UUID_INVALID", f"{label}不是有效UUID"
-        ) from error
-    if str(value) != canonical:
-        raise SourceResearchDayError(
-            "RESEARCH_DAY_UUID_INVALID", f"{label}必须是规范小写UUID"
+            "RESEARCH_DAY_NUMERIC_ID_INVALID", f"{label}不是正整数ID"
         )
-    return canonical
+    return value
 
 
 def _exact_rational(value: Any, label: str) -> ExactRational | None:
@@ -265,9 +255,8 @@ def _persist_static_research_day(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
-    namespace_id: str,
-    expected_capture_id: str | None,
+    source_package_id: int,
+    expected_capture_id: int | None,
     expected_source_count: int,
     history_session_count: int | None = None,
     worker_count: int = 1,
@@ -279,15 +268,11 @@ def _persist_static_research_day(
     catalog = source_symbol_price_profile_snapshots(
         config, max_target_session=research_cutoff
     )
-    if catalog["namespace_id"] != namespace_id:
-        raise SourceResearchDayError(
-            "STATIC_PROFILE_NAMESPACE_MISMATCH", "画像目录身份不一致"
-        )
     matches = []
     for snapshot in catalog["snapshots"]:
         if (
             snapshot["target_session"] != target_session.isoformat()
-            or snapshot["package_sha256"] != package_sha256
+            or snapshot["source_package_id"] != source_package_id
             or not snapshot["complete"]
             or snapshot["source_symbol_count"] != expected_source_count
             or snapshot["price_coordinate"] != "RAW_UNADJUSTED"
@@ -304,7 +289,6 @@ def _persist_static_research_day(
         )
         expected_revision = _profile_revision(
             scope=SOURCE_SYMBOL_PROFILE_SCOPE,
-            semantics_sha256=_profile_semantics_sha256(profile_contract),
             calendar_id=calendar["calendar_id"],
             calendar_revision=revision,
             history_session_count=count,
@@ -326,8 +310,7 @@ def _persist_static_research_day(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
-        namespace_id=namespace_id,
+        source_package_id=source_package_id,
         profile_revision=profile_revision,
         profile_contract=profile_contract,
         history_session_count=history_count,
@@ -353,10 +336,9 @@ def _persist_static_research_day(
             scenario=scenario,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             offset=0,
             limit=5000,
-            expected_namespace_id=namespace_id,
             **kwargs,
         )
         source = page.get("source_version", {})
@@ -365,33 +347,20 @@ def _persist_static_research_day(
                 expected_capture_id is not None
                 and source.get("source_capture_id") != expected_capture_id
             )
-            or source.get("package_sha256") != package_sha256
-            or seed.get("namespace_id") != namespace_id
-            or seed.get("package_sha256") != package_sha256
+            or source.get("source_package_id") != source_package_id
+            or seed.get("source_package_id") != source_package_id
         ):
             raise SourceResearchDayError(
                 "STATIC_RESEARCH_SOURCE_IDENTITY_MISMATCH",
                 "D0、Core/Profile与当日持久事实未绑定同一来源捕获",
             )
         scenarios[scenario] = page
-    semantics_sha256 = hashlib.sha256(
-        (
-            "SOURCE_POOL_SEED_ALG-19/20_R1:"
-            + _profile_semantics_sha256(profile_contract)
-            + ":CORE_RAW_SOURCE_RPS_R1:"
-            + ":".join(
-                scenarios[name]["producer_version"]
-                for name in ("LAUNCH_CONFIRM", "RECOVERY_TURN")
-            )
-        ).encode("utf-8")
-    ).hexdigest()
     result = persist_static_research_day(
         config,
         scenarios=scenarios,
         seed=seed,
         history_window=history_window,
         profile_revision=profile_revision,
-        producer_semantics_sha256=semantics_sha256,
     )
     result["profile_revision"] = profile_revision
     return result
@@ -402,7 +371,7 @@ def run_source_static_research_day(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     persist: bool = False,
     history_session_count: int | None = None,
     worker_count: int = 1,
@@ -436,13 +405,16 @@ def run_source_static_research_day(
         )
     validate_seed_worker_count(worker_count)
     _validate_static_history_count(history_session_count)
-    if target_session > research_cutoff or _SHA256.fullmatch(package_sha256) is None:
+    if (
+        target_session > research_cutoff
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+    ):
         raise SourceResearchDayError(
-            "STATIC_RESEARCH_SCOPE_INVALID", "静态事实初始化范围或来源SHA无效"
+            "STATIC_RESEARCH_SCOPE_INVALID", "静态事实初始化范围或数据包编号无效"
         )
     versions = []
     offset = 0
-    namespace_id = None
     while True:
         catalog = read_raw_daily_catalog(
             config,
@@ -450,7 +422,6 @@ def run_source_static_research_day(
             offset=offset,
             limit=200,
         )
-        namespace_id = catalog["namespace_id"]
         versions.extend(catalog["versions"])
         if catalog["next_offset"] is None:
             break
@@ -459,9 +430,8 @@ def run_source_static_research_day(
         item for item in versions if item["session_date"] == target_session.isoformat()
     ]
     if (
-        namespace_id is None
-        or len(target_versions) != 1
-        or target_versions[0]["package_sha256"] != package_sha256
+        len(target_versions) != 1
+        or target_versions[0]["source_package_id"] != source_package_id
         or target_versions[0]["version_status"] != "CLOSED"
         or target_versions[0]["row_count"] != target_versions[0]["expected_row_count"]
     ):
@@ -475,8 +445,7 @@ def run_source_static_research_day(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
-        namespace_id=namespace_id,
+        source_package_id=source_package_id,
         expected_capture_id=None,
         expected_source_count=version["row_count"],
         history_session_count=history_session_count,
@@ -492,7 +461,7 @@ def run_source_static_research_day(
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             profile_revision=persistence["profile_revision"],
             industry_snapshot_id=sector_snapshot_ids["INDUSTRY"],
             concept_snapshot_id=sector_snapshot_ids["CONCEPT"],
@@ -502,8 +471,7 @@ def run_source_static_research_day(
         "status": "PERSISTED",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "package_sha256": package_sha256,
-        "namespace_id": namespace_id,
+        "source_package_id": source_package_id,
         "source_capture_count": version["source_capture_count"],
         "source_count": version["row_count"],
         "persistence": persistence,
@@ -647,7 +615,6 @@ def _prepare_d1_facts(
             generated_anchor = None
             if anchor is not None:
                 generated_anchor = {
-                    "id": _required_text(anchor.get("anchor_id"), "D1锚标识"),
                     "created": _session(anchor.get("created_session"), "D1锚出生会话"),
                     "available": _session(
                         anchor.get("available_from_session"), "D1锚可用会话"
@@ -661,7 +628,6 @@ def _prepare_d1_facts(
                     "relation": _required_text(anchor.get("relation"), "D1锚关系"),
                     "lower": _exact_rational(anchor.get("lower"), "D1锚下界"),
                     "upper": _exact_rational(anchor.get("upper"), "D1锚上界"),
-                    "source_event_id": _optional_text(anchor.get("source_event_id")),
                     "source_ref": _optional_text(anchor.get("source_ref")),
                 }
             facts.append(
@@ -690,7 +656,6 @@ def _prepare_d1_facts(
                     not_evaluable_anchor_count=counts["NOT_EVALUABLE"],
                     not_applicable_anchor_count=counts["NOT_APPLICABLE"],
                     persisted_detail_count=len(kind_detail_rows),
-                    anchor_id=generated_anchor["id"] if generated_anchor else None,
                     anchor_created_session=generated_anchor["created"]
                     if generated_anchor
                     else None,
@@ -706,9 +671,6 @@ def _prepare_d1_facts(
                     relation=generated_anchor["relation"] if generated_anchor else None,
                     lower=generated_anchor["lower"] if generated_anchor else None,
                     upper=generated_anchor["upper"] if generated_anchor else None,
-                    source_event_id=generated_anchor["source_event_id"]
-                    if generated_anchor
-                    else None,
                     source_ref=generated_anchor["source_ref"]
                     if generated_anchor
                     else None,
@@ -731,7 +693,6 @@ def _prepare_d1_anchor(symbol: str, row: Mapping[str, Any]) -> D1MaterialAnchorF
     previous = (
         source.get("previous") if isinstance(source.get("previous"), Mapping) else {}
     )
-    target = source.get("target") if isinstance(source.get("target"), Mapping) else {}
     pairing = row.get("anchor_pairing_identity")
     pairing = pairing if isinstance(pairing, Mapping) else {}
     comparison = row.get("comparison_context")
@@ -750,7 +711,6 @@ def _prepare_d1_anchor(symbol: str, row: Mapping[str, Any]) -> D1MaterialAnchorF
     )
     gap_before = gap.get("before") if isinstance(gap.get("before"), Mapping) else {}
     gap_after = gap.get("after") if isinstance(gap.get("after"), Mapping) else {}
-    anchor_id = _required_text(row.get("anchor_id"), "D1材料锚标识")
     created = _session(row.get("created_session"), "D1材料锚出生会话")
     previous_session = _session(
         row.get("comparison_context", {}).get("previous_official_session"),
@@ -760,24 +720,12 @@ def _prepare_d1_anchor(symbol: str, row: Mapping[str, Any]) -> D1MaterialAnchorF
         raise SourceResearchDayError("D1_ANCHOR_BIRTH_INVALID", "D1锚出生会话缺失")
     lower = _exact_rational(pairing.get("lower"), "D1历史锚下界")
     upper = _exact_rational(pairing.get("upper"), "D1历史锚上界")
-    birth_capture = _uuid_text(
+    birth_capture = _numeric_id(
         birth.get("source_capture_id"), "D1锚出生捕获", optional=True
     )
-    previous_capture = _uuid_text(
+    previous_capture = _numeric_id(
         previous.get("source_capture_id"), "D1前态捕获", optional=True
     )
-    birth_entry = _optional_text(birth.get("source_entry_sha256"))
-    previous_entry = _optional_text(previous.get("source_entry_sha256"))
-    target_entry = _optional_text(target.get("source_entry_sha256"))
-    for value, label in (
-        (birth_entry, "D1出生来源条目摘要"),
-        (previous_entry, "D1前态来源条目摘要"),
-        (target_entry, "D1目标来源条目摘要"),
-    ):
-        if value is not None and _SHA256.fullmatch(value) is None:
-            raise SourceResearchDayError(
-                "D1_SOURCE_ENTRY_DIGEST_INVALID", f"{label}无效"
-            )
     state_before = before.get("state")
     state_after = after.get("state")
     gap_before_value = gap_before.get("state")
@@ -785,7 +733,6 @@ def _prepare_d1_anchor(symbol: str, row: Mapping[str, Any]) -> D1MaterialAnchorF
     return D1MaterialAnchorFact(
         source_symbol=symbol,
         structure_type=_required_text(row.get("type"), "D1材料锚类型"),
-        anchor_id=anchor_id,
         relation=_required_text(row.get("relation"), "D1材料锚关系"),
         created_session=created,
         previous_session=previous_session,
@@ -796,10 +743,7 @@ def _prepare_d1_anchor(symbol: str, row: Mapping[str, Any]) -> D1MaterialAnchorF
         if birth.get("session") == created.isoformat()
         else "UNKNOWN",
         birth_capture_id=birth_capture,
-        birth_entry_sha256=birth_entry,
         previous_capture_id=previous_capture,
-        previous_entry_sha256=previous_entry,
-        target_entry_sha256=target_entry,
         official_sessions_adjacent=(
             comparison.get("official_sessions_adjacent") is True
         ),
@@ -853,7 +797,7 @@ def prepare_source_research_day(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     d1_history_session_count: int,
 ) -> tuple[ResearchDayFacts, dict[str, Any]]:
     """同一生产者准备一个交易日；只读Raw，默认永不写PG。"""
@@ -862,11 +806,11 @@ def prepare_source_research_day(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or not isinstance(package_sha256, str)
-        or _SHA256.fullmatch(package_sha256) is None
+        or type(source_package_id) is not int
+        or source_package_id <= 0
     ):
         raise SourceResearchDayError(
-            "RESEARCH_DAY_SCOPE_INVALID", "单日研究范围或来源SHA无效"
+            "RESEARCH_DAY_SCOPE_INVALID", "单日研究范围或数据包编号无效"
         )
     official = _official_calendar(target_session)
     try:
@@ -889,8 +833,8 @@ def prepare_source_research_day(
         before_session=before_session,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
-        before_package_sha256=package_sha256,
+        source_package_id=source_package_id,
+        before_source_package_id=source_package_id,
         transition="ALL",
         offset=0,
         limit=5000,
@@ -910,7 +854,7 @@ def prepare_source_research_day(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         d1_history_session_count=d1_history_session_count,
         industry_snapshot_id=None,
         concept_snapshot_id=None,
@@ -929,12 +873,11 @@ def prepare_source_research_day(
         d0.get("pair_status") != "COMPARABLE"
         or after.get("target_session") != target_session.isoformat()
         or before.get("target_session") != before_session.isoformat()
-        or after_source.get("package_sha256") != package_sha256
-        or before_source.get("package_sha256") != package_sha256
+        or after_source.get("source_package_id") != source_package_id
+        or before_source.get("source_package_id") != source_package_id
         or d1.get("target_session") != target_session.isoformat()
-        or d1_source.get("package_sha256") != package_sha256
+        or d1_source.get("source_package_id") != source_package_id
         or d1_source.get("source_capture_id") != after_source.get("source_capture_id")
-        or d1_source.get("source_content_id") != after_source.get("source_content_id")
         or d1.get("source_pool_count")
         != after.get("source_pool", {}).get("source_count")
         or d1.get("source_pool_count")
@@ -956,19 +899,13 @@ def prepare_source_research_day(
     calendar = d1.get("calendar", {})
     source = d1_source
     facts = ResearchDayFacts(
-        namespace_id=_required_text(
-            d0.get("after", {}).get("namespace_id"), "D0命名空间"
-        ),
         before_session=before_session,
         target_session=target_session,
-        package_sha256=package_sha256,
-        source_content_id=_required_text(
-            source.get("source_content_id"), "目标来源内容摘要"
-        ),
-        before_capture_id=_uuid_text(
+        source_package_id=source_package_id,
+        before_capture_id=_numeric_id(
             before_source.get("source_capture_id"), "前态来源捕获"
         ),
-        target_capture_id=_uuid_text(
+        target_capture_id=_numeric_id(
             after_source.get("source_capture_id"), "目标来源捕获"
         ),
         source_time_quality=_required_text(
@@ -982,7 +919,6 @@ def prepare_source_research_day(
         calendar_revision=_required_text(
             calendar.get("calendar_revision"), "官方日历修订"
         ),
-        calendar_sha256=_required_text(calendar.get("calendar_sha256"), "官方日历摘要"),
         d0_before_window_start=_session(
             before.get("strict_official_sessions", [None])[0], "D0前态窗口起点"
         ),
@@ -1041,7 +977,6 @@ def _validate_day_facts(facts: ResearchDayFacts) -> None:
                 (
                     item.source_symbol,
                     item.structure_type,
-                    item.anchor_id,
                     item.created_session,
                 )
                 for item in facts.d1_anchor_facts
@@ -1084,15 +1019,12 @@ def _summarize_day(
         "target_session": facts.target_session.isoformat(),
         "before_session": facts.before_session.isoformat(),
         "research_cutoff": d1.get("research_cutoff"),
-        "package_sha256": facts.package_sha256,
-        "source_content_id": facts.source_content_id,
+        "source_package_id": facts.source_package_id,
         "before_capture_id": facts.before_capture_id,
         "target_capture_id": facts.target_capture_id,
-        "namespace_id": facts.namespace_id,
         "calendar": {
             "calendar_id": facts.calendar_id,
             "calendar_revision": facts.calendar_revision,
-            "calendar_sha256": facts.calendar_sha256,
         },
         "source_quality": {
             "source_time_quality": facts.source_time_quality,
@@ -1136,9 +1068,9 @@ def _summarize_day(
         },
         "estimated_transaction_scope": {
             "tables": [
-                "stock.source_d0_launch_day_facts",
-                "stock.source_d1_structure_day_facts",
-                "stock.source_d1_material_anchor_day_facts",
+                "source_d0_launch_day_facts",
+                "source_d1_structure_day_facts",
+                "source_d1_material_anchor_day_facts",
             ],
             "insert_rows_if_empty": len(facts.d0_facts)
             + len(facts.d1_structure_facts)
@@ -1147,17 +1079,15 @@ def _summarize_day(
             "d1_stock_type_rows": len(facts.d1_structure_facts),
             "d1_anchor_detail_rows": len(facts.d1_anchor_facts),
             "atomic_scope": {
-                "namespace_id": facts.namespace_id,
                 "target_session": facts.target_session.isoformat(),
                 "before_session": facts.before_session.isoformat(),
-                "package_sha256": facts.package_sha256,
+                "source_package_id": facts.source_package_id,
                 "before_capture_id": facts.before_capture_id,
                 "target_capture_id": facts.target_capture_id,
                 "d0_algorithm_contract": facts.d0_algorithm_contract,
                 "d0_session_contract": facts.d0_session_contract,
                 "d1_history_session_count": facts.d1_history_session_count,
                 "calendar_revision": facts.calendar_revision,
-                "calendar_sha256": facts.calendar_sha256,
                 "d1_producer_contract": facts.d1_producer_contract,
                 "d1_producer_version": facts.d1_producer_version,
                 "d1_material_change_contract": facts.d1_material_change_contract,
@@ -1184,7 +1114,7 @@ def run_source_research_day(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     d1_history_session_count: int,
     persist: bool = False,
     history_session_count: int | None = None,
@@ -1197,7 +1127,7 @@ def run_source_research_day(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         d1_history_session_count=d1_history_session_count,
     )
     if persist:
@@ -1207,8 +1137,7 @@ def run_source_research_day(
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
-            namespace_id=facts.namespace_id,
+            source_package_id=source_package_id,
             expected_capture_id=facts.target_capture_id,
             expected_source_count=facts.d1_source_count,
             history_session_count=history_session_count,

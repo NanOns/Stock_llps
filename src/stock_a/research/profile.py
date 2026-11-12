@@ -4,7 +4,6 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import date
 from fractions import Fraction
-from hashlib import sha256
 
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 
@@ -28,7 +27,7 @@ class WindowIdentity:
     contract: str
     first_endpoint: date | None
     last_endpoint: date | None
-    selected_rows_digest: str
+    selected_sessions: tuple[date, ...]
     calendar_revision: str
     status_revision: str
 
@@ -41,7 +40,6 @@ class ProfileInput:
     field: FieldValue
     unit: str
     producer_symbol: str
-    producer_source_sha256: str
     expression_ref: str
     algorithm_version: str | None
     parameter_version: str
@@ -53,10 +51,9 @@ class ProfileInput:
 
 @dataclass(frozen=True)
 class RuntimeProducerBinding:
-    """调用边界提供的当前producer身份；不来自合同中的历史源码摘要。"""
+    """调用边界提供的当前producer及其显式算法版本。"""
 
     symbol: str
-    source_sha256: str
     algorithm_version: str | None
 
 
@@ -162,11 +159,6 @@ def validate_profile_handoff(
             not isinstance(producer_symbol, str)
             or not isinstance(runtime_producer, RuntimeProducerBinding)
             or runtime_producer.symbol != producer_symbol
-            or not isinstance(runtime_producer.source_sha256, str)
-            or len(runtime_producer.source_sha256) != 64
-            or any(
-                ch not in "0123456789abcdef" for ch in runtime_producer.source_sha256
-            )
             or runtime_producer.algorithm_version != expected.get("algorithm_version")
             or not expected.get("expression_ref")
             or not expected.get("parameter_version")
@@ -179,7 +171,6 @@ def validate_profile_handoff(
         exact = {
             "unit": expected.get("unit"),
             "producer_symbol": producer_symbol,
-            "producer_source_sha256": runtime_producer.source_sha256,
             "expression_ref": expected.get("expression_ref"),
             "algorithm_version": expected.get("algorithm_version"),
             "parameter_version": expected.get("parameter_version"),
@@ -206,22 +197,25 @@ def validate_profile_handoff(
             empty_valid = (
                 empty_window
                 and supplied.field.quality != "OBSERVED"
-                and window.selected_rows_digest == sha256(b"[]").hexdigest()
+                and window.selected_sessions == ()
             )
             endpoints_valid = (
                 type(window.first_endpoint) is date
                 and type(window.last_endpoint) is date
                 and window.first_endpoint <= window.last_endpoint
                 and window.last_endpoint <= handoff.target_session
+                and isinstance(window.selected_sessions, tuple)
+                and all(type(session) is date for session in window.selected_sessions)
+                and window.selected_sessions
+                == tuple(sorted(set(window.selected_sessions)))
+                and window.selected_sessions[0] == window.first_endpoint
+                and window.selected_sessions[-1] == window.last_endpoint
             )
             if (
                 window.contract != window_contract
                 or not (empty_valid or endpoints_valid)
-                or len(window.selected_rows_digest) != 64
-                or any(
-                    ch not in "0123456789abcdef" for ch in window.selected_rows_digest
-                )
                 or not window.calendar_revision
+                or not isinstance(window.status_revision, str)
                 or not window.status_revision
                 or window != expected_window
             ):
@@ -747,7 +741,6 @@ def evaluate_closed_period_trend(
     target_session: date,
     coordinate_id: str,
     coordinate_contract_version: str,
-    producer_source_sha256: str,
     rules: Mapping,
     field_registry: list[Mapping],
 ) -> FieldValue:
@@ -763,10 +756,8 @@ def evaluate_closed_period_trend(
         type(target_session) is not date
         or not coordinate_id
         or not coordinate_contract_version
-        or len(producer_source_sha256) != 64
-        or any(char not in "0123456789abcdef" for char in producer_source_sha256)
     ):
-        raise ContractError("闭合周期Profile消费缺少精确目标、坐标或生产者身份")
+        raise ContractError("闭合周期Profile消费缺少精确目标或坐标身份")
     input_fields = rule.get("input_fields")
     if not isinstance(input_fields, list) or len(input_fields) != 1:
         raise ContractError("闭合周期趋势规则必须绑定唯一period输入")
@@ -858,19 +849,11 @@ def evaluate_closed_period_trend(
     action_revisions = {getattr(row, "action_revision", "") for row in selected}
     if len(calendar_refs) != 1 or len(action_revisions) != 1:
         raise ContractError("闭合周期Profile窗口混用日历或公司行为版本")
-    row_digests = "\n".join(
-        str(getattr(row, "period_fact_digest", ""))
-        + ":"
-        + str(getattr(row, "selection_context_digest", ""))
-        for row in selected
-    )
-    if any(len(part) != 64 for part in row_digests.replace(":", "\n").splitlines()):
-        raise ContractError("闭合周期输入缺少稳定内容摘要")
     window = WindowIdentity(
         contract=str(definition.get("window_contract", "")),
         first_endpoint=selected[0].planned_last_session,
         last_endpoint=selected[-1].planned_last_session,
-        selected_rows_digest=sha256(row_digests.encode("utf-8")).hexdigest(),
+        selected_sessions=tuple(row.planned_last_session for row in selected),
         calendar_revision=selected[-1].calendar_revision,
         status_revision=selected[-1].status_revision,
     )
@@ -886,7 +869,6 @@ def evaluate_closed_period_trend(
         field=period_value,
         unit=definition["unit"],
         producer_symbol=producer_symbol,
-        producer_source_sha256=producer_source_sha256,
         expression_ref=definition["expression_ref"],
         algorithm_version=definition.get("algorithm_version"),
         parameter_version=definition["parameter_version"],
@@ -905,7 +887,6 @@ def evaluate_closed_period_trend(
         runtime_producers={
             producer_symbol: RuntimeProducerBinding(
                 symbol=producer_symbol,
-                source_sha256=producer_source_sha256,
                 algorithm_version=definition.get("algorithm_version"),
             )
         },

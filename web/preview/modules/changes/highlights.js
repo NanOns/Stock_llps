@@ -104,7 +104,7 @@ const highlightCategoryLabels = {
   PRICE_WINDOW_STATUS: "价格窗口状态或原因变化",
   PROFILE_STATE: "Profile状态或质量变化",
   CORE_QUALITY: "Core质量或原因变化",
-  SOURCE_SET_MEMBERSHIP: "来源集合成员变化",
+  SOURCE_DATE_MEMBERSHIP: "日期来源范围成员变化",
   RECORDED_CHANGE: "其它已记录变化",
 };
 function sessionRelationLabel(relation) {
@@ -156,11 +156,9 @@ function highlightQualityText(item) {
 function appendHighlightSourceIdentity(parent, item, data) {
   const source = document.createElement("div");
   source.className = "highlight-identity";
-  const short = (value, length = 8) =>
-    value ? `${value.slice(0, length)}…` : "UNKNOWN";
   const identitySide = item.after_present ? "after" : "before";
   const identity = document.createElement("span");
-  identity.textContent = `${text(item[`${identitySide}_identity_status`])} · SHA ${short(item[`${identitySide}_package_sha256`], 12)} · rev ${short(item.before_profile_revision, 12)}→${short(item.after_profile_revision, 12)}`;
+  identity.textContent = `${text(item[`${identitySide}_identity_status`])} · 来源包ID ${text(item[`${identitySide}_source_package_id`])} · rev ${text(item.before_profile_revision)}→${text(item.after_profile_revision)}`;
   source.append(identity);
   const qualityIdentity = document.createElement("span");
   qualityIdentity.textContent = `security_id ${text(item[`${identitySide}_stable_security_id_status`])} · 上市 ${text(item[`${identitySide}_listing_status`])} · 停牌 ${text(item[`${identitySide}_suspension_status`])} · ${text(item[`${identitySide}_pit_status`])} · ${text(data.formal_listing_universe || "UNKNOWN_NOT_CONNECTED")}`;
@@ -170,7 +168,7 @@ function appendHighlightSourceIdentity(parent, item, data) {
   summary.textContent = "展开完整来源版本身份";
   details.append(summary);
   const full = document.createElement("div");
-  full.textContent = `namespace ${data.namespace_id}；前目标日 ${data.before_snapshot.target_session}；后目标日 ${data.after_snapshot.target_session}；前包SHA ${item.before_package_sha256}；后包SHA ${item.after_package_sha256}；前 profile_revision ${item.before_profile_revision}；后 profile_revision ${item.after_profile_revision}；前后坐标 ${text(item.before_price_coordinate)} → ${text(item.after_price_coordinate)}`;
+  full.textContent = `前目标日 ${data.before_snapshot.target_session}；后目标日 ${data.after_snapshot.target_session}；前来源包ID ${item.before_source_package_id}；后来源包ID ${item.after_source_package_id}；前 profile_revision ${item.before_profile_revision}；后 profile_revision ${item.after_profile_revision}；前后坐标 ${text(item.before_price_coordinate)} → ${text(item.after_price_coordinate)}`;
   details.append(full);
   source.append(details);
   parent.append(source);

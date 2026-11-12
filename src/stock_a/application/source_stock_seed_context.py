@@ -17,7 +17,7 @@ from stock_a.storage.postgres.static_research_facts import (
 )
 
 
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_PROFILE_REVISION = re.compile(r"^PROFILE_R[0-9]{2}$")
 
 _SEED_QUALITY_FIELDS = (
     ("core.bias20_atr", "core_bias20_atr"),
@@ -77,10 +77,8 @@ def query_source_stock_seed_context(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    namespace_id: str,
-    source_capture_id: str,
-    source_content_id: str,
+    source_package_id: int,
+    source_capture_id: int,
     source_symbol: str,
     profile_revision: str | None,
     expected_source_count: int,
@@ -90,12 +88,10 @@ def query_source_stock_seed_context(
 ) -> dict[str, Any]:
     """不重算Seed，按完整PG来源身份投影一个来源股票的已存事实。"""
     identity = {
-        "namespace_id": namespace_id,
         "target_session": target_session.isoformat(),
         "source_symbol": source_symbol,
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "source_capture_id": source_capture_id,
-        "source_content_id": source_content_id,
         "profile_revision": profile_revision,
     }
     if profile_revision is None:
@@ -107,12 +103,12 @@ def query_source_stock_seed_context(
         )
     if (
         not isinstance(profile_revision, str)
-        or _SHA256.fullmatch(profile_revision) is None
+        or _PROFILE_REVISION.fullmatch(profile_revision) is None
     ):
         return _unavailable(
             status="NOT_COMPARABLE",
             reason_code="PROFILE_REVISION_INVALID",
-            message="画像修订不是精确的小写SHA-256。",
+            message="画像修订不是已登记的显式PROFILE修订标签。",
             identity=identity,
         )
 
@@ -120,10 +116,8 @@ def query_source_stock_seed_context(
         stored = read_source_stock_seed_fact(
             config,
             target_session=target_session,
-            package_sha256=package_sha256,
-            namespace_id=namespace_id,
+            source_package_id=source_package_id,
             source_capture_id=source_capture_id,
-            source_content_id=source_content_id,
             profile_revision=profile_revision,
             source_symbol=source_symbol,
             expected_source_count=expected_source_count,
@@ -154,12 +148,10 @@ def query_source_stock_seed_context(
 
     row = stored["row"]
     if (
-        str(row["namespace_id"]) != namespace_id
-        or row["target_session"] != target_session
+        row["target_session"] != target_session
         or row["source_symbol"] != source_symbol
-        or str(row["package_sha256"]).strip() != package_sha256
-        or str(row["source_capture_id"]) != source_capture_id
-        or row["source_content_id"].strip() != source_content_id
+        or row["source_package_id"] != source_package_id
+        or row["source_capture_id"] != source_capture_id
         or str(row["profile_revision"]).strip() != profile_revision
         or row["source_time_quality"] != source_time_quality
         or row["source_clock_role"] != source_clock_role

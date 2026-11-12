@@ -7,8 +7,6 @@ from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, localcontext
 from fractions import Fraction
-from hashlib import sha256
-import json
 from typing import Any, Mapping, Sequence
 
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
@@ -46,10 +44,8 @@ class RawDailyBar:
     low: Fraction | None
     close: Fraction | None
     valid_price_bar: bool
-    package_sha256: str | None
-    source_capture_id: str | None
-    source_content_id: str | None
-    source_entry_sha256: str | None
+    source_capture_id: int | None
+    source_package_id: int | None
 
 
 @dataclass(frozen=True)
@@ -81,8 +77,6 @@ class RawPeriodBar:
     high_session: date | None
     low_session: date | None
     close_session: date | None
-    high_bar_entry_sha256: str | None
-    low_bar_entry_sha256: str | None
     daily_rows: tuple[RawDailyBar, ...]
 
 
@@ -155,8 +149,6 @@ def _daily_bar(session: date, row: Mapping[str, Any] | None) -> RawDailyBar:
             False,
             None,
             None,
-            None,
-            None,
         )
     if _session(row.get("session_date")) != session:
         raise ContractError("Raw周期输入行日期错配")
@@ -179,18 +171,16 @@ def _daily_bar(session: date, row: Mapping[str, Any] | None) -> RawDailyBar:
         low=values[2],
         close=values[3],
         valid_price_bar=valid,
-        package_sha256=row.get("package_sha256"),
         source_capture_id=(
-            str(row["source_capture_id"])
+            int(row["source_capture_id"])
             if row.get("source_capture_id") is not None
             else None
         ),
-        source_content_id=(
-            str(row["source_content_id"])
-            if row.get("source_content_id") is not None
+        source_package_id=(
+            int(row["source_package_id"])
+            if row.get("source_package_id") is not None
             else None
         ),
-        source_entry_sha256=row.get("source_entry_sha256"),
     )
 
 
@@ -288,8 +278,6 @@ def _aggregate_period(
         high_session=high_row.session if expose_prices and high_row else None,
         low_session=low_row.session if expose_prices and low_row else None,
         close_session=last.session if expose_prices and last else None,
-        high_bar_entry_sha256=high_row.source_entry_sha256 if high_row else None,
-        low_bar_entry_sha256=low_row.source_entry_sha256 if low_row else None,
         daily_rows=daily_rows if calendar_closed else (),
     )
 
@@ -414,7 +402,7 @@ def evaluate_raw_period_trend(
     target_session: date,
     calendar_id: str,
     calendar_revision: str,
-    producer_source_sha256: str,
+    source_cutoff: str,
     profile_rules: Mapping[str, Mapping[str, Any]],
     field_registry: Sequence[Mapping[str, Any]],
 ) -> RawPeriodTrend:
@@ -425,9 +413,11 @@ def evaluate_raw_period_trend(
         not isinstance(profile_rules, Mapping)
         or not isinstance(field_registry, (tuple, list))
         or type(target_session) is not date
-        or len(producer_source_sha256) != 64
+        or not isinstance(source_cutoff, str)
+        or not source_cutoff.strip()
+        or source_cutoff.casefold() == "latest"
     ):
-        raise ContractError("Raw周期趋势缺少显式目标、合同或生产者摘要")
+        raise ContractError("Raw周期趋势缺少显式目标、来源截止或合同")
     rule_id, formal_output_id = _TREND_RULES[kind]
     source_rule = profile_rules.get(rule_id)
     if (
@@ -518,62 +508,20 @@ def evaluate_raw_period_trend(
         }
         for name, operand in source_rule["operands"].items()
     }
-    close_rows = [
-        {
-            "period_key": period.key,
-            "close": _fraction_payload(period.close),
-            "calendar_ordinal": period.calendar_ordinal,
-            "close_session": period.close_session.isoformat()
-            if period.close_session
-            else None,
-            "daily_rows": [
-                {
-                    "session": row.session.isoformat(),
-                    "source_entry_sha256": row.source_entry_sha256,
-                    "source_capture_id": row.source_capture_id,
-                    "package_sha256": row.package_sha256,
-                }
-                for row in period.daily_rows
-            ],
-        }
-        for period in selected
-    ]
-    selected_digest = sha256(
-        json.dumps(
-            close_rows,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-    ).hexdigest()
-    status_revision = sha256(
-        json.dumps(
-            [
-                [
-                    row.session.isoformat(),
-                    row.bar_status,
-                    row.price_quality,
-                    row.price_reason,
-                ]
-                for period in selected
-                for row in period.daily_rows
-            ],
-            separators=(",", ":"),
-            ensure_ascii=False,
-        ).encode("utf-8")
-    ).hexdigest()
     window = WindowIdentity(
         contract=diagnostic_definition.get("window_contract", "CLOSED_PERIOD_R1"),
         first_endpoint=selected[0].calendar_start_session,
         last_endpoint=selected[-1].calendar_end_session,
-        selected_rows_digest=selected_digest,
+        selected_sessions=tuple(
+            row.session for period in selected for row in period.daily_rows
+        ),
         calendar_revision=calendar_revision,
-        status_revision=status_revision,
+        status_revision="RAW_PERIOD_STATUS_R1",
     )
     coordinate_id = "TDX_RAW_UNADJUSTED_SOURCE_SYMBOL_NON_PIT"
     context = {
         "context.target_session": target_session,
-        "context.source_cutoff": target_session.isoformat(),
+        "context.source_cutoff": source_cutoff,
         "context.calendar_ref": f"{calendar_id}:{calendar_revision}",
         "context.action_revision": "UNKNOWN_ACTION_SELECTION_NOT_BOUND",
         "context.coordinate_contract_version": "RAW_UNADJUSTED_NON_PIT_DIAGNOSTIC_R1",
@@ -591,7 +539,6 @@ def evaluate_raw_period_trend(
         field=FieldValue(field_value),
         unit=diagnostic_definition["unit"],
         producer_symbol=diagnostic_producer,
-        producer_source_sha256=producer_source_sha256,
         expression_ref=diagnostic_definition["expression_ref"],
         algorithm_version=diagnostic_definition.get("algorithm_version"),
         parameter_version=diagnostic_definition["parameter_version"],
@@ -610,7 +557,6 @@ def evaluate_raw_period_trend(
         runtime_producers={
             diagnostic_producer: RuntimeProducerBinding(
                 symbol=diagnostic_producer,
-                source_sha256=producer_source_sha256,
                 algorithm_version=diagnostic_definition.get("algorithm_version"),
             )
         },
@@ -692,14 +638,9 @@ def raw_period_payload(
             "close_session": period.close_session.isoformat()
             if period.close_session
             else None,
-            "high_source_entry_sha256": period.high_bar_entry_sha256,
-            "low_source_entry_sha256": period.low_bar_entry_sha256,
             "high_source_capture_id": high_row.source_capture_id if high_row else None,
             "low_source_capture_id": low_row.source_capture_id if low_row else None,
         },
-        "source_package_sha256s": sorted(
-            {row.package_sha256 for row in period.daily_rows if row.package_sha256}
-        ),
         "daily_rows": [
             {
                 "session": row.session.isoformat(),
@@ -712,10 +653,8 @@ def raw_period_payload(
                 "high": _fraction_payload(row.high) if include_daily_prices else None,
                 "low": _fraction_payload(row.low) if include_daily_prices else None,
                 "close": _fraction_payload(row.close) if include_daily_prices else None,
-                "package_sha256": row.package_sha256,
                 "source_capture_id": row.source_capture_id,
-                "source_content_id": row.source_content_id,
-                "source_entry_sha256": row.source_entry_sha256,
+                "source_package_id": row.source_package_id,
             }
             for row in period.daily_rows
         ],

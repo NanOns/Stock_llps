@@ -162,8 +162,7 @@ def research_universe_preview(
         }
         if (
             report.target_session != target
-            or report.package_sha256 != catalog.get("source_package_sha256")
-            or report.package_id != catalog.get("source_package_id")
+            or report.package_verified_at != catalog.get("package_verified_at")
             or report.candidate_total != len(candidates)
             or len(report_rows) != len(candidates)
             or set(report_symbols) != source_symbols
@@ -245,7 +244,9 @@ def research_universe_preview(
                 or capture.target_session != target
                 or capture.source_symbol != symbol
                 or source_ref is None
-                or source_ref.package_sha256 != catalog.get("source_package_sha256")
+                or source_ref.package_verified_at != catalog.get("package_verified_at")
+                or source_ref.package_file_size != catalog.get("package_file_size")
+                or source_ref.zip_entry_count != catalog.get("zip_entry_count")
                 or source_ref.zip_entry_path != candidate.get("zip_entry_path")
             ):
                 raise ResearchEntryError(
@@ -700,8 +701,7 @@ def research_universe_preview(
         result["source_target_quality"] = {
             "contract": "TDX_VIPDATA_TARGET_SESSION_SOURCE_QUALITY_NON_PIT_R1",
             "target_session": report.target_session.isoformat(),
-            "package_id": report.package_id,
-            "package_sha256": report.package_sha256,
+            "package_verified_at": report.package_verified_at,
             "candidate_total": report.candidate_total,
             "evaluated": report.evaluated,
             "target_present": report.target_present,

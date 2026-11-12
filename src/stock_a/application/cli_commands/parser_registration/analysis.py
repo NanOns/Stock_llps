@@ -26,16 +26,13 @@ def register_commands(commands):
     observation.add_argument("--end-session", required=True, help="结束官方交易会话")
     observation.add_argument("--research-cutoff", required=True, help="研究数据截止日")
     observation.add_argument(
-        "--package-sha256", required=True, help="精确来源包SHA-256"
-    )
-    observation.add_argument(
         "--profile-revision", help="精确画像修订；D1材料视图不需要画像"
     )
     observation.add_argument(
-        "--industry-snapshot-id", required=True, help="行业成员快照UUID"
+        "--industry-snapshot-id", type=int, required=True, help="行业成员数字快照ID"
     )
     observation.add_argument(
-        "--concept-snapshot-id", required=True, help="GN成员快照UUID"
+        "--concept-snapshot-id", type=int, required=True, help="GN成员数字快照ID"
     )
     observation.add_argument("--event-window-start", help="D1历史事件窗起始会话")
     observation.add_argument(
@@ -139,9 +136,7 @@ def register_commands(commands):
     research_day.add_argument(
         "--research-cutoff", required=True, help="研究数据截止官方会话YYYY-MM-DD"
     )
-    research_day.add_argument(
-        "--package-sha256", required=True, help="精确TDX来源包SHA-256"
-    )
+    research_day.add_argument("--source-package-id", type=int, required=True)
     research_day.add_argument(
         "--d1-history-session-count",
         type=int,
@@ -175,10 +170,14 @@ def register_commands(commands):
         help="在现役单日静态生产链中计算并保存行业与GN概念完整同类板块跨日PULSE",
     )
     research_day.add_argument(
-        "--industry-snapshot-id", help="板块PULSE使用的精确TDX行业成员快照UUID"
+        "--industry-snapshot-id",
+        type=int,
+        help="板块PULSE使用的精确TDX行业成员数字快照ID",
     )
     research_day.add_argument(
-        "--concept-snapshot-id", help="板块PULSE使用的精确TDX GN概念成员快照UUID"
+        "--concept-snapshot-id",
+        type=int,
+        help="板块PULSE使用的精确TDX GN概念成员数字快照ID",
     )
     pulse_transition = commands.add_parser(
         "source-sector-pulse-transition-day",
@@ -194,26 +193,38 @@ def register_commands(commands):
         "--research-cutoff", required=True, help="显式研究数据截止会话YYYY-MM-DD"
     )
     pulse_transition.add_argument(
-        "--previous-package-sha256", required=True, help="前一会话Raw来源包SHA-256"
+        "--previous-source-package-id",
+        type=int,
+        required=True,
+        help="前一会话Raw来源包数字ID",
     )
     pulse_transition.add_argument(
-        "--target-package-sha256", required=True, help="目标会话Raw来源包SHA-256"
+        "--target-source-package-id",
+        type=int,
+        required=True,
+        help="目标会话Raw来源包数字ID",
     )
     pulse_transition.add_argument(
         "--previous-profile-revision",
         required=True,
-        help="前一会话Seed/Profile修订SHA-256",
+        help="前一会话画像修订标签，例如PROFILE_R08",
     )
     pulse_transition.add_argument(
         "--target-profile-revision",
         required=True,
-        help="目标会话Seed/Profile修订SHA-256",
+        help="目标会话画像修订标签，例如PROFILE_R08",
     )
     pulse_transition.add_argument(
-        "--industry-snapshot-id", required=True, help="精确TDX行业成员快照UUID"
+        "--industry-snapshot-id",
+        type=int,
+        required=True,
+        help="精确TDX行业成员数字快照ID",
     )
     pulse_transition.add_argument(
-        "--concept-snapshot-id", required=True, help="精确TDX GN概念成员快照UUID"
+        "--concept-snapshot-id",
+        type=int,
+        required=True,
+        help="精确TDX GN概念成员数字快照ID",
     )
     pulse_followup = commands.add_parser(
         "source-sector-pulse-followup-day",
@@ -225,9 +236,7 @@ def register_commands(commands):
     pulse_followup.add_argument(
         "--research-cutoff", required=True, help="明确的Raw研究截止官方会话YYYY-MM-DD"
     )
-    pulse_followup.add_argument(
-        "--package-sha256", required=True, help="T0及后继Raw的精确来源包SHA-256"
-    )
+    pulse_followup.add_argument("--source-package-id", type=int, required=True)
     pulse_followup.add_argument(
         "--persist",
         action="store_true",
@@ -260,9 +269,14 @@ def register_commands(commands):
         "--research-cutoff", required=True, help="研究数据截止官方会话YYYY-MM-DD"
     )
     d0_raw.add_argument(
-        "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
+        "--source-package-id",
+        type=int,
+        required=True,
+        help="目标会话精确TDX来源包BIGINT数字ID",
     )
-    d0_raw.add_argument("--before-package-sha256", help="前日完整TDX来源包SHA-256")
+    d0_raw.add_argument(
+        "--before-source-package-id", type=int, help="前日完整TDX来源包数字ID"
+    )
     d0_raw.add_argument(
         "--state",
         choices=("TRUE", "FALSE", "UNKNOWN", "ALL"),
@@ -321,9 +335,7 @@ def register_commands(commands):
     source_market_breadth.add_argument(
         "--research-cutoff", required=True, help="研究数据截止交易会话YYYY-MM-DD"
     )
-    source_market_breadth.add_argument(
-        "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
-    )
+    source_market_breadth.add_argument("--source-package-id", type=int, required=True)
     source_market_breadth.add_argument(
         "--persist", action="store_true", help="显式计算并原子保存市场宽度事实"
     )
@@ -341,7 +353,10 @@ def register_commands(commands):
         "--research-cutoff", required=True, help="研究数据截止交易会话YYYY-MM-DD"
     )
     source_d1_breakout.add_argument(
-        "--package-sha256", required=True, help="目标日完整TDX来源包SHA-256"
+        "--source-package-id",
+        type=int,
+        required=True,
+        help="必填：目标日精确TDX来源包数字ID",
     )
     selection = source_d1_breakout.add_mutually_exclusive_group()
     selection.add_argument(
@@ -453,17 +468,17 @@ def register_commands(commands):
     price_profile.add_argument("--before-session", help="变化查询的前一画像日期")
     price_profile.add_argument("--after-session", help="变化查询的后一画像日期")
     price_profile.add_argument(
-        "--before-package-sha256", help="changes前态画像的精确来源包SHA-256"
+        "--before-source-package-id", type=int, help="changes前态画像的精确来源包数字ID"
     )
     price_profile.add_argument(
         "--before-profile-revision",
-        help="changes前态画像的精确profile_revision SHA-256",
+        help="changes前态画像修订标签，例如PROFILE_R08",
     )
     price_profile.add_argument(
-        "--after-package-sha256", help="changes后态画像的精确来源包SHA-256"
+        "--after-source-package-id", type=int, help="changes后态画像的精确来源包数字ID"
     )
     price_profile.add_argument(
-        "--after-profile-revision", help="changes后态画像的精确profile_revision SHA-256"
+        "--after-profile-revision", help="changes后态画像修订标签，例如PROFILE_R08"
     )
     price_profile.add_argument(
         "--change-type",
@@ -501,7 +516,9 @@ def register_commands(commands):
     price_profile.add_argument(
         "--start-session", help="compute可选：从PG已存日期起逐日计算至目标日"
     )
-    price_profile.add_argument("--package-sha256", help="精确TDX来源包SHA-256")
+    price_profile.add_argument(
+        "--source-package-id", type=int, help="精确TDX来源包数字ID"
+    )
     price_profile.add_argument(
         "--scope",
         choices=(SOURCE_SYMBOL_PROFILE_SCOPE,),
@@ -516,7 +533,9 @@ def register_commands(commands):
     price_profile.add_argument(
         "--page-size", type=int, default=100, help="PG候选分页批大小，1至100，默认100"
     )
-    price_profile.add_argument("--profile-revision", help="查询时必填的画像修订SHA-256")
+    price_profile.add_argument(
+        "--profile-revision", help="查询时必填的画像修订标签，例如PROFILE_R08"
+    )
     price_profile.add_argument("--symbol", help="可选精确来源代码，如SH.六位数字")
     price_profile.add_argument(
         "--market", choices=("ALL", "SH", "SZ"), default="ALL", help="查询市场过滤"

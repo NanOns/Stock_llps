@@ -8,24 +8,19 @@ from fractions import Fraction
 import re
 import time
 from typing import Any, Mapping, Sequence
-from uuid import UUID
 
 from stock_a.storage.postgres import source_raw
 from stock_a.storage.postgres.research_day_facts import _insert_rows, _row_matches
 
-_TABLE = "stock.source_sector_cross_period_pulse_facts"
+_TABLE = "source_sector_cross_period_pulse_facts"
 _ALGORITHM = "SOURCE_CROSS_PERIOD_PULSE_R1"
-_SHA = re.compile(r"^[0-9a-f]{64}$")
 _KINDS = ("INDUSTRY", "CONCEPT")
 _COLUMNS = (
-    "namespace_id",
     "target_session",
-    "package_sha256",
+    "source_package_id",
     "source_capture_id",
-    "source_content_id",
-    "source_raw_digest",
     "profile_revision",
-    "snapshot_id",
+    "catalog_id",
     "board_kind",
     "board_native_id",
     "board_name",
@@ -81,16 +76,9 @@ _COLUMNS = (
     "formal_rotation_state",
 )
 _KEY = (
-    "namespace_id",
-    "target_session",
-    "package_sha256",
     "source_capture_id",
-    "source_content_id",
-    "source_raw_digest",
+    "catalog_id",
     "profile_revision",
-    "snapshot_id",
-    "board_kind",
-    "board_native_id",
     "algorithm_contract",
 )
 
@@ -155,27 +143,22 @@ def _unknown_reasons(
 def _pulse_rows(
     *,
     target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     source_version: Mapping[str, Any],
     profile_revision: str,
     target_result: Mapping[str, Any],
 ) -> tuple[tuple[Any, ...], ...]:
-    namespace_id = str(source_version.get("namespace_id") or "")
-    capture_id = str(source_version.get("source_capture_id") or "")
-    content_id = str(source_version.get("source_content_id") or "")
-    raw_digest = str(source_version.get("capture_digest") or "")
+    capture_id = source_version.get("source_capture_id")
     source_count = source_version.get("raw_row_count")
     if (
-        not namespace_id
-        or not capture_id
-        or not _SHA.fullmatch(content_id)
-        or not _SHA.fullmatch(raw_digest)
-        or not _SHA.fullmatch(profile_revision)
+        type(capture_id) is not int
+        or capture_id <= 0
+        or not isinstance(profile_revision, str)
+        or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
         or type(source_count) is not int
         or source_count < 1
-        or source_version.get("package_sha256") != package_sha256
-        or target_result.get("namespace_id") != namespace_id
-        or target_result.get("package_sha256") != package_sha256
+        or source_version.get("source_package_id") != source_package_id
+        or target_result.get("source_package_id") != source_package_id
         or target_result.get("target_session") != target_session.isoformat()
         or target_result.get("membership_mode")
         != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
@@ -185,12 +168,15 @@ def _pulse_rows(
         )
     snapshots = target_result.get("snapshots_by_kind")
     names = target_result.get("board_names_by_kind")
+    catalog_ids = target_result.get("catalog_ids_by_kind")
     all_results = target_result.get("peer_target_by_kind")
     comparison_sessions = target_result.get("comparison_sessions")
     if (
         not isinstance(snapshots, Mapping)
         or set(snapshots) != set(_KINDS)
         or not isinstance(names, Mapping)
+        or not isinstance(catalog_ids, Mapping)
+        or set(catalog_ids) != set(_KINDS)
         or not isinstance(all_results, Mapping)
         or set(all_results) != set(_KINDS)
         or not isinstance(comparison_sessions, Mapping)
@@ -208,7 +194,8 @@ def _pulse_rows(
         snapshot_id = snapshot.get("snapshot_id")
         source_quality = snapshot.get("source_quality")
         if (
-            not isinstance(snapshot_id, str)
+            type(snapshot_id) is not int
+            or snapshot_id <= 0
             or not isinstance(source_quality, str)
             or not source_quality
             or snapshot.get("research_mode") != "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"
@@ -295,15 +282,18 @@ def _pulse_rows(
             mapped_count = int(result.get("mapped_count") or 0)
             member_count = int(result.get("member_count") or 0)
             unmapped_count = int(result.get("unmapped_count") or 0)
+            catalog_id = catalog_ids[kind].get(board_id)
+            if type(catalog_id) is not int or catalog_id <= 0:
+                raise SectorPulsePgError(
+                    "SECTOR_PULSE_CATALOG_ID_MISSING",
+                    f"{kind}板块缺少唯一数字目录父键",
+                )
             values = {
-                "namespace_id": namespace_id,
                 "target_session": target_session,
-                "package_sha256": package_sha256,
+                "source_package_id": source_package_id,
                 "source_capture_id": capture_id,
-                "source_content_id": content_id,
-                "source_raw_digest": raw_digest,
                 "profile_revision": profile_revision,
-                "snapshot_id": snapshot_id,
+                "catalog_id": catalog_id,
                 "board_kind": kind,
                 "board_native_id": board_id,
                 "board_name": kind_names[board_id],
@@ -374,33 +364,29 @@ def _pulse_rows(
 def _validate_write_scope(
     cursor: Any,
     *,
-    namespace_id: str,
     target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     source_version: Mapping[str, Any],
     profile_revision: str,
     rows: Sequence[Sequence[Any]],
     target_result: Mapping[str, Any],
 ) -> None:
-    if namespace_id != source_version.get("namespace_id"):
-        raise SectorPulsePgError(
-            "SECTOR_PULSE_NAMESPACE_MISMATCH", "PG连接namespace与离线研究来源不一致"
-        )
+    capture_id = source_version.get("source_capture_id")
     cursor.execute(
-        "SELECT capture_id::text, content_id, canonical_digest, normalized_count, "
+        "SELECT capture_id, source_package_id, normalized_count, "
         "source_time_quality, source_clock_role, source_available_at "
-        "FROM stock.source_captures WHERE namespace_id=%s::uuid AND capture_id=%s::uuid",
-        (namespace_id, source_version["source_capture_id"]),
+        "FROM source_captures WHERE capture_id=%s AND source_package_id=%s "
+        "AND target_session=%s",
+        (capture_id, source_package_id, target_session),
     )
     capture = cursor.fetchone()
     if capture is None or (
-        str(capture[0]) != source_version["source_capture_id"]
-        or str(capture[1]).strip() != source_version["source_content_id"]
-        or str(capture[2]).strip() != source_version["capture_digest"]
-        or int(capture[3]) != source_version["capture_expected_row_count"]
-        or capture[4] != source_version["source_time_quality"]
-        or capture[5] != source_version["source_clock_role"]
-        or source_raw._db_scalar(capture[6])
+        int(capture[0]) != capture_id
+        or int(capture[1]) != source_package_id
+        or int(capture[2]) != source_version["capture_expected_row_count"]
+        or capture[3] != source_version["source_time_quality"]
+        or capture[4] != source_version["source_clock_role"]
+        or source_raw._db_scalar(capture[5])
         != source_version.get("source_available_at")
     ):
         raise SectorPulsePgError(
@@ -408,10 +394,10 @@ def _validate_write_scope(
         )
     cursor.execute(
         "SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint, "
-        "count(DISTINCT source_capture_id)::bigint, count(DISTINCT source_content_id)::bigint "
-        "FROM stock.source_raw_daily WHERE namespace_id=%s::uuid AND session_date=%s "
-        "AND package_sha256=%s",
-        (namespace_id, target_session, package_sha256),
+        "count(DISTINCT source_capture_id)::bigint, count(DISTINCT source_package_id)::bigint "
+        "FROM source_raw_daily WHERE session_date=%s AND source_package_id=%s "
+        "AND source_capture_id=%s",
+        (target_session, source_package_id, capture_id),
     )
     raw_count, unique_symbols, capture_count, content_count = cursor.fetchone()
     expected_count = int(source_version["raw_row_count"])
@@ -431,15 +417,13 @@ def _validate_write_scope(
         )
     cursor.execute(
         "SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint, "
-        "count(DISTINCT profile_revision)::bigint FROM stock.source_pool_seed_day_facts "
-        "WHERE namespace_id=%s::uuid AND target_session=%s AND package_sha256=%s "
-        "AND source_capture_id=%s::uuid AND source_content_id=%s AND profile_revision=%s",
+        "count(DISTINCT profile_revision)::bigint FROM source_pool_seed_day_facts "
+        "WHERE target_session=%s AND source_package_id=%s "
+        "AND source_capture_id=%s AND profile_revision=%s",
         (
-            namespace_id,
             target_session,
-            package_sha256,
-            source_version["source_capture_id"],
-            source_version["source_content_id"],
+            source_package_id,
+            capture_id,
             profile_revision,
         ),
     )
@@ -464,7 +448,7 @@ def _validate_write_scope(
         )
         cursor.execute(
             "SELECT source_kind, research_mode, source_quality FROM "
-            "stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid",
+            "tdx_sector_source_snapshots WHERE snapshot_id=%s",
             (snapshot_id,),
         )
         actual_snapshot = cursor.fetchone()
@@ -478,12 +462,12 @@ def _validate_write_scope(
                 f"{kind}成员快照身份或质量已变化",
             )
         cursor.execute(
-            "SELECT c.board_native_id, c.board_name, count(m.source_symbol)::integer "
-            "FROM stock.tdx_sector_catalog c LEFT JOIN stock.tdx_sector_members m "
-            "ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind "
+            "SELECT c.id, c.board_native_id, c.board_name, count(m.source_symbol)::integer "
+            "FROM tdx_sector_catalog c LEFT JOIN tdx_sector_members m "
+            "ON m.catalog_id=c.id AND m.board_kind=c.board_kind "
             "AND m.board_native_id=c.board_native_id "
-            "WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s "
-            'GROUP BY c.board_native_id, c.board_name ORDER BY c.board_native_id COLLATE "C"',
+            "WHERE c.snapshot_id=%s AND c.board_kind=%s "
+            'GROUP BY c.id, c.board_native_id, c.board_name ORDER BY c.board_native_id COLLATE "C"',
             (snapshot_id, kind),
         )
         actual_boards = cursor.fetchall()
@@ -493,10 +477,12 @@ def _validate_write_scope(
             raise SectorPulsePgError(
                 "SECTOR_PULSE_SNAPSHOT_PARTITION_OPEN", f"{kind}完整板块目录行数不匹配"
             )
-        for board_id, board_name, member_count in actual_boards:
+        expected_catalog_ids = target_result["catalog_ids_by_kind"][kind]
+        for catalog_id, board_id, board_name, member_count in actual_boards:
             actual = expected_boards.get(board_id)
             if (
                 actual is None
+                or expected_catalog_ids.get(board_id) != int(catalog_id)
                 or expected_names.get(board_id) != board_name
                 or int(actual.get("member_count", -1)) != int(member_count)
             ):
@@ -514,7 +500,7 @@ def _persist_once(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     source_version: Mapping[str, Any],
     profile_revision: str,
     target_result: Mapping[str, Any],
@@ -525,13 +511,12 @@ def _persist_once(
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _,
         cursor,
-        namespace_id,
+        _connection_identity,
     ):
         _validate_write_scope(
             cursor,
-            namespace_id=namespace_id,
             target_session=target_session,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             source_version=source_version,
             profile_revision=profile_revision,
             rows=rows,
@@ -547,7 +532,7 @@ def _persist_once(
             group = sorted(
                 group,
                 key=lambda row: (
-                    row[_COLUMNS.index("snapshot_id")],
+                    row[_COLUMNS.index("catalog_id")],
                     row[_COLUMNS.index("board_native_id")],
                 ),
             )
@@ -555,30 +540,20 @@ def _persist_once(
                 raise SectorPulsePgError(
                     "SECTOR_PULSE_PEER_SET_EMPTY", f"{kind}没有板块事实，拒绝部分写入"
                 )
+            catalog_ids = [row[_COLUMNS.index("catalog_id")] for row in group]
             predicate = (
-                "namespace_id=%s::uuid AND target_session=%s AND package_sha256=%s "
+                "source_capture_id=%s AND profile_revision=%s "
+                "AND catalog_id=ANY(%s) AND algorithm_contract=%s"
             )
-            predicate += "AND source_capture_id=%s::uuid AND source_content_id=%s "
-            predicate += "AND source_raw_digest=%s AND profile_revision=%s "
-            predicate += (
-                "AND snapshot_id=%s::uuid AND board_kind=%s AND algorithm_contract=%s"
-            )
-            first = group[0]
             params = (
-                namespace_id,
-                target_session,
-                package_sha256,
                 source_version["source_capture_id"],
-                source_version["source_content_id"],
-                source_version["capture_digest"],
                 profile_revision,
-                first[_COLUMNS.index("snapshot_id")],
-                kind,
+                catalog_ids,
                 _ALGORITHM,
             )
             cursor.execute(
                 f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE} WHERE {predicate} "
-                'ORDER BY board_native_id COLLATE "C"',
+                "ORDER BY catalog_id",
                 params,
             )
             existing = cursor.fetchall()
@@ -604,23 +579,15 @@ def _persist_once(
                 cursor, _TABLE, _COLUMNS, _KEY, rows
             )
         for kind, group, _ in scopes:
-            first = group[0]
+            catalog_ids = [row[_COLUMNS.index("catalog_id")] for row in group]
             cursor.execute(
                 f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE} WHERE "
-                "namespace_id=%s::uuid AND target_session=%s AND package_sha256=%s "
-                "AND source_capture_id=%s::uuid AND source_content_id=%s "
-                "AND source_raw_digest=%s AND profile_revision=%s AND snapshot_id=%s::uuid "
-                'AND board_kind=%s AND algorithm_contract=%s ORDER BY board_native_id COLLATE "C"',
+                "source_capture_id=%s AND profile_revision=%s "
+                "AND catalog_id=ANY(%s) AND algorithm_contract=%s ORDER BY catalog_id",
                 (
-                    namespace_id,
-                    target_session,
-                    package_sha256,
                     source_version["source_capture_id"],
-                    source_version["source_content_id"],
-                    source_version["capture_digest"],
                     profile_revision,
-                    first[_COLUMNS.index("snapshot_id")],
-                    kind,
+                    catalog_ids,
                     _ALGORITHM,
                 ),
             )
@@ -654,7 +621,7 @@ def persist_source_sector_pulse_day(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     source_version: Mapping[str, Any],
     profile_revision: str,
     target_result: Mapping[str, Any],
@@ -662,8 +629,10 @@ def persist_source_sector_pulse_day(
     """原子保存完整行业与GN同类板块集合；同键异内容拒绝回滚。"""
     if (
         type(target_session) is not date
-        or not isinstance(package_sha256, str)
-        or not _SHA.fullmatch(package_sha256)
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or not isinstance(profile_revision, str)
+        or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
         or not isinstance(source_version, Mapping)
         or not isinstance(target_result, Mapping)
     ):
@@ -672,7 +641,7 @@ def persist_source_sector_pulse_day(
         )
     rows = _pulse_rows(
         target_session=target_session,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         source_version=source_version,
         profile_revision=profile_revision,
         target_result=target_result,
@@ -682,7 +651,7 @@ def persist_source_sector_pulse_day(
             return _persist_once(
                 config,
                 target_session=target_session,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 source_version=source_version,
                 profile_revision=profile_revision,
                 target_result=target_result,
@@ -739,7 +708,9 @@ def _pulse_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "breadth_reason_codes": list(row["breadth_reason_codes"]),
         "reason_codes": list(row["pulse_reason_codes"]),
         "snapshot_source_quality": row["snapshot_source_quality"],
-        "snapshot_id": str(row["snapshot_id"]),
+        "snapshot_id": int(row["snapshot_id"]),
+        "catalog_id": int(row["catalog_id"]),
+        "pulse_fact_id": int(row["id"]),
         "profile_revision": str(row["profile_revision"]).strip(),
         "algorithm_contract": row["algorithm_contract"],
         "research_mode": row["research_mode"],
@@ -754,42 +725,35 @@ def read_source_sector_pulse_day(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    namespace_id: str,
-    source_capture_id: str,
-    source_content_id: str,
-    source_raw_digest: str,
+    source_package_id: int,
+    source_capture_id: int,
     source_pool_count: int,
-    snapshot_ids: Mapping[str, str | None],
+    snapshot_ids: Mapping[str, int | None],
 ) -> dict[str, Any]:
-    """按精确Raw、Profile和板块快照版本批量只读已存PULSE事实。"""
+    """按精确数据包、捕获和双成员快照只读已存PULSE事实。"""
     if (
         type(target_session) is not date
-        or not _SHA.fullmatch(package_sha256 or "")
-        or not _SHA.fullmatch(source_content_id or "")
-        or not _SHA.fullmatch(source_raw_digest or "")
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or type(source_pool_count) is not int
         or source_pool_count < 1
+        or not isinstance(snapshot_ids, Mapping)
         or set(snapshot_ids) != set(_KINDS)
     ):
         raise SectorPulsePgError(
             "SECTOR_PULSE_READ_ARGUMENT_INVALID",
-            "PG脉冲读取必须绑定精确日期、来源和双快照",
+            "PG脉冲读取必须绑定精确日期、数字来源ID和双快照",
         )
-    try:
-        namespace_id = str(UUID(namespace_id))
-        source_capture_id = str(UUID(source_capture_id))
-        normalized_snapshots = {
-            kind: str(UUID(snapshot_ids[kind]))
-            if snapshot_ids[kind] is not None
-            else None
-            for kind in _KINDS
-        }
-    except (ValueError, TypeError, AttributeError) as error:
+    normalized_snapshots = dict(snapshot_ids)
+    if any(
+        value is not None and (type(value) is not int or value <= 0)
+        for value in normalized_snapshots.values()
+    ):
         raise SectorPulsePgError(
-            "SECTOR_PULSE_READ_UUID_INVALID",
-            "PG脉冲读取的namespace、capture或snapshot UUID无效",
-        ) from error
+            "SECTOR_PULSE_READ_SNAPSHOT_ID_INVALID", "PG脉冲读取快照必须是正整数ID"
+        )
     active_snapshots = [
         normalized_snapshots[kind]
         for kind in _KINDS
@@ -819,25 +783,15 @@ def read_source_sector_pulse_day(
     with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
         cursor,
-        connected_namespace,
+        _connection_identity,
     ):
-        if connected_namespace != namespace_id:
-            raise SectorPulsePgError(
-                "SECTOR_PULSE_READ_NAMESPACE_MISMATCH", "API脉冲读取namespace与PG不一致"
-            )
         cursor.execute(
             "SELECT profile_revision, count(*)::bigint, count(DISTINCT source_symbol)::bigint "
-            "FROM stock.source_pool_seed_day_facts WHERE namespace_id=%s::uuid "
-            "AND target_session=%s AND package_sha256=%s AND source_capture_id=%s::uuid "
-            "AND source_content_id=%s AND producer_version IS NOT NULL "
+            "FROM source_pool_seed_day_facts WHERE target_session=%s "
+            "AND source_package_id=%s AND source_capture_id=%s "
+            "AND producer_version IS NOT NULL "
             "GROUP BY profile_revision ORDER BY profile_revision",
-            (
-                namespace_id,
-                target_session,
-                package_sha256,
-                source_capture_id,
-                source_content_id,
-            ),
+            (target_session, source_package_id, source_capture_id),
         )
         seed_versions = cursor.fetchall()
         if len(seed_versions) != 1 or (
@@ -865,26 +819,32 @@ def read_source_sector_pulse_day(
                 "cross_period_recalculated": False,
             }
         profile_revision = str(seed_versions[0][0]).strip()
+        if re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None:
+            raise SectorPulsePgError(
+                "SECTOR_PULSE_PROFILE_REVISION_INVALID", "PG Seed修订不是显式业务版本"
+            )
         cursor.execute(
-            f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE} WHERE namespace_id=%s::uuid "
-            "AND target_session=%s AND package_sha256=%s AND source_capture_id=%s::uuid "
-            "AND source_content_id=%s AND source_raw_digest=%s AND profile_revision=%s "
-            "AND snapshot_id=ANY(%s::uuid[]) AND algorithm_contract=%s "
-            'ORDER BY snapshot_id, board_kind, board_native_id COLLATE "C"',
+            f"SELECT p.id, {', '.join('p.' + column for column in _COLUMNS)}, c.snapshot_id "
+            f"FROM {_TABLE} p JOIN tdx_sector_catalog c ON c.id=p.catalog_id "
+            "WHERE p.target_session=%s AND p.source_package_id=%s "
+            "AND p.source_capture_id=%s AND p.profile_revision=%s "
+            "AND c.snapshot_id=ANY(%s) AND p.algorithm_contract=%s "
+            'ORDER BY c.snapshot_id, p.board_kind, p.board_native_id COLLATE "C"',
             (
-                namespace_id,
                 target_session,
-                package_sha256,
+                source_package_id,
                 source_capture_id,
-                source_content_id,
-                source_raw_digest,
                 profile_revision,
                 active_snapshots,
                 _ALGORITHM,
             ),
         )
-        columns = [item.name for item in cursor.description]
-        rows = [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
+        rows = []
+        for values in cursor.fetchall():
+            item = dict(zip(_COLUMNS, values[1:-1], strict=True))
+            item["id"] = int(values[0])
+            item["snapshot_id"] = int(values[-1])
+            rows.append(item)
         for kind in _KINDS:
             snapshot_id = normalized_snapshots[kind]
             if snapshot_id is None:
@@ -898,14 +858,15 @@ def read_source_sector_pulse_day(
             group = [
                 row
                 for row in rows
-                if str(row["snapshot_id"]) == snapshot_id and row["board_kind"] == kind
+                if row["snapshot_id"] == snapshot_id and row["board_kind"] == kind
             ]
             if not group:
                 cursor.execute(
-                    f"SELECT count(*)::bigint FROM {_TABLE} WHERE namespace_id=%s::uuid "
-                    "AND target_session=%s AND snapshot_id=%s::uuid AND board_kind=%s "
-                    "AND algorithm_contract=%s",
-                    (namespace_id, target_session, snapshot_id, kind, _ALGORITHM),
+                    f"SELECT count(*)::bigint FROM {_TABLE} p "
+                    "JOIN tdx_sector_catalog c ON c.id=p.catalog_id "
+                    "WHERE p.source_capture_id=%s AND c.snapshot_id=%s "
+                    "AND p.board_kind=%s AND p.algorithm_contract=%s",
+                    (source_capture_id, snapshot_id, kind, _ALGORITHM),
                 )
                 has_other_revision = int(cursor.fetchone()[0]) > 0
                 result_by_kind[kind] = {

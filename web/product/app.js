@@ -390,10 +390,10 @@ async function selectDate(target_session) {
     message("observationLabel", "来源不可用");
     return;
   }
-  const package_sha256 = version.package_sha256;
+  const source_package_id = version.source_package_id;
   const selected = {
     target_session,
-    package_sha256,
+    source_package_id,
     contextReady: false,
   };
   state.selected = selected;
@@ -444,7 +444,6 @@ async function selectDate(target_session) {
       pg_history_session_count: c.source_history_session_count,
       stock_history_session_count: c.source_history_session_count,
       research_cutoff: c.research_cutoff,
-      namespace_id: c.namespace_id,
       contextReady: true,
     });
     const snapshotText = [industry, concept]
@@ -478,7 +477,7 @@ async function selectDate(target_session) {
 async function resolveProfileForDate(c, token, snapshotText, signal) {
   try {
     const detail = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session, package_sha256: c.package_sha256 })}`,
+      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session, source_package_id: c.source_package_id })}`,
       undefined,
       signal,
     );
@@ -495,7 +494,7 @@ async function resolveProfileForDate(c, token, snapshotText, signal) {
       (p) =>
         p.complete &&
         p.target_session === c.target_session &&
-        p.package_sha256 === c.package_sha256 &&
+        p.source_package_id === c.source_package_id &&
         p.profile_revision === revision &&
         p.history_calendar_revision === detail.official_calendar_revision &&
         p.price_coordinate === "RAW_UNADJUSTED",
@@ -714,7 +713,7 @@ $("d0BoardNext").addEventListener("click", () => {
 async function loadD0Overview(c) {
   const token = ++state.d0Request;
   const before = uniqueRawVersion(c.previous_session);
-  if (!before || before.package_sha256 !== c.package_sha256) {
+  if (!before || before.source_package_id !== c.source_package_id) {
     state.d0Result = null;
     state.d0Status = "UNKNOWN";
     state.d0Error = "相邻会话没有可确认的同源 Raw";
@@ -748,8 +747,7 @@ async function loadD0Overview(c) {
         before_session: c.previous_session,
         target_session: c.target_session,
         research_cutoff: c.research_cutoff,
-        package_sha256: c.package_sha256,
-        namespace_id: c.namespace_id,
+        source_package_id: c.source_package_id,
         industry_snapshot_id: c.industry_snapshot_id,
         concept_snapshot_id: c.concept_snapshot_id,
         offset: state.d0Offset,
@@ -892,8 +890,7 @@ async function openD0Board(board, offset = 0) {
       before_session: c.previous_session,
       target_session: c.target_session,
       research_cutoff: c.research_cutoff,
-      package_sha256: c.package_sha256,
-      namespace_id: c.namespace_id,
+      source_package_id: c.source_package_id,
       industry_snapshot_id: c.industry_snapshot_id,
       concept_snapshot_id: c.concept_snapshot_id,
       board_kind: board.board_kind,
@@ -1069,7 +1066,7 @@ function supportRequest(c, symbol) {
     observation_mode: "D1",
     target_session: c.target_session,
     research_cutoff: c.research_cutoff,
-    package_sha256: c.package_sha256,
+    source_package_id: c.source_package_id,
     profile_revision: null,
     industry_snapshot_id: null,
     concept_snapshot_id: null,
@@ -1348,7 +1345,7 @@ async function loadProfileChanges() {
   let beforeRevision;
   try {
     const beforeContext = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: previousDate, package_sha256: beforeRaw.package_sha256 })}`,
+      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: previousDate, source_package_id: beforeRaw.source_package_id })}`,
       undefined,
       controller.signal,
     );
@@ -1365,14 +1362,14 @@ async function loadProfileChanges() {
       (item) =>
         item.complete &&
         item.target_session === previousDate &&
-        item.package_sha256 === beforeRaw.package_sha256 &&
+        item.source_package_id === beforeRaw.source_package_id &&
         item.profile_revision === beforeRevision,
     );
     const afterProfiles = state.profiles.filter(
       (item) =>
         item.complete &&
         item.target_session === context.target_session &&
-        item.package_sha256 === context.package_sha256 &&
+        item.source_package_id === context.source_package_id &&
         item.profile_revision === context.profile_revision,
     );
     const beforeProfile =
@@ -1405,9 +1402,9 @@ async function loadProfileChanges() {
   const query = new URLSearchParams({
     before_session: previousDate,
     after_session: context.target_session,
-    before_package_sha256: beforeRaw.package_sha256,
+    before_source_package_id: beforeRaw.source_package_id,
     before_profile_revision: beforeRevision,
-    after_package_sha256: context.package_sha256,
+    after_source_package_id: context.source_package_id,
     after_profile_revision: context.profile_revision,
     offset: "0",
     limit: "15",
@@ -1633,7 +1630,7 @@ async function openStock(symbol, row = {}) {
   currentStockSource = state.selected
     ? {
         target_session: state.selected.target_session,
-        package_sha256: state.selected.package_sha256,
+        source_package_id: state.selected.source_package_id,
       }
     : null;
   if (!state.selected) {
@@ -1696,9 +1693,8 @@ async function openStock(symbol, row = {}) {
     const data = await stockApi("/api/preview/stock", {
       symbol,
       target_session: c.target_session,
-      package_sha256: c.package_sha256,
+      source_package_id: c.source_package_id,
       session_count: c.stock_history_session_count,
-      namespace_id: c.namespace_id,
       profile_revision: c.profile_revision,
     });
     if (token !== state.stockRequest) return;
@@ -1864,13 +1860,12 @@ async function openStock(symbol, row = {}) {
     );
     const query = new URLSearchParams({
       target_session: c.target_session,
-      package_sha256: c.package_sha256,
-      namespace_id: c.namespace_id,
+      source_package_id: c.source_package_id,
       symbol,
     });
     const profileQuery = new URLSearchParams({
       target_session: c.target_session,
-      package_sha256: c.package_sha256,
+      source_package_id: c.source_package_id,
       profile_revision: c.profile_revision,
       symbol,
       limit: "1",
@@ -1916,8 +1911,7 @@ async function openStock(symbol, row = {}) {
     stockApi("/api/preview/stock-timeline", {
       symbol,
       target_session: c.target_session,
-      package_sha256: c.package_sha256,
-      namespace_id: c.namespace_id,
+      source_package_id: c.source_package_id,
       session_count: c.stock_history_session_count,
     })
       .then((timeline) => {
@@ -1933,8 +1927,7 @@ async function openStock(symbol, row = {}) {
       source_observation_only: true,
       symbol,
       target_session: c.target_session,
-      package_sha256: c.package_sha256,
-      namespace_id: c.namespace_id,
+      source_package_id: c.source_package_id,
       research_cutoff: c.research_cutoff,
       industry_snapshot_id: c.industry_snapshot_id,
       concept_snapshot_id: c.concept_snapshot_id,
@@ -2094,7 +2087,7 @@ async function loadExtra(page) {
   }
   const common = {
     target_session: c.target_session,
-    package_sha256: c.package_sha256,
+    source_package_id: c.source_package_id,
   };
   try {
     if (page === "market") {
@@ -2157,12 +2150,12 @@ async function loadExtra(page) {
       const version = state.versions.find(
         (v) =>
           v.session_date === c.target_session &&
-          v.package_sha256 === c.package_sha256,
+          v.source_package_id === c.source_package_id,
       );
       const profiles = state.profiles.filter(
         (p) =>
           p.target_session === c.target_session &&
-          p.package_sha256 === c.package_sha256 &&
+          p.source_package_id === c.source_package_id &&
           (c.profile_revision
             ? p.profile_revision === c.profile_revision
             : true),
@@ -2173,7 +2166,7 @@ async function loadExtra(page) {
       if (token !== extraRequest || activePage !== page) return;
       const snapshots = context.snapshots || [];
       detailRows($(id), [
-        ["目标日 / 来源包", `${c.target_session} / ${c.package_sha256}`],
+        ["目标日 / 来源包", `${c.target_session} / ${c.source_package_id}`],
         [
           "Raw 覆盖",
           version
@@ -2193,11 +2186,10 @@ async function loadExtra(page) {
         ]),
         ...snapshots.map((s) => [
           s.source_kind,
-          `${s.member_rows} 条 · 观测 ${s.observed_at} · ${s.clock_quality} · ${s.source_quality} · SHA ${s.source_file_sha256}`,
+          `${s.member_rows} 条 · 观测 ${s.observed_at} · ${s.clock_quality} · ${s.source_quality}`,
         ]),
         ["官方日历修订", context.official_calendar_revision],
         ["研究截止", context.research_cutoff],
-        ["PG 命名空间", context.namespace_id],
         [
           "本次服务进程最近响应错误",
           context.last_service_error
@@ -2233,7 +2225,7 @@ async function readCohort() {
   try {
     const query = {
       target_session: c.target_session,
-      package_sha256: c.package_sha256,
+      source_package_id: c.source_package_id,
       profile_revision: key.profile_revision,
       rule: key.rule,
       history: key.history,
@@ -2359,7 +2351,7 @@ $("focusReadStock").addEventListener("click", async () => {
     const data = await api("/api/preview/stock", {
       symbol,
       target_session: c.target_session,
-      package_sha256: c.package_sha256,
+      source_package_id: c.source_package_id,
       session_count: sessionCount,
     });
     if (token !== focusStockRequest || activePage !== "focus") return;

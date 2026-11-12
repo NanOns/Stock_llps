@@ -6,8 +6,8 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
+import json
 
-from stock_a.canonical.identity import semantic_digest
 from stock_a.domain import ContractError, FieldValue, exact_number
 from stock_a.sources.tdx.actions import GbbqRecord
 
@@ -333,7 +333,7 @@ class AdjustmentFactor:
     def source_dependency_identity(
         self,
     ) -> tuple[tuple[str, str, int | None, int | None], ...]:
-        """只引用实际参与事件及其来源，不声称已计算内容digest。"""
+        """只引用实际参与事件及其来源。"""
         return self.event_source_refs
 
 
@@ -607,7 +607,7 @@ def round_to_tick(value: object, tick: object) -> Fraction:
 
 @dataclass(frozen=True)
 class AdjustedOHLC:
-    """带有质量和完整目标坐标摘要的OHLC字段投影。"""
+    """带有质量和完整目标坐标键的OHLC字段投影。"""
 
     field: FieldValue
     coordinate_id: str
@@ -629,8 +629,14 @@ def adjust_ohlc_field(
         or source_coordinate_id != factor.source_basis
     ):
         raise ContractError("OHLC源坐标与factor.source_basis不匹配")
-    coordinate_id = semantic_digest(
-        ("PRICE_COORDINATE_R1", factor.target_coordinate_id)
+    target_basis, coordinate_mode, tick, producer_version = factor.target_coordinate_id
+    coordinate_components = (
+        [tick.numerator, tick.denominator] if tick is not None else None
+    )
+    coordinate_id = "PRICE_COORDINATE_R1:" + json.dumps(
+        [target_basis, coordinate_mode, coordinate_components, producer_version],
+        ensure_ascii=True,
+        separators=(",", ":"),
     )
     if field.quality != "OBSERVED":
         return AdjustedOHLC(field, coordinate_id)

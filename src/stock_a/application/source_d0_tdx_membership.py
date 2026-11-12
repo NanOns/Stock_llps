@@ -28,9 +28,8 @@ def read_tdx_sector_memberships_for_symbols(
     *,
     source_symbols: Sequence[str],
     target_session: date,
-    industry_snapshot_id: str | None,
-    concept_snapshot_id: str | None,
-    expected_namespace_id: str,
+    industry_snapshot_id: int | None,
+    concept_snapshot_id: int | None,
 ) -> dict[str, Any]:
     """一次性读取完整FT来源代码在可用行业/GN快照中的成员关系。"""
     try:
@@ -40,7 +39,6 @@ def read_tdx_sector_memberships_for_symbols(
             target_session=target_session,
             industry_snapshot_id=industry_snapshot_id,
             concept_snapshot_id=concept_snapshot_id,
-            expected_namespace_id=expected_namespace_id,
         )
     except TdxSectorMembersPgError as error:
         raise TdxSectorMembersApplicationError(error.code, str(error)) from error
@@ -65,10 +63,6 @@ def build_d0_launch_watch_membership_result(
         raise TdxSectorMembersApplicationError(
             "D0_MEMBERSHIP_TARGET_MISMATCH", "TDX关系目标日与D0后端目标日不一致"
         )
-    if membership_read.get("namespace_id") != after.get("namespace_id"):
-        raise TdxSectorMembersApplicationError(
-            "D0_MEMBERSHIP_NAMESPACE_MISMATCH", "TDX成员namespace与D0来源不一致"
-        )
 
     before_version = before.get("source_version")
     after_version = after.get("source_version")
@@ -79,23 +73,23 @@ def build_d0_launch_watch_membership_result(
     ):
         raise TdxSectorMembersApplicationError(
             "D0_MEMBERSHIP_SOURCE_IDENTITY_INVALID",
-            "TDX联接需要同namespace、同包的完整D0 Raw端点及后验快照",
+            "TDX联接需要同数字来源包的完整D0 Raw端点及后验快照",
         )
     if (
         not isinstance(snapshots, list)
         or not isinstance(memberships, list)
         or membership_read.get("membership_mode")
         != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
-        or before_version.get("package_sha256") != after_version.get("package_sha256")
-        or before.get("namespace_id") != after.get("namespace_id")
+        or before_version.get("source_package_id")
+        != after_version.get("source_package_id")
     ):
         raise TdxSectorMembersApplicationError(
             "D0_MEMBERSHIP_SOURCE_IDENTITY_INVALID",
-            "TDX联接需要同namespace、同包的完整D0 Raw端点及后验快照",
+            "TDX联接需要同数字来源包的完整D0 Raw端点及后验快照",
         )
 
-    snapshot_by_id: dict[str, Mapping[str, Any]] = {}
-    expected_snapshot_ids: dict[str, str] = {}
+    snapshot_by_id: dict[int, Mapping[str, Any]] = {}
+    expected_snapshot_ids: dict[str, int] = {}
     for snapshot in snapshots:
         if not isinstance(snapshot, Mapping):
             raise TdxSectorMembersApplicationError(
@@ -107,7 +101,8 @@ def build_d0_launch_watch_membership_result(
         )
         snapshot_id = snapshot.get("snapshot_id")
         if (
-            not isinstance(snapshot_id, str)
+            type(snapshot_id) is not int
+            or snapshot_id <= 0
             or snapshot_id in snapshot_by_id
             or board_kind not in _SNAPSHOT_ROLES
             or snapshot.get("source_kind") != expected_source_kind
@@ -209,7 +204,6 @@ def build_d0_launch_watch_membership_result(
             or member.get("native_category")
             != ("GN" if board_kind == "CONCEPT" else "INDUSTRY")
             or member.get("observed_at") != snapshot.get("observed_at")
-            or member.get("source_file_sha256") != snapshot.get("source_file_sha256")
             or member.get("source_valid_on") != snapshot.get("source_valid_on")
             or member.get("source_known_at") != snapshot.get("source_known_at")
             or member.get("source_available_at") != snapshot.get("source_available_at")
@@ -247,7 +241,6 @@ def build_d0_launch_watch_membership_result(
                 "_board_snapshot": {
                     "snapshot_id": snapshot_id,
                     "source_kind": snapshot["source_kind"],
-                    "source_file_sha256": snapshot["source_file_sha256"],
                     "source_observed_at": snapshot["observed_at"],
                     "source_valid_on": snapshot["source_valid_on"],
                     "source_known_at": snapshot["source_known_at"],
@@ -289,7 +282,6 @@ def build_d0_launch_watch_membership_result(
                 "board_name": row["board_name"],
                 "snapshot_id": snapshot["snapshot_id"],
                 "source_kind": snapshot["source_kind"],
-                "source_file_sha256": snapshot["source_file_sha256"],
                 "observed_at": snapshot["source_observed_at"],
                 "source_valid_on": snapshot["source_valid_on"],
                 "source_known_at": snapshot["source_known_at"],
@@ -325,8 +317,7 @@ def build_d0_launch_watch_membership_result(
         {
             "target_session": target_session,
             "research_cutoff": after.get("research_cutoff"),
-            "namespace_id": after.get("namespace_id"),
-            "package_sha256": after_version.get("package_sha256"),
+            "source_package_id": after_version.get("source_package_id"),
             "global_new_stock_count": len(ft_symbols),
             "global_unique_source_symbol_count": len(ft_symbols),
             "mapped_distinct_source_symbol_count": mapped_count,

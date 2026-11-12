@@ -3,15 +3,12 @@
 function validateMa20DirectionHistory(data) {
   const history = data.ma20_direction_history;
   const binding = history?.binding;
-  const identityRef = data.snapshot_identity?.identity_sha256;
   if (
     !history ||
     !binding ||
-    history.identity_ref !== identityRef ||
     binding.target_session !== data.target_session ||
     binding.source_symbol !== data.symbol ||
-    binding.namespace_id !== data.namespace_id ||
-    binding.package_sha256 !== data.package_sha256 ||
+    binding.source_package_id !== data.source_package_id ||
     binding.calendar_id !== data.calendar_id ||
     binding.calendar_revision !== data.calendar_revision ||
     binding.price_coordinate !== data.price_coordinate ||
@@ -66,16 +63,13 @@ function validateComparisonTimeline(data, selection) {
     data.price_coordinate !== "RAW_UNADJUSTED" ||
     data.symbol !== selection.source_symbol ||
     data.target_session !== selection.target_session ||
-    data.package_sha256 !== selection.package_sha256 ||
-    data.namespace_id !== selection.namespace_id ||
+    data.source_package_id !== selection.source_package_id ||
     data.selection?.source_symbol !== selection.source_symbol ||
     data.selection?.target_session !== selection.target_session ||
-    data.selection?.package_sha256 !== selection.package_sha256 ||
+    data.selection?.source_package_id !== selection.source_package_id ||
     data.selection?.session_count !== 75 ||
-    data.selection?.namespace_id !== selection.namespace_id ||
-    data.snapshot_identity?.namespace_id !== selection.namespace_id ||
     data.snapshot_identity?.target_session !== selection.target_session ||
-    data.snapshot_identity?.package_sha256 !== selection.package_sha256 ||
+    data.snapshot_identity?.source_package_id !== selection.source_package_id ||
     data.source_version?.status !== "AVAILABLE" ||
     data.total_session_count > 75 ||
     !Array.isArray(data.points) ||
@@ -91,8 +85,7 @@ function validateComparisonTimeline(data, selection) {
     data.points.some(
       (point) =>
         point.source_symbol !== selection.source_symbol ||
-        point.package_sha256 !== selection.package_sha256 ||
-        point.namespace_id !== selection.namespace_id,
+        point.source_package_id !== selection.source_package_id,
     )
   )
     throw new Error("轨迹日期或逐日来源身份不完整，已拒绝同日合并。");
@@ -101,7 +94,6 @@ function validateComparisonTimeline(data, selection) {
   const observations = history?.observations;
   if (
     !history ||
-    history.identity_ref !== data.snapshot_identity.identity_sha256 ||
     fieldIds.length !== 5 ||
     history.comparison_count !==
       Math.max(0, data.total_session_count - 1) * 5 ||
@@ -121,7 +113,6 @@ function validateComparisonTimeline(data, selection) {
       index < 1 ||
       dates[index - 1] !== observation.previous_official_session ||
       !fieldIds.includes(observation.field_id) ||
-      observation.identity_ref !== history.identity_ref ||
       observationKeys.has(key)
     )
       throw new Error(
@@ -159,6 +150,7 @@ function validateComparisonRawPeriods(data, selection, timeline) {
   const sourceVersion = data?.source_version;
   const responseSelection = data?.selection;
   if (
+    !identity ||
     data?.ok !== true ||
     data.research_mode !== "NON_PIT_RAW_DIAGNOSTIC" ||
     data.identity_status !== "SOURCE_SYMBOL_ONLY" ||
@@ -167,35 +159,32 @@ function validateComparisonRawPeriods(data, selection, timeline) {
     data.target_session !== selection.target_session ||
     data.source_symbol !== selection.source_symbol ||
     data.symbol !== selection.source_symbol ||
-    data.package_sha256 !== selection.package_sha256 ||
-    data.namespace_id !== selection.namespace_id ||
+    data.source_package_id !== selection.source_package_id ||
     data.calendar_id !== timeline.calendar_id ||
     data.calendar_revision !== timeline.calendar_revision ||
     data.history_window?.start_session !== timeline.session_start ||
     data.history_window?.end_session !== selection.target_session ||
     responseSelection?.source_symbol !== selection.source_symbol ||
     responseSelection?.target_session !== selection.target_session ||
-    responseSelection?.package_sha256 !== selection.package_sha256 ||
-    responseSelection?.namespace_id !== selection.namespace_id ||
-    identity?.identity_sha256 == null ||
-    identity.namespace_id !== selection.namespace_id ||
+    responseSelection?.source_package_id !== selection.source_package_id ||
     identity.target_session !== selection.target_session ||
-    identity.package_sha256 !== selection.package_sha256 ||
+    identity.source_package_id !== selection.source_package_id ||
     identity.identity_type !== timeline.snapshot_identity.identity_type ||
     identity.application_id !== timeline.snapshot_identity.application_id ||
     identity.preview_mode !== timeline.snapshot_identity.preview_mode ||
-    identity.core_source_sha256 !==
-      timeline.snapshot_identity.core_source_sha256 ||
-    identity.research_entry_source_sha256 !==
-      timeline.snapshot_identity.research_entry_source_sha256 ||
-    identity.profile_contract_sha256 !==
-      timeline.snapshot_identity.profile_contract_sha256 ||
     identity.price_coordinate !== "RAW_UNADJUSTED" ||
+    identity.core_algorithm_version !==
+      timeline.snapshot_identity.core_algorithm_version ||
+    identity.research_entry_version !==
+      timeline.snapshot_identity.research_entry_version ||
+    identity.profile_contract !== timeline.snapshot_identity.profile_contract ||
+    identity.profile_contract_revision !==
+      timeline.snapshot_identity.profile_contract_revision ||
     sourceVersion?.status !== "AVAILABLE" ||
     sourceVersion?.source_capture_id !==
       timeline.source_version?.source_capture_id ||
-    sourceVersion?.source_content_id !==
-      timeline.source_version?.source_content_id ||
+    sourceVersion?.source_package_id !==
+      timeline.source_version?.source_package_id ||
     !Array.isArray(data.periods?.week) ||
     !Array.isArray(data.periods?.month)
   )
@@ -219,9 +208,9 @@ function validateComparisonRawPeriods(data, selection, timeline) {
         ) ||
         !Array.isArray(period.reason_codes) ||
         seen.has(period.period_key) ||
-        !Array.isArray(period.source_package_sha256s) ||
-        period.source_package_sha256s.some(
-          (packageSha) => packageSha !== selection.package_sha256,
+        !Array.isArray(period.source_source_package_ids) ||
+        period.source_source_package_ids.some(
+          (packageId) => packageId !== selection.source_package_id,
         )
       )
         throw new Error("闭周/月响应含错序、重复或来源身份不完整的周期行。");
@@ -246,7 +235,7 @@ function comparisonBasketRequestKey(basket) {
   return basket
     .map(
       (item) =>
-        `${item.source_symbol}|${item.target_session}|${item.namespace_id}|${item.package_sha256}|${item.profile_revision}`,
+        `${item.source_symbol}|${item.target_session}|${item.source_package_id}|${item.profile_revision}`,
     )
     .join(";");
 }
@@ -280,9 +269,8 @@ async function loadComparisonRawPeriods(entries, requestId, requestKey) {
       try {
         const query = new URLSearchParams({
           target_session: entry.selection.target_session,
-          package_sha256: entry.selection.package_sha256,
+          source_package_id: entry.selection.source_package_id,
           symbol: entry.selection.source_symbol,
-          namespace_id: entry.selection.namespace_id,
         });
         const response = await api(`/api/source-symbol/raw-periods?${query}`);
         return {
@@ -347,9 +335,8 @@ async function compareSelectedSymbols() {
           body: JSON.stringify({
             symbol: selection.source_symbol,
             target_session: selection.target_session,
-            package_sha256: selection.package_sha256,
+            source_package_id: selection.source_package_id,
             session_count: 75,
-            namespace_id: selection.namespace_id,
           }),
         });
         return {
@@ -446,10 +433,9 @@ function openComparisonTimeline(sourceSymbol, sessionDate = null) {
   state.timeline = entry.data;
   state.timelineContext = {
     target_session: entry.selection.target_session,
-    package_sha256: entry.selection.package_sha256,
+    source_package_id: entry.selection.source_package_id,
     symbol: entry.selection.source_symbol,
     session_count: 75,
-    namespace_id: entry.selection.namespace_id,
     origin: "comparison",
   };
   state.chartPeriodContext = chartContextForTimeline(entry.data);
@@ -471,10 +457,10 @@ function openComparisonTimeline(sourceSymbol, sessionDate = null) {
     `${sourceSymbol} · ${entry.selection.target_session}`;
   $("resultMode").textContent =
     "复用多股对照的现役75会话轨迹 · SOURCE_SYMBOL_ONLY · RAW_UNADJUSTED · NON_PIT";
-  $("snapshotId").textContent = entry.selection.package_sha256;
+  $("snapshotId").textContent = entry.selection.source_package_id;
   $("windowText").textContent = "75个官方会话";
   $("versionSelect").value =
-    `${entry.selection.target_session}|${entry.selection.package_sha256}`;
+    `${entry.selection.target_session}|${entry.selection.source_package_id}`;
   $("symbolInput").value = sourceSymbol;
   $("windowInput").value = "75";
   renderTimeline(entry.data);

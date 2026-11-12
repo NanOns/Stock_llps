@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from fractions import Fraction
-import re
 from typing import Any, Iterable, Mapping, Sequence
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 
@@ -193,7 +192,7 @@ def _timeline_transition(
     previous_relation = previous.get("close_vs_ma20") if previous else None
     if previous is not None and any(
         previous.get(key) != current.get(key)
-        for key in ("coordinate_id", "package_sha256", "semantic_version")
+        for key in ("coordinate_id", "source_package_id", "semantic_version")
     ):
         return {
             "status": "NOT_COMPARABLE",
@@ -475,8 +474,7 @@ def _timeline_price_relation_history(
     pair_statuses: list[list[str]] = []
     identity_keys = (
         "source_symbol",
-        "namespace_id",
-        "package_sha256",
+        "source_package_id",
         "coordinate_id",
         "producer",
         "semantic_version",
@@ -678,8 +676,7 @@ def _timeline_ma20_direction_history(
     *,
     target_session: str,
     source_symbol: str,
-    namespace_id: str,
-    package_sha256: str,
+    source_package_id: int,
     calendar_id: str,
     calendar_revision: str,
     coordinate_id: str,
@@ -687,8 +684,7 @@ def _timeline_ma20_direction_history(
     """只消费同一轨迹已生成的Core MA20点，不重算Core或跨未知会话比较。"""
     identity_fields = (
         "source_symbol",
-        "namespace_id",
-        "package_sha256",
+        "source_package_id",
         "coordinate_id",
         "producer",
         "semantic_version",
@@ -759,12 +755,10 @@ def _timeline_ma20_direction_history(
         "producer": "stock_a.research.entry:_timeline_ma20_direction_history",
         "core_producer": "stock_a.research.core:calculate_core",
         "core_semantic_version": "CORE_PRIMITIVES_FIELDSET_R2",
-        "identity_ref": None,
         "binding": {
             "target_session": target_session,
             "source_symbol": source_symbol,
-            "namespace_id": namespace_id,
-            "package_sha256": package_sha256,
+            "source_package_id": source_package_id,
             "calendar_id": calendar_id,
             "calendar_revision": calendar_revision,
             "price_coordinate": "RAW_UNADJUSTED",
@@ -781,11 +775,10 @@ def research_stock_pg_history_timeline(
     *,
     symbol: str,
     target_session: str,
-    package_sha256: str,
+    source_package_id: int,
     session_dates: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
     missing_history_sessions: Sequence[date],
-    namespace_id: str,
     profile_contract: dict[str, Any],
 ) -> dict[str, Any]:
     """按实际官方会话逐日复用PG Core生产路径，形成单股价格轨迹。"""
@@ -803,14 +796,9 @@ def research_stock_pg_history_timeline(
         raise ResearchEntryError(
             "PG_TIMELINE_WINDOW_INVALID", "价格轨迹须绑定递增官方会话且最多75日"
         )
-    if (
-        not isinstance(package_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
-        or not isinstance(namespace_id, str)
-        or not namespace_id
-    ):
+    if type(source_package_id) is not int or source_package_id <= 0:
         raise ResearchEntryError(
-            "PG_TIMELINE_BINDING_INVALID", "价格轨迹缺少完整来源包SHA或namespace"
+            "PG_TIMELINE_BINDING_INVALID", "价格轨迹缺少有效数字来源包ID"
         )
     calendar_payload, _calendar_metadata, calendar_revision, calendar_sessions = (
         _load_calendar(target)
@@ -829,14 +817,13 @@ def research_stock_pg_history_timeline(
         or any(day not in sessions for day in row_dates)
         or any(
             row.get("source_symbol") != normalized
-            or row.get("package_sha256") != package_sha256
-            or row.get("namespace_id") != namespace_id
+            or row.get("source_package_id") != source_package_id
             for row in rows
         )
     ):
         raise ResearchEntryError(
             "PG_TIMELINE_HISTORY_INVALID",
-            "轨迹Raw行重复、越界或混入其它代码、版本或namespace",
+            "轨迹Raw行重复、越界或混入其它代码或来源包",
         )
     rows_by_session = {row["session_date"]: row for row in rows}
     missing = tuple(day for day in sessions if day not in rows_by_session)
@@ -929,11 +916,10 @@ def research_stock_pg_history_timeline(
             preview = research_stock_pg_history_preview(
                 symbol=normalized,
                 target_session=session.isoformat(),
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 session_dates=prefix_sessions,
                 history_rows=prefix_rows,
                 missing_history_sessions=prefix_missing,
-                namespace_id=namespace_id,
                 profile_contract=profile_contract,
                 include_profile_preview=False,
             )
@@ -1074,13 +1060,10 @@ def research_stock_pg_history_timeline(
             },
             "prior_high20_excludes_target_session": True,
             "coordinate_id": coordinate_id,
-            "namespace_id": namespace_id,
-            "package_sha256": package_sha256,
             "producer": "stock_a.research.core:calculate_core",
             "semantic_version": "CORE_PRIMITIVES_FIELDSET_R2",
             "source_capture_id": row.get("source_capture_id") if row else None,
-            "source_content_id": row.get("source_content_id") if row else None,
-            "source_entry_sha256": row.get("source_entry_sha256") if row else None,
+            "source_package_id": row.get("source_package_id") if row else None,
         }
         points.append(point)
         transition = _timeline_transition(
@@ -1098,8 +1081,7 @@ def research_stock_pg_history_timeline(
         points,
         target_session=target.isoformat(),
         source_symbol=normalized,
-        namespace_id=namespace_id,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         calendar_id=calendar_payload["calendar_id"],
         calendar_revision=calendar_revision,
         coordinate_id=coordinate_id,
@@ -1116,8 +1098,7 @@ def research_stock_pg_history_timeline(
         "formal_selection_status": "NOT_CONNECTED",
         "symbol": normalized,
         "target_session": target.isoformat(),
-        "package_sha256": package_sha256,
-        "namespace_id": namespace_id,
+        "source_package_id": source_package_id,
         "session_start": sessions[0].isoformat(),
         "session_end": sessions[-1].isoformat(),
         "calendar_id": calendar_payload["calendar_id"],

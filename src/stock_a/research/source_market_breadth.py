@@ -9,10 +9,7 @@ from decimal import Decimal
 from fractions import Fraction
 import re
 from typing import Any
-import uuid
 
-
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SOURCE_SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _PRICE_COORDINATE = "RAW_UNADJUSTED"
 SOURCE_MARKET_BREADTH_CONTRACT = "MKT-02_RAW_POSITIVE_RETURN_STATE_DELTA_R1"
@@ -22,11 +19,9 @@ SOURCE_MARKET_BREADTH_CONTRACT = "MKT-02_RAW_POSITIVE_RETURN_STATE_DELTA_R1"
 class SourceCohortIdentity:
     """目标日Raw来源版本和实际捕获信息。"""
 
-    namespace_id: str
     target_session: date
-    package_sha256: str
-    source_content_id: str
-    source_capture_id: str
+    source_package_id: int
+    source_capture_id: int
     source_dataset_id: str
     source_byte_count: int
     parser_contract: str
@@ -40,21 +35,17 @@ class SourceCohortIdentity:
     target_present_count: int
     target_missing_count: int
     read_failed_count: int
-    capture_digest: str
-    observed_raw_digest: str
     calendar_id: str
     calendar_revision: str
-    calendar_sha256: str
 
 
 @dataclass(frozen=True)
 class RawPriceObservation:
     """一个精确来源包、官方会话和来源代码的RAW收盘观察。"""
 
-    namespace_id: str
     source_symbol: str
     session_date: date
-    package_sha256: str
+    source_package_id: int
     raw_close: Decimal | Fraction | int | None
     price_quality: str
     price_reason: str | None
@@ -71,7 +62,6 @@ class SourceMarketBreadthInput:
     research_cutoff: date
     calendar_id: str
     calendar_revision: str
-    calendar_sha256: str
     official_sessions: tuple[date, ...]
     observations: tuple[RawPriceObservation, ...]
 
@@ -133,26 +123,17 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
     ):
         raise ValueError("来源目标日必须是截止日前的明确会话")
     if (
-        not isinstance(cohort.package_sha256, str)
-        or _SHA256.fullmatch(cohort.package_sha256) is None
+        type(cohort.source_package_id) is not int
+        or cohort.source_package_id <= 0
+        or type(cohort.source_capture_id) is not int
+        or cohort.source_capture_id <= 0
     ):
-        raise ValueError("来源版本必须绑定完整小写包SHA-256")
-    if (
-        not isinstance(cohort.calendar_sha256, str)
-        or _SHA256.fullmatch(cohort.calendar_sha256) is None
-    ):
-        raise ValueError("来源版本必须绑定完整日历SHA-256")
-    try:
-        uuid.UUID(cohort.namespace_id)
-        uuid.UUID(cohort.source_capture_id)
-    except (ValueError, TypeError, AttributeError) as error:
-        raise ValueError("namespace与capture身份必须是UUID") from error
+        raise ValueError("来源版本必须绑定正数TDX包ID和捕获ID")
     if cohort.source_dataset_id != "TDX_VIPDATA_PACKAGE":
         raise ValueError("市场宽度来源必须是已登记的TDX VIPDATA包")
     if (
         inputs.calendar_id != cohort.calendar_id
         or inputs.calendar_revision != cohort.calendar_revision
-        or inputs.calendar_sha256 != cohort.calendar_sha256
     ):
         raise ValueError("官方日历身份与输入会话不一致")
     if (
@@ -176,15 +157,6 @@ def _validate_input(inputs: SourceMarketBreadthInput) -> tuple[date, ...]:
         != cohort.raw_row_count
     ):
         raise ValueError("Raw行数或来源状态分母不闭合")
-    for digest in (
-        cohort.source_content_id,
-        cohort.capture_digest,
-        cohort.observed_raw_digest,
-    ):
-        if not isinstance(digest, str) or _SHA256.fullmatch(digest) is None:
-            raise ValueError("来源版本摘要必须为完整小写SHA-256")
-    if cohort.capture_digest != cohort.observed_raw_digest:
-        raise ValueError("目标日Raw行摘要与捕获记录不一致")
     if (
         type(cohort.source_byte_count) is not int
         or cohort.source_byte_count <= 0
@@ -254,9 +226,7 @@ def _observed_close(
         return None, "RAW_SESSION_ROW_MISSING", None
     if observation.session_date != expected_session:
         return None, "OFFICIAL_SESSION_MISMATCH", None
-    if observation.namespace_id != cohort.namespace_id:
-        return None, "SOURCE_NAMESPACE_MISMATCH", None
-    if observation.package_sha256 != cohort.package_sha256:
+    if observation.source_package_id != cohort.source_package_id:
         return None, "SOURCE_PACKAGE_MISMATCH", None
     if observation.price_coordinate != _PRICE_COORDINATE:
         return None, "PRICE_COORDINATE_NOT_RAW_UNADJUSTED", None

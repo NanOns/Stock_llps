@@ -7,7 +7,6 @@ from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
-import hashlib
 import math
 import time
 from typing import BinaryIO, Callable, Iterator
@@ -101,7 +100,6 @@ class DayScanSummary:
     byte_count: int
     first_date: date
     last_date: date
-    raw_byte_sha256: str
     unit_version: str
     prices: FieldGroupCount
     amount: FieldGroupCount
@@ -195,7 +193,6 @@ class DayRecordScan(Iterator[LocatedDay]):
         self._previous_decoded: DecodedDay | None = None
         self._previous_raw: bytes | None = None
         self._previous_index: int | None = None
-        self._sha256 = hashlib.sha256()
         self._group_quality = {
             name: {
                 "observed": 0,
@@ -288,7 +285,6 @@ class DayRecordScan(Iterator[LocatedDay]):
             return
         self._at_eof = False
         self._byte_count += len(data)
-        self._sha256.update(data)
         if self._byte_count > self._limits.max_bytes:
             raise DayReadError(
                 "READ_LIMIT_EXCEEDED",
@@ -475,7 +471,6 @@ class DayRecordScan(Iterator[LocatedDay]):
             byte_count=self._byte_count,
             first_date=self._first_date,
             last_date=self._last_date,
-            raw_byte_sha256=self._sha256.hexdigest(),
             unit_version=self._units.version,
             prices=self._freeze_group("prices"),
             amount=self._freeze_group("amount"),

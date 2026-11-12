@@ -1,4 +1,4 @@
-"""板块PULSE真实后继结果的PG读取、原子写入与幂等核验。"""
+"""板块PULSE后继事实的BIGINT父键读写与幂等核验。"""
 
 from __future__ import annotations
 
@@ -10,8 +10,8 @@ from typing import Any, Mapping, Sequence
 from stock_a.storage.postgres import source_raw
 from stock_a.storage.postgres.research_day_facts import _insert_rows, _row_matches
 
-_TABLE = "stock.source_sector_pulse_followup_facts"
-_PULSE_TABLE = "stock.source_sector_cross_period_pulse_facts"
+_TABLE = "source_sector_pulse_followup_facts"
+_PULSE_TABLE = "source_sector_cross_period_pulse_facts"
 _FOLLOWUP = "SOURCE_SECTOR_PULSE_FOLLOWUP_CLOSE_R1"
 _PULSE_ALGORITHM = "SOURCE_CROSS_PERIOD_PULSE_R1"
 _KINDS = ("INDUSTRY", "CONCEPT")
@@ -19,13 +19,12 @@ _HORIZONS = (1, 3, 5)
 _PULSE_STATES = ("TRUE", "FALSE", "UNKNOWN")
 _OUTCOME_STATES = ("OBSERVED", "UNKNOWN", "NOT_DUE", "NOT_COMPUTED", "INCOMPLETE")
 _PULSE_COLUMNS = (
-    "namespace_id",
+    "id",
     "target_session",
-    "package_sha256",
+    "source_package_id",
     "source_capture_id",
-    "source_content_id",
-    "source_raw_digest",
     "profile_revision",
+    "catalog_id",
     "snapshot_id",
     "board_kind",
     "board_native_id",
@@ -45,30 +44,13 @@ _PULSE_COLUMNS = (
     "source_pool_count",
 )
 _COLUMNS = (
-    "namespace_id",
-    "t0_session",
-    "t0_package_sha256",
-    "t0_source_capture_id",
-    "t0_source_content_id",
-    "t0_source_raw_digest",
-    "t0_profile_revision",
-    "snapshot_id",
-    "board_kind",
-    "board_native_id",
-    "board_name",
-    "pulse_algorithm_contract",
-    "pulse_state",
-    "pulse_reason_codes",
+    "pulse_fact_id",
     "followup_contract",
     "horizon_sessions",
     "target_session",
-    "target_package_sha256",
     "target_source_capture_id",
-    "target_source_content_id",
-    "target_source_raw_digest",
     "calendar_id",
     "calendar_revision",
-    "calendar_sha256",
     "fixed_member_denominator",
     "observed_member_count",
     "unknown_member_count",
@@ -79,31 +61,17 @@ _COLUMNS = (
     "research_mode",
     "membership_mode",
     "price_coordinate",
-    "t0_source_time_quality",
-    "t0_source_clock_role",
-    "t0_source_available_at",
     "target_source_time_quality",
     "target_source_clock_role",
     "target_source_available_at",
 )
 _KEY = (
-    "namespace_id",
-    "t0_session",
-    "t0_package_sha256",
-    "t0_source_capture_id",
-    "t0_source_content_id",
-    "t0_source_raw_digest",
-    "t0_profile_revision",
-    "snapshot_id",
-    "board_kind",
-    "board_native_id",
-    "pulse_algorithm_contract",
-    "followup_contract",
+    "pulse_fact_id",
+    "target_source_capture_id",
     "horizon_sessions",
-    "target_session",
+    "followup_contract",
     "calendar_id",
     "calendar_revision",
-    "calendar_sha256",
 )
 
 
@@ -116,19 +84,7 @@ class SectorPulseFollowupPgError(ValueError):
         super().__init__(message)
 
 
-def _uuid(value: Any, label: str) -> str:
-    import uuid
-
-    try:
-        normalized = str(uuid.UUID(str(value)))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise SectorPulseFollowupPgError(
-            "PULSE_FOLLOWUP_UUID_INVALID", f"{label}不是有效UUID"
-        ) from error
-    return normalized
-
-
-def _text(value: Any, label: str) -> str:
+def _required_text(value: Any, label: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise SectorPulseFollowupPgError(
             "PULSE_FOLLOWUP_SOURCE_BINDING_INVALID", f"{label}不能为空"
@@ -145,13 +101,15 @@ def _codes(value: Any) -> list[str]:
 
 
 def _pulse_rows(
-    cursor: Any, *, t0_session: date, package_sha256: str
+    cursor: Any, *, t0_session: date, source_package_id: int
 ) -> list[dict[str, Any]]:
+    selected = ["p." + name for name in _PULSE_COLUMNS if name != "snapshot_id"]
     cursor.execute(
-        f"SELECT {', '.join(_PULSE_COLUMNS)} FROM {_PULSE_TABLE} "
-        "WHERE target_session=%s AND package_sha256=%s "
-        'ORDER BY board_kind, board_native_id COLLATE "C"',
-        (t0_session, package_sha256),
+        f"SELECT {', '.join(selected)}, c.snapshot_id "
+        f"FROM {_PULSE_TABLE} p JOIN tdx_sector_catalog c ON c.id=p.catalog_id "
+        "WHERE p.target_session=%s AND p.source_package_id=%s AND p.algorithm_contract=%s "
+        'ORDER BY c.board_kind, c.board_native_id COLLATE "C"',
+        (t0_session, source_package_id, _PULSE_ALGORITHM),
     )
     names = [item.name for item in cursor.description]
     rows = [dict(zip(names, values, strict=True)) for values in cursor.fetchall()]
@@ -160,49 +118,38 @@ def _pulse_rows(
             "PULSE_FOLLOWUP_T0_NOT_SAVED", "指定T0与来源包没有已存PULSE事实"
         )
     for row in rows:
-        for key in (
-            "namespace_id",
-            "source_capture_id",
-            "snapshot_id",
-        ):
-            row[key] = str(row[key])
-        for key in (
-            "package_sha256",
-            "source_content_id",
-            "source_raw_digest",
-            "profile_revision",
-        ):
-            row[key] = str(row[key]).strip()
         if (
-            row["board_kind"] not in _KINDS
-            or row["pulse_state"] not in {"TRUE", "FALSE", "UNKNOWN"}
+            type(row["id"]) is not int
+            or row["id"] <= 0
+            or type(row["source_capture_id"]) is not int
+            or row["source_capture_id"] <= 0
+            or type(row["source_package_id"]) is not int
+            or row["source_package_id"] != source_package_id
+            or type(row["catalog_id"]) is not int
+            or type(row["snapshot_id"]) is not int
+            or row["board_kind"] not in _KINDS
+            or row["pulse_state"] not in _PULSE_STATES
             or row["algorithm_contract"] != _PULSE_ALGORITHM
             or row["calculation_status"] != "COMPLETE"
             or row["research_mode"] != "NON_PIT_RETROSPECTIVE"
             or row["membership_mode"] != "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
             or row["price_coordinate"] != "RAW_UNADJUSTED"
+            or not str(row["profile_revision"]).startswith("PROFILE_R")
         ):
             raise SectorPulseFollowupPgError(
                 "PULSE_FOLLOWUP_T0_PARTITION_INVALID",
                 "T0 PULSE存在未知状态、版本或时间/价格语义",
             )
     identities = {
-        tuple(
-            row[key]
-            for key in (
-                "namespace_id",
-                "target_session",
-                "package_sha256",
-                "source_capture_id",
-                "source_content_id",
-                "source_raw_digest",
-                "profile_revision",
-                "algorithm_contract",
-                "source_pool_count",
-                "source_time_quality",
-                "source_clock_role",
-                "source_available_at",
-            )
+        (
+            row["target_session"],
+            row["source_package_id"],
+            row["source_capture_id"],
+            row["profile_revision"],
+            row["source_pool_count"],
+            row["source_time_quality"],
+            row["source_clock_role"],
+            row["source_available_at"],
         )
         for row in rows
     }
@@ -210,11 +157,7 @@ def _pulse_rows(
         kind: {row["snapshot_id"] for row in rows if row["board_kind"] == kind}
         for kind in _KINDS
     }
-    if (
-        len(identities) != 1
-        or any(len(snapshots[kind]) != 1 for kind in _KINDS)
-        or len({next(iter(snapshots[kind])) for kind in _KINDS}) != len(_KINDS)
-    ):
+    if len(identities) != 1 or any(len(snapshots[kind]) != 1 for kind in _KINDS):
         raise SectorPulseFollowupPgError(
             "PULSE_FOLLOWUP_T0_IDENTITY_AMBIGUOUS",
             "T0 PULSE的Raw、Profile或双成员快照身份不唯一",
@@ -236,72 +179,59 @@ def _pulse_rows(
 
 
 def _source_version(
-    cursor: Any,
-    *,
-    namespace_id: str,
-    session: date,
-    package_sha256: str,
+    cursor: Any, *, session: date, source_package_id: int
 ) -> tuple[str, dict[str, Any] | None]:
     status, actual, expected = source_raw._page_version_status(
-        cursor, namespace_id, session, package_sha256
+        cursor, session, source_package_id
     )
     if status != "CLOSED":
         return status, None
     cursor.execute(
-        """SELECT c.capture_id::text, c.content_id, c.canonical_digest,
-       c.normalized_count, c.source_time_quality, c.source_clock_role,
-       c.source_available_at, count(r.*)::bigint,
-       count(DISTINCT r.source_symbol)::bigint,
-       count(DISTINCT r.source_content_id)::bigint,
-       count(DISTINCT r.package_sha256)::bigint
-FROM stock.source_raw_daily r
-JOIN stock.source_captures c
-  ON c.namespace_id=r.namespace_id AND c.capture_id=r.source_capture_id
-WHERE r.namespace_id=%s::uuid AND r.session_date=%s AND r.package_sha256=%s
-GROUP BY c.capture_id, c.content_id, c.canonical_digest, c.normalized_count,
+        """SELECT c.capture_id, c.source_package_id, c.normalized_count,
+       c.source_time_quality, c.source_clock_role, c.source_available_at,
+       count(r.id)::bigint, count(DISTINCT r.source_symbol)::bigint,
+       count(DISTINCT r.source_capture_id)::bigint
+FROM source_captures c
+LEFT JOIN source_raw_daily r ON r.source_capture_id=c.capture_id
+  AND r.source_package_id=c.source_package_id AND r.session_date=c.target_session
+WHERE c.source_package_id=%s AND c.target_session=%s
+GROUP BY c.capture_id, c.source_package_id, c.normalized_count,
          c.source_time_quality, c.source_clock_role, c.source_available_at""",
-        (namespace_id, session, package_sha256),
+        (source_package_id, session),
     )
     rows = cursor.fetchall()
     if len(rows) != 1:
         return "INCOMPLETE", None
     (
-        capture_id,
-        content_id,
-        raw_digest,
-        normalized_count,
-        time_quality,
-        clock_role,
-        available_at,
+        capture,
+        package,
+        normalized,
+        quality,
+        role,
+        available,
         row_count,
         symbol_count,
-        content_count,
-        package_count,
+        capture_count,
     ) = rows[0]
     if (
-        actual != expected
+        int(package) != source_package_id
+        or actual != expected
         or int(row_count) != actual
         or int(symbol_count) != actual
-        or int(content_count) != 1
-        or int(package_count) != 1
-        or int(normalized_count) != actual
-        or not content_id
-        or not raw_digest
-        or not time_quality
-        or not clock_role
+        or int(capture_count) != 1
+        or int(normalized) != actual
+        or not quality
+        or not role
     ):
         return "INCOMPLETE", None
     return status, {
         "session_date": session,
-        "namespace_id": namespace_id,
-        "package_sha256": package_sha256,
-        "source_capture_id": str(capture_id),
-        "source_content_id": str(content_id).strip(),
-        "source_raw_digest": str(raw_digest).strip(),
-        "normalized_count": int(normalized_count),
-        "source_time_quality": time_quality,
-        "source_clock_role": clock_role,
-        "source_available_at": available_at,
+        "source_package_id": int(package),
+        "source_capture_id": int(capture),
+        "normalized_count": int(normalized),
+        "source_time_quality": quality,
+        "source_clock_role": role,
+        "source_available_at": available,
         "row_count": int(row_count),
     }
 
@@ -311,7 +241,7 @@ def read_source_sector_pulse_followup_inputs(
     *,
     t0_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     due_targets: Mapping[int, date],
 ) -> dict[str, Any]:
     """在一个只读快照中读T0完整PULSE、固定成员和已闭合后继Raw。"""
@@ -319,48 +249,36 @@ def read_source_sector_pulse_followup_inputs(
         type(t0_session) is not date
         or type(research_cutoff) is not date
         or t0_session > research_cutoff
-        or not isinstance(package_sha256, str)
-        or len(package_sha256) != 64
+        or type(source_package_id) is not int
+        or source_package_id <= 0
         or any(
-            type(horizon) is not int
-            or horizon not in _HORIZONS
-            or type(target) is not date
-            or target <= t0_session
-            or target > research_cutoff
-            for horizon, target in due_targets.items()
+            type(h) is not int
+            or h not in _HORIZONS
+            or type(d) is not date
+            or d <= t0_session
+            or d > research_cutoff
+            for h, d in due_targets.items()
         )
     ):
         raise SectorPulseFollowupPgError(
             "PULSE_FOLLOWUP_INPUT_INVALID", "后继生产输入日期、期限或来源包无效"
         )
-
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _connection,
         cursor,
-        namespace_id,
+        _identity,
     ):
         pulses = _pulse_rows(
-            cursor, t0_session=t0_session, package_sha256=package_sha256
+            cursor, t0_session=t0_session, source_package_id=source_package_id
         )
-        pulse_namespaces = {row["namespace_id"] for row in pulses}
-        if pulse_namespaces != {namespace_id}:
-            raise SectorPulseFollowupPgError(
-                "PULSE_FOLLOWUP_NAMESPACE_MISMATCH", "T0 PULSE与PG命名空间不一致"
-            )
         identity = pulses[0]
-
         t0_status, t0_source = _source_version(
-            cursor,
-            namespace_id=namespace_id,
-            session=t0_session,
-            package_sha256=package_sha256,
+            cursor, session=t0_session, source_package_id=source_package_id
         )
         if (
             t0_status != "CLOSED"
             or t0_source is None
             or t0_source["source_capture_id"] != identity["source_capture_id"]
-            or t0_source["source_content_id"] != identity["source_content_id"]
-            or t0_source["source_raw_digest"] != identity["source_raw_digest"]
             or t0_source["normalized_count"] != int(identity["source_pool_count"])
         ):
             raise SectorPulseFollowupPgError(
@@ -369,27 +287,23 @@ def read_source_sector_pulse_followup_inputs(
             )
         cursor.execute(
             """SELECT count(*)::bigint, count(DISTINCT source_symbol)::bigint,
-       count(DISTINCT profile_revision)::bigint,
-       min(producer_version), max(producer_version)
-FROM stock.source_pool_seed_day_facts
-WHERE namespace_id=%s::uuid AND target_session=%s AND package_sha256=%s
-  AND source_capture_id=%s::uuid AND source_content_id=%s AND profile_revision=%s""",
+       count(DISTINCT profile_revision)::bigint, min(producer_version), max(producer_version)
+FROM source_pool_seed_day_facts
+WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s AND profile_revision=%s""",
             (
-                namespace_id,
                 t0_session,
-                package_sha256,
+                source_package_id,
                 identity["source_capture_id"],
-                identity["source_content_id"],
                 identity["profile_revision"],
             ),
         )
-        seed_count, seed_symbols, profile_count, producer_min, producer_max = (
+        seed_count, seed_symbols, revision_count, producer_min, producer_max = (
             cursor.fetchone()
         )
         if (
             int(seed_count) != int(identity["source_pool_count"])
             or int(seed_symbols) != int(identity["source_pool_count"])
-            or int(profile_count) != 1
+            or int(revision_count) != 1
             or producer_min != "SOURCE_POOL_SEED_CORE_PROFILE_R1"
             or producer_max != producer_min
         ):
@@ -397,7 +311,6 @@ WHERE namespace_id=%s::uuid AND target_session=%s AND package_sha256=%s
                 "PULSE_FOLLOWUP_PROFILE_PARTITION_INCOMPLETE",
                 "T0画像修订没有闭合到唯一完整的已存Seed来源池",
             )
-
         members_by_board: dict[tuple[str, str], tuple[str, ...]] = {}
         pulse_by_board = {}
         for kind in _KINDS:
@@ -405,27 +318,22 @@ WHERE namespace_id=%s::uuid AND target_session=%s AND package_sha256=%s
                 row["snapshot_id"] for row in pulses if row["board_kind"] == kind
             )
             cursor.execute(
-                """SELECT c.board_native_id, c.board_name,
-       count(m.source_symbol)::integer,
+                """SELECT c.board_native_id, c.board_name, count(m.source_symbol)::integer,
        COALESCE(array_agg(m.source_symbol ORDER BY m.source_symbol)
            FILTER (WHERE m.source_symbol IS NOT NULL), ARRAY[]::text[])
-FROM stock.tdx_sector_catalog c
-LEFT JOIN stock.tdx_sector_members m
-  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
- AND m.board_native_id=c.board_native_id
-WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s
-GROUP BY c.board_native_id,c.board_name
-ORDER BY c.board_native_id COLLATE "C" """,
+FROM tdx_sector_catalog c LEFT JOIN tdx_sector_members m ON m.catalog_id=c.id
+WHERE c.snapshot_id=%s AND c.board_kind=%s
+GROUP BY c.board_native_id,c.board_name ORDER BY c.board_native_id COLLATE "C""",
                 (snapshot_id, kind),
             )
             directory = cursor.fetchall()
             group = [row for row in pulses if row["board_kind"] == kind]
+            expected = {row["board_native_id"]: row for row in group}
             if len(directory) != len(group):
                 raise SectorPulseFollowupPgError(
                     "PULSE_FOLLOWUP_SNAPSHOT_PARTITION_INCOMPLETE",
                     f"{kind}的T0成员目录与PULSE板块分区不一致",
                 )
-            expected = {row["board_native_id"]: row for row in group}
             for board_id, board_name, member_count, symbols in directory:
                 pulse = expected.get(board_id)
                 symbols = tuple(symbols or ())
@@ -442,16 +350,11 @@ ORDER BY c.board_native_id COLLATE "C" """,
                     )
                 members_by_board[(kind, board_id)] = symbols
                 pulse_by_board[(kind, board_id)] = pulse
-
-        target_versions: dict[int, dict[str, Any]] = {}
-        target_statuses: dict[int, dict[str, Any]] = {}
+        target_versions, target_statuses = {}, {}
         readable_sessions = [t0_session]
         for horizon, target in sorted(due_targets.items()):
             status, version = _source_version(
-                cursor,
-                namespace_id=namespace_id,
-                session=target,
-                package_sha256=package_sha256,
+                cursor, session=target, source_package_id=source_package_id
             )
             target_statuses[horizon] = {
                 "status": status,
@@ -462,7 +365,6 @@ ORDER BY c.board_native_id COLLATE "C" """,
             if status == "CLOSED" and version is not None:
                 target_versions[horizon] = version
                 readable_sessions.append(target)
-
         symbols = tuple(
             sorted(
                 {symbol for members in members_by_board.values() for symbol in members}
@@ -470,26 +372,22 @@ ORDER BY c.board_native_id COLLATE "C" """,
         )
         raw_rows = source_raw._read_history_rows(
             cursor,
-            namespace_id=namespace_id,
             source_symbols=symbols,
             sessions=tuple(sorted(set(readable_sessions))),
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
         )
         cursor.execute(
-            "SELECT max(session_date) FROM stock.source_raw_daily "
-            "WHERE namespace_id=%s::uuid AND package_sha256=%s AND session_date<=%s",
-            (namespace_id, package_sha256, research_cutoff),
+            "SELECT max(session_date) FROM source_raw_daily WHERE source_package_id=%s AND session_date<=%s",
+            (source_package_id, research_cutoff),
         )
         saved_through = cursor.fetchone()[0]
-
     rows_by_symbol: dict[str, list[dict[str, Any]]] = {symbol: [] for symbol in symbols}
     for row in raw_rows:
         rows_by_symbol[row["source_symbol"]].append(row)
     return {
-        "namespace_id": namespace_id,
         "t0_session": t0_session,
         "research_cutoff": research_cutoff,
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "pulse_rows": pulses,
         "pulse_by_board": pulse_by_board,
         "members_by_board": members_by_board,
@@ -518,28 +416,23 @@ def _prepare_rows(
     outcomes: Sequence[Mapping[str, Any]],
     calendar_identity: Mapping[str, str],
 ) -> list[tuple[Any, ...]]:
-    identity = context["pulse_rows"][0]
-    calendar_id = _text(calendar_identity.get("calendar_id"), "官方日历")
-    calendar_revision = _text(
+    calendar_id = _required_text(calendar_identity.get("calendar_id"), "官方日历")
+    calendar_revision = _required_text(
         calendar_identity.get("calendar_revision"), "官方日历修订"
     )
-    calendar_sha256 = _text(calendar_identity.get("calendar_sha256"), "官方日历SHA")
-    rows = []
-    seen = set()
+    rows, seen = [], set()
     for item in outcomes:
-        pulse = item.get("pulse")
-        outcome = item.get("outcome")
-        horizon = item.get("horizon_sessions")
-        target_session = item.get("target_session")
+        pulse, outcome = item.get("pulse"), item.get("outcome")
+        horizon, target = item.get("horizon_sessions"), item.get("target_session")
         target_version = context["target_source_versions"].get(horizon)
         if (
             not isinstance(pulse, Mapping)
             or not isinstance(outcome, Mapping)
             or type(horizon) is not int
             or horizon not in _HORIZONS
-            or type(target_session) is not date
+            or type(target) is not date
             or target_version is None
-            or target_version["session_date"] != target_session
+            or target_version["session_date"] != target
             or outcome.get("outcome_status") not in {"OBSERVED", "UNKNOWN"}
             or outcome.get("research_mode") != "NON_PIT_RETROSPECTIVE"
             or outcome.get("membership_mode")
@@ -551,13 +444,20 @@ def _prepare_rows(
                 "PULSE_FOLLOWUP_TYPED_ROW_INVALID",
                 "后继PG typed行缺少精确来源或质量字段",
             )
+        pulse_id = pulse.get("pulse_fact_id")
+        if type(pulse_id) is not int or pulse_id <= 0:
+            raise SectorPulseFollowupPgError(
+                "PULSE_FOLLOWUP_PULSE_ID_INVALID", "后继结果缺少已存PULSE父记录数字ID"
+            )
         numerator, denominator = _fraction_parts(
             outcome.get("equal_weight_mean_return")
         )
         key = (
-            pulse["board_kind"],
-            pulse["board_native_id"],
+            pulse_id,
+            target_version["source_capture_id"],
             horizon,
+            calendar_id,
+            calendar_revision,
         )
         if key in seen:
             raise SectorPulseFollowupPgError(
@@ -566,30 +466,13 @@ def _prepare_rows(
         seen.add(key)
         rows.append(
             (
-                identity["namespace_id"],
-                identity["target_session"],
-                identity["package_sha256"],
-                identity["source_capture_id"],
-                identity["source_content_id"],
-                identity["source_raw_digest"],
-                identity["profile_revision"],
-                pulse["snapshot_id"],
-                pulse["board_kind"],
-                pulse["board_native_id"],
-                pulse["board_name"],
-                pulse["algorithm_contract"],
-                pulse["pulse_state"],
-                _codes(pulse["pulse_reason_codes"]),
+                pulse_id,
                 _FOLLOWUP,
                 horizon,
-                target_session,
-                identity["package_sha256"],
+                target,
                 target_version["source_capture_id"],
-                target_version["source_content_id"],
-                target_version["source_raw_digest"],
                 calendar_id,
                 calendar_revision,
-                calendar_sha256,
                 int(outcome["fixed_member_denominator"]),
                 int(outcome["observed_member_count"]),
                 int(outcome["unknown_member_count"]),
@@ -600,32 +483,28 @@ def _prepare_rows(
                 outcome["research_mode"],
                 outcome["membership_mode"],
                 outcome["price_coordinate"],
-                identity["source_time_quality"],
-                identity["source_clock_role"],
-                identity["source_available_at"],
                 target_version["source_time_quality"],
                 target_version["source_clock_role"],
                 target_version["source_available_at"],
             )
         )
     expected = {
-        (kind, board_id, horizon)
-        for kind, board_id in context["pulse_by_board"]
-        for horizon in context["target_source_versions"]
+        (
+            pulse["id"],
+            context["target_source_versions"][h]["source_capture_id"],
+            h,
+            calendar_id,
+            calendar_revision,
+        )
+        for pulse in context["pulse_rows"]
+        for h in context["target_source_versions"]
     }
     if seen != expected or not rows:
         raise SectorPulseFollowupPgError(
             "PULSE_FOLLOWUP_BATCH_INCOMPLETE",
             "离线后继批次未覆盖每个T0板块与每个可用期限",
         )
-    rows.sort(
-        key=lambda row: (
-            row[_COLUMNS.index("board_kind")],
-            row[_COLUMNS.index("horizon_sessions")],
-            row[_COLUMNS.index("board_native_id")],
-        )
-    )
-    return rows
+    return sorted(rows, key=lambda row: (row[0], row[2]))
 
 
 def _validate_write_scope(cursor: Any, context: Mapping[str, Any]) -> None:
@@ -633,21 +512,14 @@ def _validate_write_scope(cursor: Any, context: Mapping[str, Any]) -> None:
     current = _pulse_rows(
         cursor,
         t0_session=identity["target_session"],
-        package_sha256=identity["package_sha256"],
+        source_package_id=identity["source_package_id"],
     )
-    expected_map = {
-        (row["board_kind"], row["board_native_id"]): row
-        for row in context["pulse_rows"]
-    }
-    current_map = {(row["board_kind"], row["board_native_id"]): row for row in current}
-    stable_fields = (
-        "namespace_id",
-        "target_session",
-        "package_sha256",
+    stable = (
+        "id",
         "source_capture_id",
-        "source_content_id",
-        "source_raw_digest",
+        "source_package_id",
         "profile_revision",
+        "catalog_id",
         "snapshot_id",
         "board_name",
         "algorithm_contract",
@@ -658,81 +530,73 @@ def _validate_write_scope(cursor: Any, context: Mapping[str, Any]) -> None:
         "source_clock_role",
         "source_available_at",
     )
+    expected_map = {
+        (r["board_kind"], r["board_native_id"]): r for r in context["pulse_rows"]
+    }
+    current_map = {(r["board_kind"], r["board_native_id"]): r for r in current}
     if current_map.keys() != expected_map.keys() or any(
-        any(
-            current_map[key][field] != expected_map[key][field]
-            for field in stable_fields
-        )
-        for key in expected_map
+        any(current_map[k].get(n) != expected_map[k].get(n) for n in stable)
+        for k in expected_map
     ):
         raise SectorPulseFollowupPgError(
             "PULSE_FOLLOWUP_T0_CHANGED", "T0 PULSE业务分区在生产期间发生变化"
         )
-    dates = {context["t0_session"]: context["t0_source_version"]}
-    dates.update(
-        {
-            item["session_date"]: item
-            for item in context["target_source_versions"].values()
-        }
+    versions = {context["t0_session"]: context["t0_source_version"]}
+    versions.update(
+        {v["session_date"]: v for v in context["target_source_versions"].values()}
     )
-    for session, expected in dates.items():
+    for session, expected in versions.items():
         status, actual = _source_version(
-            cursor,
-            namespace_id=context["namespace_id"],
-            session=session,
-            package_sha256=context["package_sha256"],
+            cursor, session=session, source_package_id=context["source_package_id"]
         )
         if status != "CLOSED" or actual != expected:
             raise SectorPulseFollowupPgError(
-                "PULSE_FOLLOWUP_RAW_CHANGED", "T0或后继Raw来源修订在生产期间发生变化"
+                "PULSE_FOLLOWUP_RAW_CHANGED", "T0或后继Raw来源分区在生产期间发生变化"
             )
-    for (kind, snapshot_id), group in (
-        (
-            (
-                kind,
-                next(
-                    row["snapshot_id"] for row in current if row["board_kind"] == kind
-                ),
-            ),
-            [row for row in current if row["board_kind"] == kind],
-        )
-        for kind in _KINDS
-    ):
+    for kind in _KINDS:
+        snapshot_id = next(r["snapshot_id"] for r in current if r["board_kind"] == kind)
         cursor.execute(
-            """SELECT c.board_native_id, count(m.source_symbol)::integer
-FROM stock.tdx_sector_catalog c
-LEFT JOIN stock.tdx_sector_members m
-  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
- AND m.board_native_id=c.board_native_id
-WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s
-GROUP BY c.board_native_id ORDER BY c.board_native_id COLLATE "C" """,
+            """SELECT c.board_native_id, c.board_name,
+       COALESCE(array_agg(m.source_symbol ORDER BY m.source_symbol)
+           FILTER (WHERE m.source_symbol IS NOT NULL), ARRAY[]::text[])
+FROM tdx_sector_catalog c LEFT JOIN tdx_sector_members m ON m.catalog_id=c.id
+WHERE c.snapshot_id=%s AND c.board_kind=%s
+GROUP BY c.board_native_id,c.board_name ORDER BY c.board_native_id COLLATE "C""",
             (snapshot_id, kind),
         )
-        members = {board_id: int(count) for board_id, count in cursor.fetchall()}
-        expected_members = {
-            row["board_native_id"]: int(row["member_count"]) for row in group
+        actual = {(b, n): tuple(s or ()) for b, n, s in cursor.fetchall()}
+        expected = {
+            (r["board_native_id"], r["board_name"]): context["members_by_board"][
+                (kind, r["board_native_id"])
+            ]
+            for r in current
+            if r["board_kind"] == kind
         }
-        if members != expected_members:
+        if actual != expected:
             raise SectorPulseFollowupPgError(
                 "PULSE_FOLLOWUP_SNAPSHOT_CHANGED",
                 f"{kind}后验成员快照在生产期间发生变化",
             )
 
 
-def _scope_query(cursor: Any, row: Sequence[Any]) -> list[tuple[Any, ...]]:
-    values = dict(zip(_COLUMNS, row, strict=True))
-    scope = (
-        "namespace_id=%s::uuid AND t0_session=%s AND t0_package_sha256=%s "
-        "AND t0_source_capture_id=%s::uuid AND t0_source_content_id=%s "
-        "AND t0_source_raw_digest=%s AND t0_profile_revision=%s "
-        "AND snapshot_id=%s::uuid AND board_kind=%s AND pulse_algorithm_contract=%s "
-        "AND followup_contract=%s AND horizon_sessions=%s AND target_session=%s "
-        "AND calendar_id=%s AND calendar_revision=%s AND calendar_sha256=%s"
-    )
+def _read_scope(
+    cursor: Any,
+    pulse_ids: Sequence[int],
+    capture_id: int,
+    horizon: int,
+    calendar_id: str,
+    calendar_revision: str,
+) -> list[tuple[Any, ...]]:
     cursor.execute(
-        f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE} WHERE {scope} "
-        'ORDER BY board_native_id COLLATE "C"',
-        tuple(values[name] for name in _KEY if name != "board_native_id"),
+        f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE} WHERE pulse_fact_id=ANY(%s::bigint[]) AND target_source_capture_id=%s AND horizon_sessions=%s AND followup_contract=%s AND calendar_id=%s AND calendar_revision=%s ORDER BY pulse_fact_id",
+        (
+            list(pulse_ids),
+            capture_id,
+            horizon,
+            _FOLLOWUP,
+            calendar_id,
+            calendar_revision,
+        ),
     )
     return cursor.fetchall()
 
@@ -746,97 +610,92 @@ def persist_source_sector_pulse_followups(
 ) -> dict[str, Any]:
     """以一个SERIALIZABLE事务原子写入全部行业、概念与期限结果。"""
     rows = _prepare_rows(
-        context=context,
-        outcomes=outcomes,
-        calendar_identity=calendar_identity,
+        context=context, outcomes=outcomes, calendar_identity=calendar_identity
     )
-    scopes = []
+    calendar_id = _required_text(calendar_identity.get("calendar_id"), "官方日历")
+    calendar_revision = _required_text(
+        calendar_identity.get("calendar_revision"), "官方日历修订"
+    )
+    grouped: dict[tuple[int, int], list[tuple[Any, ...]]] = {}
+    for row in rows:
+        grouped.setdefault((row[4], row[2]), []).append(row)
+    scopes, already = [], []
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _connection,
         cursor,
-        namespace_id,
+        _identity,
     ):
-        if namespace_id != context["namespace_id"]:
-            raise SectorPulseFollowupPgError(
-                "PULSE_FOLLOWUP_NAMESPACE_MISMATCH", "写入PG命名空间与生产输入不一致"
-            )
         _validate_write_scope(cursor, context)
-        cursor.execute("SELECT to_regclass(%s) IS NOT NULL", (_TABLE,))
-        if cursor.fetchone() != (True,):
+        cursor.execute("SELECT 1 FROM migration_ledger WHERE migration_id=22")
+        if cursor.fetchone() is None:
             raise SectorPulseFollowupPgError(
-                "PULSE_FOLLOWUP_MIGRATION_MISSING", "板块PULSE后继结果迁移尚未应用"
+                "PULSE_FOLLOWUP_MIGRATION_MISSING", "R06板块PULSE后继结果迁移尚未应用"
             )
-        by_scope: dict[tuple[str, int], list[tuple[Any, ...]]] = {}
-        for row in rows:
-            by_scope.setdefault(
-                (
-                    row[_COLUMNS.index("board_kind")],
-                    row[_COLUMNS.index("horizon_sessions")],
-                ),
-                [],
-            ).append(row)
-        already = []
-        for key, group in sorted(by_scope.items()):
-            existing = _scope_query(cursor, group[0])
-            if existing and (
-                len(existing) != len(group)
-                or any(
-                    not _row_matches(expected, actual)
-                    for expected, actual in zip(group, existing, strict=False)
-                )
-            ):
+        for key, group in sorted(grouped.items()):
+            expected = sorted(group, key=lambda row: row[0])
+            ids = [row[0] for row in expected]
+            existing = _read_scope(
+                cursor, ids, key[0], key[1], calendar_id, calendar_revision
+            )
+            equal = len(existing) == len(expected) and all(
+                _row_matches(a, b) for a, b in zip(expected, existing, strict=True)
+            )
+            if existing and not equal:
                 raise SectorPulseFollowupPgError(
                     "PULSE_FOLLOWUP_CONTENT_CONFLICT",
-                    "相同T0、成员快照与期限已有异内容或不完整PG结果",
+                    "相同PULSE父行、目标捕获与期限已有异内容或不完整PG结果",
                 )
-            already.append(len(existing) == len(group))
-            scopes.append((key, group, existing))
+            already.append(equal)
+            scopes.append((key, expected, ids))
         if any(already) and not all(already):
             raise SectorPulseFollowupPgError(
                 "PULSE_FOLLOWUP_PARTIAL_BATCH",
                 "PG中存在部分期限或板块已写结果；拒绝留下半批事实",
             )
-        if not all(already):
-            inserted = _insert_rows(cursor, _TABLE, _COLUMNS, _KEY, rows)
-        else:
-            inserted = 0
-        for _key, group, _existing in scopes:
-            readback = _scope_query(cursor, group[0])
-            if len(readback) != len(group) or any(
-                not _row_matches(expected, actual)
-                for expected, actual in zip(group, readback, strict=True)
+        inserted = (
+            0 if all(already) else _insert_rows(cursor, _TABLE, _COLUMNS, _KEY, rows)
+        )
+        for key, expected, ids in scopes:
+            actual = _read_scope(
+                cursor, ids, key[0], key[1], calendar_id, calendar_revision
+            )
+            if len(actual) != len(expected) or any(
+                not _row_matches(a, b) for a, b in zip(expected, actual, strict=True)
             ):
                 raise SectorPulseFollowupPgError(
                     "PULSE_FOLLOWUP_TYPED_READBACK_MISMATCH",
                     "同一PG事务中的后继typed事实读回不匹配",
                 )
-    already_present = bool(already) and all(already)
+    same = bool(already) and all(already)
     return {
         "status": "IDEMPOTENT_ALREADY_PRESENT"
-        if already_present
+        if same
         else "WRITTEN_AND_TYPED_READBACK_VERIFIED",
         "rows_expected": len(rows),
         "rows_inserted": inserted,
-        "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED"
-        if already_present
-        else None,
+        "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED" if same else None,
         "transaction": "SERIALIZABLE_ATOMIC_ALL_BOARDS_AND_DUE_HORIZONS",
-        "database_write_attempted": not already_present,
+        "database_write_attempted": not same,
         "ddl_executed": False,
-        "dml_executed": not already_present,
+        "dml_executed": not same,
     }
 
 
 def _result_payload(row: Mapping[str, Any]) -> dict[str, Any]:
-    numerator = row["equal_weight_return_numerator"]
-    denominator = row["equal_weight_return_denominator"]
-    percent_4dp = None
-    exact = None
-    if numerator is not None and denominator is not None:
-        exact = Fraction(numerator) / Fraction(denominator)
+    numerator, denominator = (
+        row["equal_weight_return_numerator"],
+        row["equal_weight_return_denominator"],
+    )
+    exact = (
+        Fraction(numerator) / Fraction(denominator)
+        if numerator is not None and denominator is not None
+        else None
+    )
+    percent = None
+    if exact is not None:
         with localcontext() as context:
             context.prec = 50
-            percent_4dp = str(
+            percent = str(
                 (Decimal(exact.numerator * 100) / Decimal(exact.denominator)).quantize(
                     Decimal("0.0001"), rounding=ROUND_HALF_UP
                 )
@@ -850,25 +709,21 @@ def _result_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "observed_member_count": int(row["observed_member_count"]),
         "unknown_member_count": int(row["unknown_member_count"]),
         "equal_weight_return": str(exact) if exact is not None else None,
-        "equal_weight_return_percent_4dp": percent_4dp,
+        "equal_weight_return_percent_4dp": percent,
         "reason_codes": list(row["reason_codes"]),
         "research_mode": row["research_mode"],
         "membership_mode": row["membership_mode"],
         "price_coordinate": row["price_coordinate"],
-        "t0_source_time_quality": row["t0_source_time_quality"],
-        "t0_source_clock_role": row["t0_source_clock_role"],
-        "t0_source_available_at": (
-            row["t0_source_available_at"].isoformat()
-            if row["t0_source_available_at"] is not None
-            else None
-        ),
+        "t0_source_time_quality": row["source_time_quality"],
+        "t0_source_clock_role": row["source_clock_role"],
+        "t0_source_available_at": row["source_available_at"].isoformat()
+        if row["source_available_at"] is not None
+        else None,
         "target_source_time_quality": row["target_source_time_quality"],
         "target_source_clock_role": row["target_source_clock_role"],
-        "target_source_available_at": (
-            row["target_source_available_at"].isoformat()
-            if row["target_source_available_at"] is not None
-            else None
-        ),
+        "target_source_available_at": row["target_source_available_at"].isoformat()
+        if row["target_source_available_at"] is not None
+        else None,
     }
 
 
@@ -1141,7 +996,7 @@ def read_source_sector_pulse_followups(
     calendar_identity: Mapping[str, str],
 ) -> dict[str, Any]:
     """批量PG只读已存后继事实，并区分到期、未生产和输入未闭合。"""
-    groups: dict[str, dict[str, Any]] = {
+    groups = {
         kind: {
             "status": "NOT_COMPUTED",
             "reason_codes": [],
@@ -1153,85 +1008,116 @@ def read_source_sector_pulse_followups(
     if pulse_day.get("status") != "AVAILABLE":
         status = pulse_day.get("status", "NOT_COMPUTED")
         reasons = pulse_day.get("reason_codes", ["PULSE_INPUT_NOT_AVAILABLE"])
-        for kind in _KINDS:
-            groups[kind] = {
-                "status": status,
-                "reason_codes": reasons,
-                "facts": {},
-                "comparison": {
+        return {
+            "status": status,
+            "by_kind": {
+                kind: {
                     "status": status,
                     "reason_codes": reasons,
-                    "horizons": [],
-                },
-            }
-        return {"status": status, "by_kind": groups, "database_write_attempted": False}
-
+                    "facts": {},
+                    "comparison": {
+                        "status": status,
+                        "reason_codes": reasons,
+                        "horizons": [],
+                    },
+                }
+                for kind in _KINDS
+            },
+            "database_write_attempted": False,
+        }
     source = pulse_day.get("source_version")
-    t0_session = date.fromisoformat(str(pulse_day.get("target_session")))
-    package_sha256 = _text(source.get("package_sha256"), "T0来源包")
-    namespace_id = _uuid(source.get("namespace_id"), "T0 namespace")
-    capture_id = _uuid(source.get("source_capture_id"), "T0捕获")
-    content_id = _text(source.get("source_content_id"), "T0内容")
-    raw_digest = _text(
-        source.get("source_raw_digest") or source.get("capture_digest"), "T0 Raw摘要"
-    )
-    profile_revision = _text(pulse_day.get("profile_revision"), "T0画像修订")
-    snapshot_ids = {
-        kind: _uuid(
-            pulse_day.get("by_kind", {}).get(kind, {}).get("snapshot_id"),
-            f"{kind}成员快照",
+    if not isinstance(source, Mapping):
+        raise SectorPulseFollowupPgError(
+            "PULSE_FOLLOWUP_SOURCE_BINDING_INVALID", "T0缺少来源捕获上下文"
         )
+    t0_session = date.fromisoformat(str(pulse_day.get("target_session")))
+    package_id, capture_id = (
+        source.get("source_package_id"),
+        source.get("source_capture_id"),
+    )
+    if (
+        type(package_id) is not int
+        or package_id <= 0
+        or type(capture_id) is not int
+        or capture_id <= 0
+    ):
+        raise SectorPulseFollowupPgError(
+            "PULSE_FOLLOWUP_SOURCE_BINDING_INVALID", "T0来源包或捕获ID无效"
+        )
+    profile_revision = _required_text(pulse_day.get("profile_revision"), "T0画像修订")
+    calendar_id = _required_text(calendar_identity.get("calendar_id"), "官方日历")
+    calendar_revision = _required_text(
+        calendar_identity.get("calendar_revision"), "官方日历修订"
+    )
+    snapshot_ids = {
+        kind: pulse_day.get("by_kind", {}).get(kind, {}).get("snapshot_id")
         for kind in _KINDS
     }
-    rows_by_scope: dict[tuple[str, int], list[dict[str, Any]]] = {}
+    if any(type(value) is not int or value <= 0 for value in snapshot_ids.values()):
+        raise SectorPulseFollowupPgError(
+            "PULSE_FOLLOWUP_SNAPSHOT_ID_INVALID", "T0成员快照必须是正BIGINT ID"
+        )
+    saved_by_board: dict[str, dict[int, dict[str, Any]]] = {kind: {} for kind in _KINDS}
     with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
         _connection,
         cursor,
-        connected_namespace,
+        _identity,
     ):
-        if connected_namespace != namespace_id:
-            raise SectorPulseFollowupPgError(
-                "PULSE_FOLLOWUP_NAMESPACE_MISMATCH", "API后继读取namespace与PG不一致"
-            )
         cursor.execute(
-            f"SELECT {', '.join(_COLUMNS)} FROM {_TABLE} WHERE "
-            "namespace_id=%s::uuid AND t0_session=%s AND t0_package_sha256=%s "
-            "AND t0_source_capture_id=%s::uuid AND t0_source_content_id=%s "
-            "AND t0_source_raw_digest=%s AND t0_profile_revision=%s "
-            "AND snapshot_id=ANY(%s::uuid[]) AND followup_contract=%s "
-            "AND calendar_id=%s AND calendar_revision=%s AND calendar_sha256=%s "
-            'ORDER BY board_kind,board_native_id COLLATE "C",horizon_sessions',
+            f"""SELECT f.{", f.".join(_COLUMNS)}, p.pulse_state, p.pulse_reason_codes,
+       p.source_time_quality, p.source_clock_role, p.source_available_at,
+       c.board_kind, c.board_native_id, c.board_name, p.member_count, p.catalog_id
+FROM {_TABLE} f JOIN {_PULSE_TABLE} p ON p.id=f.pulse_fact_id
+JOIN tdx_sector_catalog c ON c.id=p.catalog_id
+WHERE p.source_package_id=%s AND p.source_capture_id=%s AND p.profile_revision=%s
+  AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s::bigint[])
+  AND f.followup_contract=%s AND f.calendar_id=%s AND f.calendar_revision=%s
+ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
             (
-                namespace_id,
-                t0_session,
-                package_sha256,
+                package_id,
                 capture_id,
-                content_id,
-                raw_digest,
                 profile_revision,
+                _PULSE_ALGORITHM,
                 list(snapshot_ids.values()),
                 _FOLLOWUP,
-                calendar_identity["calendar_id"],
-                calendar_identity["calendar_revision"],
-                calendar_identity["calendar_sha256"],
+                calendar_id,
+                calendar_revision,
             ),
         )
         names = [item.name for item in cursor.description]
         saved = [dict(zip(names, row, strict=True)) for row in cursor.fetchall()]
         for row in saved:
-            rows_by_scope.setdefault(
-                (row["board_kind"], int(row["horizon_sessions"])), []
-            ).append(row)
+            bucket = saved_by_board[row["board_kind"]].setdefault(
+                row["board_native_id"], {}
+            )
+            horizon = int(row["horizon_sessions"])
+            if horizon in bucket:
+                raise SectorPulseFollowupPgError(
+                    "PULSE_FOLLOWUP_DUPLICATE_RESULT",
+                    "同一板块期限存在多个已存后继结果",
+                )
+            bucket[horizon] = row
         cursor.execute(
-            "SELECT max(session_date) FROM stock.source_raw_daily "
-            "WHERE namespace_id=%s::uuid AND package_sha256=%s AND session_date<=%s",
-            (namespace_id, package_sha256, research_cutoff),
+            "SELECT max(session_date) FROM source_raw_daily WHERE source_package_id=%s AND session_date<=%s",
+            (package_id, research_cutoff),
         )
         saved_through = cursor.fetchone()[0]
+        target_versions, target_statuses = {}, {}
+        for horizon, target in horizon_targets.items():
+            if target is None or target > research_cutoff:
+                continue
+            status, version = _source_version(
+                cursor, session=target, source_package_id=package_id
+            )
+            target_statuses[horizon] = status
+            if version is not None:
+                target_versions[horizon] = version
         for kind in _KINDS:
             pulse_group = pulse_day.get("by_kind", {}).get(kind, {})
-            expected_count = pulse_group.get("expected_board_count")
-            pulse_facts = pulse_group.get("facts", {})
+            expected_count, pulse_facts = (
+                pulse_group.get("expected_board_count"),
+                pulse_group.get("facts", {}),
+            )
             if (
                 pulse_group.get("status") != "AVAILABLE"
                 or type(expected_count) is not int
@@ -1249,24 +1135,18 @@ def read_source_sector_pulse_followups(
                     },
                 }
                 continue
-            kind_facts = {}
-            kind_statuses = []
-            for board_id, pulse_fact in pulse_facts.items():
+            kind_facts, statuses = {}, []
+            for board_id, pulse in pulse_facts.items():
                 horizons = []
                 for horizon in _HORIZONS:
                     target = horizon_targets.get(horizon)
-                    persisted = [
-                        row
-                        for row in rows_by_scope.get((kind, horizon), ())
-                        if row["board_native_id"] == board_id
-                    ]
-                    scope_rows = rows_by_scope.get((kind, horizon), ())
+                    row = saved_by_board[kind].get(board_id, {}).get(horizon)
                     if target is None:
                         item = {
                             "status": "INCOMPLETE",
                             "horizon_sessions": horizon,
                             "target_session": None,
-                            "fixed_member_denominator": pulse_fact.get("member_count"),
+                            "fixed_member_denominator": pulse.get("member_count"),
                             "observed_member_count": None,
                             "unknown_member_count": None,
                             "reason_codes": ["OFFICIAL_CALENDAR_WINDOW_UNAVAILABLE"],
@@ -1276,65 +1156,42 @@ def read_source_sector_pulse_followups(
                             "status": "NOT_DUE",
                             "horizon_sessions": horizon,
                             "target_session": target.isoformat(),
-                            "fixed_member_denominator": int(pulse_fact["member_count"]),
+                            "fixed_member_denominator": int(pulse["member_count"]),
                             "observed_member_count": None,
                             "unknown_member_count": None,
                             "reason_codes": ["FOLLOWUP_HORIZON_BEYOND_RESEARCH_CUTOFF"],
                         }
-                    elif persisted:
-                        row = persisted[0]
-                        if row["target_session"] != target:
+                    elif row is not None:
+                        version = target_versions.get(horizon)
+                        if (
+                            row["target_session"] != target
+                            or row["target_source_capture_id"]
+                            != (version or {}).get("source_capture_id")
+                            or row["pulse_state"] != pulse.get("state")
+                            or row["fixed_member_denominator"]
+                            != pulse.get("member_count")
+                            or row["catalog_id"] != pulse.get("catalog_id")
+                        ):
                             item = {
                                 "status": "INCOMPLETE",
                                 "horizon_sessions": horizon,
                                 "target_session": target.isoformat(),
-                                "fixed_member_denominator": int(
-                                    pulse_fact["member_count"]
-                                ),
+                                "fixed_member_denominator": int(pulse["member_count"]),
                                 "observed_member_count": None,
                                 "unknown_member_count": None,
-                                "reason_codes": ["FOLLOWUP_TARGET_SESSION_MISMATCH"],
-                            }
-                        elif row["pulse_state"] != pulse_fact.get("state"):
-                            item = {
-                                "status": "INCOMPLETE",
-                                "horizon_sessions": horizon,
-                                "target_session": target.isoformat(),
-                                "fixed_member_denominator": int(
-                                    pulse_fact["member_count"]
-                                ),
-                                "observed_member_count": None,
-                                "unknown_member_count": None,
-                                "reason_codes": ["FOLLOWUP_PULSE_STATE_MISMATCH"],
+                                "reason_codes": ["FOLLOWUP_SOURCE_OR_PARENT_MISMATCH"],
                             }
                         else:
                             item = _result_payload(row)
-                    elif len(scope_rows) > 0:
-                        item = {
-                            "status": "INCOMPLETE",
-                            "horizon_sessions": horizon,
-                            "target_session": target.isoformat(),
-                            "fixed_member_denominator": int(pulse_fact["member_count"]),
-                            "observed_member_count": None,
-                            "unknown_member_count": None,
-                            "reason_codes": ["FOLLOWUP_BOARD_PARTITION_INCOMPLETE"],
-                        }
                     else:
-                        try:
-                            version_status, _actual, _expected = (
-                                source_raw._page_version_status(
-                                    cursor, namespace_id, target, package_sha256
-                                )
-                            )
-                        except source_raw.RawSourcePgError:
-                            version_status = "INCOMPLETE"
+                        version_status = target_statuses.get(horizon, "INCOMPLETE")
                         item = {
                             "status": "NOT_COMPUTED"
                             if version_status == "CLOSED"
                             else "INCOMPLETE",
                             "horizon_sessions": horizon,
                             "target_session": target.isoformat(),
-                            "fixed_member_denominator": int(pulse_fact["member_count"]),
+                            "fixed_member_denominator": int(pulse["member_count"]),
                             "observed_member_count": None,
                             "unknown_member_count": None,
                             "reason_codes": [
@@ -1343,30 +1200,27 @@ def read_source_sector_pulse_followups(
                                 else "FOLLOWUP_RAW_SESSION_PARTITION_NOT_CLOSED"
                             ],
                         }
-                    item.setdefault("pulse_state", pulse_fact.get("state"))
+                    item.setdefault("pulse_state", pulse.get("state"))
                     item.setdefault("research_mode", "NON_PIT_RETROSPECTIVE")
                     item.setdefault(
                         "membership_mode", "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
                     )
                     item.setdefault("price_coordinate", "RAW_UNADJUSTED")
                     horizons.append(item)
-                    kind_statuses.append(item["status"])
+                    statuses.append(item["status"])
                 kind_facts[board_id] = {
-                    "pulse_state": pulse_fact.get("state"),
+                    "pulse_state": pulse.get("state"),
                     "snapshot_id": snapshot_ids[kind],
                     "horizons": horizons,
                 }
             group_status = (
                 "INCOMPLETE"
-                if "INCOMPLETE" in kind_statuses
+                if "INCOMPLETE" in statuses
                 else "NOT_COMPUTED"
-                if "NOT_COMPUTED" in kind_statuses
+                if "NOT_COMPUTED" in statuses
                 else "NOT_DUE"
-                if "NOT_DUE" in kind_statuses
+                if "NOT_DUE" in statuses
                 else "AVAILABLE"
-            )
-            comparison = _followup_cohort_comparison(
-                kind_facts, expected_count=expected_count
             )
             groups[kind] = {
                 "status": group_status,
@@ -1374,7 +1228,9 @@ def read_source_sector_pulse_followups(
                 "expected_board_count": expected_count,
                 "read_board_count": len(kind_facts),
                 "facts": kind_facts,
-                "comparison": comparison,
+                "comparison": _followup_cohort_comparison(
+                    kind_facts, expected_count=expected_count
+                ),
             }
     statuses = [groups[kind]["status"] for kind in _KINDS]
     overall = (
@@ -1389,15 +1245,12 @@ def read_source_sector_pulse_followups(
     return {
         "status": overall,
         "by_kind": groups,
-        "database_write_attempted": False,
-        "cross_session_recalculated": False,
         "saved_through": saved_through.isoformat() if saved_through else None,
+        "database_write_attempted": False,
+        "ddl_executed": False,
+        "dml_executed": False,
+        "read_only_transaction": "REPEATABLE READ READ ONLY",
+        "profile_revision": profile_revision,
+        "source_package_id": package_id,
+        "source_capture_id": capture_id,
     }
-
-
-__all__ = [
-    "SectorPulseFollowupPgError",
-    "persist_source_sector_pulse_followups",
-    "read_source_sector_pulse_followup_inputs",
-    "read_source_sector_pulse_followups",
-]

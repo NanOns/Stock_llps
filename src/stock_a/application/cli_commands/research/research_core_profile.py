@@ -218,8 +218,6 @@ def _run_full_source_core_profile(
             "source_bar_status": row.status,
             "source_reason": row.reason,
             "target_session": target.isoformat(),
-            "package_sha256": package.sha256,
-            "entry_sha256": row.entry_sha256,
         }
         if result is None:
             sample["consumer_status"] = unavailable_status
@@ -426,7 +424,6 @@ def _run_full_source_core_profile(
             "evaluated_listing_universe": "UNKNOWN",
         },
         "source_identity_and_clock": {
-            "package_sha256": package.sha256,
             "published_at": "UNKNOWN",
             "first_available_at": "UNKNOWN",
             "observed_at_role": "LOCAL_REVALIDATED_ZIP_ENTRY_READ_NON_PIT",
@@ -501,7 +498,6 @@ def _run_full_source_core_profile(
         },
         "source_package": {
             "package_id": scan_report.package_id,
-            "sha256": scan_report.package_sha256,
             "file_size": package.file_size,
             "zip_crc": package.zip_crc,
             "zip_entry_count": package.zip_entry_count,
@@ -512,7 +508,7 @@ def _run_full_source_core_profile(
             "membership_and_listing_status": "UNKNOWN_NOT_OFFICIALLY_BOUND",
         },
         "performance": {
-            "zip_sha_crc_validation_seconds": None,
+            "package_integrity_validation_seconds": None,
             "candidate_pool_metadata_seconds": None,
             "full_source_scan_seconds": round(scan_wall, 6),
             "entry_read_seconds": scan_report.entry_read_elapsed_seconds,

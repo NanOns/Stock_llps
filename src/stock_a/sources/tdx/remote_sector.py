@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-import hashlib
 import io
 import ipaddress
 from pathlib import Path
@@ -111,7 +110,6 @@ class RemoteSectorFiles:
     files: Mapping[str, SourceFileEvidence]
     methods: Mapping[str, str]
     archive_size_bytes: int | None
-    archive_sha256: str | None
     archive_raw: bytes | None
     archive_member_crc32: str | None
     missing_files: tuple[str, ...]
@@ -136,7 +134,6 @@ class _CandidateDownload:
     files: Mapping[str, SourceFileEvidence]
     methods: Mapping[str, str]
     archive_size_bytes: int | None
-    archive_sha256: str | None
     archive_raw: bytes | None
     archive_member_crc32: str | None
     missing_files: tuple[str, ...]
@@ -864,18 +861,17 @@ def _file_evidence(
     relative_path: str,
     raw: bytes,
     method: str,
-    archive_sha256: str | None = None,
+    archive_size_bytes: int | None = None,
 ) -> SourceFileEvidence:
     return SourceFileEvidence(
         relative_path=relative_path,
         absolute_path="",
         raw=raw,
-        sha256=hashlib.sha256(raw).hexdigest(),
         size_bytes=len(raw),
-        last_write_time_utc="NOT_PROVIDED_BY_TDX_REMOTE_SOURCE",
+        last_write_time_utc=None,
         source_label=f"TDX_REMOTE_SERVER/{host}:{REMOTE_SECTOR_PORT}/{file_name}",
         source_protocol=method,
-        source_archive_sha256=archive_sha256,
+        source_archive_size_bytes=archive_size_bytes,
     )
 
 
@@ -925,7 +921,6 @@ def _download_candidate(
     files: dict[str, SourceFileEvidence] = {}
     methods: dict[str, str] = {}
     archive_size_bytes: int | None = None
-    archive_sha256: str | None = None
     archive_raw: bytes | None = None
     archive_member_crc32: str | None = None
     source_failures: list[dict[str, str]] = []
@@ -949,7 +944,6 @@ def _download_candidate(
         if archive is not None:
             archive_raw = archive
             archive_size_bytes = len(archive)
-            archive_sha256 = hashlib.sha256(archive).hexdigest()
             try:
                 tdxzs, archive_member_crc32 = _extract_tdxzs(archive)
             except TdxRemoteSectorError as error:
@@ -961,7 +955,7 @@ def _download_candidate(
                     relative_path=_TDXZS_PATH,
                     raw=tdxzs,
                     method="GET_REPORT_FILE_0X06B9_ZHB_ZIP_MEMBER",
-                    archive_sha256=archive_sha256,
+                    archive_size_bytes=archive_size_bytes,
                 )
                 methods["zhb.zip"] = "GET_REPORT_FILE_0X06B9"
                 methods["tdxzs.cfg"] = "GET_REPORT_FILE_0X06B9_ZHB_ZIP_MEMBER"
@@ -998,7 +992,6 @@ def _download_candidate(
         files=files,
         methods=methods,
         archive_size_bytes=archive_size_bytes,
-        archive_sha256=archive_sha256,
         archive_raw=archive_raw,
         archive_member_crc32=archive_member_crc32,
         missing_files=tuple(missing),
@@ -1113,10 +1106,10 @@ def fetch_remote_sector_files(
             "source_failures": list(candidate.source_failures),
             "parse_rejections": list(parse_outcome.rejected_sources),
             "source_quality": quality_fields,
-            "verified_file_sha256": {
-                name: item.sha256 for name, item in sorted(candidate.files.items())
+            "verified_file_sizes": {
+                name: item.size_bytes for name, item in sorted(candidate.files.items())
             },
-            "archive_sha256": candidate.archive_sha256,
+            "archive_size_bytes": candidate.archive_size_bytes,
         }
         if status == "REJECTED":
             if parse_outcome.rejected_sources:
@@ -1159,7 +1152,6 @@ def fetch_remote_sector_files(
         files=selected.files,
         methods=selected.methods,
         archive_size_bytes=selected.archive_size_bytes,
-        archive_sha256=selected.archive_sha256,
         archive_raw=selected.archive_raw,
         archive_member_crc32=selected.archive_member_crc32,
         missing_files=selected.missing_files,
@@ -1257,7 +1249,6 @@ def validate_remote_sector_files(remote: RemoteSectorFiles) -> None:
             != f"{prefix}{name if name != 'tdxzs.cfg' else 'zhb.zip!tdxzs.cfg'}"
             or evidence.size_bytes != len(evidence.raw)
             or evidence.size_bytes > MAX_REMOTE_BLOCK_FILE_BYTES
-            or evidence.sha256 != hashlib.sha256(evidence.raw).hexdigest()
             or remote.methods.get(name) != evidence.source_protocol
             or evidence.source_protocol not in allowed_methods.get(name, set())
         ):
@@ -1271,7 +1262,6 @@ def validate_remote_sector_files(remote: RemoteSectorFiles) -> None:
                 value is not None
                 for value in (
                     remote.archive_size_bytes,
-                    remote.archive_sha256,
                     remote.archive_member_crc32,
                 )
             )
@@ -1281,17 +1271,16 @@ def validate_remote_sector_files(remote: RemoteSectorFiles) -> None:
                 "REMOTE_ARCHIVE_EVIDENCE_INVALID", "zhb.zip归档证据缺少完整原始字节"
             )
     else:
-        actual_archive_sha = hashlib.sha256(remote.archive_raw).hexdigest()
         if (
             len(remote.archive_raw) > MAX_REMOTE_ZHB_BYTES
             or remote.archive_size_bytes != len(remote.archive_raw)
-            or remote.archive_sha256 != actual_archive_sha
             or "tdxzs.cfg" not in remote.files
-            or remote.files["tdxzs.cfg"].source_archive_sha256 != actual_archive_sha
+            or remote.files["tdxzs.cfg"].source_archive_size_bytes
+            != remote.archive_size_bytes
         ):
             raise TdxRemoteSectorError(
                 "REMOTE_ARCHIVE_EVIDENCE_INVALID",
-                "zhb.zip大小、SHA或tdxzs.cfg来源不匹配",
+                "zhb.zip大小或tdxzs.cfg原件不匹配",
             )
         extracted, crc = _extract_tdxzs(remote.archive_raw)
         directory = remote.files["tdxzs.cfg"]
@@ -1305,13 +1294,15 @@ def validate_remote_sector_files(remote: RemoteSectorFiles) -> None:
                 "zhb.zip完整字节与tdxzs.cfg原件不匹配",
             )
 
-    verified_files = {name: item.sha256 for name, item in sorted(remote.files.items())}
+    verified_files = {
+        name: item.size_bytes for name, item in sorted(remote.files.items())
+    }
     expected_method_keys = set(remote.files)
     if remote.archive_raw is not None:
         expected_method_keys.add("zhb.zip")
     if (
-        selected_attempt.get("verified_file_sha256") != verified_files
-        or selected_attempt.get("archive_sha256") != remote.archive_sha256
+        selected_attempt.get("verified_file_sizes") != verified_files
+        or selected_attempt.get("archive_size_bytes") != remote.archive_size_bytes
         or set(remote.methods) != expected_method_keys
         or remote.archive_raw is not None
         and remote.methods.get("zhb.zip") != "GET_REPORT_FILE_0X06B9"
@@ -1321,7 +1312,7 @@ def validate_remote_sector_files(remote: RemoteSectorFiles) -> None:
     ):
         raise TdxRemoteSectorError(
             "REMOTE_CANDIDATE_CONTENT_IDENTITY_INVALID",
-            "候选通过记录与本次远端文件SHA不一致",
+            "候选通过记录与本次远端文件大小或来源不一致",
         )
     parse_outcome = _parse_candidate_files(remote.host, remote.files)
     parsed_kinds = {

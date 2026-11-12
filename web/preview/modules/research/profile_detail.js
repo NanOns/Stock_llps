@@ -17,16 +17,14 @@ function showProfileDetail(item) {
   meta.className = "profile-detail-meta";
   const details = [
     ["来源范围", item.calculation_scope],
-    ["命名空间", item.namespace_id],
     ["研究资格", `${item.identity_status} · ${item.pit_status}`],
     [
       "来源版本定位键",
-      `${item.target_session} · ${item.package_sha256} · ${item.profile_revision}`,
+      `${item.target_session} · ${item.source_package_id} · ${item.profile_revision}`,
     ],
-    ["来源包SHA-256", item.package_sha256],
     [
-      "画像修订 / 合同SHA",
-      `${item.profile_revision} · ${item.producer_contract_sha256}`,
+      "来源包ID / 画像修订",
+      `${item.source_package_id} · ${item.profile_revision}`,
     ],
     [
       "窗口与日历",
@@ -48,7 +46,6 @@ function showProfileDetail(item) {
       "价格窗口状态",
       `${item.price_window_status} · ${item.price_window_reason || "无"}`,
     ],
-    ["窗口输入摘要SHA-256", item.history_window_sha256],
     [
       "量额单位资格",
       `成交额 ${item.amount_unit_status} · 成交量 ${item.volume_unit_status}`,
@@ -149,16 +146,16 @@ function showProfileDetail(item) {
 }
 async function openProfileTimeline(item) {
   const root = $("profileDetail");
-  const value = `${item.target_session}|${item.package_sha256}`;
+  const value = `${item.target_session}|${item.source_package_id}`;
   const version = state.versions.find(
     (candidate) =>
       candidate.session_date === item.target_session &&
-      candidate.package_sha256 === item.package_sha256,
+      candidate.source_package_id === item.source_package_id,
   );
   const option = Array.from($("versionSelect").options).find(
     (candidate) => candidate.value === value,
   );
-  if (!version || !option || !item.namespace_id) {
+  if (!version || !option) {
     appendText(
       root,
       "p",
@@ -182,12 +179,10 @@ async function openProfileTimeline(item) {
   }
   const persistedProfileSnapshot = {
     target_session: item.target_session,
-    namespace_id: item.namespace_id,
-    package_sha256: item.package_sha256,
+    source_package_id: item.source_package_id,
     profile_revision: item.profile_revision,
   };
   await queryTimeline({
-    namespace_id: item.namespace_id,
     origin: "profile",
     persistedProfileSnapshot,
   });

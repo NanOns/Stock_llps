@@ -9,7 +9,6 @@ from fractions import Fraction
 import re
 import time
 from typing import Any, Mapping
-from uuid import UUID
 
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.sessions import _load_calendar
@@ -175,10 +174,9 @@ def finalize_prior_shape_observation(item):
     attach_continuation_observation(item)
 
 
-def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
+def read_source_shape_cohort(config, day, *, research_cutoff, source_package_id):
     """对完整T0来源池复用回踩、续强诊断；历史RPS按会话共享。"""
     target = day["session"]
-    namespace = day["namespace_id"]
     source = day["scenarios"]["RECOVERY_TURN"]["source_version"]
     expected = set(day["states"])
     calendar = _official_calendar(target)
@@ -198,8 +196,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
                 config,
                 target_session=target,
                 research_cutoff=research_cutoff,
-                package_sha256=package_sha256,
-                expected_namespace_id=namespace,
+                source_package_id=source_package_id,
             )
         except RawSourcePgError as error:
             if error.code != "PG_SOURCE_NO_MATCH":
@@ -222,7 +219,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
         page = read_raw_daily_history_page(
             config,
             target_session=target,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             sessions=sessions,
             offset=offset,
             limit=100,
@@ -231,8 +228,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
             include_parser_contract=True,
         )
         if (
-            page["namespace_id"] != namespace
-            or page["total_count"] != len(expected)
+            page["total_count"] != len(expected)
             or page["version_status"] != "CLOSED"
             or not page["partition_closed"]
         ):
@@ -249,7 +245,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
                 or symbol in output
                 or birth is None
                 or birth.get("source_capture_id") != source["source_capture_id"]
-                or birth.get("source_content_id") != source["source_content_id"]
+                or birth.get("source_package_id") != source["source_package_id"]
                 or birth.get("parser_contract") != source["parser_contract"]
             ):
                 raise SourceD0RawError(
@@ -259,10 +255,8 @@ def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
                 "sessions": sessions,
                 "rows": rows,
                 "symbol": symbol,
-                "package": package_sha256,
-                "namespace": namespace,
-                "content": source["source_content_id"],
-                "parser": source["parser_contract"],
+                "source_package_id": source["source_package_id"],
+                "parser_contract": source["parser_contract"],
             }
             shape = observe_prior_shapes(**args)
             needed = [
@@ -278,8 +272,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
                         config,
                         target_session=prior,
                         research_cutoff=research_cutoff,
-                        package_sha256=package_sha256,
-                        expected_namespace_id=namespace,
+                        source_package_id=source_package_id,
                     )["facts"]
                 except RawSourcePgError as error:
                     if error.code != "PG_SOURCE_NO_MATCH":
@@ -302,9 +295,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
                 official_sessions=short_sessions,
                 history_rows_by_session=by_date,
                 source_symbol=symbol,
-                package_sha256=package_sha256,
-                namespace_id=namespace,
-                source_content_id=source["source_content_id"],
+                source_package_id=source["source_package_id"],
                 target_capture_id=source["source_capture_id"],
                 parser_contract=source["parser_contract"],
                 rps5_delta3=rps.get("rps5_delta3_pp"),
@@ -316,8 +307,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
                 rows={session: by_date.get(session) for session in short_sessions},
                 sessions=short_sessions,
                 calendar=calendar,
-                namespace_id=namespace,
-                source_content_id=source["source_content_id"],
+                source_package_id=source["source_package_id"],
                 target_capture_id=source["source_capture_id"],
                 parser_contract=source["parser_contract"],
             )
@@ -456,11 +446,11 @@ def read_source_shape_cohort(config, day, *, research_cutoff, package_sha256):
     }
 
 
-def diagnostic_admission(result, *, target, package_sha256):
+def diagnostic_admission(result, *, target, source_package_id):
     """应用来源诊断角色，不生成正式事件。"""
     item = result["results"][0]
     symbol = item["source_symbol"]
-    source = f"{result['namespace_id']}:{package_sha256}"
+    source = f"source_package:{source_package_id}"
     missing = unknown("FORMAL_EPISODE_NOT_ESTABLISHED")
     raw = (
         FieldValue(item["scenario_raw"] == "TRUE")
@@ -497,29 +487,26 @@ def diagnostic_admission(result, *, target, package_sha256):
 
 
 def attach_stock_risk_readiness(
-    config, result, *, target, cutoff, package_sha256, rps_read=None
+    config, result, *, target, cutoff, source_package_id, rps_read=None
 ):
     """将同股同日PG历史事实交给现役风险归并，保留正式结构未知。"""
     item = result["results"][0]
     symbol = item["source_symbol"]
-    namespace = result["namespace_id"]
     _, sessions, _ = resolve_pg_history_window(target.isoformat(), 75)
     history = read_raw_daily_history_stock(
         config,
         source_symbol=symbol,
         target_session=target,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         sessions=sessions,
-        expected_namespace_id=namespace,
         research_cutoff=cutoff,
     )
     preview = research_stock_pg_history_preview(
         symbol=symbol,
         target_session=target.isoformat(),
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         session_dates=sessions,
         history_rows=history["history_rows"],
-        namespace_id=namespace,
         profile_contract=load_price_profile_contract(_CONFIG_ROOT).document,
     )
     damage_data = preview["core"]["fields"]["core.price_damage"]
@@ -537,7 +524,7 @@ def attach_stock_risk_readiness(
     damage, extension = field(damage_data), field(extension_data)
     missing = unknown("FORMAL_EPISODE_NOT_ESTABLISHED")
     coordinate = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
-    source = f"{namespace}:{package_sha256}"
+    source = f"source_package:{source_package_id}"
     fact = lambda value: Fact(value, symbol, target, coordinate, source)
     risk = compose(
         entity_id=symbol,
@@ -557,14 +544,12 @@ def attach_stock_risk_readiness(
             config,
             target_session=target,
             research_cutoff=cutoff,
-            package_sha256=package_sha256,
-            expected_namespace_id=namespace,
+            source_package_id=source_package_id,
         )
     if (
-        rps_read["namespace_id"] != namespace
-        or rps_read["target_session"] != target
+        rps_read["target_session"] != target
         or rps_read["research_cutoff"] != cutoff
-        or rps_read["package_sha256"] != package_sha256
+        or rps_read["source_package_id"] != source_package_id
     ):
         raise ValueError("风险输入RPS与目标来源身份不一致")
     metric_field = rps_read["facts"].get(symbol, {}).get("rps5_delta3_pp") or unknown(
@@ -573,12 +558,11 @@ def attach_stock_risk_readiness(
     prior = research_stock_pg_history_preview(
         symbol=symbol,
         target_session=sessions[-2].isoformat(),
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         session_dates=sessions[:-1],
         history_rows=[
             row for row in history["history_rows"] if row["session_date"] < target
         ],
-        namespace_id=namespace,
         profile_contract=load_price_profile_contract(_CONFIG_ROOT).document,
         include_profile_preview=False,
         allow_missing_target_row=True,
@@ -612,7 +596,7 @@ def attach_stock_risk_readiness(
         "profile_extension": extension_data,
         "structure_applicability": "UNKNOWN",
         "diagnostic_admission": diagnostic_admission(
-            result, target=target, package_sha256=package_sha256
+            result, target=target, source_package_id=source_package_id
         ),
         "risk": asdict(risk),
         "health_input_rps5_delta3_pp": fraction_payload(Fraction(metric_field.value))
@@ -714,9 +698,7 @@ def attach_source_d1_prior_reference(
         if source_prior.get("price_coordinate") != "RAW_UNADJUSTED":
             source_prior_identity_reasons.append("SOURCE_PRICE_COORDINATE_NOT_RAW")
         for identity_field in (
-            "namespace_id",
-            "package_sha256",
-            "source_content_id",
+            "source_package_id",
             "parser_contract",
         ):
             if source_prior.get(identity_field) is None:
@@ -772,9 +754,7 @@ def attach_source_d1_prior_reference(
                 if row.get("session") != expected_session:
                     quality_reasons.add(f"{label}_SOURCE_SESSION_MISMATCH")
                 for identity_field in (
-                    "namespace_id",
-                    "package_sha256",
-                    "source_content_id",
+                    "source_package_id",
                     "parser_contract",
                 ):
                     expected_value = source_prior.get(identity_field)
@@ -871,8 +851,7 @@ def attach_recovery_failure_followup(
     target: date,
     followup: date,
     cutoff: date,
-    package_sha256: str,
-    namespace_id: str,
+    source_package_id: int,
 ) -> None:
     """只观察诊断线出生后有界官方会话，不生成D2状态。"""
     if type(followup) is not date or not target < followup <= cutoff:
@@ -902,9 +881,8 @@ def attach_recovery_failure_followup(
             config,
             source_symbol=item["source_symbol"],
             target_session=target,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             sessions=sessions,
-            expected_namespace_id=namespace_id,
             starts_at_target=True,
             research_cutoff=cutoff,
         )
@@ -932,10 +910,8 @@ def attach_recovery_failure_followup(
             )
         elif (
             birth is None
-            or not birth.get("source_entry_sha256")
-            or not row.get("source_entry_sha256")
-            or row.get("source_entry_sha256") != birth.get("source_entry_sha256")
-            or row.get("source_content_id") != birth.get("source_content_id")
+            or row.get("source_package_id") != birth.get("source_package_id")
+            or row.get("parser_contract") != birth.get("parser_contract")
             or row.get("price_coordinate") != "RAW_UNADJUSTED"
         ):
             reason = "FOLLOWUP_COORDINATE_OR_SOURCE_MISMATCH"
@@ -1040,10 +1016,8 @@ def attach_recovery_failure_followup(
                 row is not None
                 and birth is not None
                 and (
-                    row.get("source_entry_sha256")
-                    and row.get("source_entry_sha256")
-                    == birth.get("source_entry_sha256")
-                    and row.get("source_content_id") == birth.get("source_content_id")
+                    row.get("source_package_id") == birth.get("source_package_id")
+                    and row.get("parser_contract") == birth.get("parser_contract")
                     and row.get("price_coordinate") == "RAW_UNADJUSTED"
                 )
             ):
@@ -1063,7 +1037,7 @@ def attach_recovery_failure_followup(
 
 
 def attach_shape_state_followup(
-    config, result, *, target, followup, cutoff, package_sha256
+    config, result, *, target, followup, cutoff, source_package_id
 ):
     """追踪T0已选诊断父；各后继会话形态与峰为滚动重算。"""
     item = result["results"][0]
@@ -1083,10 +1057,9 @@ def attach_shape_state_followup(
                 scenario="RECOVERY_TURN",
                 target_session=session,
                 research_cutoff=cutoff,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 symbol=item["source_symbol"],
                 limit=1,
-                expected_namespace_id=result["namespace_id"],
                 _include_shape_observation=True,
             )
         except SourceD0RawError as error:
@@ -1103,8 +1076,8 @@ def attach_shape_state_followup(
             continue
         if (
             len(later["results"]) != 1
-            or later["source_version"]["source_content_id"]
-            != result["source_version"]["source_content_id"]
+            or later["source_version"]["source_package_id"]
+            != result["source_version"]["source_package_id"]
         ):
             observations.append(
                 {
@@ -1121,15 +1094,14 @@ def attach_shape_state_followup(
             scenario="LAUNCH_CONFIRM",
             target_session=session,
             research_cutoff=cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             symbol=item["source_symbol"],
             limit=1,
-            expected_namespace_id=result["namespace_id"],
         )
         if (
             len(later_launch["results"]) != 1
-            or later_launch["source_version"]["source_content_id"]
-            != result["source_version"]["source_content_id"]
+            or later_launch["source_version"]["source_package_id"]
+            != result["source_version"]["source_package_id"]
         ):
             source_states = {"LAUNCH_CONFIRM": "UNKNOWN", "RECOVERY_TURN": "UNKNOWN"}
         else:
@@ -1299,9 +1271,8 @@ def _target_row_payload(row: Mapping[str, Any]) -> dict[str, Any]:
         "amount_unit_status": row.get("amount_unit_status"),
         "raw_volume_quality": row.get("raw_volume_quality"),
         "volume_unit_status": row.get("volume_unit_status"),
-        "source_capture_id": str(row.get("source_capture_id")),
-        "source_content_id": row.get("source_content_id"),
-        "source_entry_sha256": row.get("source_entry_sha256"),
+        "source_capture_id": int(row.get("source_capture_id")),
+        "source_package_id": row.get("source_package_id"),
         "source_clock_role": row.get("source_clock_role"),
         "source_available_at": _iso(row.get("source_available_at")),
         "observed_started_at": _iso(row.get("observed_started_at")),
@@ -1322,8 +1293,7 @@ def _attach_continuation_core(
     rows,
     sessions,
     calendar,
-    namespace_id,
-    source_content_id,
+    source_package_id,
     target_capture_id,
     parser_contract,
 ):
@@ -1334,16 +1304,10 @@ def _attach_continuation_core(
         for day, row in rows.items()
         if isinstance(day, date) and row is not None
     }
-    hashes = {
-        row.get("source_entry_sha256")
-        for row in present.values()
-        if row.get("source_entry_sha256")
-    }
-    inconsistent = len(hashes) > 1 or any(
+    inconsistent = any(
         row.get("parser_contract") != parser_contract
         or row.get("source_symbol") != symbol
-        or row.get("namespace_id") != namespace_id
-        or row.get("source_content_id") != source_content_id
+        or row.get("source_package_id") != source_package_id
         or row.get("reference_quality") is False
         for row in present.values()
     )
@@ -1442,34 +1406,11 @@ def _classify_transition(before_state: str | None, after_state: str | None) -> s
     return f"{before_state}_TO_{after_state}"
 
 
-def _canonical_expected_namespace(value: str | None) -> str | None:
-    if value is None:
-        return None
-    try:
-        canonical = str(UUID(value))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise SourceD0RawError(
-            "D0_NAMESPACE_ID_INVALID",
-            "expected_namespace_id必须是规范小写UUID。",
-            category="ARGUMENT",
-        ) from error
-    if canonical != value:
-        raise SourceD0RawError(
-            "D0_NAMESPACE_ID_INVALID",
-            "expected_namespace_id必须是规范小写UUID。",
-            category="ARGUMENT",
-        )
-    return canonical
-
-
 def _official_calendar(target: date) -> dict[str, Any]:
-    payload, metadata, revision_chain, sessions = _load_calendar(target)
-    year_metadata = next(item for item in metadata if item["year"] == target.year)
+    payload, _metadata, _revision_chain, sessions = _load_calendar(target)
     return {
         "calendar_id": payload["calendar_id"],
         "calendar_revision": payload["revision"],
-        "calendar_revision_chain": revision_chain,
-        "calendar_sha256": year_metadata["resource_sha256"],
         "sessions": sessions,
     }
 
@@ -1480,16 +1421,15 @@ def query_source_d0_raw_launch(
     scenario: str,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     state: str | None = None,
     symbol: str | None = None,
     offset: int = 0,
     limit: int = 30,
     action: str = "current",
     before_session: date | None = None,
-    before_package_sha256: str | None = None,
+    before_source_package_id: int | None = None,
     transition: str | None = None,
-    expected_namespace_id: str | None = None,
     _history_symbol: str | None = None,
     _include_shape_observation: bool = False,
     _single_symbol_only: bool = False,
@@ -1497,7 +1437,6 @@ def query_source_d0_raw_launch(
     _rps_result_error: str | None = None,
 ) -> dict[str, Any]:
     """读取启动或恢复原始状态，或联结启动相邻官方会话的三态变化。"""
-    expected_namespace_id = _canonical_expected_namespace(expected_namespace_id)
     if _history_symbol is not None and (
         action != "current"
         or not isinstance(_history_symbol, str)
@@ -1517,16 +1456,15 @@ def query_source_d0_raw_launch(
             config,
             scenario=scenario,
             before_session=before_session,
-            before_package_sha256=before_package_sha256,
+            before_source_package_id=before_source_package_id,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             state=state,
             symbol=symbol,
             offset=offset,
             limit=limit,
             transition=transition,
-            expected_namespace_id=expected_namespace_id,
             single_symbol_only=_single_symbol_only,
         )
     if action != "current":
@@ -1539,7 +1477,7 @@ def query_source_d0_raw_launch(
         value is not None
         for value in (
             before_session,
-            before_package_sha256,
+            before_source_package_id,
             transition,
         )
     ):
@@ -1604,7 +1542,6 @@ def query_source_d0_raw_launch(
     calendar_identity = {
         "calendar_id": calendar["calendar_id"],
         "calendar_revision": calendar["calendar_revision"],
-        "calendar_sha256": calendar["calendar_sha256"],
     }
 
     process_started = time.perf_counter()
@@ -1618,10 +1555,9 @@ def query_source_d0_raw_launch(
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             sessions=sessions,
             expected_calendar=calendar_identity,
-            expected_namespace_id=expected_namespace_id,
             history_source_symbol=symbol if _single_symbol_only else None,
         )
     except D0RawPgError as error:
@@ -1643,15 +1579,13 @@ def query_source_d0_raw_launch(
                         config,
                         target_session=target_session,
                         research_cutoff=research_cutoff,
-                        package_sha256=package_sha256,
-                        expected_namespace_id=pg_result["namespace_id"],
+                        source_package_id=source_package_id,
                     )
                 )
                 if (
                     rps.get("target_session") != target_session
                     or rps.get("research_cutoff") != research_cutoff
-                    or rps.get("namespace_id") != pg_result["namespace_id"]
-                    or rps.get("package_sha256") != package_sha256
+                    or rps.get("source_package_id") != source_package_id
                 ):
                     rps_input_error = "D0_RPS_SOURCE_IDENTITY_MISMATCH"
                 elif set(rps["facts"]) != set(pg_result["source_symbols"]):
@@ -1679,9 +1613,7 @@ def query_source_d0_raw_launch(
             official_sessions=sessions,
             history_rows_by_session=pg_result["history_rows_by_symbol"][source_symbol],
             source_symbol=source_symbol,
-            package_sha256=package_sha256,
-            namespace_id=pg_result["namespace_id"],
-            source_content_id=source_version["source_content_id"],
+            source_package_id=source_package_id,
             target_capture_id=source_version["source_capture_id"],
             parser_contract=source_version["parser_contract"],
         )
@@ -1731,8 +1663,7 @@ def query_source_d0_raw_launch(
                 rows=pg_result["history_rows_by_symbol"][item["source_symbol"]],
                 sessions=sessions,
                 calendar=calendar,
-                namespace_id=pg_result["namespace_id"],
-                source_content_id=source_version["source_content_id"],
+                source_package_id=source_version["source_package_id"],
                 target_capture_id=source_version["source_capture_id"],
                 parser_contract=source_version["parser_contract"],
             )
@@ -1745,9 +1676,8 @@ def query_source_d0_raw_launch(
                     config,
                     source_symbol=item["source_symbol"],
                     target_session=target_session,
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     sessions=extended_sessions,
-                    expected_namespace_id=pg_result["namespace_id"],
                     include_parser_contract=True,
                 )
                 source_d1_prior_history_read_seconds += (
@@ -1766,8 +1696,8 @@ def query_source_d0_raw_launch(
                     history_target is None
                     or history_target.get("source_capture_id")
                     != source_version["source_capture_id"]
-                    or history_target.get("source_content_id")
-                    != source_version["source_content_id"]
+                    or history_target.get("source_package_id")
+                    != source_version["source_package_id"]
                     or history_target.get("parser_contract")
                     != source_version["parser_contract"]
                 ):
@@ -1786,9 +1716,7 @@ def query_source_d0_raw_launch(
                     sessions=shape_sessions,
                     rows=shape_rows,
                     symbol=item["source_symbol"],
-                    package=package_sha256,
-                    namespace=pg_result["namespace_id"],
-                    content=source_version["source_content_id"],
+                    source_package_id=source_package_id,
                     parser=source_version["parser_contract"],
                 )
                 historical_rps = {}
@@ -1803,8 +1731,7 @@ def query_source_d0_raw_launch(
                             config,
                             target_session=prior_day,
                             research_cutoff=research_cutoff,
-                            package_sha256=package_sha256,
-                            expected_namespace_id=pg_result["namespace_id"],
+                            source_package_id=source_package_id,
                         )
                         historical_rps[prior_day] = (
                             prior_rps["facts"]
@@ -1829,9 +1756,7 @@ def query_source_d0_raw_launch(
                         sessions=shape_sessions,
                         rows=shape_rows,
                         symbol=item["source_symbol"],
-                        package=package_sha256,
-                        namespace=pg_result["namespace_id"],
-                        content=source_version["source_content_id"],
+                        source_package_id=source_package_id,
                         parser=source_version["parser_contract"],
                         historical_rps=historical_rps,
                     )
@@ -1851,9 +1776,7 @@ def query_source_d0_raw_launch(
                     symbol=item["source_symbol"],
                     sessions=prior_sessions,
                     history_rows=prior_rows,
-                    namespace_id=pg_result["namespace_id"],
-                    package_sha256=package_sha256,
-                    source_content_id=source_version["source_content_id"],
+                    source_package_id=source_package_id,
                     parser_contract=source_version["parser_contract"],
                 )
                 attach_source_d1_prior_reference(item, source_prior=source_prior)
@@ -1910,13 +1833,10 @@ def query_source_d0_raw_launch(
         "research_cutoff": research_cutoff.isoformat(),
         "strict_official_sessions": [session.isoformat() for session in sessions],
         "official_calendar": calendar_identity,
-        "namespace_id": pg_result["namespace_id"],
         "source_version": {
-            "package_sha256": str(source_version["package_sha256"]).strip(),
-            "source_content_id": source_version["source_content_id"],
+            "source_package_id": source_version["source_package_id"],
             "source_capture_id": source_version["source_capture_id"],
             "parser_contract": source_version["parser_contract"],
-            "source_raw_digest": pg_result["target_raw_digest"],
             "source_time_quality": source_version["source_time_quality"],
             "source_available_at": _iso(source_version["source_available_at"]),
             "source_clock_role": source_version["source_clock_role"],
@@ -2000,16 +1920,15 @@ def _query_source_d0_raw_launch_changes(
     *,
     scenario: str,
     before_session: date | None,
-    before_package_sha256: str | None,
+    before_source_package_id: int | None,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     state: str | None,
     symbol: str | None,
     offset: int,
     limit: int,
     transition: str | None,
-    expected_namespace_id: str | None,
     single_symbol_only: bool,
 ) -> dict[str, Any]:
     if scenario != "LAUNCH_CONFIRM":
@@ -2038,13 +1957,15 @@ def _query_source_d0_raw_launch_changes(
             category="ARGUMENT",
         )
     if (
-        not isinstance(before_package_sha256, str)
-        or not isinstance(package_sha256, str)
-        or before_package_sha256 != package_sha256
+        type(before_source_package_id) is not int
+        or type(source_package_id) is not int
+        or before_source_package_id <= 0
+        or source_package_id <= 0
+        or before_source_package_id != source_package_id
     ):
         raise SourceD0RawError(
             "D0_CHANGE_PACKAGE_IDENTITY_MISMATCH",
-            "相邻比较两端必须显式绑定同一个完整来源包SHA。",
+            "相邻比较两端必须显式绑定同一个数字来源包ID。",
             category="ARGUMENT",
         )
     if transition is None:
@@ -2089,12 +2010,10 @@ def _query_source_d0_raw_launch_changes(
     except ResearchEntryError as error:
         raise SourceD0RawError("D0_OFFICIAL_CALENDAR_INVALID", str(error)) from error
     before_identity = {
-        key: before_calendar[key]
-        for key in ("calendar_id", "calendar_revision", "calendar_sha256")
+        key: before_calendar[key] for key in ("calendar_id", "calendar_revision")
     }
     after_identity = {
-        key: after_calendar[key]
-        for key in ("calendar_id", "calendar_revision", "calendar_sha256")
+        key: after_calendar[key] for key in ("calendar_id", "calendar_revision")
     }
     if before_identity != after_identity or after_index != before_index + 1:
         raise SourceD0RawError(
@@ -2121,12 +2040,11 @@ def _query_source_d0_raw_launch_changes(
             scenario=scenario,
             target_session=before_session,
             research_cutoff=research_cutoff,
-            package_sha256=before_package_sha256,
+            source_package_id=before_source_package_id,
             state="ALL",
             offset=0,
             limit=_MAX_LIMIT,
             symbol=symbol if single_symbol_only else None,
-            expected_namespace_id=expected_namespace_id,
             _history_symbol=symbol,
             _single_symbol_only=single_symbol_only,
         )
@@ -2135,12 +2053,11 @@ def _query_source_d0_raw_launch_changes(
             scenario=scenario,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             state="ALL",
             offset=0,
             limit=_MAX_LIMIT,
             symbol=symbol if single_symbol_only else None,
-            expected_namespace_id=expected_namespace_id,
             _history_symbol=symbol,
             _single_symbol_only=single_symbol_only,
         )
@@ -2150,9 +2067,8 @@ def _query_source_d0_raw_launch_changes(
     before_source = before_result["source_version"]
     after_source = after_result["source_version"]
     compatible_identity = (
-        before_result["namespace_id"] == after_result["namespace_id"]
-        and before_source["package_sha256"] == after_source["package_sha256"]
-        and before_source["source_content_id"] == after_source["source_content_id"]
+        before_source["source_package_id"] == after_source["source_package_id"]
+        and before_source["source_package_id"] == after_source["source_package_id"]
         and before_result["official_calendar"] == after_result["official_calendar"]
         and before_result["session_contract"] == after_result["session_contract"]
         and before_result["algorithm_contract"] == after_result["algorithm_contract"]
@@ -2161,7 +2077,7 @@ def _query_source_d0_raw_launch_changes(
     if not compatible_identity:
         raise SourceD0RawError(
             "D0_PAIR_NOT_COMPARABLE",
-            "两端命名空间、完整包、来源内容、日历或算法身份不兼容，拒绝计算转移。",
+            "两端来源包、日历或算法身份不兼容，拒绝计算转移。",
         )
 
     def indexed_rows(
@@ -2280,7 +2196,6 @@ def _query_source_d0_raw_launch_changes(
             "research_cutoff": result["research_cutoff"],
             "strict_official_sessions": result["strict_official_sessions"],
             "official_calendar": result["official_calendar"],
-            "namespace_id": result["namespace_id"],
             "source_version": result["source_version"],
             "source_pool": result["source_pool"],
             "session_contract": result["session_contract"],

@@ -6,9 +6,6 @@ from collections import Counter
 from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_EVEN, localcontext
 from fractions import Fraction
-import hashlib
-import json
-import re
 from zoneinfo import ZoneInfo
 from typing import Any
 
@@ -79,7 +76,6 @@ def ingest_tdx_sector_members(config: dict[str, Any]) -> dict[str, Any]:
         {
             "relative_path": item.relative_path,
             "absolute_path": item.absolute_path,
-            "sha256": item.sha256,
             "size_bytes": item.size_bytes,
             "last_write_time_utc": item.last_write_time_utc,
             "last_write_time_is_source_clock": False,
@@ -104,10 +100,8 @@ def refresh_remote_tdx_sector_members(
     config: dict[str, Any],
     *,
     validate_only: bool,
-    validated_source_sha256: list[str] | None = None,
-    oracle_set_sha256: list[str] | None = None,
 ) -> dict[str, Any]:
-    """从有限TDX远端候选校验成员来源，并按已有身份键追加新版本。"""
+    """从TDX远端候选校验成员来源，并按typed事实集合识别已存版本。"""
     try:
         remote = fetch_remote_sector_files(config)
     except TdxRemoteSectorError:
@@ -140,11 +134,11 @@ def refresh_remote_tdx_sector_members(
         )
 
     preflight = inspect_remote_sector_source_revisions(config, snapshots)
-    decisions = {item["snapshot_id"]: item for item in preflight["revisions"]}
+    decisions = {item["source_kind"]: item for item in preflight["revisions"]}
     insert_candidates = [
         snapshot
         for snapshot in snapshots
-        if decisions[snapshot.snapshot_id]["decision"] == "NEW_VERSION"
+        if decisions[snapshot.source_kind]["decision"] == "NEW_VERSION"
     ]
     blocked = [
         item
@@ -152,67 +146,8 @@ def refresh_remote_tdx_sector_members(
         if item["decision"] == "BLOCKED_REVISION_KEY"
     ]
 
-    source_artifacts = {name: item.sha256 for name, item in remote.files.items()}
-    if remote.archive_sha256 is not None:
-        source_artifacts["zhb.zip"] = remote.archive_sha256
-    expected_source_hashes = _parse_hash_bindings(
-        validated_source_sha256,
-        set(source_artifacts),
-        "SOURCE_ORACLE_SHA_INVALID",
-    )
-    expected_set_hashes = _parse_hash_bindings(
-        oracle_set_sha256,
-        {"INDUSTRY", "CONCEPT"},
-        "INDEPENDENT_ORACLE_SHA_INVALID",
-    )
-    snapshot_oracle_status: dict[str, str] = {}
-    for snapshot in snapshots:
-        board_kind = (
-            "INDUSTRY" if snapshot.source_kind == "TDX_TDXHY_CFG" else "CONCEPT"
-        )
-        expected = expected_set_hashes.get(board_kind)
-        snapshot_oracle_status[snapshot.snapshot_id] = (
-            "MATCHED_EXTERNAL_ORACLE_SHA"
-            if expected is not None and expected == _snapshot_set_sha256(snapshot)
-            else "EXTERNAL_TRF02_NOT_BOUND"
-        )
-    if expected_source_hashes and expected_source_hashes != source_artifacts:
-        raise TdxRemoteSectorError(
-            "REMOTE_SOURCE_ORACLE_SHA_MISMATCH",
-            "本次远端原件与TRF独立Oracle核验的文件SHA不一致",
-        )
-    if expected_set_hashes and any(
-        snapshot_oracle_status[item.snapshot_id] != "MATCHED_EXTERNAL_ORACLE_SHA"
-        for item in snapshots
-        if item.source_kind == "TDX_TDXHY_CFG"
-        and "INDUSTRY" in expected_set_hashes
-        or item.source_kind == "TDX_INFOHARBOR_BLOCK_DAT"
-        and "CONCEPT" in expected_set_hashes
-    ):
-        raise TdxRemoteSectorError(
-            "INDEPENDENT_ORACLE_SHA_MISMATCH",
-            "本次解析成员集合与TRF独立Oracle摘要不一致",
-        )
-
     inserted: dict[str, Any] | None = None
     if not validate_only and insert_candidates:
-        required_kinds = {
-            "INDUSTRY" if item.source_kind == "TDX_TDXHY_CFG" else "CONCEPT"
-            for item in insert_candidates
-        }
-        if (
-            expected_source_hashes != source_artifacts
-            or not required_kinds.issubset(expected_set_hashes)
-            or any(
-                snapshot_oracle_status[item.snapshot_id]
-                != "MATCHED_EXTERNAL_ORACLE_SHA"
-                for item in insert_candidates
-            )
-        ):
-            raise TdxRemoteSectorError(
-                "INDEPENDENT_ORACLE_REQUIRED",
-                "新增PG来源版本前必须绑定同一原件SHA和外部独立成员集合Oracle SHA",
-            )
         insert_catalog = sum(len(item.catalog_rows) for item in insert_candidates)
         insert_members = sum(len(item.member_rows) for item in insert_candidates)
         if (
@@ -229,28 +164,48 @@ def refresh_remote_tdx_sector_members(
     reusable = [
         snapshot
         for snapshot in snapshots
-        if decisions[snapshot.snapshot_id]["decision"] == "REUSE_IDENTICAL_VERSION"
+        if decisions[snapshot.source_kind]["decision"] == "REUSE_IDENTICAL_VERSION"
     ]
+    snapshot_ids = {
+        item["source_kind"]: item["existing_snapshot_id"]
+        for item in preflight["revisions"]
+        if item["existing_snapshot_id"] is not None
+    }
     readback: dict[str, Any] | None = None
-    if not validate_only and reusable:
-        readback = verify_remote_sector_source_readback(config, reusable)
+    if not validate_only and (insert_candidates or reusable):
+        readback = (
+            {
+                "status": "PASS",
+                "independent_readback_transaction": inserted[
+                    "independent_readback_transaction"
+                ],
+                "independent_readback": inserted["independent_readback"],
+            }
+            if inserted is not None
+            else verify_remote_sector_source_readback(config, reusable, snapshot_ids)
+        )
+        snapshot_ids.update(
+            {
+                item["source_kind"]: int(item["snapshot_id"])
+                for item in (inserted or {}).get("snapshots", [])
+            }
+        )
 
     consumer_queries: dict[str, Any] = {}
     for snapshot in snapshots:
-        decision = decisions[snapshot.snapshot_id]["decision"]
-        if decision == "BLOCKED_REVISION_KEY":
-            continue
-        if validate_only and decision == "NEW_VERSION":
+        decision = decisions[snapshot.source_kind]["decision"]
+        snapshot_id = snapshot_ids.get(snapshot.source_kind)
+        if decision == "BLOCKED_REVISION_KEY" or snapshot_id is None:
             continue
         result = query_sector_catalog(
             config,
-            snapshot_id=snapshot.snapshot_id,
+            snapshot_id=snapshot_id,
             board_kind=None,
             search=None,
             offset=0,
             limit=1,
         )
-        consumer_queries[snapshot.snapshot_id] = {
+        consumer_queries[snapshot.source_kind] = {
             "status": result["status"],
             "total_boards": result["total_count"],
             "snapshot_members": len(snapshot.member_rows),
@@ -260,24 +215,24 @@ def refresh_remote_tdx_sector_members(
         }
 
     per_snapshot: list[dict[str, Any]] = []
-    inserted_by_id = {
-        item["snapshot_id"]: item for item in (inserted or {}).get("snapshots", [])
+    inserted_by_kind = {
+        item["source_kind"]: item for item in (inserted or {}).get("snapshots", [])
     }
     for snapshot in snapshots:
-        decision = decisions[snapshot.snapshot_id]
+        decision = decisions[snapshot.source_kind]
+        snapshot_id = snapshot_ids.get(snapshot.source_kind)
         if decision["decision"] == "BLOCKED_REVISION_KEY":
             result_status = "BLOCKED_REVISION_KEY"
         elif validate_only:
             result_status = decision["decision"]
-        elif snapshot.snapshot_id in inserted_by_id:
+        elif snapshot.source_kind in inserted_by_kind:
             result_status = "INSERTED"
         else:
             result_status = "IDEMPOTENT_ZERO_WRITE"
         per_snapshot.append(
             {
-                "snapshot_id": snapshot.snapshot_id,
+                "snapshot_id": snapshot_id,
                 "source_kind": snapshot.source_kind,
-                "source_file_sha256": snapshot.source_file_sha256,
                 "source_file_size": snapshot.source_file_size,
                 "source_path_role": snapshot.source_path_role,
                 "parse_contract_version": snapshot.parse_contract_version,
@@ -290,32 +245,35 @@ def refresh_remote_tdx_sector_members(
                 "source_quality": snapshot.source_quality,
                 "clock_quality": snapshot.clock_quality,
                 "research_mode": snapshot.research_mode,
-                "independent_oracle_status": snapshot_oracle_status[
-                    snapshot.snapshot_id
-                ],
-                "catalog_membership_set_sha256": _snapshot_set_sha256(snapshot),
+                "independent_oracle_status": (
+                    "PG_TYPED_SET_READBACK_PASS"
+                    if snapshot.source_kind in snapshot_ids and readback is not None
+                    else "MATCHED_EXISTING_TYPED_SET"
+                    if decision["decision"] == "REUSE_IDENTICAL_VERSION"
+                    else "NOT_RUN_VALIDATE_ONLY"
+                ),
                 "preflight_decision": decision["decision"],
                 "result": result_status,
                 "reason_code": decision.get("reason_code"),
-                "catalog_query_recheck": consumer_queries.get(snapshot.snapshot_id),
+                "catalog_query_recheck": consumer_queries.get(snapshot.source_kind),
                 "followup_catalog_command": (
                     "python -m stock_a source-tdx-sector-members catalog "
-                    f"--snapshot-id {snapshot.snapshot_id} --limit 100"
+                    f"--snapshot-id {snapshot_id or '<SNAPSHOT_ID>'} --limit 100"
                 ),
                 "followup_members_command_template": (
                     "python -m stock_a source-tdx-sector-members members "
-                    f"--snapshot-id {snapshot.snapshot_id} --board-kind <INDUSTRY|CONCEPT> "
+                    f"--snapshot-id {snapshot_id or '<SNAPSHOT_ID>'} --board-kind <INDUSTRY|CONCEPT> "
                     "--board-native-id <原生板块ID> --target-session <YYYY-MM-DD> "
                     "--research-cutoff <YYYY-MM-DD> "
-                    "--package-sha256 <PACKAGE_SHA256> [--profile-revision <REVISION>]"
+                    "--source-package-id <BIGINT> [--profile-revision <REVISION>]"
                 ),
                 "followup_breadth_command_template": (
                     "python -m stock_a source-tdx-sector-members breadth "
-                    f"--snapshot-id {snapshot.snapshot_id} --board-kind <INDUSTRY|CONCEPT> "
+                    f"--snapshot-id {snapshot_id or '<SNAPSHOT_ID>'} --board-kind <INDUSTRY|CONCEPT> "
                     "--before-session <YYYY-MM-DD> --after-session <YYYY-MM-DD> "
                     "--research-cutoff <YYYY-MM-DD> "
-                    "--before-package-sha256 <PACKAGE_SHA256> --before-profile-revision <REVISION> "
-                    "--after-package-sha256 <PACKAGE_SHA256> --after-profile-revision <REVISION>"
+                    "--before-source-package-id <BIGINT> --before-profile-revision <REVISION> "
+                    "--after-source-package-id <BIGINT> --after-profile-revision <REVISION>"
                 ),
             }
         )
@@ -331,8 +289,7 @@ def refresh_remote_tdx_sector_members(
                     "protocol": remote.methods.get(name),
                     "complete_original_bytes_in_memory": True,
                     "size_bytes": item.size_bytes,
-                    "sha256": item.sha256,
-                    "archive_sha256": item.source_archive_sha256,
+                    "archive_size_bytes": item.source_archive_size_bytes,
                 }
             )
     partial_source = (
@@ -377,23 +334,27 @@ def refresh_remote_tdx_sector_members(
         "source_failures": list(remote.source_failures),
         "source_parse_rejections": list(parse_outcome.rejected_sources),
         "source_files": source_files,
-        "source_artifacts_sha256": source_artifacts,
         "zhb_zip": (
             {
                 "source": f"TDX_REMOTE_SERVER/{remote.host}:7709/zhb.zip",
                 "protocol": "GET_REPORT_FILE_0X06B9",
                 "complete_original_bytes_in_memory": True,
                 "size_bytes": remote.archive_size_bytes,
-                "sha256": remote.archive_sha256,
                 "tdxzs_member_crc32": remote.archive_member_crc32,
             }
-            if remote.archive_sha256 is not None
+            if remote.archive_size_bytes is not None
             else None
         ),
         "observed_at": observed_at.isoformat(),
         "source_clock_quality": "UNKNOWN",
         "research_mode": "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT",
-        "independent_oracle_status": "EXTERNAL_TRF02_REQUIRED",
+        "independent_oracle_status": (
+            "PG_TYPED_SET_READBACK_PASS"
+            if readback is not None
+            else "MATCHED_EXISTING_TYPED_SET"
+            if reusable
+            else "NOT_RUN_VALIDATE_ONLY"
+        ),
         "preflight": preflight,
         "snapshots": per_snapshot,
         "write_summary": (
@@ -434,60 +395,13 @@ def refresh_remote_tdx_sector_members(
     }
     if blocked and result["snapshots"]:
         result["independent_categories_continue"] = True
-    if snapshots and all(
-        snapshot_oracle_status[item.snapshot_id] == "MATCHED_EXTERNAL_ORACLE_SHA"
-        for item in snapshots
-    ):
-        result["independent_oracle_status"] = "MATCHED_EXTERNAL_ORACLE_SHA"
     return result
-
-
-def _parse_hash_bindings(
-    values: list[str] | None, allowed_names: set[str], error_code: str
-) -> dict[str, str]:
-    result: dict[str, str] = {}
-    for value in values or []:
-        name, separator, digest = value.partition("=")
-        if (
-            not separator
-            or name not in allowed_names
-            or re.fullmatch(r"[0-9a-f]{64}", digest) is None
-            or name in result
-        ):
-            raise TdxRemoteSectorError(
-                error_code, "独立来源或成员集合SHA参数必须是唯一的NAME=64位小写SHA"
-            )
-        result[name] = digest
-    return result
-
-
-def _snapshot_set_sha256(snapshot: Any) -> str:
-    canonical = {
-        "catalog": sorted(
-            [row.board_kind, row.board_native_id, row.board_name]
-            for row in snapshot.catalog_rows
-        ),
-        "members": sorted(
-            [
-                row.board_kind,
-                row.board_native_id,
-                row.source_symbol,
-                row.membership_quality,
-                row.source_record_ordinal,
-            ]
-            for row in snapshot.member_rows
-        ),
-    }
-    encoded = json.dumps(canonical, ensure_ascii=False, separators=(",", ":")).encode(
-        "utf-8"
-    )
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def read_tdx_sector_catalog(
     config: dict[str, Any],
     *,
-    snapshot_id: str,
+    snapshot_id: int,
     board_kind: str | None,
     search: str | None,
     offset: int,
@@ -507,7 +421,7 @@ def read_latest_tdx_sector_snapshot_observation(
     config: dict[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     source_profile: dict[str, Any] | None,
 ) -> dict[str, Any]:
     """只读投影最新行业/GN快照及其与精确画像的成员交集。"""
@@ -515,7 +429,7 @@ def read_latest_tdx_sector_snapshot_observation(
         observation = query_latest_sector_source_observation(
             config,
             target_session=target_session,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             source_profile=source_profile,
         )
     except TdxSectorMembersPgError as error:
@@ -548,12 +462,12 @@ def read_tdx_sector_source_snapshot_catalog(
 def read_tdx_sector_members(
     config: dict[str, Any],
     *,
-    snapshot_id: str,
+    snapshot_id: int,
     board_kind: str,
     board_native_id: str,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str | None,
     offset: int,
     limit: int,
@@ -565,7 +479,7 @@ def read_tdx_sector_members(
         board_native_id=board_native_id,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         profile_revision=profile_revision,
         offset=offset,
         limit=limit,
@@ -575,15 +489,15 @@ def read_tdx_sector_members(
 def read_tdx_sector_breadth(
     config: dict[str, Any],
     *,
-    snapshot_id: str,
+    snapshot_id: int,
     board_kind: str,
     board_native_id: str | None,
     before_session: date,
     after_session: date,
     research_cutoff: date,
-    before_package_sha256: str,
+    before_source_package_id: int,
     before_profile_revision: str,
-    after_package_sha256: str,
+    after_source_package_id: int,
     after_profile_revision: str,
     offset: int,
     limit: int,
@@ -619,9 +533,9 @@ def read_tdx_sector_breadth(
         before_session=before_session,
         after_session=after_session,
         research_cutoff=research_cutoff,
-        before_package_sha256=before_package_sha256,
+        before_source_package_id=before_source_package_id,
         before_profile_revision=before_profile_revision,
-        after_package_sha256=after_package_sha256,
+        after_source_package_id=after_source_package_id,
         after_profile_revision=after_profile_revision,
         official_calendar_id=str(calendar["calendar_id"]),
         official_calendar_revision=str(calendar_revision),
@@ -1065,12 +979,12 @@ def _rank_strength_boards(
 def read_tdx_sector_strength(
     config: dict[str, Any],
     *,
-    snapshot_id: str,
+    snapshot_id: int,
     board_kind: str,
     board_native_id: str | None,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str | None,
     changed_only: bool,
     sort_by: str,
@@ -1145,7 +1059,7 @@ def read_tdx_sector_strength(
         board_native_id=board_native_id,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         profile_revision=profile_revision,
         official_calendar_id=str(calendar["calendar_id"]),
         official_calendar_revision=str(calendar_revision),
@@ -1174,13 +1088,6 @@ def read_tdx_sector_strength(
             for member in board["members"]
         }
     )
-    source_entry_sha_by_symbol: dict[str, set[str]] = {
-        symbol: set() for symbol in symbols
-    }
-    for row in data["raw_rows"]:
-        entry_sha = row.get("source_entry_sha256")
-        if entry_sha:
-            source_entry_sha_by_symbol[str(row["source_symbol"])].add(str(entry_sha))
     official_calendar = MarketSessionCalendar(
         calendar_id=str(calendar["calendar_id"]),
         revision=str(calendar_revision),
@@ -1211,19 +1118,6 @@ def read_tdx_sector_strength(
             )
             observations.append(observation)
             observation_issues.append(issue)
-        if len(source_entry_sha_by_symbol[symbol]) > 1:
-            observation_issues = [
-                issue or "SOURCE_ENTRY_SHA_CONFLICT" for issue in observation_issues
-            ]
-            observations = [
-                CoreObservation(
-                    session=row.session,
-                    state="UNKNOWN",
-                    coordinate_id="RAW_UNADJUSTED",
-                    close=unknown("SOURCE_ENTRY_SHA_CONFLICT"),
-                )
-                for row in observations
-            ]
         endpoint_values: dict[str, dict[str, Any]] = {}
         if include_cross_period_inputs:
             cross_period_inputs[symbol] = {"mapped": symbol in profile_by_symbol}
@@ -1286,7 +1180,7 @@ def read_tdx_sector_strength(
                     profile = profile_by_symbol.get(symbol)
                     if profile is None:
                         value = None
-                        reason = "CORE_PROFILE_NOT_IN_EXACT_TARGET_SOURCE_SET"
+                        reason = "CORE_PROFILE_NOT_IN_EXACT_TARGET_PACKAGE_SCOPE"
                         value_source = "EXACT_TARGET_CORE_PROFILE_REQUIRED"
                     elif profile["price_coordinate"] != "RAW_UNADJUSTED":
                         value = None
@@ -1374,7 +1268,6 @@ def read_tdx_sector_strength(
         "snapshot": {
             "snapshot_id": snapshot["snapshot_id"],
             "source_kind": snapshot["source_kind"],
-            "source_file_sha256": snapshot["source_file_sha256"],
             "source_observed_at": snapshot["observed_at"],
             "source_valid_on": snapshot["source_valid_on"],
             "source_known_at": snapshot["source_known_at"],
@@ -1391,7 +1284,6 @@ def read_tdx_sector_strength(
             "research_mode": snapshot["research_mode"],
         },
         "target_source_version": source_version,
-        "namespace_id": data["namespace_id"],
         "target_profile_snapshot": data["profile_snapshot"],
         "official_calendar": data["official_calendar"],
         "target_session": target_session.isoformat(),

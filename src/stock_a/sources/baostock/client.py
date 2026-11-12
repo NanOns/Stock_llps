@@ -7,14 +7,12 @@ from datetime import date, datetime, timezone
 import importlib
 from importlib import metadata
 from dataclasses import dataclass
-from hashlib import sha256
 import io
-import json
+from itertools import count
 import re
 import socket
 from time import perf_counter
 from typing import Any
-from uuid import uuid4
 
 from stock_a.domain import ContractError
 
@@ -26,21 +24,21 @@ _QUERY_FIELDS = (
 )
 _MAX_QUERY_ROWS = 8
 _DEFAULT_SOCKET_TIMEOUT_SECONDS = 30.0
-_VERIFIED_DAILY_CAPTURES: dict[str, "BaoStockDailySourceCapture"] = {}
-_VERIFIED_IDENTITY_CAPTURES: dict[str, "BaoStockIdentitySourceCapture"] = {}
+_VERIFIED_DAILY_CAPTURES: dict[int, "BaoStockDailySourceCapture"] = {}
+_VERIFIED_IDENTITY_CAPTURES: dict[int, "BaoStockIdentitySourceCapture"] = {}
+_CAPTURE_ID_SEQUENCE = count(1)
 
 
 @dataclass(frozen=True)
 class BaoStockDailySourceCapture:
     """本进程内由真实SDK成功响应签发的单代码/单日原始行绑定。"""
 
-    capture_id: str
+    capture_id: int
     source_symbol: str
     target_session: date
     adjustflag: str
     amount_raw: str
     volume_raw: str
-    source_sha256: str
     captured_at: datetime
 
 
@@ -48,56 +46,28 @@ class BaoStockDailySourceCapture:
 class BaoStockIdentitySourceCapture:
     """本进程内由真实SDK成功身份接口响应签发的内容摘要绑定。"""
 
-    capture_id: str
-    source_sha256: str
-    canonical_digest: str
+    capture_id: int
     normalized_count: int
     request_started_at: datetime
     request_completed_at: datetime
 
 
 def resolve_verified_baostock_capture(
-    capture_id: str,
+    capture_id: int,
 ) -> BaoStockDailySourceCapture | None:
     """解析本进程内真实SDK签发的来源引用；合成transport不会进入注册表。"""
-    if not isinstance(capture_id, str):
+    if type(capture_id) is not int or capture_id <= 0:
         return None
     return _VERIFIED_DAILY_CAPTURES.get(capture_id)
 
 
 def resolve_verified_baostock_identity_capture(
-    capture_id: str,
+    capture_id: int,
 ) -> BaoStockIdentitySourceCapture | None:
     """解析真实SDK完成的身份查询封套；伪造Mapping与测试transport不签发。"""
-    if not isinstance(capture_id, str):
+    if type(capture_id) is not int or capture_id <= 0:
         return None
     return _VERIFIED_IDENTITY_CAPTURES.get(capture_id)
-
-
-def _daily_row_content_sha256(
-    *,
-    fields: tuple[str, ...],
-    row: dict[str, str],
-    symbol: str,
-    target_session: str,
-) -> str:
-    """只摘要同一未复权日线行内容；capture ID与观察时钟另行绑定。"""
-    payload = {
-        "fields": fields,
-        "row": row,
-        "source_symbol": symbol.upper(),
-        "target_session": target_session,
-        "adjustflag": "3",
-    }
-    return sha256(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def _issue_verified_identity_capture(
@@ -131,27 +101,7 @@ def _issue_verified_identity_capture(
         rows_count += len(rows)
     if rows_count <= 0:
         return None
-    projection = {
-        "contract": snapshot.get("contract"),
-        "source": snapshot.get("source"),
-        "calls": [
-            {
-                "query": item.get("query"),
-                "target_session": item.get("target_session"),
-                "response_fields": item.get("response_fields"),
-                "rows": item.get("rows"),
-            }
-            for item in flat_calls
-        ],
-    }
     try:
-        evidence = json.dumps(
-            projection,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        ).encode("utf-8")
         started = min(
             datetime.fromisoformat(item["request_started_at"]) for item in flat_calls
         )
@@ -168,18 +118,8 @@ def _issue_verified_identity_capture(
             return None
     except (TypeError, ValueError, KeyError, OverflowError):
         return None
-    source_digest = sha256(evidence).hexdigest()
-    canonical_digest = sha256(
-        json.dumps(
-            projection,
-            sort_keys=True,
-            separators=(",", ":"),
-            ensure_ascii=False,
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
     capture = BaoStockIdentitySourceCapture(
-        str(uuid4()), source_digest, canonical_digest, rows_count, started, completed
+        next(_CAPTURE_ID_SEQUENCE), rows_count, started, completed
     )
     _VERIFIED_IDENTITY_CAPTURES[capture.capture_id] = capture
     while len(_VERIFIED_IDENTITY_CAPTURES) > 64:
@@ -211,20 +151,13 @@ def _issue_verified_daily_capture(
         captured_at = datetime.fromisoformat(completed_at)
         if captured_at.tzinfo is None or captured_at.utcoffset() is None:
             return None
-        digest = _daily_row_content_sha256(
-            fields=fields,
-            row=row,
-            symbol=symbol,
-            target_session=target_session,
-        )
         capture = BaoStockDailySourceCapture(
-            capture_id=str(uuid4()),
+            capture_id=next(_CAPTURE_ID_SEQUENCE),
             source_symbol=symbol.upper(),
             target_session=date.fromisoformat(target_session),
             adjustflag="3",
             amount_raw=row["amount"],
             volume_raw=row["volume"],
-            source_sha256=digest,
             captured_at=captured_at,
         )
     except (KeyError, TypeError, ValueError):
@@ -264,20 +197,13 @@ def _issue_verified_daily_row_capture(
         captured_clock = datetime.fromisoformat(captured_at)
         if captured_clock.tzinfo is None or captured_clock.utcoffset() is None:
             return None
-        digest = _daily_row_content_sha256(
-            fields=fields,
-            row=row,
-            symbol=symbol,
-            target_session=row["date"],
-        )
         capture = BaoStockDailySourceCapture(
-            capture_id=str(uuid4()),
+            capture_id=next(_CAPTURE_ID_SEQUENCE),
             source_symbol=symbol.upper(),
             target_session=session,
             adjustflag="3",
             amount_raw=row["amount"],
             volume_raw=row["volume"],
-            source_sha256=digest,
             captured_at=captured_clock,
         )
     except (KeyError, TypeError, ValueError):
@@ -656,9 +582,6 @@ def query_daily_rows(
         },
         "captured_sdk_output_chars": len(output_capture.getvalue()),
         "verified_source_capture_id": verified_capture.capture_id
-        if verified_capture
-        else None,
-        "verified_source_sha256": verified_capture.source_sha256
         if verified_capture
         else None,
     }
@@ -1508,7 +1431,6 @@ def query_daily_range_rows(
                         "date": row["date"],
                         "code": row["code"],
                         "verified_source_capture_id": capture.capture_id,
-                        "verified_source_sha256": capture.source_sha256,
                     }
                 )
             verified_captures[symbol] = issued

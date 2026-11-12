@@ -15,7 +15,7 @@ from stock_a.research.entry_context.sessions import _load_calendar
 def research_universe_pg_history_preview(
     *,
     target_session: str,
-    package_sha256: str,
+    source_package_id: int,
     session_dates: Sequence[date],
     page: Mapping[str, Any],
     profile_contract: dict[str, Any],
@@ -32,13 +32,12 @@ def research_universe_pg_history_preview(
             preview = research_stock_pg_history_preview(
                 symbol=symbol,
                 target_session=target_session,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 session_dates=session_dates,
                 history_rows=candidate["history_rows"],
                 missing_history_sessions=tuple(
                     date.fromisoformat(item) for item in candidate["missing_sessions"]
                 ),
-                namespace_id=page["namespace_id"],
                 profile_contract=profile_contract,
                 closed_period_bars=(
                     closed_period_bars_by_symbol.get(symbol)
@@ -332,7 +331,7 @@ def research_universe_pg_history_preview(
         "contract": "STOCK_A_PG_SOURCE_SYMBOL_UNIVERSE_CORE_PROFILE_PREVIEW_R1",
         "status": page["status"],
         "target_session": target_session,
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "research_mode": "SOURCE_SYMBOL_NON_PIT_PREVIEW",
         "price_coordinate": "RAW_UNADJUSTED",
         "identity_status": "SOURCE_SYMBOL_ONLY",
@@ -342,7 +341,6 @@ def research_universe_pg_history_preview(
         "suspension_status": "SUSPENSION_STATUS_UNKNOWN",
         "pit_status": "NON_PIT_RETROSPECTIVE",
         "official_listing_denominator": "UNKNOWN_NOT_PROVED_BY_SOURCE_CANDIDATES",
-        "namespace_id": page["namespace_id"],
         "session_start": page["session_start"],
         "session_end": page["session_end"],
         "session_count": page["session_count"],

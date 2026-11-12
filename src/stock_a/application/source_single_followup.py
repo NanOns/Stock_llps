@@ -13,8 +13,7 @@ def observe_frozen_scenario(
     symbol,
     target,
     cutoff,
-    package_sha256,
-    namespace_id,
+    source_package_id,
     target_capture_id,
     calendar,
     horizon,
@@ -43,9 +42,8 @@ def observe_frozen_scenario(
         config,
         source_symbol=symbol,
         target_session=target,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         sessions=history_sessions,
-        expected_namespace_id=namespace_id,
         research_cutoff=cutoff,
         include_parser_contract=True,
     )
@@ -53,9 +51,8 @@ def observe_frozen_scenario(
         config,
         source_symbol=symbol,
         target_session=target,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         sessions=(target, *future),
-        expected_namespace_id=namespace_id,
         research_cutoff=cutoff,
         include_parser_contract=True,
         starts_at_target=True,
@@ -66,12 +63,11 @@ def observe_frozen_scenario(
         raise ValueError("两次单股读取的T0来源事实不一致")
     rows.update(forward_rows)
     birth = rows.get(target)
-    if birth is None or str(birth["source_capture_id"]) != target_capture_id:
+    if birth is None or birth["source_capture_id"] != target_capture_id:
         raise ValueError("单股后继与冻结T0捕获不一致")
-    content = birth.get("source_content_id")
-    entry = birth.get("source_entry_sha256")
+    content = birth.get("source_package_id")
     parser = birth.get("parser_contract")
-    if not content or not entry or not parser:
+    if not content or not parser:
         return {
             "observations": [],
             "first_false": None,
@@ -83,8 +79,8 @@ def observe_frozen_scenario(
         }
     safe = {
         day: row
-        if row.get("source_content_id") == content
-        and row.get("source_entry_sha256") == entry
+        if row.get("source_package_id") == content
+        and row.get("parser_contract") == parser
         else {**row, "reference_quality": False}
         for day, row in rows.items()
     }
@@ -111,9 +107,7 @@ def observe_frozen_scenario(
                 official_sessions=window,
                 history_rows_by_session={d: safe.get(d) for d in window},
                 source_symbol=symbol,
-                package_sha256=package_sha256,
-                namespace_id=namespace_id,
-                source_content_id=content,
+                source_package_id=source_package_id,
                 target_capture_id=capture,
                 parser_contract=parser,
                 **extra,

@@ -12,7 +12,7 @@ from stock_a.research.d0_launch_raw import (
 
 
 def observe_prior_shapes(
-    *, sessions, rows, symbol, package, namespace, content, parser, historical_rps=None
+    *, sessions, rows, symbol, source_package_id, parser_contract, historical_rps=None
 ):
     """逐个过去启动观察计算旧峰；目标日及后续行情不参与父或峰的选择。"""
     sessions = tuple(sessions)
@@ -24,8 +24,11 @@ def observe_prior_shapes(
     by_day = {row["session_date"]: row for row in rows}
     if len(by_day) != len(rows):
         raise ValueError("同一历史会话不得存在重复来源行")
-    entries = {row.get("source_entry_sha256") for row in rows}
-    same_entry = len(entries) == 1 and all(entries)
+    same_package = all(
+        row.get("source_package_id") == source_package_id
+        and row.get("parser_contract") == parser_contract
+        for row in rows
+    )
     checked = []
     for day in sessions:
         row = by_day.get(day)
@@ -33,14 +36,12 @@ def observe_prior_shapes(
             day,
             by_day,
             source_symbol=symbol,
-            package_sha256=package,
-            namespace_id=namespace,
-            source_content_id=content,
+            source_package_id=source_package_id,
             target_capture_id=row.get("source_capture_id") if row else "",
-            parser_contract=parser,
+            parser_contract=parser_contract,
         )
-        if not same_entry:
-            values, error = None, "RAW_SOURCE_ENTRY_MISMATCH"
+        if not same_package:
+            values, error = None, "RAW_SOURCE_PACKAGE_MISMATCH"
         checked.append((row, values, error))
 
     def pred(value, formula, **inputs):
@@ -72,11 +73,9 @@ def observe_prior_shapes(
             official_sessions=sessions[index - 20 : index + 1],
             history_rows_by_session=by_day,
             source_symbol=symbol,
-            package_sha256=package,
-            namespace_id=namespace,
-            source_content_id=content,
+            source_package_id=source_package_id,
             target_capture_id=checked[index][0]["source_capture_id"],
-            parser_contract=parser,
+            parser_contract=parser_contract,
         )
         launch = calculate_d0_launch_confirm_raw(**args)
         recovery_args = dict(args)
@@ -200,7 +199,7 @@ def observe_prior_shapes(
             for j in amount_indices:
                 row, _, error = checked[j]
                 value, amount_error = _raw_amount(
-                    sessions[j], row, parser_contract=parser
+                    sessions[j], row, parser_contract=parser_contract
                 )
                 if (
                     error

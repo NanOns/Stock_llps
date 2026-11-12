@@ -42,7 +42,6 @@ class CanonicalFieldFact:
     value: FieldValue
     unit: str
     unit_basis: str
-    source_sha256: str
 
 
 @dataclass(frozen=True)
@@ -121,7 +120,6 @@ def build_tdx_read_selection(
         package_entry is not None
         and package_entry.source_symbol == source_symbol
         and package_entry.target_session == target_session
-        and package_entry.entry_sha256 == capture.content_sha256
         and package_entry.entry_byte_count == capture.byte_count
     )
     if (
@@ -189,7 +187,6 @@ def build_tdx_read_selection(
 
     target = selected_rows.get(target_session)
     target_values = _row_fields(target)
-    source_sha256 = capture.content_sha256
     amount_basis = (
         f"CALLER_DECLARED_SCALE:{units.amount_to_cny}"
         if units.amount_to_cny is not None
@@ -216,7 +213,6 @@ def build_tdx_read_selection(
             value=target_values[name],
             unit=field_units[name][0],
             unit_basis=field_units[name][1],
-            source_sha256=source_sha256,
         )
         for name in _FIELD_NAMES
     )

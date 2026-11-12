@@ -6,7 +6,6 @@ import argparse
 from dataclasses import asdict
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation, localcontext
-import hashlib
 import math
 import os
 from pathlib import Path
@@ -30,7 +29,7 @@ from stock_a.storage.postgres.identity import inspect_postgres
 from stock_a.storage.postgres.binding import (
     BindingCommittedConfigError,
     BindingRefused,
-    bind_stock_namespace,
+    apply_stock_migration,
     registered_migration_ids,
     registered_task_scopes,
 )
@@ -305,7 +304,6 @@ def _collect_source_phase0(args: argparse.Namespace) -> dict[str, Any]:
             total_records += summary.scan.record_count
             market_result["sample"] = {
                 "path": str(sample_path),
-                "raw_byte_sha256": summary.scan.raw_byte_sha256,
                 "byte_count": summary.scan.byte_count,
                 "record_count": summary.scan.record_count,
                 "first_date": summary.scan.first_date.isoformat(),
@@ -422,7 +420,6 @@ def _collect_source_phase0(args: argparse.Namespace) -> dict[str, Any]:
                 "status": "BLOCKED",
                 "reason": "GBBQ内容合同未闭合",
                 "error_code": error.code,
-                "raw_byte_sha256": hashlib.sha256(raw).hexdigest(),
                 "byte_count": len(raw),
                 "handle_path": identity.handle_path,
             }
@@ -436,7 +433,6 @@ def _collect_source_phase0(args: argparse.Namespace) -> dict[str, Any]:
                 "status": "DEGRADED_PASS",
                 "path": str(action_path),
                 "handle_path": identity.handle_path,
-                "raw_byte_sha256": hashlib.sha256(raw).hexdigest(),
                 "byte_count": len(raw),
                 "record_count": parsed.parsed_count,
                 "category_counts": categories,
@@ -601,7 +597,7 @@ def _run_doctor(args: argparse.Namespace) -> int:
             "price_profile_semantics": {
                 "contract_id": contract_document["contract_id"],
                 "version": contract_document["version"],
-                "assembled_sha256": loaded_contract.assembled_sha256,
+                "contract_version": loaded_contract.document["version"],
                 "module_count": len(loaded_contract.module_paths),
                 "module_paths": list(loaded_contract.module_paths),
                 "field_count": len(contract_document["field_registry"]),
@@ -658,14 +654,15 @@ def _run_pg_identity(args: argparse.Namespace) -> int:
 
 
 def _run_pg_bind(args: argparse.Namespace) -> int:
+    max_timeout_seconds = 14400 if args.migration_id == 22 else 900
     if (
         type(args.timeout_seconds) not in (int, float)
         or not math.isfinite(args.timeout_seconds)
-        or not 0 < args.timeout_seconds <= 30
+        or not 0 < args.timeout_seconds <= max_timeout_seconds
     ):
         raise DiagnosticError(
             "ARGUMENT_CONTRACT_INVALID",
-            "PG绑定超时必须大于0且不超过30秒",
+            f"集中PG迁移超时必须大于0且不超过{max_timeout_seconds}秒",
             _EXIT_ARGUMENT,
         )
     package = _module_mode()
@@ -677,7 +674,7 @@ def _run_pg_bind(args: argparse.Namespace) -> int:
         )
     config, config_path = _load_runtime_config()
     try:
-        result = bind_stock_namespace(
+        result = apply_stock_migration(
             config,
             config_path,
             task_scope=args.task_scope,

@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-import hashlib
 import json
 import re
 import socket
@@ -16,7 +15,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 from stock_a.application.source_market_context import (
     SourceMarketContextError,
@@ -122,7 +121,7 @@ from stock_a.research.raw_periods import (
 )
 
 
-from stock_a.service.serialization import _json_value, canonical_sha
+from stock_a.service.serialization import _json_value
 from stock_a.service.static_assets import read_static_asset, static_asset_routes
 
 _HOST = "127.0.0.1"
@@ -132,7 +131,6 @@ _MAX_PAGE_SIZE = 50
 _MAX_OFFSET = 2**31 - 1
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _SYMBOL_SEARCH = re.compile(r"^[A-Za-z0-9.]{1,9}$")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
 _DIAGNOSTIC_ROUTES = frozenset(
     {
@@ -179,7 +177,6 @@ def _source_context_preview_error(error: Exception) -> PreviewHttpError | None:
         "SOURCE_SYMBOL_INVALID",
         "SECTOR_SNAPSHOT_UUID_INVALID",
         "SECTOR_SNAPSHOT_IDS_NOT_DISTINCT",
-        "DEV_NAMESPACE_INVALID",
         "PG_RESEARCH_PROFILE_KEY_INVALID",
         "SECTOR_CHANGE_IDENTITY_INVALID",
         "SECTOR_CHANGE_SOURCE_ID_INVALID",
@@ -242,12 +239,29 @@ def _iso_date(value: Any, field: str = "target_session") -> date:
     return parsed
 
 
-def _sha(value: Any) -> str:
-    if not isinstance(value, str) or _SHA256.fullmatch(value) is None:
+def _package_id(value: Any) -> int:
+    if (type(value) is int and value > 0) or (
+        isinstance(value, str)
+        and value.isdecimal()
+        and str(int(value)) == value
+        and int(value) > 0
+    ):
+        return int(value)
+    raise PreviewHttpError(
+        400, "PREVIEW_PACKAGE_ID_INVALID", "来源包ID必须是正数BIGINT"
+    )
+
+
+def _profile_revision(value: Any) -> str:
+    if not isinstance(value, str) or re.fullmatch(r"PROFILE_R[0-9]{2}", value) is None:
         raise PreviewHttpError(
-            400, "PREVIEW_SHA_INVALID", "来源包SHA必须是64位小写十六进制值"
+            400, "PREVIEW_PROFILE_REVISION_INVALID", "画像修订须为PROFILE_Rnn显式标签"
         )
     return value
+
+
+def _snapshot_id(value: Any) -> int:
+    return _package_id(value)
 
 
 def _symbol(value: Any) -> str:
@@ -370,8 +384,7 @@ def _raw_public_fields(row: Mapping[str, Any]) -> dict[str, Any]:
         "quality": {name: _json_value(row.get(name)) for name in quality_names},
         "source": {
             "dataset_id": row.get("dataset_id"),
-            "package_sha256": row.get("package_sha256"),
-            "source_entry_sha256": row.get("source_entry_sha256"),
+            "source_package_id": row.get("source_package_id"),
             "source_record_count": row.get("source_record_count"),
             "first_source_date": _json_value(row.get("first_source_date")),
             "last_source_date": _json_value(row.get("last_source_date")),
@@ -425,7 +438,7 @@ def _page_public_fields(page: Mapping[str, Any]) -> dict[str, Any]:
     expected = page.get("version_expected_row_count")
     return {
         "target_session": page["target_session"],
-        "package_sha256": page["package_sha256"],
+        "source_package_id": page["source_package_id"],
         "offset": page["offset"],
         "limit": page["limit"],
         "page_count": page["page_count"],
@@ -470,8 +483,7 @@ def _preview_source_context(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    namespace_id: str,
+    source_package_id: str,
     target_raw_rows: Sequence[Mapping[str, Any]],
     expected_raw_row_count: int | None = None,
 ) -> dict[str, Any]:
@@ -479,8 +491,7 @@ def _preview_source_context(
     return read_source_version_context(
         config,
         target_session=target_session,
-        package_sha256=package_sha256,
-        namespace_id=namespace_id,
+        source_package_id=source_package_id,
         target_raw_rows=target_raw_rows,
         expected_raw_row_count=expected_raw_row_count,
     )
@@ -508,34 +519,11 @@ class _PreviewState:
                 "CONFIG_INVALID", "本机研究预览要求配置development服务为127.0.0.1:28766"
             )
         self.profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
-        self.profile_contract_sha256 = canonical_sha(self.profile_contract)
-        self.core_source_sha256 = hashlib.sha256(
-            Path(research_core.__file__).read_bytes()
-        ).hexdigest()
-        self.entry_source_sha256 = research_entry.implementation_source_sha256()
-        self.raw_period_source_sha256 = hashlib.sha256(
-            Path(research_raw_periods.__file__).read_bytes()
-        ).hexdigest()
-        self.source_d1_algorithm_identity_sha256 = canonical_sha(
-            {
-                "discovery_source_sha256": hashlib.sha256(
-                    Path(
-                        discover_source_d1_support_changes.__code__.co_filename
-                    ).read_bytes()
-                ).hexdigest(),
-                "history_preview_source_sha256": hashlib.sha256(
-                    Path(research_history_preview.__file__).read_bytes()
-                ).hexdigest(),
-                "core_source_sha256": self.core_source_sha256,
-                "entry_source_sha256": self.entry_source_sha256,
-                "raw_reader_source_sha256": hashlib.sha256(
-                    Path(read_raw_daily_history_stock.__code__.co_filename).read_bytes()
-                ).hexdigest(),
-                "profile_contract_sha256": self.profile_contract_sha256,
-                "identity_status": "SOURCE_SYMBOL_ONLY",
-                "price_coordinate": "RAW_UNADJUSTED",
-            }
+        self.profile_contract_revision = (
+            self.profile_contract["contract_id"],
+            self.profile_contract["version"],
         )
+        self.source_d1_algorithm_version = "SOURCE_D1_PREVIEW_R1"
         self.source_d1_cache_lock = threading.Lock()
         self.source_d1_cache_key: tuple[Any, ...] | None = None
         self.source_d1_cache_result: dict[str, Any] | None = None
@@ -771,9 +759,8 @@ class _PreviewState:
     def snapshot_identity(
         self,
         *,
-        namespace_id: str,
         target_session: str,
-        package_sha256: str,
+        source_package_id: str,
         session_count: int | None = None,
         session_start: str | None = None,
         calendar_revision: str | None = None,
@@ -781,18 +768,17 @@ class _PreviewState:
         fields: dict[str, Any] = {
             "identity_type": "PREVIEW_SNAPSHOT_IDENTITY_NON_PIT",
             "application_id": "STOCK_A",
-            "namespace_id": namespace_id,
             "target_session": target_session,
-            "package_sha256": package_sha256,
+            "source_package_id": source_package_id,
             "preview_mode": "SOURCE_SYMBOL_NON_PIT_PREVIEW",
             "price_coordinate": "RAW_UNADJUSTED",
-            "core_source_sha256": self.core_source_sha256,
-            "research_entry_source_sha256": self.entry_source_sha256,
+            "core_algorithm_version": "STOCK_A_CORE_R1",
+            "research_entry_version": "STOCK_A_RESEARCH_ENTRY_R1",
             "profile_contract": (
                 f"{self.profile_contract['contract_id']}/"
                 f"{self.profile_contract['version']}"
             ),
-            "profile_contract_sha256": self.profile_contract_sha256,
+            "profile_contract_revision": self.profile_contract_revision,
         }
         if session_count is not None:
             fields["target_window"] = {
@@ -801,7 +787,7 @@ class _PreviewState:
                 "session_end": target_session,
                 "calendar_revision": calendar_revision,
             }
-        return {**fields, "identity_sha256": canonical_sha(fields)}
+        return fields
 
 
 def _duplicate_free_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -967,7 +953,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if error.code.endswith("INVALID") or error.code in {
                 "PROFILE_PAGE_INVALID",
                 "PROFILE_FILTER_INVALID",
-                "PROFILE_SOURCE_SET_ID_INVALID",
                 "PROFILE_REVISION_INVALID",
                 "PROFILE_SYMBOL_INVALID",
                 "PROFILE_DATE_AFTER_CUTOFF",
@@ -976,7 +961,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             }:
                 status = 400
             elif error.code in {
-                "PROFILE_SOURCE_SET_NOT_FOUND",
                 "PROFILE_SNAPSHOT_INCOMPLETE",
                 "PROFILE_CHANGE_SNAPSHOT_MISSING",
                 "PROFILE_CHANGE_SNAPSHOT_AMBIGUOUS",
@@ -1058,8 +1042,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "before_session",
             "target_session",
             "research_cutoff",
-            "package_sha256",
-            "namespace_id",
+            "source_package_id",
             "industry_snapshot_id",
             "concept_snapshot_id",
             "offset",
@@ -1070,7 +1053,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             raise PreviewHttpError(
                 400,
                 "SOURCE_LAUNCH_WATCH_FIELDS_INVALID",
-                "请求必须显式绑定双日期、研究截止、来源版本、DEV命名空间、双板块快照和分页",
+                "请求必须显式绑定双日期、研究截止、来源包ID、双板块快照和分页",
             )
         body_fields = frozenset(body)
         if body_fields not in {
@@ -1101,24 +1084,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "before_session必须早于target_session",
             )
 
-        try:
-            namespace_id = str(UUID(body["namespace_id"]))
-            industry_snapshot_id = (
-                str(UUID(body["industry_snapshot_id"]))
-                if body["industry_snapshot_id"] is not None
-                else None
-            )
-            concept_snapshot_id = (
-                str(UUID(body["concept_snapshot_id"]))
-                if body["concept_snapshot_id"] is not None
-                else None
-            )
-        except (ValueError, TypeError, AttributeError) as error:
-            raise PreviewHttpError(
-                400,
-                "SOURCE_LAUNCH_WATCH_ID_INVALID",
-                "namespace和板块快照须使用有效UUID",
-            ) from error
+        source_package_id = _package_id(body["source_package_id"])
+        industry_snapshot_id = (
+            _snapshot_id(body["industry_snapshot_id"])
+            if body["industry_snapshot_id"] is not None
+            else None
+        )
+        concept_snapshot_id = (
+            _snapshot_id(body["concept_snapshot_id"])
+            if body["concept_snapshot_id"] is not None
+            else None
+        )
         if (
             industry_snapshot_id is not None
             and industry_snapshot_id == concept_snapshot_id
@@ -1128,7 +1104,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "SOURCE_LAUNCH_WATCH_SNAPSHOTS_NOT_DISTINCT",
                 "行业和GN概念必须绑定各自不同的TDX快照",
             )
-        package_sha256 = _sha(body["package_sha256"])
         offset = body["offset"]
         if type(offset) is not int or not 0 <= offset <= _MAX_OFFSET:
             raise PreviewHttpError(
@@ -1199,8 +1174,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     read_source_d0_scenario_day(
                         self.preview_server.state.config,
                         target_session=before_session,
-                        package_sha256=package_sha256,
-                        namespace_id=namespace_id,
+                        source_package_id=source_package_id,
                         scenario="LAUNCH_CONFIRM",
                     )
                 )
@@ -1208,14 +1182,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     read_source_d0_scenario_day(
                         self.preview_server.state.config,
                         target_session=target_session,
-                        package_sha256=package_sha256,
-                        namespace_id=namespace_id,
+                        source_package_id=source_package_id,
                         scenario="LAUNCH_CONFIRM",
                     )
                 )
                 if (
-                    before_day["source_version"]["source_content_id"]
-                    != after_day["source_version"]["source_content_id"]
+                    before_day["source_version"]["source_package_id"]
+                    != after_day["source_version"]["source_package_id"]
                     or before_day["official_calendar"] != after_day["official_calendar"]
                     or before_day["session_contract"] != after_day["session_contract"]
                     or before_day["algorithm_contract"]
@@ -1249,7 +1222,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             item.isoformat() for item in window
                         ],
                         "official_calendar": day["official_calendar"],
-                        "namespace_id": day["namespace_id"],
                         "source_version": day["source_version"],
                         "source_pool": {
                             "source_count": day["source_pool"]["source_count"],
@@ -1431,28 +1403,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if (
                 changes.get("before", {})
                 .get("source_version", {})
-                .get("package_sha256")
-                != package_sha256
+                .get("source_package_id")
+                != source_package_id
                 or changes.get("after", {})
                 .get("source_version", {})
-                .get("package_sha256")
-                != package_sha256
+                .get("source_package_id")
+                != source_package_id
             ):
                 raise PreviewHttpError(
                     409,
                     "SOURCE_LAUNCH_WATCH_SOURCE_IDENTITY_MISMATCH",
-                    "D0实际Raw来源键或包SHA与请求不一致",
+                    "D0实际Raw来源键或来源包ID与请求不一致",
                 )
-            if (
-                changes.get("before", {}).get("namespace_id") != namespace_id
-                or changes.get("after", {}).get("namespace_id") != namespace_id
-            ):
-                raise PreviewHttpError(
-                    409,
-                    "SOURCE_LAUNCH_WATCH_NAMESPACE_MISMATCH",
-                    "D0读者绑定的DEV namespace与请求不一致",
-                )
-
             source_symbols = [row["source_symbol"] for row in ft_rows]
             try:
                 membership_started = time.perf_counter()
@@ -1462,7 +1424,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     target_session=target_session,
                     industry_snapshot_id=industry_snapshot_id,
                     concept_snapshot_id=concept_snapshot_id,
-                    expected_namespace_id=namespace_id,
                 )
                 membership_read_wall_seconds = time.perf_counter() - membership_started
                 aggregation_started = time.perf_counter()
@@ -1483,8 +1444,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 or not isinstance(boards, list)
                 or complete.get("global_new_stock_count") != len(stocks)
                 or len(stocks) != len(ft_rows)
-                or complete.get("namespace_id") != namespace_id
-                or complete.get("package_sha256") != package_sha256
+                or complete.get("source_package_id") != source_package_id
                 or complete.get("target_session") != target_session.isoformat()
             ):
                 raise PreviewHttpError(
@@ -1528,31 +1488,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
 
         actual_calendar = _official_calendar(target_session)
         calendar_identity = {
-            key: actual_calendar[key]
-            for key in ("calendar_id", "calendar_revision", "calendar_sha256")
+            key: actual_calendar[key] for key in ("calendar_id", "calendar_revision")
         }
         before_source = read_source_version_context(
             self.preview_server.state.config,
             target_session=before_session,
-            package_sha256=package_sha256,
-            namespace_id=namespace_id,
+            source_package_id=source_package_id,
         )
         after_source = read_source_version_context(
             self.preview_server.state.config,
             target_session=target_session,
-            package_sha256=package_sha256,
-            namespace_id=namespace_id,
+            source_package_id=source_package_id,
         )
         cache_key = (
             before_session,
             target_session,
             research_cutoff,
-            package_sha256,
-            namespace_id,
+            source_package_id,
             before_source["source_capture_id"],
-            before_source["source_raw_digest"],
             after_source["source_capture_id"],
-            after_source["source_raw_digest"],
             calendar_revision,
             industry_snapshot_id,
             concept_snapshot_id,
@@ -1586,11 +1540,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             sector_pulse = read_source_sector_pulse_day(
                 self.preview_server.state.config,
                 target_session=target_session,
-                package_sha256=package_sha256,
-                namespace_id=namespace_id,
+                source_package_id=source_package_id,
                 source_capture_id=after_source["source_capture_id"],
-                source_content_id=after_source["source_content_id"],
-                source_raw_digest=after_source["source_raw_digest"],
                 source_pool_count=after_source["raw_row_count"],
                 snapshot_ids={
                     "INDUSTRY": industry_snapshot_id,
@@ -1602,11 +1553,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             previous_sector_pulse = read_source_sector_pulse_day(
                 self.preview_server.state.config,
                 target_session=before_session,
-                package_sha256=package_sha256,
-                namespace_id=namespace_id,
+                source_package_id=source_package_id,
                 source_capture_id=before_source["source_capture_id"],
-                source_content_id=before_source["source_content_id"],
-                source_raw_digest=before_source["capture_digest"],
                 source_pool_count=before_source["raw_row_count"],
                 snapshot_ids={
                     "INDUSTRY": industry_snapshot_id,
@@ -1781,13 +1729,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "body": {
                     "symbol": stock["source_symbol"],
                     "target_session": target_session.isoformat(),
-                    "package_sha256": package_sha256,
+                    "source_package_id": source_package_id,
                     "session_count": 75,
-                    "namespace_id": namespace_id,
                     "include_source_change_context": True,
                     "research_cutoff": research_cutoff.isoformat(),
                     "before_session": before_session.isoformat(),
-                    "before_package_sha256": package_sha256,
+                    "before_source_package_id": source_package_id,
                     "industry_snapshot_id": industry_snapshot_id,
                     "concept_snapshot_id": concept_snapshot_id,
                 },
@@ -1800,8 +1747,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "before_session": before_session.isoformat(),
                 "target_session": target_session.isoformat(),
                 "research_cutoff": research_cutoff.isoformat(),
-                "package_sha256": package_sha256,
-                "namespace_id": namespace_id,
+                "source_package_id": source_package_id,
                 "industry_snapshot_id": industry_snapshot_id,
                 "concept_snapshot_id": concept_snapshot_id,
                 "calendar_revision": calendar_revision,
@@ -1932,7 +1878,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         required = {
             "target_session",
             "research_cutoff",
-            "package_sha256",
+            "source_package_id",
             "d1_history_session_count",
             "industry_snapshot_id",
             "concept_snapshot_id",
@@ -1967,7 +1913,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
         _require_research_cutoff(cutoff, self.preview_server.state.research_cutoff)
         _require_research_cutoff(target, cutoff)
-        package_sha = _sha(body["package_sha256"])
+        source_package_id = _package_id(body["source_package_id"])
         d1_history_session_count = _d1_material_int(
             body["d1_history_session_count"],
             "d1_history_session_count",
@@ -1980,15 +1926,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if value is None:
                 snapshots[field] = None
                 continue
-            try:
-                parsed_id = str(UUID(value))
-            except (ValueError, TypeError, AttributeError) as error:
-                raise PreviewHttpError(
-                    400,
-                    "D1_MATERIAL_SNAPSHOT_ID_INVALID",
-                    f"{field}必须是有效成员快照UUID",
-                ) from error
-            snapshots[field] = parsed_id
+            snapshots[field] = _snapshot_id(value)
         if snapshots["industry_snapshot_id"] is not None and (
             snapshots["industry_snapshot_id"] == snapshots["concept_snapshot_id"]
         ):
@@ -2092,7 +2030,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         cache_key = (
             target.isoformat(),
             cutoff.isoformat(),
-            package_sha,
+            source_package_id,
             d1_history_session_count,
             snapshots["industry_snapshot_id"],
             snapshots["concept_snapshot_id"],
@@ -2106,7 +2044,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.config,
                     target_session=target,
                     research_cutoff=cutoff,
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                     d1_history_session_count=d1_history_session_count,
                     industry_snapshot_id=snapshots["industry_snapshot_id"],
                     concept_snapshot_id=snapshots["concept_snapshot_id"],
@@ -2116,7 +2054,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self.preview_server.state.config,
                 target_session=target,
                 research_cutoff=cutoff,
-                package_sha256=package_sha,
+                source_package_id=source_package_id,
                 d1_history_session_count=d1_history_session_count,
                 industry_snapshot_id=snapshots["industry_snapshot_id"],
                 concept_snapshot_id=snapshots["concept_snapshot_id"],
@@ -2152,7 +2090,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "qualification_scope": result["qualification_scope"],
             "target_session": result["target_session"],
             "research_cutoff": result["research_cutoff"],
-            "package_sha256": result["package_sha256"],
+            "source_package_id": result["source_package_id"],
             "profile_revision": result["profile_revision"],
             "d1_history_session_count": result["d1_history_session_count"],
             "d1_history_start": result["d1_history_start"],
@@ -2160,8 +2098,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "source": {
                 key: result["source"].get(key)
                 for key in (
-                    "namespace_id",
-                    "package_sha256",
+                    "source_package_id",
                     "raw_row_count",
                     "capture_expected_row_count",
                     "capture_read_started_at",
@@ -2209,7 +2146,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         required = {
             "target_session",
             "research_cutoff",
-            "package_sha256",
+            "source_package_id",
             "profile_revision",
             "industry_snapshot_id",
             "concept_snapshot_id",
@@ -2272,8 +2209,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
         _require_research_cutoff(target, cutoff)
         _require_research_cutoff(cutoff, self.preview_server.state.research_cutoff)
-        package_sha = _sha(body["package_sha256"])
-        profile_revision = None if d1_only else _sha(body["profile_revision"])
+        source_package_id = _package_id(body["source_package_id"])
+        profile_revision = (
+            None if d1_only else _profile_revision(body["profile_revision"])
+        )
         event_window_start = _iso_date(body["event_window_start"], "event_window_start")
         history_session_count = _positive_int(
             body["pg_history_session_count"], "pg_history_session_count", 75
@@ -2303,15 +2242,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
 
         industry_snapshot_id = concept_snapshot_id = None
         if not d1_only:
-            try:
-                industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
-                concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
-            except (ValueError, TypeError, AttributeError) as error:
-                raise PreviewHttpError(
-                    400,
-                    "SECTOR_CHANGE_SNAPSHOT_ID_INVALID",
-                    "行业与GN快照编号必须为规范UUID",
-                ) from error
+            industry_snapshot_id = _snapshot_id(body["industry_snapshot_id"])
+            concept_snapshot_id = _snapshot_id(body["concept_snapshot_id"])
             if (
                 industry_snapshot_id != body["industry_snapshot_id"]
                 or concept_snapshot_id != body["concept_snapshot_id"]
@@ -2436,7 +2368,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     item
                     for item in profile_catalog["snapshots"]
                     if item.get("target_session") == target.isoformat()
-                    and item.get("package_sha256") == package_sha
+                    and item.get("source_package_id") == source_package_id
                     and item.get("profile_revision") == profile_revision
                     and item.get("complete") is True
                 ]
@@ -2469,7 +2401,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             cache_key = (
                 target.isoformat(),
                 cutoff.isoformat(),
-                package_sha,
+                source_package_id,
                 profile_revision,
                 industry_snapshot_id,
                 concept_snapshot_id,
@@ -2498,7 +2430,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     cutoff,
                     d1_sessions,
                     d1_calendar_revision,
-                    package_sha,
+                    source_package_id,
                     event_window_start,
                     0,
                     1,
@@ -2518,7 +2450,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "scope": "SOURCE_SYMBOL_ONLY_D1_SUPPORT_EXPLANATION",
                     "target_session": target.isoformat(),
                     "research_cutoff": cutoff.isoformat(),
-                    "package_sha256": package_sha,
+                    "source_package_id": source_package_id,
                     "source_pool_count": discovery["source_pool_count"],
                     "evaluated_source_symbol_count": discovery[
                         "evaluated_source_symbol_count"
@@ -2562,12 +2494,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     },
                 }
             if not d1_only:
-                namespace_id = profile_catalog["namespace_id"]
                 source_version_context = read_source_version_context(
                     config,
                     target_session=target,
-                    package_sha256=package_sha,
-                    namespace_id=namespace_id,
+                    source_package_id=source_package_id,
                 )
                 resolved_target, d1_sessions, d1_calendar_revision = (
                     resolve_pg_history_window(target.isoformat(), history_session_count)
@@ -2584,7 +2514,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             source_version_context=source_version_context,
                             target_session=target,
                             research_cutoff=cutoff,
-                            package_sha256=package_sha,
+                            source_package_id=source_package_id,
                             sessions=d1_sessions,
                             calendar_revision=d1_calendar_revision,
                             event_window_start=event_window_start,
@@ -2596,11 +2526,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 source_d1_cache_key = (
                     target.isoformat(),
                     cutoff.isoformat(),
-                    namespace_id,
-                    package_sha,
-                    source_version_context["source_content_id"],
+                    source_package_id,
+                    source_version_context["source_package_id"],
                     str(source_version_context["source_capture_id"]),
-                    source_version_context["source_raw_digest"],
                     source_version_context["raw_row_count"],
                     source_version_context["capture_expected_row_count"],
                     d1_calendar_revision,
@@ -2610,7 +2538,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "SOURCE_SYMBOL_ONLY",
                     "RAW_UNADJUSTED",
                     "TARGET_SESSION_RAW_SOURCE_POOL_EVENT_WINDOW_DISCOVERY",
-                    self.preview_server.state.source_d1_algorithm_identity_sha256,
+                    self.preview_server.state.source_d1_algorithm_version,
                 )
 
                 def discover_exact_source_d1() -> dict[str, Any]:
@@ -2621,7 +2549,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         cutoff,
                         d1_sessions,
                         d1_calendar_revision,
-                        package_sha,
+                        source_package_id,
                         event_window_start,
                         0,
                         1,
@@ -2633,7 +2561,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         source_version_context=source_version_context,
                         target_session=target,
                         research_cutoff=cutoff,
-                        package_sha256=package_sha,
+                        source_package_id=source_package_id,
                         sessions=d1_sessions,
                         calendar_revision=d1_calendar_revision,
                         event_window_start=event_window_start,
@@ -2651,7 +2579,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     source_version_context=source_version_context,
                     target_session=target,
                     research_cutoff=cutoff,
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                     sessions=d1_sessions,
                     calendar_revision=d1_calendar_revision,
                     event_window_start=event_window_start,
@@ -2666,7 +2594,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             research_cutoff=cutoff,
                             industry_snapshot_id=industry_snapshot_id,
                             concept_snapshot_id=concept_snapshot_id,
-                            package_sha256=package_sha,
+                            source_package_id=source_package_id,
                             profile_revision=profile_revision,
                             event_window_start=event_window_start,
                             pg_history_session_count=history_session_count,
@@ -2771,7 +2699,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.path,
                     {
                         "target_session",
-                        "package_sha256",
+                        "source_package_id",
                         "d1_history_session_count",
                         "offset",
                         "limit",
@@ -2786,7 +2714,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 required = {
                     "target_session",
-                    "package_sha256",
+                    "source_package_id",
                     "d1_history_session_count",
                 }
                 if not required.issubset(values):
@@ -2823,7 +2751,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     result = read_source_research_day(
                         self.preview_server.state.config,
                         target_session=target,
-                        package_sha256=_sha(values["package_sha256"]),
+                        source_package_id=_package_id(values["source_package_id"]),
                         d1_history_session_count=_positive_int(
                             _nonnegative_int(
                                 values["d1_history_session_count"],
@@ -2852,8 +2780,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/product/market":
-                values = _query(self.path, {"target_session", "package_sha256"})
-                if set(values) != {"target_session", "package_sha256"}:
+                values = _query(self.path, {"target_session", "source_package_id"})
+                if set(values) != {"target_session", "source_package_id"}:
                     raise PreviewHttpError(
                         400, "QUERY_REQUIRED", "须提供目标日与来源包"
                     )
@@ -2865,7 +2793,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         self.preview_server.state.config,
                         target_session=target,
                         research_cutoff=cutoff,
-                        package_sha256=_sha(values["package_sha256"]),
+                        source_package_id=_package_id(values["source_package_id"]),
                     )
                 except SourceMarketContextError as error:
                     if error.code not in {
@@ -2888,8 +2816,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 return
             if parsed.path == "/api/product/cohort-keys":
-                values = _query(self.path, {"target_session", "package_sha256"})
-                if set(values) != {"target_session", "package_sha256"}:
+                values = _query(self.path, {"target_session", "source_package_id"})
+                if set(values) != {"target_session", "source_package_id"}:
                     raise PreviewHttpError(
                         400, "QUERY_REQUIRED", "须提供目标日和来源包"
                     )
@@ -2897,12 +2825,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                package = _sha(values["package_sha256"])
+                package = _package_id(values["source_package_id"])
                 keys = read_persisted_cohort_keys(
                     self.preview_server.state.config,
                     target=target,
                     research_cutoff=self.preview_server.state.research_cutoff,
-                    package_sha256=package,
+                    source_package_id=package,
                 )
                 if any(key["capture_count"] != 1 for key in keys):
                     raise PreviewHttpError(
@@ -2928,7 +2856,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/product/cohort":
                 allowed = {
                     "target_session",
-                    "package_sha256",
+                    "source_package_id",
                     "profile_revision",
                     "rule",
                     "history",
@@ -2959,8 +2887,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         self.preview_server.state.config,
                         target=target,
                         research_cutoff=cutoff,
-                        package_sha256=_sha(values["package_sha256"]),
-                        profile_revision=_sha(values["profile_revision"]),
+                        source_package_id=_package_id(values["source_package_id"]),
+                        profile_revision=_profile_revision(values["profile_revision"]),
                         history_session_count=_positive_int(
                             _nonnegative_int(values["history"], "history", 500),
                             "history",
@@ -3009,7 +2937,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/preview/sector-change-context":
-                values = _query(self.path, {"target_session", "package_sha256"})
+                values = _query(self.path, {"target_session", "source_package_id"})
                 if "target_session" not in values:
                     raise PreviewHttpError(
                         400,
@@ -3030,13 +2958,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.config
                 )
                 profile_observation = None
-                if "package_sha256" in values:
-                    package_sha = _sha(values["package_sha256"])
+                if "source_package_id" in values:
+                    source_package_id = _package_id(values["source_package_id"])
                     source_context = read_source_version_context(
                         self.preview_server.state.config,
                         target_session=target,
-                        package_sha256=package_sha,
-                        namespace_id=catalog["namespace_id"],
+                        source_package_id=source_package_id,
                     )
                     try:
                         profile_observation = (
@@ -3044,7 +2971,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 self.preview_server.state.config,
                                 self.preview_server.state.profile_contract,
                                 target_session=target,
-                                package_sha256=package_sha,
+                                source_package_id=source_package_id,
                                 source_capture_id=source_context["source_capture_id"],
                             )
                         )
@@ -3089,7 +3016,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     200,
                     {
                         "ok": True,
-                        "namespace_id": catalog["namespace_id"],
                         "target_session": target.isoformat(),
                         "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
                         "official_calendar_revision": calendar_revision,
@@ -3135,7 +3061,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     200,
                     {
                         "ok": True,
-                        "namespace_id": catalog["namespace_id"],
                         "offset": catalog["offset"],
                         "limit": catalog["limit"],
                         "page_count": catalog["page_count"],
@@ -3169,7 +3094,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "research_mode": "SOURCE_SYMBOL_NON_PIT_PRICE_PROFILE",
                         "formal_listing_universe": "UNKNOWN_NOT_CONNECTED",
                         "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
-                        "namespace_id": snapshots["namespace_id"],
                         "snapshots": snapshots["snapshots"],
                         "database_write": False,
                         "ddl_executed": False,
@@ -3182,9 +3106,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_package_sha256",
+                        "before_source_package_id",
                         "before_profile_revision",
-                        "after_package_sha256",
+                        "after_source_package_id",
                         "after_profile_revision",
                         "offset",
                         "limit",
@@ -3238,9 +3162,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_bias20_atr_state", "ALL"
                     ),
                     after_bias20_atr_state=values.get("after_bias20_atr_state", "ALL"),
-                    before_package_sha256=values.get("before_package_sha256"),
+                    before_source_package_id=values.get("before_source_package_id"),
                     before_profile_revision=values.get("before_profile_revision"),
-                    after_package_sha256=values.get("after_package_sha256"),
+                    after_source_package_id=values.get("after_source_package_id"),
                     after_profile_revision=values.get("after_profile_revision"),
                 )
                 result.update(
@@ -3259,9 +3183,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_package_sha256",
+                        "before_source_package_id",
                         "before_profile_revision",
-                        "after_package_sha256",
+                        "after_source_package_id",
                         "after_profile_revision",
                         "relation_field",
                         "transition_type",
@@ -3280,9 +3204,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 required = {
                     "before_session",
                     "after_session",
-                    "before_package_sha256",
+                    "before_source_package_id",
                     "before_profile_revision",
-                    "after_package_sha256",
+                    "after_source_package_id",
                     "after_profile_revision",
                     "relation_field",
                 }
@@ -3290,7 +3214,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_RELATION_QUERY_REQUIRED",
-                        "RAW关系查询必须绑定前后日期、包SHA、画像修订和关系字段",
+                        "RAW关系查询必须绑定前后日期、来源包ID、画像修订和关系字段",
                     )
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
@@ -3326,10 +3250,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         if values.get("symbol")
                         else None
                     ),
-                    before_package_sha256=_sha(values["before_package_sha256"]),
-                    before_profile_revision=_sha(values["before_profile_revision"]),
-                    after_package_sha256=_sha(values["after_package_sha256"]),
-                    after_profile_revision=_sha(values["after_profile_revision"]),
+                    before_source_package_id=_package_id(
+                        values["before_source_package_id"]
+                    ),
+                    before_profile_revision=_profile_revision(
+                        values["before_profile_revision"]
+                    ),
+                    after_source_package_id=_package_id(
+                        values["after_source_package_id"]
+                    ),
+                    after_profile_revision=_profile_revision(
+                        values["after_profile_revision"]
+                    ),
                 )
                 result.update(
                     {
@@ -3348,25 +3280,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_package_sha256",
+                        "before_source_package_id",
                         "before_profile_revision",
-                        "after_package_sha256",
+                        "after_source_package_id",
                         "after_profile_revision",
                     },
                 )
                 required = {
                     "before_session",
                     "after_session",
-                    "before_package_sha256",
+                    "before_source_package_id",
                     "before_profile_revision",
-                    "after_package_sha256",
+                    "after_source_package_id",
                     "after_profile_revision",
                 }
                 if not required.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_BREADTH_QUERY_REQUIRED",
-                        "来源池广度必须精确提供前后日期、包SHA和画像修订",
+                        "来源池广度必须精确提供前后日期、来源包ID和画像修订",
                     )
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
@@ -3381,10 +3313,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     before_session=before_session,
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    before_package_sha256=_sha(values["before_package_sha256"]),
-                    before_profile_revision=_sha(values["before_profile_revision"]),
-                    after_package_sha256=_sha(values["after_package_sha256"]),
-                    after_profile_revision=_sha(values["after_profile_revision"]),
+                    before_source_package_id=_package_id(
+                        values["before_source_package_id"]
+                    ),
+                    before_profile_revision=_profile_revision(
+                        values["before_profile_revision"]
+                    ),
+                    after_source_package_id=_package_id(
+                        values["after_source_package_id"]
+                    ),
+                    after_profile_revision=_profile_revision(
+                        values["after_profile_revision"]
+                    ),
                 )
                 result.update(
                     {
@@ -3404,9 +3344,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     {
                         "before_session",
                         "after_session",
-                        "before_package_sha256",
+                        "before_source_package_id",
                         "before_profile_revision",
-                        "after_package_sha256",
+                        "after_source_package_id",
                         "after_profile_revision",
                         "mode",
                         "side",
@@ -3420,9 +3360,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 base = {
                     "before_session",
                     "after_session",
-                    "before_package_sha256",
+                    "before_source_package_id",
                     "before_profile_revision",
-                    "after_package_sha256",
+                    "after_source_package_id",
                     "after_profile_revision",
                     "mode",
                 }
@@ -3458,10 +3398,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     before_session=before_session,
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    before_package_sha256=_sha(values["before_package_sha256"]),
-                    before_profile_revision=_sha(values["before_profile_revision"]),
-                    after_package_sha256=_sha(values["after_package_sha256"]),
-                    after_profile_revision=_sha(values["after_profile_revision"]),
+                    before_source_package_id=_package_id(
+                        values["before_source_package_id"]
+                    ),
+                    before_profile_revision=_profile_revision(
+                        values["before_profile_revision"]
+                    ),
+                    after_source_package_id=_package_id(
+                        values["after_source_package_id"]
+                    ),
+                    after_profile_revision=_profile_revision(
+                        values["after_profile_revision"]
+                    ),
                     mode=mode,
                     side=values.get("side"),
                     relation=values.get("relation"),
@@ -3493,9 +3441,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "before_session",
                         "after_session",
                         "symbol",
-                        "before_package_sha256",
+                        "before_source_package_id",
                         "before_profile_revision",
-                        "after_package_sha256",
+                        "after_source_package_id",
                         "after_profile_revision",
                     },
                 )
@@ -3503,16 +3451,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "before_session",
                     "after_session",
                     "symbol",
-                    "before_package_sha256",
+                    "before_source_package_id",
                     "before_profile_revision",
-                    "after_package_sha256",
+                    "after_source_package_id",
                     "after_profile_revision",
                 }
                 if set(values) != required:
                     raise PreviewHttpError(
                         400,
                         "PROFILE_PAIR_QUERY_REQUIRED",
-                        "双日代码对照必须精确提供前后日期、包SHA、画像修订和来源代码",
+                        "双日代码对照必须精确提供前后日期、来源包ID、画像修订和来源代码",
                     )
                 before_session = _iso_date(values["before_session"], "before_session")
                 after_session = _iso_date(values["after_session"], "after_session")
@@ -3528,10 +3476,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     after_session=after_session,
                     max_target_session=self.preview_server.state.research_cutoff,
                     source_symbol=_symbol(values["symbol"]),
-                    before_package_sha256=_sha(values["before_package_sha256"]),
-                    before_profile_revision=_sha(values["before_profile_revision"]),
-                    after_package_sha256=_sha(values["after_package_sha256"]),
-                    after_profile_revision=_sha(values["after_profile_revision"]),
+                    before_source_package_id=_package_id(
+                        values["before_source_package_id"]
+                    ),
+                    before_profile_revision=_profile_revision(
+                        values["before_profile_revision"]
+                    ),
+                    after_source_package_id=_package_id(
+                        values["after_source_package_id"]
+                    ),
+                    after_profile_revision=_profile_revision(
+                        values["after_profile_revision"]
+                    ),
                 )
                 result.update(
                     {
@@ -3551,7 +3507,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.path,
                     {
                         "target_session",
-                        "package_sha256",
+                        "source_package_id",
                         "profile_revision",
                         "offset",
                         "limit",
@@ -3580,20 +3536,20 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 required = {
                     "target_session",
-                    "package_sha256",
+                    "source_package_id",
                     "profile_revision",
                 }
                 if not required.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PROFILE_QUERY_REQUIRED",
-                        "画像查询必须显式绑定日期、包SHA和画像修订",
+                        "画像查询必须显式绑定日期、来源包ID和画像修订",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                package_sha = _sha(values["package_sha256"])
+                source_package_id = _package_id(values["source_package_id"])
                 offset = _nonnegative_int(values.get("offset", "0"), "offset")
                 limit = _positive_int(
                     _nonnegative_int(values.get("limit", "100"), "limit", 100) or 0,
@@ -3605,7 +3561,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.config,
                     target_session=target,
                     max_target_session=self.preview_server.state.research_cutoff,
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                     profile_revision=values["profile_revision"],
                     offset=offset,
                     limit=limit,
@@ -3653,45 +3609,43 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 return
             if parsed.path == "/api/preview/raw":
                 values = _query(
-                    self.path, {"target_session", "package_sha256", "symbol"}
+                    self.path, {"target_session", "source_package_id", "symbol"}
                 )
-                required = {"target_session", "package_sha256", "symbol"}
+                required = {"target_session", "source_package_id", "symbol"}
                 if set(values) != required:
                     raise PreviewHttpError(
                         400,
                         "PREVIEW_QUERY_REQUIRED",
-                        "Raw查询必须显式提供日期、完整SHA和来源代码",
+                        "Raw查询必须显式提供日期、数字来源包ID和来源代码",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                package_sha = _sha(values["package_sha256"])
+                source_package_id = _package_id(values["source_package_id"])
                 symbol = _symbol(values["symbol"])
                 row = read_raw_daily_stock(
                     self.preview_server.state.config,
                     source_symbol=symbol,
                     target_session=target,
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                 )
                 if row is None:
                     raise PreviewHttpError(
                         404,
                         "PG_SOURCE_NO_MATCH",
-                        "PG中没有该明确日期、来源包SHA与来源代码的Raw记录",
+                        "PG中没有该明确日期、来源包ID与来源代码的Raw记录",
                     )
                 source_context = _preview_source_context(
                     self.preview_server.state.config,
                     target_session=target,
-                    package_sha256=package_sha,
-                    namespace_id=str(row["namespace_id"]),
+                    source_package_id=source_package_id,
                     target_raw_rows=(row,),
                 )
                 raw = _raw_public_fields(row)
                 identity = self.preview_server.state.snapshot_identity(
-                    namespace_id=str(row["namespace_id"]),
                     target_session=target.isoformat(),
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                 )
                 self._send_json(
                     200,
@@ -3707,42 +3661,28 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/source-symbol/raw-periods":
                 values = _query(
                     self.path,
-                    {"target_session", "package_sha256", "symbol", "namespace_id"},
+                    {"target_session", "source_package_id", "symbol"},
                 )
                 self._raw_period_request_context = {
                     "target_session": values.get("target_session"),
                     "symbol": values.get("symbol"),
-                    "package_sha256": values.get("package_sha256"),
+                    "source_package_id": values.get("source_package_id"),
                     "price_coordinate": "RAW_UNADJUSTED",
-                    "namespace_id": values.get("namespace_id"),
                     "research_cutoff": self.preview_server.state.research_cutoff.isoformat(),
                     "identity_status": "REQUEST_NOT_RESOLVED",
                 }
-                required = {"target_session", "package_sha256", "symbol"}
-                if set(values) not in {
-                    frozenset(required),
-                    frozenset(required | {"namespace_id"}),
-                }:
+                required = {"target_session", "source_package_id", "symbol"}
+                if set(values) != required:
                     raise PreviewHttpError(
                         400,
                         "RAW_PERIOD_QUERY_REQUIRED",
-                        "RAW周期查询须提供日期、完整SHA、来源代码及可选namespace",
+                        "RAW周期查询须提供日期、数字来源包ID和来源代码",
                     )
-                expected_namespace_id = None
-                if "namespace_id" in values:
-                    try:
-                        expected_namespace_id = str(UUID(values["namespace_id"]))
-                    except (ValueError, TypeError, AttributeError) as error:
-                        raise PreviewHttpError(
-                            400,
-                            "PREVIEW_SOURCE_IDENTITY_INVALID",
-                            "周期来源身份须使用有效的namespace_id",
-                        ) from error
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                package_sha = _sha(values["package_sha256"])
+                source_package_id = _package_id(values["source_package_id"])
                 symbol = _symbol(values["symbol"])
                 resolved_target, sessions, calendar_revision = (
                     resolve_pg_history_window(target.isoformat(), 75)
@@ -3757,30 +3697,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.config,
                     source_symbol=symbol,
                     target_session=target,
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                     sessions=sessions,
                 )
                 source_context = _preview_source_context(
                     self.preview_server.state.config,
                     target_session=target,
-                    package_sha256=package_sha,
-                    namespace_id=history["namespace_id"],
+                    source_package_id=source_package_id,
                     target_raw_rows=history["history_rows"],
                 )
-                if expected_namespace_id is not None and (
-                    expected_namespace_id != history["namespace_id"]
-                    or source_context["status"] != "AVAILABLE"
-                ):
+                if source_context["status"] != "AVAILABLE":
                     self._raw_period_request_context.update(
                         {
-                            "resolved_namespace_id": history["namespace_id"],
                             "identity_status": "REQUEST_IDENTITY_MISMATCH",
                         }
                     )
                     raise PreviewHttpError(
                         409,
                         "PREVIEW_SOURCE_IDENTITY_MISMATCH",
-                        "周期返回的namespace或Raw来源键与请求不一致",
+                        "周期返回的Raw来源包或捕获记录与请求不一致",
                     )
                 calendar_payload, _metadata, _year_revision, calendar_sessions = (
                     research_entry._load_calendar(target)
@@ -3805,7 +3740,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         target_session=target,
                         calendar_id=calendar_payload["calendar_id"],
                         calendar_revision=calendar_revision,
-                        producer_source_sha256=self.preview_server.state.raw_period_source_sha256,
+                        source_cutoff=(
+                            f"TDX_PACKAGE:{source_package_id}:THROUGH:{target.isoformat()}"
+                        ),
                         profile_rules=profile_rules,
                         field_registry=field_registry,
                     )
@@ -3834,9 +3771,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "Raw历史缺失会话汇总与PG读取结果不一致",
                     )
                 identity = self.preview_server.state.snapshot_identity(
-                    namespace_id=history["namespace_id"],
                     target_session=target.isoformat(),
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                     session_count=len(sessions),
                     session_start=sessions[0].isoformat(),
                     calendar_revision=calendar_revision,
@@ -3858,15 +3794,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "target_session": target.isoformat(),
                         "source_symbol": symbol,
                         "symbol": symbol,
-                        "package_sha256": package_sha,
-                        "namespace_id": history["namespace_id"],
+                        "source_package_id": source_package_id,
                         "snapshot_identity": identity,
                         "source_version": source_context,
                         "selection": {
                             "source_symbol": symbol,
                             "target_session": target.isoformat(),
-                            "package_sha256": package_sha,
-                            "namespace_id": history["namespace_id"],
+                            "source_package_id": source_package_id,
                         },
                         "calendar_id": calendar_payload["calendar_id"],
                         "calendar_revision": calendar_revision,
@@ -3908,24 +3842,24 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.path,
                     {
                         "target_session",
-                        "package_sha256",
+                        "source_package_id",
                         "offset",
                         "limit",
                         "market",
                         "board",
                     },
                 )
-                if not {"target_session", "package_sha256"}.issubset(values):
+                if not {"target_session", "source_package_id"}.issubset(values):
                     raise PreviewHttpError(
                         400,
                         "PREVIEW_QUERY_REQUIRED",
-                        "候选分页必须显式提供目标日期和来源包SHA",
+                        "候选分页必须显式提供目标日期和来源包ID",
                     )
                 target = _iso_date(values["target_session"])
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                package_sha = _sha(values["package_sha256"])
+                source_package_id = _package_id(values["source_package_id"])
                 offset = _nonnegative_int(values.get("offset", "0"), "offset")
                 limit = _nonnegative_int(
                     values.get("limit", "20"), "limit", _MAX_PAGE_SIZE
@@ -3947,7 +3881,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 page = read_raw_daily_page(
                     self.preview_server.state.config,
                     target_session=target,
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                     offset=offset,
                     limit=limit,
                     market=market,
@@ -3957,21 +3891,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         404,
                         "PG_SOURCE_NO_MATCH",
-                        "PG中没有该明确日期和来源包SHA的Raw来源版本",
+                        "PG中没有该明确日期和数字来源包ID的Raw来源版本",
                     )
                 source_context = _preview_source_context(
                     self.preview_server.state.config,
                     target_session=target,
-                    package_sha256=package_sha,
-                    namespace_id=page["namespace_id"],
+                    source_package_id=source_package_id,
                     target_raw_rows=page["rows"],
                     expected_raw_row_count=page["version_row_count"],
                 )
-                namespace_id = page["namespace_id"]
                 identity = self.preview_server.state.snapshot_identity(
-                    namespace_id=namespace_id,
                     target_session=target.isoformat(),
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                 )
                 self._send_json(
                     200,
@@ -4103,8 +4034,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "post_signal_price_facts",
                     "symbol",
                     "target_session",
-                    "package_sha256",
-                    "namespace_id",
+                    "source_package_id",
                     "research_cutoff",
                     "session_count",
                 }
@@ -4121,16 +4051,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 _require_research_cutoff(
                     cutoff, self.preview_server.state.research_cutoff
                 )
-                package = _sha(body["package_sha256"])
+                package = _package_id(body["source_package_id"])
                 count = _positive_int(body["session_count"], "session_count", 10)
-                try:
-                    namespace = str(UUID(body["namespace_id"]))
-                except (ValueError, TypeError, AttributeError) as error:
-                    raise PreviewHttpError(
-                        400,
-                        "PREVIEW_SOURCE_IDENTITY_INVALID",
-                        "namespace_id须为有效UUID",
-                    ) from error
                 calendar = _official_calendar(cutoff)
                 all_sessions = calendar["sessions"]
                 if target not in all_sessions:
@@ -4144,9 +4066,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     self.preview_server.state.config,
                     source_symbol=symbol,
                     target_session=target,
-                    package_sha256=package,
+                    source_package_id=package,
                     sessions=sessions,
-                    expected_namespace_id=namespace,
                     starts_at_target=True,
                     research_cutoff=cutoff,
                 )
@@ -4158,8 +4079,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "symbol": symbol,
                         "target_session": target.isoformat(),
                         "research_cutoff": cutoff.isoformat(),
-                        "namespace_id": namespace,
-                        "package_sha256": package,
+                        "source_package_id": package,
                         "calendar_revision": calendar["calendar_revision_chain"],
                         "saved_session_range": history["saved_session_range"],
                         "database_write": False,
@@ -4177,8 +4097,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "source_observation_only",
                     "symbol",
                     "target_session",
-                    "package_sha256",
-                    "namespace_id",
+                    "source_package_id",
                     "research_cutoff",
                 }
                 membership_fields = {"industry_snapshot_id", "concept_snapshot_id"}
@@ -4201,7 +4120,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 _require_research_cutoff(
                     cutoff, self.preview_server.state.research_cutoff
                 )
-                package = _sha(body["package_sha256"])
+                package = _package_id(body["source_package_id"])
                 diagnostic_scope = body.get("diagnostic_scope", "LAUNCH")
                 if not isinstance(diagnostic_scope, str) or diagnostic_scope not in {
                     "BOTH",
@@ -4211,14 +4130,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400, "SOURCE_DIAGNOSTIC_SCOPE_INVALID", "来源诊断范围无效"
                     )
-                try:
-                    namespace = str(UUID(body["namespace_id"]))
-                except (ValueError, TypeError, AttributeError) as error:
-                    raise PreviewHttpError(
-                        400,
-                        "PREVIEW_SOURCE_IDENTITY_INVALID",
-                        "namespace_id须为有效UUID",
-                    ) from error
                 launch_change = None
                 if diagnostic_scope != "RECOVERY":
                     _, pair, _ = resolve_pg_history_window(target.isoformat(), 2)
@@ -4230,10 +4141,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             before_session=pair[0],
                             target_session=target,
                             research_cutoff=cutoff,
-                            before_package_sha256=package,
-                            package_sha256=package,
+                            before_source_package_id=package,
+                            source_package_id=package,
                             symbol=symbol,
-                            expected_namespace_id=namespace,
                             transition="ALL",
                             offset=0,
                             limit=1,
@@ -4250,13 +4160,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     rps_error = None
                     try:
                         rps, _ = self.preview_server.state.source_pool_rps(
-                            (namespace, target, cutoff, package),
+                            (target, cutoff, package),
                             lambda: read_source_pool_rps(
                                 self.preview_server.state.config,
                                 target_session=target,
                                 research_cutoff=cutoff,
-                                package_sha256=package,
-                                expected_namespace_id=namespace,
+                                source_package_id=package,
                             ),
                         )
                     except ValueError as error:
@@ -4268,8 +4177,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         action="current",
                         target_session=target,
                         research_cutoff=cutoff,
-                        package_sha256=package,
-                        expected_namespace_id=namespace,
+                        source_package_id=package,
                         symbol=symbol,
                         offset=0,
                         limit=1,
@@ -4297,7 +4205,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 target_session=target,
                                 industry_snapshot_id=body["industry_snapshot_id"],
                                 concept_snapshot_id=body["concept_snapshot_id"],
-                                expected_namespace_id=namespace,
                             )
                             missing = [
                                 kind
@@ -4317,7 +4224,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 target_session=target,
                                 industry_snapshot_id=body["industry_snapshot_id"],
                                 concept_snapshot_id=body["concept_snapshot_id"],
-                                expected_namespace_id=namespace,
                             )
                     except Exception as error:
                         if getattr(error, "code", None) != "SECTOR_SNAPSHOT_NOT_FOUND":
@@ -4346,12 +4252,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     },
                 )
                 return
-            expected = {"symbol", "target_session", "package_sha256", "session_count"}
-            allowed_timeline = expected | {"namespace_id"}
+            expected = {
+                "symbol",
+                "target_session",
+                "source_package_id",
+                "session_count",
+            }
+            allowed_timeline = expected
             source_change_required = {
                 "include_source_change_context",
                 "before_session",
-                "before_package_sha256",
+                "before_source_package_id",
                 "industry_snapshot_id",
                 "concept_snapshot_id",
             }
@@ -4375,9 +4286,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "PREVIEW_PROFILE_REVISIONS_MUST_BE_PAIRED",
                     "before_profile_revision与after_profile_revision必须同时提供",
                 )
-            source_change_body = expected | {"namespace_id"} | source_change_required
+            source_change_body = expected | source_change_required
             source_change_allowed = source_change_body | source_change_optional
-            stock_seed_fields = {"namespace_id", "profile_revision"}
+            stock_seed_fields = {"profile_revision"}
             valid_body = isinstance(body, dict)
             if valid_body and post_path == "/api/preview/stock":
                 valid_body = set(body) in {
@@ -4400,13 +4311,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 raise PreviewHttpError(
                     400,
                     "PREVIEW_BODY_FIELDS_INVALID",
-                    "请求体须包含symbol、target_session、package_sha256、session_count；轨迹可绑定namespace_id，并可显式启用单股变化上下文",
+                    "请求体须包含symbol、target_session、数字source_package_id、session_count；可显式启用单股变化上下文",
                 )
             symbol = _symbol(body["symbol"])
             target_text = body["target_session"]
             target = _iso_date(target_text)
             _require_research_cutoff(target, self.preview_server.state.research_cutoff)
-            package_sha = _sha(body["package_sha256"])
+            source_package_id = _package_id(body["source_package_id"])
             session_count = _positive_int(body["session_count"], "session_count", 75)
             source_change_opt_in = source_change_required <= set(body)
             research_cutoff = self.preview_server.state.research_cutoff
@@ -4420,7 +4331,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     )
                 _require_research_cutoff(target, research_cutoff)
             before_target: date | None = None
-            before_package_sha: str | None = None
+            before_source_package_id: int | None = None
             industry_snapshot_id: str | None = None
             concept_snapshot_id: str | None = None
             before_profile_revision: str | None = None
@@ -4440,41 +4351,28 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "PREVIEW_SOURCE_CHANGE_DATE_INVALID",
                         "before_session必须早于target_session",
                     )
-                before_package_sha = _sha(body["before_package_sha256"])
-                if before_package_sha != package_sha:
+                before_source_package_id = _package_id(body["before_source_package_id"])
+                if before_source_package_id != source_package_id:
                     raise PreviewHttpError(
                         409,
                         "PREVIEW_SOURCE_CHANGE_PACKAGE_MISMATCH",
-                        "前后来源包SHA必须相同",
+                        "前后研究请求必须使用相同数字来源包ID",
                     )
-                try:
-                    industry_snapshot_id = str(UUID(body["industry_snapshot_id"]))
-                    concept_snapshot_id = str(UUID(body["concept_snapshot_id"]))
-                except (ValueError, TypeError, AttributeError) as error:
-                    raise PreviewHttpError(
-                        400,
-                        "PREVIEW_SOURCE_CHANGE_ID_INVALID",
-                        "行业与概念快照ID须为有效UUID",
-                    ) from error
+                industry_snapshot_id = _snapshot_id(body["industry_snapshot_id"])
+                concept_snapshot_id = _snapshot_id(body["concept_snapshot_id"])
                 if source_change_optional <= set(body):
-                    before_profile_revision = _sha(body["before_profile_revision"])
-                    after_profile_revision = _sha(body["after_profile_revision"])
-            expected_namespace_id = None
-            if "namespace_id" in body:
-                try:
-                    expected_namespace_id = str(UUID(body["namespace_id"]))
-                except (ValueError, TypeError, AttributeError) as error:
-                    raise PreviewHttpError(
-                        400,
-                        "PREVIEW_SOURCE_IDENTITY_INVALID",
-                        "轨迹来源身份须使用有效namespace_id",
-                    ) from error
+                    before_profile_revision = _profile_revision(
+                        body["before_profile_revision"]
+                    )
+                    after_profile_revision = _profile_revision(
+                        body["after_profile_revision"]
+                    )
             profile_revision = None
             if (
                 post_path == "/api/preview/stock"
                 and body.get("profile_revision") is not None
             ):
-                profile_revision = _sha(body["profile_revision"])
+                profile_revision = _profile_revision(body["profile_revision"])
             resolved_target, sessions, calendar_revision = resolve_pg_history_window(
                 target.isoformat(), session_count
             )
@@ -4511,39 +4409,33 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 self.preview_server.state.config,
                 source_symbol=symbol,
                 target_session=target,
-                package_sha256=package_sha,
+                source_package_id=source_package_id,
                 sessions=sessions,
-                expected_namespace_id=expected_namespace_id,
             )
             if post_path == "/api/preview/stock-timeline":
                 result = research_entry.research_stock_pg_history_timeline(
                     symbol=symbol,
                     target_session=target.isoformat(),
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                     session_dates=sessions,
                     history_rows=history["history_rows"],
                     missing_history_sessions=tuple(
                         date.fromisoformat(item)
                         for item in history["missing_history_sessions"]
                     ),
-                    namespace_id=history["namespace_id"],
                     profile_contract=self.preview_server.state.profile_contract,
                 )
                 source_context = _preview_source_context(
                     self.preview_server.state.config,
                     target_session=target,
-                    package_sha256=package_sha,
-                    namespace_id=history["namespace_id"],
+                    source_package_id=source_package_id,
                     target_raw_rows=history["history_rows"],
                 )
-                if expected_namespace_id is not None and (
-                    expected_namespace_id != history["namespace_id"]
-                    or source_context["status"] != "AVAILABLE"
-                ):
+                if source_context["status"] != "AVAILABLE":
                     raise PreviewHttpError(
                         409,
                         "PREVIEW_SOURCE_IDENTITY_MISMATCH",
-                        "轨迹返回的namespace或Raw来源键与变化快照不一致",
+                        "轨迹返回的Raw包ID或捕获记录与变化快照不一致",
                     )
                 if source_change_opt_in:
                     try:
@@ -4553,16 +4445,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             target_session=target,
                             industry_snapshot_id=industry_snapshot_id,
                             concept_snapshot_id=concept_snapshot_id,
-                            expected_namespace_id=history["namespace_id"],
                         )
                         source_change = query_source_stock_change_context(
                             self.preview_server.state.config,
-                            namespace_id=history["namespace_id"],
                             before_session=before_target,
                             target_session=target,
                             research_cutoff=research_cutoff,
-                            before_package_sha256=before_package_sha,
-                            package_sha256=package_sha,
+                            before_source_package_id=before_source_package_id,
+                            source_package_id=source_package_id,
                             symbol=symbol,
                             before_profile_revision=before_profile_revision,
                             after_profile_revision=after_profile_revision,
@@ -4577,9 +4467,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "current_tdx_membership": membership,
                     }
                 identity = self.preview_server.state.snapshot_identity(
-                    namespace_id=history["namespace_id"],
                     target_session=target.isoformat(),
-                    package_sha256=package_sha,
+                    source_package_id=source_package_id,
                     session_count=session_count,
                     session_start=sessions[0].isoformat(),
                     calendar_revision=calendar_revision,
@@ -4589,22 +4478,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 result["selection"] = {
                     "source_symbol": symbol,
                     "target_session": target.isoformat(),
-                    "package_sha256": package_sha,
+                    "source_package_id": source_package_id,
                     "session_count": session_count,
                     "calendar_revision": calendar_revision,
-                    "namespace_id": history["namespace_id"],
                 }
                 relation_history = result.get("price_relation_history")
                 if isinstance(relation_history, dict):
-                    identity_ref = identity["identity_sha256"]
-                    relation_history["identity_ref"] = identity_ref
-                    for collection_name in ("observations", "events"):
-                        for item in relation_history.get(collection_name, ()):
-                            if isinstance(item, dict):
-                                item["identity_ref"] = identity_ref
+                    relation_history["source_package_id"] = source_package_id
                 direction_history = result.get("ma20_direction_history")
                 if isinstance(direction_history, dict):
-                    direction_history["identity_ref"] = identity["identity_sha256"]
                     binding = direction_history.get("binding")
                     if isinstance(binding, dict):
                         binding.update(
@@ -4612,10 +4494,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                 "source_capture_id": source_context[
                                     "source_capture_id"
                                 ],
-                                "source_content_id": source_context[
-                                    "source_content_id"
+                                "source_package_id": source_context[
+                                    "source_package_id"
                                 ],
-                                "package_sha256": package_sha,
                             }
                         )
                 self._send_json(200, result)
@@ -4623,27 +4504,24 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             source_context = _preview_source_context(
                 self.preview_server.state.config,
                 target_session=target,
-                package_sha256=package_sha,
-                namespace_id=history["namespace_id"],
+                source_package_id=source_package_id,
                 target_raw_rows=history["history_rows"],
             )
             result = research_entry.research_stock_pg_history_preview(
                 symbol=symbol,
                 target_session=target.isoformat(),
-                package_sha256=package_sha,
+                source_package_id=source_package_id,
                 session_dates=sessions,
                 history_rows=history["history_rows"],
                 missing_history_sessions=tuple(
                     date.fromisoformat(item)
                     for item in history["missing_history_sessions"]
                 ),
-                namespace_id=history["namespace_id"],
                 profile_contract=self.preview_server.state.profile_contract,
             )
             identity = self.preview_server.state.snapshot_identity(
-                namespace_id=history["namespace_id"],
                 target_session=target.isoformat(),
-                package_sha256=package_sha,
+                source_package_id=source_package_id,
                 session_count=session_count,
                 session_start=sessions[0].isoformat(),
                 calendar_revision=calendar_revision,
@@ -4653,7 +4531,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             result["selection"] = {
                 "source_symbol": symbol,
                 "target_session": target.isoformat(),
-                "package_sha256": package_sha,
+                "source_package_id": source_package_id,
                 "session_count": session_count,
                 "calendar_revision": calendar_revision,
             }
@@ -4665,10 +4543,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             result["source_seed"] = query_source_stock_seed_context(
                 self.preview_server.state.config,
                 target_session=target,
-                package_sha256=package_sha,
-                namespace_id=history["namespace_id"],
+                source_package_id=source_package_id,
                 source_capture_id=source_context["source_capture_id"],
-                source_content_id=source_context["source_content_id"],
                 source_symbol=symbol,
                 profile_revision=profile_revision,
                 expected_source_count=source_context["capture_expected_row_count"],

@@ -102,7 +102,7 @@ def read_market_observation_sessions(
     *,
     sessions: tuple[date, ...],
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str,
     profile_contract: dict[str, Any],
     history_session_count: int,
@@ -122,31 +122,25 @@ def read_market_observation_sessions(
         raise ValueError("研究会话必须连续")
 
     previous: dict[str, dict[str, str]] = {}
-    previous_namespace = None
     previous_scenarios = None
     previous_profile_revision = None
     outputs = []
     for session in sessions:
         scenarios = {}
-        namespace = None
         for scenario in ("LAUNCH_CONFIRM", "RECOVERY_TURN"):
             page = read_source_d0_scenario_day(
                 config,
                 target_session=session,
-                package_sha256=package_sha256,
-                namespace_id=namespace,
+                source_package_id=source_package_id,
                 scenario=scenario,
             )
-            namespace = page["namespace_id"]
             scenarios[scenario] = page
-        if previous_namespace is not None and namespace != previous_namespace:
-            raise SourceObservationError("相邻会话来源namespace不一致")
         if previous_scenarios is not None:
             for scenario, current_result in scenarios.items():
                 prior_result = previous_scenarios[scenario]
                 if (
-                    prior_result["source_version"]["source_content_id"]
-                    != current_result["source_version"]["source_content_id"]
+                    prior_result["source_version"]["source_package_id"]
+                    != current_result["source_version"]["source_package_id"]
                     or prior_result["official_calendar"]
                     != current_result["official_calendar"]
                     or prior_result["session_contract"]
@@ -168,8 +162,7 @@ def read_market_observation_sessions(
                 config,
                 target_session=session,
                 research_cutoff=research_cutoff,
-                package_sha256=package_sha256,
-                namespace_id=namespace,
+                source_package_id=source_package_id,
                 profile_revision=profile_revision,
                 profile_contract=profile_contract,
                 history_session_count=history_session_count,
@@ -229,7 +222,7 @@ def read_market_observation_sessions(
                 config,
                 target_session=session,
                 research_cutoff=research_cutoff,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
             )
         except SourceMarketContextError as error:
             if not allow_missing_market or error.category != "NOT_EVALUABLE":
@@ -242,11 +235,8 @@ def read_market_observation_sessions(
             }
         source_version = scenarios["LAUNCH_CONFIRM"]["source_version"]
         if market is not None and (
-            market.cohort.namespace_id != namespace
-            or market.cohort.source_content_id != source_version["source_content_id"]
+            market.cohort.source_package_id != source_version["source_package_id"]
             or market.cohort.source_capture_id != source_version["source_capture_id"]
-            or market.pg_result["target_raw_digest"]
-            != source_version["source_raw_digest"]
         ):
             raise SourceObservationError("市场宽度与D0来源捕获身份不一致")
         if market is not None:
@@ -254,7 +244,6 @@ def read_market_observation_sessions(
         outputs.append(
             {
                 "session": session,
-                "namespace_id": namespace,
                 "market": market_payload,
                 "scenarios": scenarios,
                 "seed": seed,
@@ -268,7 +257,7 @@ def read_market_observation_sessions(
                 "pit_status": "NON_PIT_RETROSPECTIVE",
             }
         )
-        previous, previous_namespace, previous_scenarios = current, namespace, scenarios
+        previous, previous_scenarios = current, scenarios
         previous_profile_revision = runtime_profile_revision
     return outputs
 
@@ -289,10 +278,6 @@ def assemble_observation_changes(
             ("CONCEPT", concept_snapshot_id),
         )
     ]
-    if any(
-        snapshot["namespace_id"] != days[0]["namespace_id"] for snapshot in snapshots
-    ):
-        raise SourceObservationError("板块成员与来源池namespace不一致")
     memberships: dict[str, list[dict[str, str]]] = {}
     boards = []
     for snapshot in snapshots:
@@ -328,13 +313,9 @@ def assemble_observation_changes(
                             "signal": signal,
                             "transition": transition,
                             "source_binding": {
-                                "namespace_id": day["namespace_id"],
-                                "package_sha256": day["scenarios"]["LAUNCH_CONFIRM"][
+                                "source_package_id": day["scenarios"]["LAUNCH_CONFIRM"][
                                     "source_version"
-                                ]["package_sha256"],
-                                "source_content_id": day["scenarios"]["LAUNCH_CONFIRM"][
-                                    "source_version"
-                                ]["source_content_id"],
+                                ]["source_package_id"],
                                 "profile_revision": day["seed"].get("profile_revision"),
                                 "runtime_profile_revision": day["seed"].get(
                                     "runtime_profile_revision"
@@ -366,25 +347,16 @@ def assemble_observation_changes(
             discovery = d1_by_session[day["session"]]
             if (
                 discovery["source_pool_count"] != len(states)
-                or discovery["source"]["namespace_id"] != day["namespace_id"]
-                or discovery["source"]["package_sha256"]
+                or discovery["source"]["source_package_id"]
                 != day["scenarios"]["LAUNCH_CONFIRM"]["source_version"][
-                    "package_sha256"
-                ]
-                or discovery["source"]["source_content_id"]
-                != day["scenarios"]["LAUNCH_CONFIRM"]["source_version"][
-                    "source_content_id"
+                    "source_package_id"
                 ]
                 or discovery["source"]["source_capture_id"]
                 != day["scenarios"]["LAUNCH_CONFIRM"]["source_version"][
                     "source_capture_id"
                 ]
-                or discovery["source"]["source_raw_digest"]
-                != day["scenarios"]["LAUNCH_CONFIRM"]["source_version"][
-                    "source_raw_digest"
-                ]
             ):
-                raise SourceObservationError("D1与来源池分母或namespace不一致")
+                raise SourceObservationError("D1与来源池分母或数字来源键不一致")
             d1_details = {
                 detail["source_symbol"]: detail
                 for detail in discovery["complete_symbol_details"]
@@ -734,7 +706,7 @@ def attach_board_strengths(
     industry_snapshot_id: str,
     concept_snapshot_id: str,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str,
 ) -> None:
     """在完整行业/GN成员上复用现役跨期强弱，缺画像时局部未知。"""
@@ -767,8 +739,6 @@ def attach_board_strengths(
                 snapshot = read_rotation_snapshot_members(
                     config, snapshot_id=snapshot_id, board_kind=kind
                 )
-                if snapshot["namespace_id"] != day["namespace_id"]:
-                    raise SourceObservationError("板块成员与来源池namespace不一致")
                 peers = {key: row["members"] for key, row in snapshot["boards"].items()}
                 cache = {}
                 representative = next(
@@ -784,11 +754,9 @@ def attach_board_strengths(
                     start_session=day["session"],
                     target_session=day["session"],
                     research_cutoff=research_cutoff,
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     peer_target_only=True,
                 )
-                if rotation["namespace_id"] != day["namespace_id"]:
-                    raise SourceObservationError("板块轮动与来源池namespace不一致")
                 for board_id, members in peers.items():
                     row = boards[(day["session"], kind, board_id)]
                     row["native_detail"] = _board_native(
@@ -817,7 +785,7 @@ def attach_board_strengths(
                     board_native_id=None,
                     target_session=day["session"],
                     research_cutoff=research_cutoff,
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     profile_revision=profile_revision,
                     changed_only=False,
                     sort_by="delta20",
@@ -832,13 +800,12 @@ def attach_board_strengths(
                     read_context=context,
                 )
                 if (
-                    strength["namespace_id"] != day["namespace_id"]
-                    or strength["target_source_version"]["source_capture_id"]
+                    strength["target_source_version"]["source_capture_id"]
                     != day["scenarios"]["LAUNCH_CONFIRM"]["source_version"][
                         "source_capture_id"
                     ]
                 ):
-                    raise SourceObservationError("板块强弱与来源池namespace不一致")
+                    raise SourceObservationError("板块强弱与来源捕获ID不一致")
                 peer_members = strength["all_member_symbols_for_linkage"]
                 cross = _cross_period_boards(
                     peer_members, strength["cross_period_inputs_for_linkage"]
@@ -874,7 +841,7 @@ def read_observation_d1(
     *,
     sessions: tuple[date, ...],
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     event_window_start: date,
     history_session_count: int,
 ) -> dict[date, dict[str, Any]]:
@@ -891,7 +858,7 @@ def read_observation_d1(
             research_cutoff,
             history,
             revision,
-            package_sha256,
+            source_package_id,
             event_window_start,
             0,
             1,
@@ -1275,7 +1242,7 @@ def _d1_material_outcomes(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     horizon: int | None,
     source: Mapping[str, Any],
     source_symbol_summary: Mapping[str, Mapping[str, Any]],
@@ -1336,14 +1303,12 @@ def _d1_material_outcomes(
         offset=0,
         limit=200,
     )
-    if catalog["namespace_id"] != source.get("namespace_id"):
-        raise SourceObservationError("后续Raw目录与D1来源namespace不一致")
     versions = {
-        (date.fromisoformat(row["session_date"]), row["package_sha256"]): row
+        (date.fromisoformat(row["session_date"]), row["source_package_id"]): row
         for row in catalog["versions"]
     }
     for session in horizon_sessions:
-        version = versions.get((session, package_sha256))
+        version = versions.get((session, source_package_id))
         if (
             version is None
             or version["version_status"] != "CLOSED"
@@ -1376,8 +1341,8 @@ def _d1_material_outcomes(
     rows_by_symbol: dict[str, list[dict[str, Any]]] = {}
     raw_history_rows_read = 0
     raw_batch_reads = 0
-    expected_content_id = source.get("source_content_id")
-    target_capture_id = str(source.get("source_capture_id"))
+    expected_source_package_id = source.get("source_package_id")
+    target_capture_id = int(source.get("source_capture_id"))
     for offset in range(0, len(cohort_symbols), 100):
         batch_symbols = cohort_symbols[offset : offset + 100]
         batch = read_raw_daily_history_batch(
@@ -1385,10 +1350,9 @@ def _d1_material_outcomes(
             source_symbols=batch_symbols,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             sessions=horizon_sessions,
-            expected_namespace_id=source["namespace_id"],
-            expected_source_content_id=expected_content_id,
+            expected_source_package_id=expected_source_package_id,
             expected_target_capture_id=target_capture_id,
             starts_at_target=True,
         )
@@ -1521,7 +1485,7 @@ def prepare_d1_material_observation(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     d1_history_session_count: int,
     industry_snapshot_id: str | None,
     concept_snapshot_id: str | None,
@@ -1536,7 +1500,7 @@ def prepare_d1_material_observation(
         target_session=target_session,
         research_cutoff=research_cutoff,
         sessions=sessions,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         offset=0,
         limit=1,
         structure_changes=True,
@@ -1555,11 +1519,6 @@ def prepare_d1_material_observation(
         )
         if snapshot_id is not None
     ]
-    if any(
-        snapshot["namespace_id"] != d1["source"]["namespace_id"]
-        for snapshot in snapshots
-    ):
-        raise SourceObservationError("板块当前成员快照与D1来源namespace不一致")
     return {
         "d1": d1,
         "sessions": sessions,
@@ -1573,7 +1532,7 @@ def prepare_saved_d1_material_observation(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     d1_history_session_count: int,
     industry_snapshot_id: str | None,
     concept_snapshot_id: str | None,
@@ -1585,7 +1544,7 @@ def prepare_saved_d1_material_observation(
     saved = read_source_research_day(
         config,
         target_session=target_session,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         d1_history_session_count=d1_history_session_count,
         industry_snapshot_id=industry_snapshot_id,
         concept_snapshot_id=concept_snapshot_id,
@@ -1700,15 +1659,12 @@ def prepare_saved_d1_material_observation(
         "calendar": {
             "calendar_id": first_structure["calendar_id"],
             "calendar_revision": saved["calendar_revision"],
-            "calendar_sha256": saved["calendar_sha256"],
             "official_session_count": len(sessions),
             "history_start": sessions[0].isoformat(),
             "history_end": sessions[-1].isoformat(),
         },
         "source": {
-            "namespace_id": saved["namespace_id"],
-            "package_sha256": package_sha256,
-            "source_content_id": saved["source_content_id"],
+            "source_package_id": saved["source_package_id"],
             "source_capture_id": saved["target_capture_id"],
             "raw_row_count": source_count,
             "capture_expected_row_count": source_count,
@@ -1788,8 +1744,6 @@ def prepare_saved_d1_material_observation(
         )
         if snapshot_id is not None
     ]
-    if any(snapshot["namespace_id"] != saved["namespace_id"] for snapshot in snapshots):
-        raise SourceObservationError("板块成员快照与PG D1事实namespace不一致")
     return {
         "d1": d1,
         "sessions": sessions,
@@ -1833,7 +1787,7 @@ def read_d1_material_observation(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     d1_history_session_count: int,
     industry_snapshot_id: str | None,
     concept_snapshot_id: str | None,
@@ -1885,7 +1839,7 @@ def read_d1_material_observation(
             target_session=target_session,
             research_cutoff=research_cutoff,
             sessions=sessions,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             offset=offset,
             limit=limit,
             structure_symbol=symbol,
@@ -1929,11 +1883,6 @@ def read_d1_material_observation(
         else projected_source_symbol_summary
     )
 
-    if any(
-        snapshot["namespace_id"] != d1["source"]["namespace_id"]
-        for snapshot in snapshots
-    ):
-        raise SourceObservationError("板块当前成员快照与D1来源namespace不一致")
     board_rows, mapped_by_kind = _d1_material_board_summaries(
         snapshots,
         source_symbol_summary,
@@ -2104,7 +2053,7 @@ def read_d1_material_observation(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         horizon=horizon,
         source=d1["source"],
         source_symbol_summary=source_symbol_summary,
@@ -2200,7 +2149,7 @@ def read_d1_material_observation(
         "qualification_scope": "SOURCE_D1_MATERIAL_CHANGE_NOT_FORMAL_D2_OR_TRADING_SIGNAL",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "profile_revision": "NOT_REQUIRED_FOR_D1_RAW_MATERIAL_VIEW",
         "membership_availability": {
             "INDUSTRY": "AVAILABLE" if industry_snapshot_id is not None else "UNKNOWN",
@@ -2212,11 +2161,8 @@ def read_d1_material_observation(
         "source": {
             key: d1["source"].get(key)
             for key in (
-                "namespace_id",
-                "package_sha256",
-                "source_content_id",
+                "source_package_id",
                 "source_capture_id",
-                "source_raw_digest",
                 "raw_row_count",
                 "capture_expected_row_count",
                 "capture_read_started_at",
@@ -2323,7 +2269,7 @@ def read_observation_board_details(
     snapshot_id: str,
     board_kind: str,
     board_native_id: str,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str,
     research_cutoff: date,
     rotation_start: date,
@@ -2336,8 +2282,6 @@ def read_observation_board_details(
     snapshot = read_rotation_snapshot_members(
         config, snapshot_id=snapshot_id, board_kind=board_kind
     )
-    if snapshot["namespace_id"] != day["namespace_id"]:
-        raise SourceObservationError("板块快照与来源池namespace不一致")
     peer_members = {key: row["members"] for key, row in snapshot["boards"].items()}
     if board_native_id not in peer_members:
         return {"status": "UNKNOWN_DATA", "reason": "BOARD_NOT_IN_EXACT_SNAPSHOT"}
@@ -2371,7 +2315,7 @@ def read_observation_board_details(
             start_session=rotation_start,
             target_session=day["session"],
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
         )
         return {
             "status": "COMPUTED",
@@ -2390,7 +2334,7 @@ def read_observation_board_details(
         board_native_id=None,
         target_session=day["session"],
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         profile_revision=profile_revision,
         changed_only=False,
         sort_by="delta20",
@@ -2403,8 +2347,6 @@ def read_observation_board_details(
         include_all_member_symbols=True,
         include_cross_period_inputs=True,
     )
-    if strength["namespace_id"] != day["namespace_id"]:
-        raise SourceObservationError("板块强弱与来源池namespace不一致")
     native = read_board_seed_facts(
         config,
         day["seed"],
@@ -2430,7 +2372,7 @@ def read_observation_board_details(
         start_session=rotation_start,
         target_session=day["session"],
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         profile_revision=profile_revision,
         profile_contract=profile_contract,
         profile_history_session_count=day["seed"]["history_session_count"],
@@ -2450,7 +2392,7 @@ def attach_observation_outcomes(
     observation: dict[str, Any],
     *,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     horizon: int,
     history_cache: Mapping[tuple[date, str], dict[str, Any]] | None = None,
     read_metrics: dict[str, int] | None = None,
@@ -2478,9 +2420,8 @@ def attach_observation_outcomes(
                 config,
                 source_symbol=symbol,
                 target_session=target,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 sessions=sessions,
-                expected_namespace_id=day_index[target]["namespace_id"],
                 starts_at_target=True,
                 research_cutoff=research_cutoff,
             )
@@ -2489,10 +2430,7 @@ def attach_observation_outcomes(
             safe_rows = []
             for row in rows:
                 if row["session_date"] != target and (
-                    not birth.get("source_entry_sha256")
-                    or row.get("source_entry_sha256")
-                    != birth.get("source_entry_sha256")
-                    or row.get("source_content_id") != birth.get("source_content_id")
+                    row.get("source_package_id") != birth.get("source_package_id")
                     or row.get("price_coordinate") != "RAW_UNADJUSTED"
                 ):
                     safe_rows.append(
@@ -2713,7 +2651,7 @@ def compare_source_outcomes(
     observation: Mapping[str, Any],
     *,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     horizon: int,
     history_cache: dict[tuple[date, str], dict[str, Any]] | None = None,
     read_metrics: dict[str, int] | None = None,
@@ -2743,15 +2681,13 @@ def compare_source_outcomes(
             page = read_raw_daily_history_page(
                 config,
                 target_session=sessions[-1],
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 sessions=sessions,
                 offset=offset,
                 limit=100,
                 market="ALL",
                 board="ALL",
             )
-            if page["namespace_id"] != day["namespace_id"]:
-                raise SourceObservationError("后继来源namespace不一致")
             for candidate in page["candidates"]:
                 symbol = candidate["source_symbol"]
                 rows = candidate["history_rows"]
@@ -2762,11 +2698,8 @@ def compare_source_outcomes(
                 for row in rows:
                     if row["session_date"] != target and (
                         birth is None
-                        or not birth.get("source_entry_sha256")
-                        or row.get("source_entry_sha256")
-                        != birth.get("source_entry_sha256")
-                        or row.get("source_content_id")
-                        != birth.get("source_content_id")
+                        or row.get("source_package_id")
+                        != birth.get("source_package_id")
                         or row.get("price_coordinate") != "RAW_UNADJUSTED"
                     ):
                         safe.append(
@@ -2795,9 +2728,8 @@ def compare_source_outcomes(
                         config,
                         source_symbol=symbol,
                         target_session=target,
-                        package_sha256=package_sha256,
+                        source_package_id=source_package_id,
                         sessions=sessions,
-                        expected_namespace_id=day["namespace_id"],
                         starts_at_target=True,
                         research_cutoff=research_cutoff,
                     )
@@ -2810,11 +2742,8 @@ def compare_source_outcomes(
                         if row["session_date"] == target
                         or (
                             birth is not None
-                            and birth.get("source_entry_sha256")
-                            and row.get("source_entry_sha256")
-                            == birth.get("source_entry_sha256")
-                            and row.get("source_content_id")
-                            == birth.get("source_content_id")
+                            and row.get("source_package_id")
+                            == birth.get("source_package_id")
                             and row.get("price_coordinate") == "RAW_UNADJUSTED"
                         )
                         else {

@@ -8,7 +8,6 @@ from datetime import date, datetime, time, timedelta
 from fractions import Fraction
 from zoneinfo import ZoneInfo
 
-from stock_a.canonical.identity import semantic_digest
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 from stock_a.research.core import CoreObservation, MarketSessionCalendar
 
@@ -192,13 +191,10 @@ class ClosedPeriodBar:
     status_revision: str
     action_revision: str
     aggregation_version: str
-    input_digest: str
     calendar_coverage_proven: bool
     fact_identity_trusted: bool
     fact_dependency_closure_bound: bool
     action_selection_status: str
-    period_fact_digest: str
-    selection_context_digest: str
 
 
 def _period_key(kind: str, session: date) -> tuple[str, date, date, int]:
@@ -498,42 +494,6 @@ def build_closed_period_bars(
             )
             fields = _aggregate_actual(actual)
         actual_sessions = [row.session for row in actual]
-        state_identity = tuple(
-            None
-            if row is None
-            else (
-                row.session,
-                row.state,
-                row.listing_eligible,
-                official_session_closes[row.session],
-            )
-            for row in states
-        )
-        daily_identity = tuple(
-            (
-                row.session,
-                row.state,
-                row.coordinate_id,
-                row.open,
-                row.high,
-                row.low,
-                row.close,
-                row.amount,
-                row.volume,
-            )
-            for row in actual
-        )
-        proof_identity = (
-            None
-            if calendar_coverage_proof is None
-            else (
-                calendar_coverage_proof.proof_ref,
-                calendar_coverage_proof.coverage_start,
-                calendar_coverage_proof.coverage_end,
-                calendar_coverage_proof.available_at,
-                calendar_coverage_proof.seal_basis,
-            )
-        )
         # 实体与逐行来源身份须由调用方依据真实来源提供；纯内核不把调用者标签视为已验证身份。
         fact_identity_trusted = False
         dependency_identity = (period_dependency_identities or {}).get(period_id)
@@ -566,67 +526,6 @@ def build_closed_period_bars(
             == selected_state_sessions
             and selected_state_sessions == set(scheduled)
         )
-        action_proof_value = (
-            None
-            if action_proof is None
-            else (
-                action_proof.period_id,
-                action_proof.target_coordinate_id,
-                action_proof.coordinate_dependency_ref,
-                tuple(sorted(action_proof.selected_action_dependencies)),
-                action_proof.completeness,
-                action_proof.proof_ref,
-            )
-        )
-        # 未绑定也保留局部依赖及核验状态，避免遗漏/不完整选集与确认空集共享身份。
-        dependency_identity_value = (
-            "DEPENDENCY_CLOSURE_BOUND"
-            if dependency_closure_bound
-            else "DEPENDENCY_CLOSURE_UNBOUND",
-            action_selection_status,
-            None
-            if dependency_identity is None
-            else (
-                tuple(sorted(dependency_identity.status_dependencies)),
-                tuple(sorted(dependency_identity.action_dependencies)),
-                dependency_identity.coordinate_dependency_ref,
-            ),
-            action_proof_value,
-        )
-        period_fact_digest = semantic_digest(
-            (
-                PERIOD_AGGREGATION_VERSION,
-                "ENTITY_SOURCE_BINDING_UNVERIFIED",
-                period,
-                period_id,
-                ordinal,
-                state_name,
-                coverage,
-                listing_complete,
-                proof_covers_period,
-                official_calendar.calendar_id,
-                official_calendar.revision,
-                proof_identity,
-                target_coordinate_id,
-                state_identity,
-                daily_identity,
-                dependency_identity_value,
-                fields,
-            )
-        )
-        selection_context_digest = semantic_digest(
-            (
-                period_fact_digest,
-                target_session,
-                source_cutoff,
-                official_calendar.calendar_id,
-                official_calendar.revision,
-                status_revision,
-                action_revision,
-                tuple(scheduled),
-            )
-        )
-        input_digest = period_fact_digest
         result.append(
             ClosedPeriodBar(
                 period,
@@ -655,13 +554,10 @@ def build_closed_period_bars(
                 status_revision,
                 action_revision,
                 PERIOD_AGGREGATION_VERSION,
-                input_digest,
                 proof_covers_period,
                 fact_identity_trusted,
                 dependency_closure_bound,
                 action_selection_status,
-                period_fact_digest,
-                selection_context_digest,
             )
         )
     return tuple(result)

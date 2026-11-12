@@ -29,20 +29,18 @@ def bind_source_context_to_raw_rows(
     source_context: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    namespace_id: str,
+    source_package_id: int,
     target_raw_rows: Sequence[Mapping[str, Any]],
 ) -> dict[str, Any]:
-    """核对所选来源版本与目标日Raw行的日期、包、内容和捕获引用。"""
+    """核对所选来源版本与目标日Raw行的日期、数字包ID和捕获引用。"""
     if (
         source_context.get("status") != "AVAILABLE"
         or source_context.get("target_session") != target_session.isoformat()
-        or source_context.get("package_sha256") != package_sha256
-        or source_context.get("namespace_id") != namespace_id
+        or source_context.get("source_package_id") != source_package_id
     ):
         raise PgResearchBindingError(
             "PG_RESEARCH_SOURCE_VERSION_MISMATCH",
-            "来源版本上下文与请求日期、包SHA或namespace不一致。",
+            "来源版本上下文与请求日期或数字包ID不一致。",
         )
     target_rows = [
         row
@@ -56,16 +54,15 @@ def bind_source_context_to_raw_rows(
         )
     target_row = target_rows[0]
     if (
-        target_row.get("package_sha256") != package_sha256
-        or target_row.get("namespace_id") != namespace_id
-        or target_row.get("source_content_id")
-        != source_context.get("source_content_id")
+        target_row.get("source_package_id") != source_package_id
+        or target_row.get("source_package_id")
+        != source_context.get("source_package_id")
         or target_row.get("source_capture_id")
         != source_context.get("source_capture_id")
     ):
         raise PgResearchBindingError(
             "PG_RESEARCH_RAW_REFERENCE_MISMATCH",
-            "目标日Raw行与来源包内容或捕获引用不一致。",
+            "目标日Raw行与来源包数字ID或捕获引用不一致。",
         )
     bound_context = dict(source_context)
     bound_context["target_raw_binding_count"] = 1
@@ -77,25 +74,23 @@ def read_source_version_context(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    namespace_id: str | None,
+    source_package_id: int,
     target_raw_rows: Sequence[Mapping[str, Any]] = (),
     expected_raw_row_count: int | None = None,
 ) -> dict[str, Any]:
-    """从Raw、捕获与内容事实取上下文；旧profile键只作为行筛选值回传。"""
+    """从Raw、捕获和原始包父记录读取精确来源上下文。"""
     try:
         source = _read_source_version_context(
             config,
             target_session=target_session,
-            package_sha256=package_sha256,
-            expected_namespace_id=namespace_id,
+            source_package_id=source_package_id,
         )
     except RawSourcePgError as error:
         raise PgResearchBindingError(error.code, str(error)) from error
     if source.get("status") != "AVAILABLE":
         raise PgResearchBindingError(
             "PG_RESEARCH_SOURCE_VERSION_UNAVAILABLE",
-            "该日期与来源包SHA没有可用的Raw来源版本。",
+            "该日期与数字来源包ID没有可用的Raw来源版本。",
         )
     if expected_raw_row_count is not None and (
         type(expected_raw_row_count) is not int
@@ -117,17 +112,14 @@ def read_source_version_context(
             )
         for row in target_rows:
             if (
-                row.get("package_sha256") != package_sha256
-                or str(row.get("namespace_id")) != source.get("namespace_id")
-                or row.get("source_content_id") != source.get("source_content_id")
+                row.get("source_package_id") != source_package_id
+                or row.get("source_package_id") != source.get("source_package_id")
                 or str(row.get("source_capture_id")) != source.get("source_capture_id")
             ):
                 raise PgResearchBindingError(
                     "PG_RESEARCH_RAW_REFERENCE_MISMATCH",
-                    "目标日Raw行跨包、跨namespace、跨内容或跨捕获。",
+                    "目标日Raw行与来源包或捕获引用不一致。",
                 )
-    source["source_raw_digest"] = source.get("capture_digest")
-    source["source_digest"] = source.get("capture_digest")
     source["capture_read_started_at"] = source.get("capture_started_at")
     source["target_raw_binding_count"] = len(target_raw_rows)
     source["target_raw_binding_verified"] = bool(target_raw_rows)

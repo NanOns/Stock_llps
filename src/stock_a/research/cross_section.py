@@ -6,8 +6,6 @@ from dataclasses import dataclass
 from bisect import bisect_left, bisect_right
 from datetime import date
 from fractions import Fraction
-import hashlib
-import json
 from typing import Mapping
 
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
@@ -71,7 +69,6 @@ class CrossSectionMetric:
     coordinate_id: str
     coordinate_revision: str
     producer_version: str
-    input_digest: str
     comparison_universe_id: str | None = None
     comparison_universe_revision: str | None = None
     comparison_universe_date: date | None = None
@@ -79,7 +76,6 @@ class CrossSectionMetric:
     comparison_denominator_count: int | None = None
     comparison_known_count: int | None = None
     comparison_unknown_count: int | None = None
-    comparison_input_digest: str | None = None
 
 
 _RANK_KEYS = frozenset(
@@ -251,65 +247,14 @@ def _field(endpoint: ReturnEndpoint, entity_id: str) -> FieldValue:
     return endpoint.returns.get(entity_id, unknown("MISSING_RETURN_ROW"))
 
 
-def _digest(
-    endpoint: ReturnEndpoint, members: tuple[str, ...], calendar: MarketSessionCalendar
-) -> str:
-    rows = []
-    for entity_id in members:
-        field = _field(endpoint, entity_id)
-        if field.quality == "OBSERVED":
-            number = exact_number(field.value)
-            value = f"{number.numerator}/{number.denominator}"
-        else:
-            value = None
-        coordinate = endpoint.coordinates.get(entity_id)
-        coordinate_value = (
-            None
-            if coordinate is None
-            else [
-                coordinate.entity_id,
-                coordinate.target_date.isoformat(),
-                coordinate.coordinate_id,
-                coordinate.revision,
-            ]
-        )
-        rows.append(
-            (
-                entity_id,
-                field.quality,
-                value,
-                field.reason,
-                coordinate_value,
-                endpoint.window_statuses.get(entity_id),
-            )
-        )
-    encoded = json.dumps(
-        [
-            endpoint.endpoint_date.isoformat(),
-            endpoint.return_period,
-            endpoint.return_start_date.isoformat(),
-            endpoint.universe_date.isoformat(),
-            endpoint.universe_id,
-            endpoint.universe_revision,
-            endpoint.producer_version,
-            calendar.calendar_id,
-            calendar.revision,
-            rows,
-        ],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
-
-
 def _metadata(
-    endpoint: ReturnEndpoint, members: tuple[str, ...], calendar: MarketSessionCalendar
-) -> tuple[int, int, int, str]:
+    endpoint: ReturnEndpoint, members: tuple[str, ...]
+) -> tuple[int, int, int]:
     known = sum(
         _field(endpoint, entity_id).quality == "OBSERVED" for entity_id in members
     )
     denominator = len(members)
-    return denominator, known, denominator - known, _digest(endpoint, members, calendar)
+    return denominator, known, denominator - known
 
 
 def _metric(
@@ -323,7 +268,7 @@ def _metric(
     field_id: str,
     comparison: tuple[ReturnEndpoint, tuple[str, ...]] | None = None,
 ) -> CrossSectionMetric:
-    denominator, known, missing, digest = _metadata(endpoint, members, calendar)
+    denominator, known, missing = _metadata(endpoint, members)
     coordinate = target_coordinates.get(target_entity_id)
     if (
         not isinstance(coordinate, PriceCoordinate)
@@ -334,7 +279,7 @@ def _metric(
         or not isinstance(coordinate.revision, str)
         or not coordinate.revision.strip()
     ):
-        raise ContractError("输出目标坐标身份无效，不能生成横截面摘要")
+        raise ContractError("输出目标坐标身份无效")
     comparison_fields = {}
     if comparison is not None:
         comparison_endpoint, comparison_members = comparison
@@ -342,11 +287,7 @@ def _metric(
             comparison_denominator,
             comparison_known,
             comparison_missing,
-            comparison_digest,
-        ) = _metadata(comparison_endpoint, comparison_members, calendar)
-        digest = hashlib.sha256(
-            f"{digest}:{comparison_digest}".encode("ascii")
-        ).hexdigest()
+        ) = _metadata(comparison_endpoint, comparison_members)
         comparison_fields = {
             "comparison_universe_id": comparison_endpoint.universe_id,
             "comparison_universe_revision": comparison_endpoint.universe_revision,
@@ -355,26 +296,7 @@ def _metric(
             "comparison_denominator_count": comparison_denominator,
             "comparison_known_count": comparison_known,
             "comparison_unknown_count": comparison_missing,
-            "comparison_input_digest": comparison_digest,
         }
-    digest_input = json.dumps(
-        [
-            digest,
-            target_entity_id,
-            field_id,
-            calendar.calendar_id,
-            calendar.revision,
-            [
-                coordinate.entity_id,
-                coordinate.target_date.isoformat(),
-                coordinate.coordinate_id,
-                coordinate.revision,
-            ],
-        ],
-        ensure_ascii=False,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    digest = hashlib.sha256(digest_input).hexdigest()
     return CrossSectionMetric(
         target_entity_id=target_entity_id,
         field_id=field_id,
@@ -389,7 +311,6 @@ def _metric(
         coordinate_id=coordinate.coordinate_id,
         coordinate_revision=coordinate.revision,
         producer_version=endpoint.producer_version,
-        input_digest=digest,
         **comparison_fields,
     )
 

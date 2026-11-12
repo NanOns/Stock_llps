@@ -1,9 +1,8 @@
 """P16逐episode纯Reducer；不接收P17风险、Priority或Focus。"""
 
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from fractions import Fraction
 
-from stock_a.canonical.identity import semantic_digest
 from stock_a.domain import ContractError, FieldValue, unknown, exact_number
 from stock_a.research.admission import Event, SCENARIOS
 from stock_a.research.facts import Fact, boolean, number, enum, completions, capability
@@ -45,7 +44,15 @@ class Rules:
 
     @property
     def identity(self):
-        return semantic_digest(asdict(self))
+        return repr(
+            (
+                self.version,
+                self.downgrade_sessions,
+                self.expiry_sessions,
+                exact_number(self.improvement_pp),
+                exact_number(self.health_deadband_pp),
+            )
+        )
 
 
 @dataclass(frozen=True)
@@ -103,10 +110,6 @@ class State:
     transitions: tuple[str, ...]
     preserved_episode_ids: tuple[str, ...]
     input_ref: str
-
-    @property
-    def state_id(self):
-        return semantic_digest(asdict(self))
 
 
 def select_maturity(qualifications, entity_type):
@@ -474,11 +477,9 @@ def reduce_episode(
         event_id = (
             source_event.event_id
             if source_event
-            else semantic_digest(
-                ("CORE_ENTRY", day.entity_id, day.ordinal, day.input_ref)
-            )
+            else repr(("CORE_ENTRY", day.entity_id, day.ordinal, day.input_ref))
         )
-        episode_id = semantic_digest(
+        episode_id = repr(
             (CONTRACT, rules.identity, day.entity_id, event_id, state.parent_episode_id)
         )
         state = replace(

@@ -40,10 +40,9 @@ RULES = frozenset(
 )
 
 RULE_COLUMNS = (
-    "namespace_id",
     "target_session",
     "source_symbol",
-    "package_sha256",
+    "source_package_id",
     "source_capture_id",
     "rule_id",
     "rule_version",
@@ -61,10 +60,9 @@ RULE_COLUMNS = (
     "scope",
 )
 PATH_COLUMNS = (
-    "namespace_id",
     "target_session",
     "source_symbol",
-    "package_sha256",
+    "source_package_id",
     "source_capture_id",
     "horizon",
     "path_rule_version",
@@ -86,6 +84,24 @@ PATH_COLUMNS = (
     "price_coordinate",
     "scope",
 )
+RULE_KEY = (
+    "source_capture_id",
+    "source_symbol",
+    "rule_id",
+    "rule_version",
+    "profile_revision",
+    "history_session_count",
+    "d1_history_session_count",
+    "event_window_start",
+    "calendar_revision",
+)
+PATH_KEY = (
+    "source_capture_id",
+    "source_symbol",
+    "horizon",
+    "path_rule_version",
+    "calendar_revision",
+)
 
 
 def _fraction_pair(value: Any) -> tuple[int | None, int | None]:
@@ -101,12 +117,11 @@ def prepare_research_rows(
     *,
     target,
     source,
-    namespace_id,
     calendar_revision,
     session_versions,
     frozen,
     outcomes,
-    package_sha256,
+    source_package_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -115,8 +130,13 @@ def prepare_research_rows(
     """只转换实际生产者结果；未到期路径不构成持久结算事实。"""
     if not frozen or set(frozen) != set(outcomes):
         raise ValueError("冻结规则与后继路径的来源池不一致")
-    capture = str(source["source_capture_id"])
-    common = (str(namespace_id), target, None, package_sha256, capture)
+    capture = source["source_capture_id"]
+    if (
+        type(capture) is not int
+        or capture <= 0
+        or source.get("source_package_id") != source_package_id
+    ):
+        raise ValueError("研究事实缺少真实来源包或捕获数字ID")
     rules, paths = [], []
     expected_rules = None
     for symbol in sorted(frozen):
@@ -126,7 +146,7 @@ def prepare_research_rows(
             expected_rules = names
         if names != expected_rules or names != RULES:
             raise ValueError("每个来源代码必须具有一致的九个规则")
-        prefix = common[:2] + (symbol,) + common[3:]
+        prefix = (target, symbol, source_package_id, capture)
         for rule, fact in sorted(item["rules"].items()):
             state = fact["state"]
             reasons = fact.get("reasons") or []
@@ -200,11 +220,12 @@ def prepare_research_rows(
     return rules, paths
 
 
-def _insert_and_compare(cursor, table, columns, rows, key_count, selection, args):
+def _insert_and_compare(cursor, table, columns, rows, key_columns, selection, args):
     if not rows:
         return 0
+    indexes = tuple(columns.index(name) for name in key_columns)
     statement = sql.SQL(
-        "INSERT INTO stock.{} ({}) VALUES ({}) ON CONFLICT DO NOTHING"
+        "INSERT INTO {} ({}) VALUES ({}) ON CONFLICT DO NOTHING"
     ).format(
         sql.Identifier(table),
         sql.SQL(", ").join(map(sql.Identifier, columns)),
@@ -212,28 +233,17 @@ def _insert_and_compare(cursor, table, columns, rows, key_count, selection, args
     )
     cursor.executemany(statement, rows)
     inserted = cursor.rowcount
-    select_columns = [
-        sql.SQL("{}::text").format(sql.Identifier(column))
-        if column
-        in {
-            "namespace_id",
-            "source_capture_id",
-            "target_capture_id",
-            "anchor_capture_id",
-        }
-        else sql.Identifier(column)
-        for column in columns
-    ]
     cursor.execute(
-        sql.SQL("SELECT {} FROM stock.{} WHERE ").format(
-            sql.SQL(", ").join(select_columns), sql.Identifier(table)
+        sql.SQL("SELECT {} FROM {} WHERE ").format(
+            sql.SQL(", ").join(map(sql.Identifier, columns)),
+            sql.Identifier(table),
         )
         + sql.SQL(selection),
         args,
     )
-    stored = {tuple(row[:key_count]): tuple(row) for row in cursor.fetchall()}
+    stored = {tuple(row[i] for i in indexes): tuple(row) for row in cursor.fetchall()}
     for row in rows:
-        actual = stored.get(tuple(row[:key_count]))
+        actual = stored.get(tuple(row[i] for i in indexes))
         if actual != row:
             raise ResearchFactConflict(f"{table}业务键已存在不同事实，整事务回滚")
     return inserted
@@ -244,32 +254,32 @@ def write_research_rows(config, *, rules, paths, events=None):
     if not rules:
         raise ValueError("不允许写入空规则来源池")
     first = rules[0]
-    namespace, target, _, package, capture = first[:5]
-    if any(
-        (r[0], r[1], r[3], r[4]) != (namespace, target, package, capture)
-        for r in rules + paths
-    ):
+    target, _symbol, package, capture = first[:4]
+    if any((r[0], r[2], r[3]) != (target, package, capture) for r in rules + paths):
         raise ValueError("一个事务只能写入一个T0和来源捕获")
-    with _transaction(config, write=True) as (_, cursor, actual_namespace):
-        if actual_namespace != namespace:
-            raise ValueError("事实命名空间与连接身份不一致")
+    rule_keys = [
+        tuple(row[RULE_COLUMNS.index(name)] for name in RULE_KEY) for row in rules
+    ]
+    path_keys = [
+        tuple(row[PATH_COLUMNS.index(name)] for name in PATH_KEY) for row in paths
+    ]
+    if len(rule_keys) != len(set(rule_keys)) or len(path_keys) != len(set(path_keys)):
+        raise ValueError("同一研究批次内存在重复真实业务键")
+    with _transaction(config, write=True) as (_, cursor, _):
         cursor.execute(
-            """SELECT source_symbol,source_capture_id::text FROM stock.source_raw_daily
-               WHERE namespace_id=%s AND session_date=%s AND package_sha256=%s""",
-            (namespace, target, package),
+            """SELECT source_symbol,source_capture_id FROM source_raw_daily
+               WHERE session_date=%s AND source_package_id=%s""",
+            (target, package),
         )
         raw = cursor.fetchall()
-        expected = {row[2] for row in rules}
+        expected = {row[0] for row in rules}
         if (
             len(raw) != len(expected)
             or {row[0] for row in raw} != expected
             or any(row[1] != capture for row in raw)
             or len(rules) != len(expected) * len(RULES)
-            or {row[5] for row in rules} != RULES
-            or len({(row[2], row[5]) for row in rules}) != len(rules)
-            or not {row[2] for row in paths}.issubset(expected)
-            or len({tuple(row[:12]) for row in rules}) != len(rules)
-            or len({tuple(row[:8]) for row in paths}) != len(paths)
+            or {row[4] for row in rules} != RULES
+            or not {row[1] for row in paths}.issubset(expected)
         ):
             raise ValueError("规则或路径与T0完整来源池和捕获身份不一致")
         count_rules = _insert_and_compare(
@@ -277,18 +287,18 @@ def write_research_rows(config, *, rules, paths, events=None):
             "source_rule_evaluations",
             RULE_COLUMNS,
             rules,
-            12,
-            "namespace_id=%s AND target_session=%s AND package_sha256=%s AND source_capture_id=%s",
-            (namespace, target, package, capture),
+            RULE_KEY,
+            "target_session=%s AND source_package_id=%s AND source_capture_id=%s",
+            (target, package, capture),
         )
         count_paths = _insert_and_compare(
             cursor,
             "source_forward_path_facts",
             PATH_COLUMNS,
             paths,
-            8,
-            "namespace_id=%s AND target_session=%s AND package_sha256=%s AND source_capture_id=%s",
-            (namespace, target, package, capture),
+            PATH_KEY,
+            "target_session=%s AND source_package_id=%s AND source_capture_id=%s",
+            (target, package, capture),
         )
         event_result = None
         if events is not None:
@@ -297,15 +307,14 @@ def write_research_rows(config, *, rules, paths, events=None):
             event_result = insert_source_events(
                 cursor,
                 rows=events,
-                namespace_id=namespace,
                 target=target,
-                package_sha256=package,
+                source_package_id=package,
                 target_capture_id=capture,
-                profile_revision=first[7],
-                history_session_count=first[8],
-                d1_history_session_count=first[9],
-                event_window_start=first[10],
-                calendar_revision=first[11],
+                profile_revision=first[6],
+                history_session_count=first[7],
+                d1_history_session_count=first[8],
+                event_window_start=first[9],
+                calendar_revision=first[10],
             )
     return {
         "inserted_rules": count_rules,
@@ -318,7 +327,7 @@ def read_research_rows(
     config,
     *,
     target,
-    package_sha256,
+    source_package_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -331,7 +340,7 @@ def read_research_rows(
     """从已保存事实读取完整三态分母及共享路径，不扫描Raw。"""
     if horizon not in {1, 3, 5, 10, 20}:
         raise ValueError("后继期限必须为1、3、5、10或20")
-    with _transaction(config, write=False) as (_, cursor, namespace):
+    with _transaction(config, write=False) as (_, cursor, _):
         cursor.execute(
             """SELECT r.source_symbol, r.state, r.reasons, r.event_count,
                       p.endpoint_session, p.maturity, p.endpoint_quality,
@@ -340,15 +349,16 @@ def read_research_rows(
                       p.mfe_numerator, p.mfe_denominator, p.mae_numerator,
                       p.mae_denominator, p.mdd_numerator, p.mdd_denominator,
                       r.frozen_line_numerator, r.frozen_line_denominator,
-                      r.frozen_line_source, r.namespace_id::text, r.source_capture_id::text
-               FROM stock.source_rule_evaluations r
-               LEFT JOIN stock.source_forward_path_facts p
-                 ON p.namespace_id=r.namespace_id AND p.target_session=r.target_session
-                AND p.source_symbol=r.source_symbol AND p.package_sha256=r.package_sha256
+                      r.frozen_line_source, r.source_capture_id
+               FROM source_rule_evaluations r
+               LEFT JOIN source_forward_path_facts p
+                 ON p.target_session=r.target_session
+                AND p.source_symbol=r.source_symbol
+                AND p.source_package_id=r.source_package_id
                 AND p.source_capture_id=r.source_capture_id AND p.horizon=%s
                 AND p.path_rule_version=%s AND p.calendar_revision=r.calendar_revision
                 AND p.endpoint_session <= %s
-               WHERE r.namespace_id=%s AND r.target_session=%s AND r.package_sha256=%s
+               WHERE r.target_session=%s AND r.source_package_id=%s
                  AND r.rule_id=%s AND r.rule_version=%s AND r.profile_revision=%s
                  AND r.history_session_count=%s AND r.d1_history_session_count=%s
                  AND r.event_window_start=%s AND r.calendar_revision=%s
@@ -357,9 +367,8 @@ def read_research_rows(
                 horizon,
                 PATH_VERSION,
                 research_cutoff,
-                namespace,
                 target,
-                package_sha256,
+                source_package_id,
                 rule,
                 RULE_VERSION,
                 profile_revision,
@@ -372,7 +381,7 @@ def read_research_rows(
         rows = cursor.fetchall()
     if not rows:
         raise ResearchFactNotFound("未找到精确输入版本的持久规则事实")
-    if len({row[22] for row in rows}) != 1 or len({row[0] for row in rows}) != len(
+    if len({row[21] for row in rows}) != 1 or len({row[0] for row in rows}) != len(
         rows
     ):
         raise ResearchFactConflict(
@@ -385,24 +394,24 @@ def read_board_members(config, *, industry_snapshot_id, concept_snapshot_id):
     """读取明确指定的后验行业及概念成员，不推断历史有效期。"""
     with _transaction(config, write=False) as (_, cursor, _):
         cursor.execute(
-            """SELECT snapshot_id::text, source_kind, observed_at, research_mode
-               FROM stock.tdx_sector_source_snapshots WHERE snapshot_id IN (%s,%s)""",
+            """SELECT snapshot_id, source_kind, observed_at, research_mode
+               FROM tdx_sector_source_snapshots WHERE snapshot_id IN (%s,%s)""",
             (industry_snapshot_id, concept_snapshot_id),
         )
         snapshots = cursor.fetchall()
         kinds = {row[0]: row[1] for row in snapshots}
         if kinds != {
-            str(industry_snapshot_id): "TDX_TDXHY_CFG",
-            str(concept_snapshot_id): "TDX_INFOHARBOR_BLOCK_DAT",
+            industry_snapshot_id: "TDX_TDXHY_CFG",
+            concept_snapshot_id: "TDX_INFOHARBOR_BLOCK_DAT",
         } or any(
             row[3] != "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT" for row in snapshots
         ):
             raise ValueError("行业或概念快照身份和后验模式不匹配")
         cursor.execute(
             """SELECT m.board_kind,m.board_native_id,c.board_name,m.source_symbol
-               FROM stock.tdx_sector_members m JOIN stock.tdx_sector_catalog c
-                 USING (snapshot_id,board_kind,board_native_id)
-               WHERE m.snapshot_id IN (%s,%s)
+               FROM tdx_sector_members m JOIN tdx_sector_catalog c
+                 ON c.id=m.catalog_id
+               WHERE c.snapshot_id IN (%s,%s)
                ORDER BY m.board_kind,m.board_native_id,m.source_symbol""",
             (industry_snapshot_id, concept_snapshot_id),
         )
@@ -410,18 +419,18 @@ def read_board_members(config, *, industry_snapshot_id, concept_snapshot_id):
     return snapshots, members
 
 
-def read_research_keys(config, *, target, package_sha256, calendar_revision):
+def read_research_keys(config, *, target, source_package_id, calendar_revision):
     """列出与现行读取器规则版本和日历修订一致的冻结键。"""
-    with _transaction(config, write=False) as (_, cursor, namespace):
+    with _transaction(config, write=False) as (_, cursor, _):
         cursor.execute(
             """SELECT rule_id, history_session_count, d1_history_session_count,
                       event_window_start, profile_revision, count(*),
-                      count(DISTINCT source_capture_id), min(source_capture_id::text)
-               FROM stock.source_rule_evaluations
-               WHERE namespace_id=%s AND target_session=%s AND package_sha256=%s
+                      count(DISTINCT source_capture_id), min(source_capture_id)
+               FROM source_rule_evaluations
+               WHERE target_session=%s AND source_package_id=%s
                  AND rule_version=%s AND calendar_revision=%s
                GROUP BY 1,2,3,4,5 ORDER BY 1,2,3,4,5 LIMIT 101""",
-            (namespace, target, package_sha256, RULE_VERSION, calendar_revision),
+            (target, source_package_id, RULE_VERSION, calendar_revision),
         )
         return [
             {
@@ -432,7 +441,7 @@ def read_research_keys(config, *, target, package_sha256, calendar_revision):
                 "profile_revision": row[4],
                 "count": row[5],
                 "capture_count": row[6],
-                "source_capture_id": row[7] if row[6] == 1 else None,
+                "source_capture_id": int(row[7]) if row[6] == 1 else None,
                 "rule_version": RULE_VERSION,
                 "calendar_revision": calendar_revision,
             }

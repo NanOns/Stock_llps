@@ -28,15 +28,10 @@ class PriceSafetyFactError(ValueError):
 
 
 def _official_calendar(target_session: date) -> dict[str, Any]:
-    payload, metadata, revision_chain, sessions = _load_calendar(target_session)
-    target_metadata = next(
-        item for item in metadata if item["year"] == target_session.year
-    )
+    payload, _metadata, _revision_chain, sessions = _load_calendar(target_session)
     return {
         "calendar_id": payload["calendar_id"],
         "calendar_revision": payload["revision"],
-        "calendar_revision_chain": revision_chain,
-        "calendar_sha256": target_metadata["resource_sha256"],
         "sessions": sessions,
     }
 
@@ -176,11 +171,10 @@ def attach_source_d1_price_safety_facts(
         source_symbols=symbols,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=source["package_sha256"],
+        source_package_id=source["source_package_id"],
         sessions=history_sessions,
-        expected_namespace_id=str(source["namespace_id"]),
-        expected_source_content_id=str(source["source_content_id"]),
-        expected_target_capture_id=str(source["source_capture_id"]),
+        expected_source_package_id=int(source["source_package_id"]),
+        expected_target_capture_id=int(source["source_capture_id"]),
     )
     calendar = MarketSessionCalendar(
         calendar_id=str(target_calendar["calendar_id"]),
@@ -196,7 +190,6 @@ def attach_source_d1_price_safety_facts(
         {
             "year": year,
             "calendar_revision": year_metadata[year]["revision"],
-            "canonical_lf_resource_sha256": year_metadata[year]["resource_sha256"],
         }
         for year in sorted(year_metadata)
     ]
@@ -211,10 +204,8 @@ def attach_source_d1_price_safety_facts(
             official_sessions=history_sessions,
             history_rows_by_session=by_session,
             source_symbol=symbol,
-            package_sha256=source["package_sha256"],
-            namespace_id=str(source["namespace_id"]),
-            source_content_id=str(source["source_content_id"]),
-            target_capture_id=str(source["source_capture_id"]),
+            source_package_id=source["source_package_id"],
+            target_capture_id=int(source["source_capture_id"]),
         )
         facts_by_symbol[symbol] = _facts_payload(
             symbol=symbol,
@@ -293,14 +284,12 @@ def _validate_source_binding(
     expected = {
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "package_sha256": result.get("package_sha256"),
-        "namespace_id": result.get("namespace_id"),
+        "source_package_id": result.get("source_package_id"),
     }
     actual = {
         "target_session": source.get("target_session"),
         "research_cutoff": result.get("research_cutoff"),
-        "package_sha256": source.get("package_sha256"),
-        "namespace_id": source.get("namespace_id"),
+        "source_package_id": source.get("source_package_id"),
     }
     if (
         actual != expected
@@ -311,11 +300,11 @@ def _validate_source_binding(
     ):
         raise PriceSafetyFactError(
             "PRICE_SAFETY_SOURCE_BINDING_MISMATCH",
-            "价格事实要求与当前目标日、包SHA、来源键、namespace及RAW坐标完全一致。",
+            "价格事实要求与当前目标日、数字来源包、捕获键及RAW坐标完全一致。",
         )
     if (
         source.get("source_capture_id") is None
-        or source.get("source_content_id") is None
+        or source.get("source_package_id") is None
     ):
         raise PriceSafetyFactError(
             "PRICE_SAFETY_SOURCE_IDENTITY_INCOMPLETE", "Raw来源捕获或内容身份缺失。"
@@ -337,8 +326,6 @@ def _validate_calendar_binding(
         != official_calendar.get("calendar_id")
         or target_official_calendar.get("calendar_revision")
         != official_calendar.get("calendar_revision")
-        or target_official_calendar.get("calendar_sha256")
-        != official_calendar.get("calendar_sha256")
         or not isinstance(target_calendar_metadata, Mapping)
         or target_calendar_metadata.get("revision")
         != official_calendar.get("calendar_revision")
@@ -447,7 +434,6 @@ def _facts_payload(
         "official_calendar": {
             "calendar_id": official_calendar["calendar_id"],
             "target_calendar_revision": official_calendar["calendar_revision"],
-            "target_calendar_sha256": official_calendar["calendar_sha256"],
             "window_calendars": window_calendar,
         },
         "raw_session_evidence": raw_history,
@@ -476,7 +462,6 @@ def _facts_payload(
         "official_calendar": {
             "calendar_id": official_calendar["calendar_id"],
             "target_calendar_revision": official_calendar["calendar_revision"],
-            "target_calendar_sha256": official_calendar["calendar_sha256"],
             "window_calendars": window_calendar,
         },
         "raw_session_evidence": [
@@ -492,10 +477,8 @@ def _facts_payload(
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "target_session": source["target_session"],
         "research_cutoff": research_cutoff.isoformat(),
-        "namespace_id": str(source["namespace_id"]),
-        "target_source_capture_id": str(source["source_capture_id"]),
-        "source_content_id": str(source["source_content_id"]),
-        "package_sha256": source["package_sha256"],
+        "target_source_capture_id": int(source["source_capture_id"]),
+        "source_package_id": source["source_package_id"],
         "price_coordinate": "RAW_UNADJUSTED",
         "target_raw_bar_status": current_row.get("bar_status")
         if current_row
@@ -556,7 +539,6 @@ def _raw_session_evidence(
             "session_date": session.isoformat(),
             "status": "MISSING_RAW_ROW",
             "capture_id": None,
-            "source_entry_sha256": None,
             "bar_status": "NO_RAW_ROW",
             "price_quality": "UNKNOWN",
             "price_reason": "RAW_BAR_MISSING_FOR_OFFICIAL_SESSION",
@@ -565,7 +547,6 @@ def _raw_session_evidence(
         "session_date": session.isoformat(),
         "status": "RAW_ROW_READ",
         "capture_id": row["source_capture_id"],
-        "source_entry_sha256": row["source_entry_sha256"],
         "bar_status": row["bar_status"],
         "price_quality": row["price_quality"],
         "price_reason": row["price_reason"],

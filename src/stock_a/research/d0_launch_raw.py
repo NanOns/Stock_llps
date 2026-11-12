@@ -136,10 +136,8 @@ def _window_row(
     rows: Mapping[date, Mapping[str, Any] | None],
     *,
     source_symbol: str,
-    package_sha256: str,
-    namespace_id: str,
-    source_content_id: str,
-    target_capture_id: str,
+    source_package_id: int,
+    target_capture_id: int,
     parser_contract: str,
 ) -> tuple[Mapping[str, Any] | None, dict[str, Fraction] | None, str | None]:
     row = rows.get(session)
@@ -148,9 +146,8 @@ def _window_row(
     if (
         row.get("session_date") != session
         or row.get("source_symbol") != source_symbol
-        or row.get("namespace_id") != namespace_id
-        or str(row.get("package_sha256", "")).strip() != package_sha256
-        or row.get("source_content_id") != source_content_id
+        or type(row.get("source_package_id")) is not int
+        or row.get("source_package_id") != source_package_id
     ):
         return row, None, "RAW_SOURCE_IDENTITY_MISMATCH"
     if (
@@ -249,8 +246,7 @@ def _window_payload(
         "raw_amount_reason",
         "amount_unit_status",
         "source_capture_id",
-        "source_content_id",
-        "package_sha256",
+        "source_package_id",
     )
     result = []
     for session in official_sessions:
@@ -281,10 +277,8 @@ def calculate_d0_launch_confirm_raw(
     official_sessions: Sequence[date],
     history_rows_by_session: Mapping[date, Mapping[str, Any] | None],
     source_symbol: str,
-    package_sha256: str,
-    namespace_id: str,
-    source_content_id: str,
-    target_capture_id: str,
+    source_package_id: int,
+    target_capture_id: int,
     parser_contract: str,
     include_history_window: bool = False,
 ) -> dict[str, Any]:
@@ -321,9 +315,7 @@ def calculate_d0_launch_confirm_raw(
                 session,
                 rows,
                 source_symbol=source_symbol,
-                package_sha256=package_sha256,
-                namespace_id=namespace_id,
-                source_content_id=source_content_id,
+                source_package_id=source_package_id,
                 target_capture_id=target_capture_id,
                 parser_contract=parser_contract,
             )
@@ -414,10 +406,8 @@ def calculate_d0_launch_confirm_raw(
                 value, error = None, strict_session_error
             elif row is not None and (
                 row.get("source_symbol") != source_symbol
-                or row.get("namespace_id") != namespace_id
                 or row.get("session_date") != session
-                or str(row.get("package_sha256", "")).strip() != package_sha256
-                or row.get("source_content_id") != source_content_id
+                or row.get("source_package_id") != source_package_id
                 or session == current_session
                 and row.get("source_capture_id") != target_capture_id
             ):
@@ -561,9 +551,7 @@ def calculate_d0_recovery_turn_raw(
     official_sessions,
     history_rows_by_session,
     source_symbol,
-    package_sha256,
-    namespace_id,
-    source_content_id,
+    source_package_id,
     target_capture_id,
     parser_contract,
     rps5_delta3,
@@ -586,23 +574,12 @@ def calculate_d0_recovery_turn_raw(
             day,
             rows,
             source_symbol=source_symbol,
-            package_sha256=package_sha256,
-            namespace_id=namespace_id,
-            source_content_id=source_content_id,
+            source_package_id=source_package_id,
             target_capture_id=target_capture_id,
             parser_contract=parser_contract,
         )
         for day in sessions
     ]
-    entry_shas = {
-        row.get("source_entry_sha256")
-        for row, _, _ in checked
-        if row is not None and row.get("source_entry_sha256")
-    }
-    if len(entry_shas) > 1:
-        checked = [
-            (row, None, "RAW_SOURCE_ENTRY_SHA_CONFLICT") for row, _, _ in checked
-        ]
 
     def price(index, field):
         if index < -len(checked) or index >= len(checked):
@@ -689,7 +666,6 @@ def calculate_d0_recovery_turn_raw(
         "RAW_TARGET_CAPTURE_MISMATCH",
         "RAW_REFERENCE_QUALITY_UNKNOWN",
         "RAW_PARSER_CONTRACT_MISMATCH",
-        "RAW_SOURCE_ENTRY_SHA_CONFLICT",
         "OFFICIAL_SESSION_ROW_MISSING",
         "OFFICIAL_SESSION_BAR_MISSING",
     }
@@ -773,9 +749,7 @@ def calculate_d0_recovery_turn_raw(
         official_sessions=sessions,
         history_rows_by_session=history_rows_by_session,
         source_symbol=source_symbol,
-        package_sha256=package_sha256,
-        namespace_id=namespace_id,
-        source_content_id=source_content_id,
+        source_package_id=source_package_id,
         target_capture_id=target_capture_id,
     )
     damage_input_error = next((error for _, _, error in checked[-20:] if error), None)

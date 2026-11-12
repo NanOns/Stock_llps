@@ -35,13 +35,10 @@ def register_commands(commands):
         help="G:/codex_tmp内已存在且只读的VIPDATA ZIP绝对路径",
     )
     raw_import.add_argument(
-        "--vipdata-package-sha256", required=True, help="完整ZIP的64位小写SHA-256"
-    )
-    raw_import.add_argument(
         "--max-vipdata-validation-seconds",
         type=float,
         default=300.0,
-        help="本地ZIP SHA与CRC完整复验秒数上限，默认300",
+        help="本地ZIP原件与CRC完整复验秒数上限，默认300",
     )
     raw_import.add_argument(
         "--target-session", required=True, help="必填目标交易会话，格式YYYY-MM-DD"
@@ -121,22 +118,10 @@ def register_commands(commands):
         action="store_true",
         help="只下载并校验远端成员原件、差异与PG身份，不执行INSERT",
     )
-    sector_refresh.add_argument(
-        "--validated-source-sha256",
-        action="append",
-        metavar="文件=SHA256",
-        help="绑定TRF01核验的远端文件原件SHA；同一文件名只可出现一次",
-    )
-    sector_refresh.add_argument(
-        "--oracle-set-sha256",
-        action="append",
-        metavar="INDUSTRY|CONCEPT=SHA256",
-        help="绑定TRF02独立目录与成员集合SHA；新增PG版本时必填",
-    )
     sector_catalog = sector_actions.add_parser(
         "catalog", help="分页查询精确行业或概念来源快照目录"
     )
-    sector_catalog.add_argument("--snapshot-id", required=True)
+    sector_catalog.add_argument("--snapshot-id", type=int, required=True)
     sector_catalog.add_argument("--board-kind", choices=("INDUSTRY", "CONCEPT"))
     sector_catalog.add_argument("--search", help="名称子串或原生编号")
     sector_catalog.add_argument("--offset", type=int, default=0)
@@ -144,21 +129,21 @@ def register_commands(commands):
     sector_query = sector_actions.add_parser(
         "members", help="读取精确板块成员与Core/Profile状态"
     )
-    sector_query.add_argument("--snapshot-id", required=True)
+    sector_query.add_argument("--snapshot-id", type=int, required=True)
     sector_query.add_argument(
         "--board-kind", required=True, choices=("INDUSTRY", "CONCEPT")
     )
     sector_query.add_argument("--board-native-id", required=True)
     sector_query.add_argument("--target-session", required=True)
     sector_query.add_argument("--research-cutoff", required=True)
-    sector_query.add_argument("--package-sha256", required=True)
+    sector_query.add_argument("--source-package-id", type=int, required=True)
     sector_query.add_argument("--profile-revision")
     sector_query.add_argument("--offset", type=int, default=0)
     sector_query.add_argument("--limit", type=int, default=100)
     sector_breadth = sector_actions.add_parser(
         "breadth", help="读取真实行业或概念完整成员的两日MA20广度及关系变化"
     )
-    sector_breadth.add_argument("--snapshot-id", required=True)
+    sector_breadth.add_argument("--snapshot-id", type=int, required=True)
     sector_breadth.add_argument(
         "--board-kind", required=True, choices=("INDUSTRY", "CONCEPT")
     )
@@ -168,9 +153,9 @@ def register_commands(commands):
     sector_breadth.add_argument("--before-session", required=True)
     sector_breadth.add_argument("--after-session", required=True)
     sector_breadth.add_argument("--research-cutoff", required=True)
-    sector_breadth.add_argument("--before-package-sha256", required=True)
+    sector_breadth.add_argument("--before-source-package-id", type=int, required=True)
     sector_breadth.add_argument("--before-profile-revision", required=True)
-    sector_breadth.add_argument("--after-package-sha256", required=True)
+    sector_breadth.add_argument("--after-source-package-id", type=int, required=True)
     sector_breadth.add_argument("--after-profile-revision", required=True)
     sector_breadth.add_argument("--offset", type=int, default=0)
     sector_breadth.add_argument("--limit", type=int, default=30)
@@ -197,7 +182,7 @@ def register_commands(commands):
         "strength",
         help="按精确当前TDX成员快照比较5/20会话来源级Core收益与三会话前变化",
     )
-    sector_strength.add_argument("--snapshot-id", required=True)
+    sector_strength.add_argument("--snapshot-id", type=int, required=True)
     sector_strength.add_argument(
         "--board-kind", required=True, choices=("INDUSTRY", "CONCEPT")
     )
@@ -206,7 +191,7 @@ def register_commands(commands):
     )
     sector_strength.add_argument("--target-session", required=True)
     sector_strength.add_argument("--research-cutoff", required=True)
-    sector_strength.add_argument("--package-sha256", required=True)
+    sector_strength.add_argument("--source-package-id", type=int, required=True)
     sector_strength.add_argument("--profile-revision")
     sector_strength.add_argument(
         "--rotation-start",
@@ -242,15 +227,15 @@ def register_commands(commands):
         "change-stocks",
         help="全量联接行业概念强弱变化与同一来源包D1支撑变化股票",
     )
-    sector_change_stocks.add_argument("--industry-snapshot-id", required=True)
-    sector_change_stocks.add_argument("--concept-snapshot-id", required=True)
+    sector_change_stocks.add_argument("--industry-snapshot-id", type=int, required=True)
+    sector_change_stocks.add_argument("--concept-snapshot-id", type=int, required=True)
     sector_change_stocks.add_argument(
         "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
     )
     sector_change_stocks.add_argument(
         "--research-cutoff", required=True, help="显式研究截止会话YYYY-MM-DD"
     )
-    sector_change_stocks.add_argument("--package-sha256", required=True)
+    sector_change_stocks.add_argument("--source-package-id", type=int, required=True)
     sector_change_stocks.add_argument("--profile-revision")
     sector_change_stocks.add_argument(
         "--d0-structure-symbol", help="对一个来源代码联接D0恢复诊断和前态D1支撑参考"

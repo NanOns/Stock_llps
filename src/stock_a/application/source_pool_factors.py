@@ -27,8 +27,7 @@ def read_source_pool_rps(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
-    expected_namespace_id: str,
+    source_package_id: int,
 ) -> dict[str, Any]:
     """各精确端点分别读取完整来源池；RAW结果仅作后验描述。"""
     if (
@@ -54,15 +53,13 @@ def read_source_pool_rps(
             page = read_raw_daily_history_page(
                 config,
                 target_session=end,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 sessions=sessions if offset == 0 else (end,),
                 offset=page_offset,
                 limit=100,
                 market="ALL",
                 board="ALL",
             )
-            if page["namespace_id"] != expected_namespace_id:
-                raise ValueError("来源池namespace与请求不一致")
             if total is None:
                 total = page["total_count"]
                 if total and (
@@ -99,7 +96,7 @@ def read_source_pool_rps(
                     history_page = read_raw_daily_history_page(
                         config,
                         target_session=end,
-                        package_sha256=package_sha256,
+                        source_package_id=source_package_id,
                         sessions=window,
                         offset=0,
                         limit=1,
@@ -108,8 +105,7 @@ def read_source_pool_rps(
                         source_symbol=symbol,
                     )
                     if (
-                        history_page["namespace_id"] != expected_namespace_id
-                        or history_page["version_status"] != "CLOSED"
+                        history_page["version_status"] != "CLOSED"
                         or history_page["total_count"] != 1
                     ):
                         raise ValueError("前一端点独有证券的来源历史不完整")
@@ -136,25 +132,10 @@ def read_source_pool_rps(
                     )[0]
                     for day in window
                 )
-                entry_shas = {
-                    row.get("source_entry_sha256")
-                    for row in rows
-                    if row.get("source_entry_sha256")
-                }
-                if len(entry_shas) > 1:
-                    observations = tuple(
-                        CoreObservation(
-                            session=day,
-                            state="UNKNOWN",
-                            coordinate_id="RAW_UNADJUSTED",
-                            close=unknown("SOURCE_ENTRY_SHA_CONFLICT"),
-                        )
-                        for day in window
-                    )
                 histories[symbol] = observations
                 members.append(symbol)
                 all_coordinates[symbol] = PriceCoordinate(
-                    symbol, target_session, "RAW_UNADJUSTED", package_sha256
+                    symbol, target_session, "RAW_UNADJUSTED", source_package_id
                 )
             if page["next_offset"] is None:
                 break
@@ -194,7 +175,7 @@ def read_source_pool_rps(
                 return_start_date=window[-1 - period],
                 universe_date=end,
                 universe_id="SOURCE_POOL_NON_PIT_EXPLORATORY",
-                universe_revision=package_sha256,
+                universe_revision=source_package_id,
                 producer_version="CORE_RAW_SOURCE_RPS_R1",
                 universe_members=members,
                 returns=returns,
@@ -236,8 +217,7 @@ def read_source_pool_rps(
     return {
         "target_session": target_session,
         "research_cutoff": research_cutoff,
-        "namespace_id": expected_namespace_id,
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
         "coordinate": "RAW_UNADJUSTED",
         "corporate_action_continuity": "UNKNOWN",

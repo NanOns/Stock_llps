@@ -5,19 +5,15 @@
   "modules": [
     {
       "id": "fields-source",
-      "path": "price-profile/fields-source.json",
-      "sha256": "cb16d2bea7efb554d27b9d6ed9767eb3d14d44d4cb278d348d95e54e8fe6d875"
+      "path": "price-profile/fields-source.json"
     },
     {
       "id": "fields-core",
-      "path": "price-profile/fields-core.json",
-      "sha256": "ccffba8a4e3d7e1982ddf7e12b7303c25ef38e114690d587d7bcd3e348417ce5"
+      "path": "price-profile/fields-core.json"
     },
     {
       "id": "fields-profile",
-      "path": "price-profile/fields-profile.json",
-      "sha256": "c605889ceb7e786ea7be83f8a0c98fbb1c3e9d4ed9d6776f568b16a6f91adbd2"
+      "path": "price-profile/fields-profile.json"
     }
-  ],
-  "assembled_sha256": "bc141d463623d08562a049ec5baa568a853c35c682f2bc371dbae446b82384ce"
+  ]
 }

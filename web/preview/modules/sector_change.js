@@ -40,7 +40,6 @@ function postSignalButton(symbol) {
     postSignalSelection = {
       symbol,
       ...version,
-      namespace_id: state.sectorChange.context.namespace_id,
       research_cutoff: state.sectorChange.context.research_cutoff,
     };
     loadPostSignal();
@@ -114,8 +113,8 @@ const sectorD1ViewSettings = {
 function sectorSelectedVersion() {
   const value = $("sectorVersionSelect").value;
   if (!value.includes("|")) return null;
-  const [target_session, package_sha256] = value.split("|");
-  return { target_session, package_sha256 };
+  const [target_session, source_package_id] = value.split("|");
+  return { target_session, source_package_id };
 }
 
 function sectorLabel(value) {
@@ -228,10 +227,10 @@ function sectorSetObservationMode() {
 function sectorInputsReady() {
   return Boolean(
     sectorSelectedVersion() &&
-    $("sectorProfileRevisionSelect").value &&
-    $("sectorIndustrySnapshotSelect").value &&
-    $("sectorConceptSnapshotSelect").value &&
-    $("sectorEventWindowSelect").value,
+      $("sectorProfileRevisionSelect").value &&
+      $("sectorIndustrySnapshotSelect").value &&
+      $("sectorConceptSnapshotSelect").value &&
+      $("sectorEventWindowSelect").value,
   );
 }
 
@@ -244,7 +243,7 @@ function sectorExactProfile(version) {
   return state.profileSnapshots.filter(
     (snapshot) =>
       snapshot.target_session === version.target_session &&
-      snapshot.package_sha256 === version.package_sha256 &&
+      snapshot.source_package_id === version.source_package_id &&
       snapshot.complete === true,
   );
 }
@@ -254,12 +253,11 @@ function sectorPopulateProfileRevisions(version) {
   select.replaceChildren(new Option("— 请选择完整Profile修订 —", ""));
   for (const snapshot of sectorExactProfile(version)) {
     const option = new Option(
-      `rev ${snapshot.profile_revision.slice(0, 12)}… · ${snapshot.source_symbol_count}/${snapshot.expected_source_symbol_count} · ${snapshot.history_session_count}会话`,
+      `rev ${snapshot.profile_revision} · ${snapshot.source_symbol_count}/${snapshot.expected_source_symbol_count} · ${snapshot.history_session_count}会话`,
       snapshot.profile_revision,
     );
     option.title =
-      `namespace ${snapshot.namespace_id || state.namespace_id} · ` +
-      `target ${snapshot.target_session} · package ${snapshot.package_sha256} · ` +
+      `target ${snapshot.target_session} · source package ID ${snapshot.source_package_id} · ` +
       `profile_revision ${snapshot.profile_revision}`;
     select.append(option);
   }
@@ -336,8 +334,8 @@ async function loadSectorChangeContext() {
     );
     if (
       request !== state.sectorChange.contextRequest ||
-      `${sectorSelectedVersion()?.target_session}|${sectorSelectedVersion()?.package_sha256}` !==
-        `${version.target_session}|${version.package_sha256}`
+      `${sectorSelectedVersion()?.target_session}|${sectorSelectedVersion()?.source_package_id}` !==
+        `${version.target_session}|${version.source_package_id}`
     )
       return;
     state.sectorChange.context = context;
@@ -354,7 +352,7 @@ async function loadSectorChangeContext() {
     }
     select.disabled = !context.window_options?.length;
     $("sectorChangeStatus").textContent =
-      `${version.target_session} · 截止 ${context.research_cutoff} · namespace ${context.namespace_id}。` +
+      `${version.target_session} · 截止 ${context.research_cutoff}。` +
       `请选择精确Profile修订、行业/GN快照和事件窗；观察时间仅表示本地留存观测，不等于来源可用时间。`;
   } catch (error) {
     if (request !== state.sectorChange.contextRequest) return;
@@ -373,7 +371,7 @@ function sectorCurrentRequest() {
     observation_mode: sectorObservationMode,
     target_session: version.target_session,
     research_cutoff: state.sectorChange.context.research_cutoff,
-    package_sha256: version.package_sha256,
+    source_package_id: version.source_package_id,
     profile_revision: $("sectorProfileRevisionSelect").value,
     industry_snapshot_id: $("sectorIndustrySnapshotSelect").value,
     concept_snapshot_id: $("sectorConceptSnapshotSelect").value,
@@ -745,7 +743,7 @@ function renderSectorChange(data) {
   const identity = $("sectorChangeIdentity");
   identity.hidden = false;
   identity.textContent =
-    `${data.target_session} · namespace ${data.namespace_id} · package ${data.package_sha256} · ` +
+    `${data.target_session} · 来源包ID ${data.source_package_id} · ` +
     `Profile rev ${$("sectorProfileRevisionSelect").value} · NON_PIT回溯研究 · 来源代码级，不是正式选股。`;
   renderSectorMetrics(data);
   renderSectorBoards(data);
@@ -790,7 +788,7 @@ async function loadSectorChangeView() {
   const identity = [
     payload.observation_mode,
     payload.target_session,
-    payload.package_sha256,
+    payload.source_package_id,
     payload.profile_revision,
     payload.industry_snapshot_id,
     payload.concept_snapshot_id,
@@ -810,7 +808,7 @@ async function loadSectorChangeView() {
     const currentIdentity = [
       $("sectorObservationMode").value,
       currentVersion?.target_session,
-      currentVersion?.package_sha256,
+      currentVersion?.source_package_id,
       $("sectorProfileRevisionSelect").value,
       $("sectorIndustrySnapshotSelect").value,
       $("sectorConceptSnapshotSelect").value,
@@ -852,8 +850,7 @@ async function loadSectorSingleD0() {
         source_observation_only: true,
         symbol,
         target_session: version.target_session,
-        package_sha256: version.package_sha256,
-        namespace_id: state.sectorChange.context.namespace_id,
+        source_package_id: version.source_package_id,
         research_cutoff: state.sectorChange.context.research_cutoff,
         ...(industry && concept
           ? { industry_snapshot_id: industry, concept_snapshot_id: concept }
@@ -864,7 +861,7 @@ async function loadSectorSingleD0() {
     if (
       request !== state.sectorChange.request ||
       current?.target_session !== version.target_session ||
-      current?.package_sha256 !== version.package_sha256 ||
+      current?.source_package_id !== version.source_package_id ||
       $("sectorIndustrySnapshotSelect").value !== industry ||
       $("sectorConceptSnapshotSelect").value !== concept ||
       $("sectorExplainSymbol").value.trim().toUpperCase() !== symbol
@@ -1016,7 +1013,7 @@ async function openSectorStock(symbol, row, targetSession) {
   const chosenVersion = state.versions.find(
     (item) =>
       item.session_date === version.target_session &&
-      item.package_sha256 === version.package_sha256,
+      item.source_package_id === version.source_package_id,
   );
   if (!chosenVersion) {
     $("sectorChangeStatus").textContent =
@@ -1025,10 +1022,10 @@ async function openSectorStock(symbol, row, targetSession) {
   }
   state.sectorChange.returnTarget = targetSession;
   $("versionSelect").value =
-    `${version.target_session}|${version.package_sha256}`;
+    `${version.target_session}|${version.source_package_id}`;
   state.version = {
     target_session: version.target_session,
-    package_sha256: version.package_sha256,
+    source_package_id: version.source_package_id,
   };
   $("symbolInput").value = symbol;
   $("windowInput").value = "75";
@@ -1039,13 +1036,11 @@ async function openSectorStock(symbol, row, targetSession) {
     (item) => item.profile_revision === $("sectorProfileRevisionSelect").value,
   );
   await queryTimeline({
-    namespace_id: state.namespace_id,
     origin: "sector-change",
     persistedProfileSnapshot: profileSnapshot
       ? {
           target_session: profileSnapshot.target_session,
-          namespace_id: profileSnapshot.namespace_id || state.namespace_id,
-          package_sha256: profileSnapshot.package_sha256,
+          source_package_id: profileSnapshot.source_package_id,
           profile_revision: profileSnapshot.profile_revision,
         }
       : null,
@@ -1084,8 +1079,8 @@ function initializeSectorChangeExplorer() {
   select.replaceChildren(new Option("— 请选择真实PG目标日期与来源包 —", ""));
   for (const version of state.versions) {
     const option = new Option(
-      `${version.session_date} · ${version.package_sha256.slice(0, 12)}… · ${version.version_status} · Raw ${version.row_count}/${version.expected_row_count}`,
-      `${version.session_date}|${version.package_sha256}`,
+      `${version.session_date} · 包ID ${version.source_package_id} · ${version.version_status} · Raw ${version.row_count}/${version.expected_row_count}`,
+      `${version.session_date}|${version.source_package_id}`,
     );
     select.append(option);
   }

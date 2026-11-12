@@ -20,7 +20,6 @@ from stock_a.domain.research_day_facts import (
 from stock_a.storage.postgres import source_raw
 
 
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _STRUCTURE_TYPES = (
     "PIVOT_LOW",
@@ -31,13 +30,11 @@ _STRUCTURE_TYPES = (
 )
 _STRUCTURE_TYPE_SET = frozenset(_STRUCTURE_TYPES)
 _D0_COLUMNS = (
-    "namespace_id",
     "before_session",
     "target_session",
     "source_symbol",
     "market",
-    "package_sha256",
-    "source_content_id",
+    "source_package_id",
     "before_capture_id",
     "target_capture_id",
     "producer_version",
@@ -58,27 +55,23 @@ _D0_COLUMNS = (
     "source_available_at",
     "calendar_id",
     "calendar_revision",
-    "calendar_sha256",
     "research_mode",
     "price_coordinate",
 )
 _D1_COLUMNS = (
-    "namespace_id",
     "before_session",
     "target_session",
     "source_symbol",
     "market",
     "board",
     "structure_type",
-    "package_sha256",
-    "source_content_id",
+    "source_package_id",
     "target_capture_id",
     "d1_history_session_count",
     "history_window_start",
     "history_window_end",
     "calendar_id",
     "calendar_revision",
-    "calendar_sha256",
     "producer_contract",
     "producer_version",
     "material_change_contract",
@@ -94,7 +87,6 @@ _D1_COLUMNS = (
     "target_price_reason",
     "generation_state",
     "generation_reason",
-    "anchor_id",
     "anchor_created_session",
     "anchor_available_from_session",
     "anchor_test_from_session",
@@ -104,7 +96,6 @@ _D1_COLUMNS = (
     "lower_denominator",
     "upper_numerator",
     "upper_denominator",
-    "source_event_id",
     "source_ref",
     "historical_anchor_count",
     "material_change_anchor_count",
@@ -117,20 +108,7 @@ _D1_COLUMNS = (
     "persisted_detail_count",
 )
 _ANCHOR_COLUMNS = (
-    "namespace_id",
-    "before_session",
-    "target_session",
-    "source_symbol",
-    "structure_type",
-    "package_sha256",
-    "target_capture_id",
-    "d1_history_session_count",
-    "calendar_revision",
-    "calendar_sha256",
-    "producer_contract",
-    "producer_version",
-    "material_change_contract",
-    "anchor_id",
+    "d1_structure_id",
     "created_session",
     "previous_session",
     "coordinate_id",
@@ -141,10 +119,7 @@ _ANCHOR_COLUMNS = (
     "upper_denominator",
     "birth_status",
     "birth_capture_id",
-    "birth_entry_sha256",
     "previous_capture_id",
-    "previous_entry_sha256",
-    "target_entry_sha256",
     "official_sessions_adjacent",
     "anchor_birth_before_previous_session",
     "change_classification",
@@ -180,37 +155,33 @@ _ANCHOR_COLUMNS = (
     "gap_after_reason",
 )
 _D0_KEY = (
-    "namespace_id",
+    "source_package_id",
     "target_session",
     "source_symbol",
-    "package_sha256",
     "before_capture_id",
     "target_capture_id",
     "producer_version",
     "algorithm_contract",
     "session_contract",
     "calendar_revision",
-    "calendar_sha256",
 )
 _D1_KEY = (
-    "namespace_id",
+    "source_package_id",
     "target_session",
     "source_symbol",
     "structure_type",
-    "package_sha256",
     "target_capture_id",
     "d1_history_session_count",
     "calendar_revision",
-    "calendar_sha256",
     "producer_contract",
     "producer_version",
     "material_change_contract",
 )
-_ANCHOR_KEY = _D1_KEY + ("anchor_id", "created_session")
+_ANCHOR_KEY = ("d1_structure_id", "created_session")
 _TABLES = (
-    ("stock.source_d0_launch_day_facts", _D0_COLUMNS, _D0_KEY),
-    ("stock.source_d1_structure_day_facts", _D1_COLUMNS, _D1_KEY),
-    ("stock.source_d1_material_anchor_day_facts", _ANCHOR_COLUMNS, _ANCHOR_KEY),
+    ("source_d0_launch_day_facts", _D0_COLUMNS, _D0_KEY),
+    ("source_d1_structure_day_facts", _D1_COLUMNS, _D1_KEY),
+    ("source_d1_material_anchor_day_facts", _ANCHOR_COLUMNS, _ANCHOR_KEY),
 )
 
 
@@ -250,13 +221,11 @@ def _d0_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
     for item in facts.d0_facts:
         result.append(
             (
-                facts.namespace_id,
                 facts.before_session,
                 facts.target_session,
                 item.source_symbol,
                 item.market,
-                facts.package_sha256,
-                facts.source_content_id,
+                facts.source_package_id,
                 facts.before_capture_id,
                 facts.target_capture_id,
                 facts.d0_producer_version,
@@ -277,7 +246,6 @@ def _d0_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
                 _available_at(facts.source_available_at),
                 facts.calendar_id,
                 facts.calendar_revision,
-                facts.calendar_sha256,
                 "NON_PIT_RETROSPECTIVE",
                 "RAW_UNADJUSTED",
             )
@@ -292,22 +260,19 @@ def _d1_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
         upper_num, upper_den = _ratio_pair(item.upper)
         result.append(
             (
-                facts.namespace_id,
                 facts.before_session,
                 facts.target_session,
                 item.source_symbol,
                 item.market,
                 item.board,
                 item.structure_type,
-                facts.package_sha256,
-                facts.source_content_id,
+                facts.source_package_id,
                 facts.target_capture_id,
                 facts.d1_history_session_count,
                 facts.d1_history_window_start,
                 facts.d1_history_window_end,
                 facts.calendar_id,
                 facts.calendar_revision,
-                facts.calendar_sha256,
                 facts.d1_producer_contract,
                 facts.d1_producer_version,
                 facts.d1_material_change_contract,
@@ -323,7 +288,6 @@ def _d1_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
                 item.target_price_reason,
                 item.generation_state,
                 item.generation_reason,
-                item.anchor_id,
                 item.anchor_created_session,
                 item.anchor_available_from_session,
                 item.anchor_test_from_session,
@@ -333,7 +297,6 @@ def _d1_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
                 lower_den,
                 upper_num,
                 upper_den,
-                item.source_event_id,
                 item.source_ref,
                 item.historical_anchor_count,
                 item.material_change_anchor_count,
@@ -349,27 +312,16 @@ def _d1_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
     return result
 
 
-def _anchor_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
+def _anchor_rows(
+    facts: ResearchDayFacts, structure_ids: Mapping[tuple[str, str], int]
+) -> list[tuple[Any, ...]]:
     result = []
     for item in facts.d1_anchor_facts:
         lower_num, lower_den = _ratio_pair(item.lower)
         upper_num, upper_den = _ratio_pair(item.upper)
         result.append(
             (
-                facts.namespace_id,
-                facts.before_session,
-                facts.target_session,
-                item.source_symbol,
-                item.structure_type,
-                facts.package_sha256,
-                facts.target_capture_id,
-                facts.d1_history_session_count,
-                facts.calendar_revision,
-                facts.calendar_sha256,
-                facts.d1_producer_contract,
-                facts.d1_producer_version,
-                facts.d1_material_change_contract,
-                item.anchor_id,
+                structure_ids[(item.source_symbol, item.structure_type)],
                 item.created_session,
                 item.previous_session,
                 item.coordinate_id,
@@ -380,10 +332,7 @@ def _anchor_rows(facts: ResearchDayFacts) -> list[tuple[Any, ...]]:
                 upper_den,
                 item.birth_status,
                 item.birth_capture_id,
-                item.birth_entry_sha256,
                 item.previous_capture_id,
-                item.previous_entry_sha256,
-                item.target_entry_sha256,
                 item.official_sessions_adjacent,
                 item.anchor_birth_before_previous_session,
                 item.change_classification,
@@ -434,9 +383,12 @@ def _validate_facts(facts: ResearchDayFacts) -> None:
         or facts.d1_history_session_count < 1
         or facts.d1_history_window_end != facts.target_session
         or facts.d1_history_window_start > facts.before_session
-        or _SHA256.fullmatch(facts.package_sha256) is None
-        or _SHA256.fullmatch(facts.source_content_id) is None
-        or _SHA256.fullmatch(facts.calendar_sha256) is None
+        or type(facts.source_package_id) is not int
+        or facts.source_package_id <= 0
+        or type(facts.before_capture_id) is not int
+        or type(facts.target_capture_id) is not int
+        or facts.before_capture_id <= 0
+        or facts.target_capture_id <= 0
     ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_FACTS_INCOMPLETE", "单日来源、日历或窗口分母无效"
@@ -528,7 +480,6 @@ def _validate_facts(facts: ResearchDayFacts) -> None:
         key = (
             item.source_symbol,
             item.structure_type,
-            item.anchor_id,
             item.created_session,
         )
         anchor_keys.add(key)
@@ -536,7 +487,6 @@ def _validate_facts(facts: ResearchDayFacts) -> None:
         detail_counts[owner] = detail_counts.get(owner, 0) + 1
         if (
             owner not in d1_by_key
-            or not item.anchor_id
             or item.created_session > facts.target_session
             or item.previous_session != facts.before_session
             or item.official_sessions_adjacent is not True
@@ -583,82 +533,61 @@ def _sort_rows(
 
 
 def _scope_predicate(
-    table_name: str, facts: ResearchDayFacts
+    table_name: str,
+    facts: ResearchDayFacts,
+    structure_ids: Sequence[int] = (),
 ) -> tuple[str, tuple[Any, ...]]:
     if table_name.endswith("source_d0_launch_day_facts"):
         return (
-            "namespace_id=%s AND target_session=%s AND package_sha256=%s "
+            "target_session=%s AND source_package_id=%s "
             "AND before_capture_id=%s AND target_capture_id=%s AND producer_version=%s "
             "AND algorithm_contract=%s AND session_contract=%s "
-            "AND calendar_revision=%s AND calendar_sha256=%s",
+            "AND calendar_revision=%s",
             (
-                facts.namespace_id,
                 facts.target_session,
-                facts.package_sha256,
+                facts.source_package_id,
                 facts.before_capture_id,
                 facts.target_capture_id,
                 facts.d0_producer_version,
                 facts.d0_algorithm_contract,
                 facts.d0_session_contract,
                 facts.calendar_revision,
-                facts.calendar_sha256,
             ),
         )
     if table_name.endswith("source_d1_structure_day_facts"):
         return (
-            "namespace_id=%s AND target_session=%s AND package_sha256=%s "
+            "target_session=%s AND source_package_id=%s "
             "AND target_capture_id=%s AND d1_history_session_count=%s "
-            "AND calendar_revision=%s AND calendar_sha256=%s "
+            "AND calendar_revision=%s "
             "AND producer_contract=%s AND producer_version=%s "
             "AND material_change_contract=%s",
             (
-                facts.namespace_id,
                 facts.target_session,
-                facts.package_sha256,
+                facts.source_package_id,
                 facts.target_capture_id,
                 facts.d1_history_session_count,
                 facts.calendar_revision,
-                facts.calendar_sha256,
                 facts.d1_producer_contract,
                 facts.d1_producer_version,
                 facts.d1_material_change_contract,
             ),
         )
-    return (
-        "namespace_id=%s AND target_session=%s AND package_sha256=%s "
-        "AND target_capture_id=%s AND d1_history_session_count=%s "
-        "AND calendar_revision=%s AND calendar_sha256=%s "
-        "AND producer_contract=%s AND producer_version=%s "
-        "AND material_change_contract=%s",
-        (
-            facts.namespace_id,
-            facts.target_session,
-            facts.package_sha256,
-            facts.target_capture_id,
-            facts.d1_history_session_count,
-            facts.calendar_revision,
-            facts.calendar_sha256,
-            facts.d1_producer_contract,
-            facts.d1_producer_version,
-            facts.d1_material_change_contract,
-        ),
-    )
+    return "d1_structure_id = ANY(%s)", (list(structure_ids),)
 
 
 def _verify_raw_source(cursor: Any, facts: ResearchDayFacts) -> None:
     cursor.execute(
         """
         SELECT session_date, count(*), count(DISTINCT source_symbol),
-               count(DISTINCT source_capture_id), min(source_capture_id::text),
-               count(DISTINCT source_content_id), min(source_content_id)
-        FROM stock.source_raw_daily
-        WHERE namespace_id=%s AND package_sha256=%s
+               count(DISTINCT source_capture_id), min(source_capture_id),
+               count(DISTINCT source_package_id), min(source_package_id)
+        FROM source_raw_daily
+        WHERE source_package_id=%s
           AND session_date IN (%s, %s)
         GROUP BY session_date ORDER BY session_date
         """,
         (
-            facts.namespace_id,
-            facts.package_sha256,
+            facts.source_package_id,
             facts.before_session,
             facts.target_session,
         ),
@@ -674,25 +603,24 @@ def _verify_raw_source(cursor: Any, facts: ResearchDayFacts) -> None:
         or target[2] != 1
         or target[3] != facts.target_capture_id
         or target[4] != 1
-        or target[5] != facts.source_content_id
+        or target[5] != facts.source_package_id
         or before[1] != facts.d0_before_source_count
         or before[2] != 1
         or before[3] != facts.before_capture_id
     ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_RAW_IDENTITY_MISMATCH",
-            "D0/D1事实与固定PG中的前后态Raw总体、捕获或内容摘要不一致",
+            "D0/D1事实与固定PG中的前后态Raw总体、捕获或数据包编号不一致",
         )
     cursor.execute(
         """
-        SELECT session_date, source_symbol FROM stock.source_raw_daily
-        WHERE namespace_id=%s AND package_sha256=%s
+        SELECT session_date, source_symbol FROM source_raw_daily
+        WHERE source_package_id=%s
           AND session_date IN (%s, %s)
         ORDER BY session_date, source_symbol
         """,
         (
-            facts.namespace_id,
-            facts.package_sha256,
+            facts.source_package_id,
             facts.before_session,
             facts.target_session,
         ),
@@ -727,9 +655,9 @@ def _verify_raw_source(cursor: Any, facts: ResearchDayFacts) -> None:
 
 def _ensure_tables(cursor: Any) -> None:
     cursor.execute(
-        "SELECT to_regclass('stock.source_d0_launch_day_facts') IS NOT NULL, "
-        "to_regclass('stock.source_d1_structure_day_facts') IS NOT NULL, "
-        "to_regclass('stock.source_d1_material_anchor_day_facts') IS NOT NULL"
+        "SELECT to_regclass('source_d0_launch_day_facts') IS NOT NULL, "
+        "to_regclass('source_d1_structure_day_facts') IS NOT NULL, "
+        "to_regclass('source_d1_material_anchor_day_facts') IS NOT NULL"
     )
     if cursor.fetchone() != (True, True, True):
         raise ResearchDayPgError(
@@ -804,30 +732,66 @@ def _persist_source_research_day_once(
 ) -> dict[str, Any]:
     """串行化事务写三张typed事实表；同键异内容拒绝并回滚。"""
     _validate_facts(facts)
-    expected_rows = tuple(
-        _sort_rows(rows, columns, key)
-        for (table, columns, key), rows in zip(
-            _TABLES,
-            (_d0_rows(facts), _d1_rows(facts), _anchor_rows(facts)),
-            strict=True,
-        )
-    )
+    d0_rows = _sort_rows(_d0_rows(facts), _D0_COLUMNS, _D0_KEY)
+    d1_rows = _sort_rows(_d1_rows(facts), _D1_COLUMNS, _D1_KEY)
     inserted = {}
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _connection,
         cursor,
-        namespace_id,
+        _connection_identity,
     ):
-        if namespace_id != facts.namespace_id:
-            raise ResearchDayPgError(
-                "RESEARCH_DAY_NAMESPACE_MISMATCH", "写入事实与PG DEV命名空间不一致"
-            )
         _ensure_tables(cursor)
         _verify_raw_source(cursor, facts)
+        inserted["source_d0_launch_day_facts"] = _insert_rows(
+            cursor,
+            "source_d0_launch_day_facts",
+            _D0_COLUMNS,
+            _D0_KEY,
+            d0_rows,
+        )
+        inserted["source_d1_structure_day_facts"] = _insert_rows(
+            cursor,
+            "source_d1_structure_day_facts",
+            _D1_COLUMNS,
+            _D1_KEY,
+            d1_rows,
+        )
+        d1_predicate, d1_params = _scope_predicate(
+            "source_d1_structure_day_facts", facts
+        )
+        cursor.execute(
+            "SELECT id, source_symbol, structure_type "
+            f"FROM source_d1_structure_day_facts WHERE {d1_predicate} "
+            "ORDER BY source_symbol, structure_type",
+            d1_params,
+        )
+        structure_ids = {
+            (source_symbol, structure_type): structure_id
+            for structure_id, source_symbol, structure_type in cursor.fetchall()
+        }
+        expected_d1_keys = {
+            (item.source_symbol, item.structure_type)
+            for item in facts.d1_structure_facts
+        }
+        if set(structure_ids) != expected_d1_keys:
+            raise ResearchDayPgError(
+                "RESEARCH_DAY_D1_PARENT_MISSING",
+                "D1材料锚无法绑定唯一的数字结构事实主键",
+            )
+        anchor_rows = _sort_rows(
+            _anchor_rows(facts, structure_ids), _ANCHOR_COLUMNS, _ANCHOR_KEY
+        )
+        expected_rows = (d0_rows, d1_rows, anchor_rows)
         existing_scopes = []
         any_existing = False
-        for (table, columns, _key), rows in zip(_TABLES, expected_rows, strict=True):
-            predicate, params = _scope_predicate(table, facts)
+        for index, ((table, columns, _key), rows) in enumerate(
+            zip(_TABLES, expected_rows, strict=True)
+        ):
+            predicate, params = (
+                _scope_predicate(table, facts, tuple(structure_ids.values()))
+                if index == 2
+                else _scope_predicate(table, facts)
+            )
             existing = _select_rows(cursor, table, columns, predicate, params)
             any_existing = any_existing or bool(existing)
             if existing and len(existing) != len(rows):
@@ -850,12 +814,21 @@ def _persist_source_research_day_once(
                 "三类事实表的既存范围不完整，拒绝跨表补写",
             )
         if not all(existing_scopes):
-            for (table, columns, key), rows in zip(_TABLES, expected_rows, strict=True):
-                inserted[table.rsplit(".", 1)[1]] = _insert_rows(
-                    cursor, table, columns, key, rows
-                )
-        for (table, columns, _key), rows in zip(_TABLES, expected_rows, strict=True):
-            predicate, params = _scope_predicate(table, facts)
+            inserted["source_d1_material_anchor_day_facts"] = _insert_rows(
+                cursor,
+                "source_d1_material_anchor_day_facts",
+                _ANCHOR_COLUMNS,
+                _ANCHOR_KEY,
+                anchor_rows,
+            )
+        for index, ((table, columns, _key), rows) in enumerate(
+            zip(_TABLES, expected_rows, strict=True)
+        ):
+            predicate, params = (
+                _scope_predicate(table, facts, tuple(structure_ids.values()))
+                if index == 2
+                else _scope_predicate(table, facts)
+            )
             actual = _select_rows(cursor, table, columns, predicate, params)
             if len(actual) != len(rows) or any(
                 not _row_matches(expected, persisted)
@@ -880,9 +853,9 @@ def _persist_source_research_day_once(
         if all(existing_scopes)
         else None,
         "transaction": "SERIALIZABLE_ATOMIC_THREE_TABLE_WRITE",
-        "database_write_attempted": not all(existing_scopes),
+        "database_write_attempted": any(inserted.values()),
         "ddl_executed": False,
-        "dml_executed": not all(existing_scopes),
+        "dml_executed": any(inserted.values()),
     }
 
 
@@ -910,13 +883,13 @@ def read_source_research_day(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     d1_history_session_count: int,
     offset: int = 0,
     limit: int = 30,
     symbol: str | None = None,
-    industry_snapshot_id: str | None = None,
-    concept_snapshot_id: str | None = None,
+    industry_snapshot_id: int | None = None,
+    concept_snapshot_id: int | None = None,
     board_kind: str | None = None,
     board_native_id: str | None = None,
     structure_type: str | None = None,
@@ -926,8 +899,8 @@ def read_source_research_day(
     """只读分页读取PG事实；未迁移或未计算时返回明确状态，不重算回退。"""
     if (
         type(target_session) is not date
-        or not isinstance(package_sha256, str)
-        or _SHA256.fullmatch(package_sha256) is None
+        or type(source_package_id) is not int
+        or source_package_id <= 0
         or type(d1_history_session_count) is not int
         or not 1 <= d1_history_session_count <= 32767
         or type(offset) is not int
@@ -961,14 +934,11 @@ def read_source_research_day(
             "RESEARCH_DAY_QUERY_INVALID", "PG研究事实读取键或分页参数无效"
         )
 
-    def incomplete_result(
-        namespace_id: str, reason: str, **details: Any
-    ) -> dict[str, Any]:
+    def incomplete_result(reason: str, **details: Any) -> dict[str, Any]:
         return {
             "storage_status": "INCOMPLETE",
-            "namespace_id": namespace_id,
             "target_session": target_session.isoformat(),
-            "package_sha256": package_sha256,
+            "source_package_id": source_package_id,
             "d1_history_session_count": d1_history_session_count,
             "results": [],
             "reason": reason,
@@ -978,39 +948,37 @@ def read_source_research_day(
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _connection,
         cursor,
-        namespace_id,
+        _connection_identity,
     ):
         cursor.execute(
-            "SELECT to_regclass('stock.source_d0_launch_day_facts') IS NOT NULL, "
-            "to_regclass('stock.source_d1_structure_day_facts') IS NOT NULL, "
-            "to_regclass('stock.source_d1_material_anchor_day_facts') IS NOT NULL"
+            "SELECT to_regclass('source_d0_launch_day_facts') IS NOT NULL, "
+            "to_regclass('source_d1_structure_day_facts') IS NOT NULL, "
+            "to_regclass('source_d1_material_anchor_day_facts') IS NOT NULL"
         )
         if cursor.fetchone() != (True, True, True):
             return {
                 "storage_status": "NOT_COMPUTED",
-                "namespace_id": namespace_id,
                 "target_session": target_session.isoformat(),
-                "package_sha256": package_sha256,
+                "source_package_id": source_package_id,
                 "d1_history_session_count": d1_history_session_count,
                 "results": [],
                 "reason": "R06事实迁移尚未应用",
             }
         cursor.execute(
-            "SELECT DISTINCT target_capture_id, calendar_revision, calendar_sha256, "
+            "SELECT DISTINCT target_capture_id, calendar_revision, "
             "producer_contract, producer_version, material_change_contract "
-            "FROM stock.source_d1_structure_day_facts "
-            "WHERE namespace_id=%s AND target_session=%s AND package_sha256=%s "
+            "FROM source_d1_structure_day_facts "
+            "WHERE target_session=%s AND source_package_id=%s "
             "AND d1_history_session_count=%s ORDER BY target_capture_id, calendar_revision, "
-            "calendar_sha256, producer_contract, producer_version, material_change_contract",
-            (namespace_id, target_session, package_sha256, d1_history_session_count),
+            "producer_contract, producer_version, material_change_contract",
+            (target_session, source_package_id, d1_history_session_count),
         )
         d1_scopes = cursor.fetchall()
         if not d1_scopes:
             return {
                 "storage_status": "NOT_COMPUTED",
-                "namespace_id": namespace_id,
                 "target_session": target_session.isoformat(),
-                "package_sha256": package_sha256,
+                "source_package_id": source_package_id,
                 "d1_history_session_count": d1_history_session_count,
                 "results": [],
                 "reason": "该精确来源与D1窗口尚无已保存研究事实",
@@ -1022,26 +990,23 @@ def read_source_research_day(
         (
             target_capture_id,
             calendar_revision,
-            calendar_sha256,
             producer_contract,
             d1_producer_version,
             material_change_contract,
         ) = d1_scopes[0]
         d1_predicate = (
-            "namespace_id=%s AND target_session=%s AND package_sha256=%s "
+            "target_session=%s AND source_package_id=%s "
             "AND target_capture_id=%s AND d1_history_session_count=%s "
-            "AND calendar_revision=%s AND calendar_sha256=%s "
+            "AND calendar_revision=%s "
             "AND producer_contract=%s AND producer_version=%s "
             "AND material_change_contract=%s"
         )
         d1_params = (
-            namespace_id,
             target_session,
-            package_sha256,
+            source_package_id,
             target_capture_id,
             d1_history_session_count,
             calendar_revision,
-            calendar_sha256,
             producer_contract,
             d1_producer_version,
             material_change_contract,
@@ -1053,21 +1018,15 @@ def read_source_research_day(
         ):
             if supplied_id is None:
                 continue
-            try:
-                snapshot_uuid = UUID(supplied_id)
-            except (TypeError, ValueError, AttributeError) as error:
-                raise ResearchDayPgError(
-                    "RESEARCH_DAY_MEMBER_SNAPSHOT_INVALID", "板块成员快照不是合法UUID"
-                ) from error
-            if str(snapshot_uuid) != supplied_id:
+            if type(supplied_id) is not int or supplied_id <= 0:
                 raise ResearchDayPgError(
                     "RESEARCH_DAY_MEMBER_SNAPSHOT_INVALID",
-                    "板块成员快照必须是规范小写UUID",
+                    "板块成员快照必须是正整数ID",
                 )
             cursor.execute(
-                "SELECT source_kind, research_mode FROM stock.tdx_sector_source_snapshots "
+                "SELECT source_kind, research_mode FROM tdx_sector_source_snapshots "
                 "WHERE snapshot_id=%s",
-                (snapshot_uuid,),
+                (supplied_id,),
             )
             snapshot_meta = cursor.fetchone()
             if snapshot_meta != (
@@ -1078,40 +1037,38 @@ def read_source_research_day(
                     "RESEARCH_DAY_MEMBER_SNAPSHOT_NOT_AVAILABLE",
                     f"{kind}快照缺失、类型不符或未标记NON_PIT",
                 )
-            snapshot_specs.append((snapshot_uuid, kind))
+            snapshot_specs.append((supplied_id, kind))
         cursor.execute(
             f"SELECT before_session, history_window_start, history_window_end, "
-            f"calendar_id, calendar_sha256, producer_contract, material_change_contract, "
+            f"calendar_id, calendar_revision, producer_contract, material_change_contract, "
             f"source_time_quality, source_clock_role, source_available_at, research_mode, "
-            f"price_coordinate, min(source_content_id), count(DISTINCT source_content_id), "
+            f"price_coordinate, min(source_package_id), count(DISTINCT source_package_id), "
             f"count(DISTINCT source_symbol), count(*) "
-            f"FROM stock.source_d1_structure_day_facts WHERE {d1_predicate} "
+            f"FROM source_d1_structure_day_facts WHERE {d1_predicate} "
             f"GROUP BY before_session, history_window_start, history_window_end, calendar_id, "
-            f"calendar_sha256, producer_contract, material_change_contract, "
+            f"calendar_revision, producer_contract, material_change_contract, "
             f"source_time_quality, source_clock_role, source_available_at, research_mode, price_coordinate",
             d1_params,
         )
         contexts = cursor.fetchall()
         if not contexts:
-            return incomplete_result(namespace_id, "D1单日事实缺少窗口或来源质量上下文")
+            return incomplete_result("D1单日事实缺少窗口或来源质量上下文")
         if len(contexts) != 1:
             raise ResearchDayPgError(
                 "RESEARCH_DAY_D1_CONTEXT_AMBIGUOUS", "D1单日事实上下文不唯一"
             )
         d1_context = contexts[0]
         before_session = d1_context[0]
-        source_content_id = d1_context[12]
+        source_package_id = d1_context[12]
         if d1_context[13] != 1:
             return incomplete_result(
-                namespace_id,
                 "D1逐股事实绑定多个来源内容摘要",
-                distinct_source_content_count=d1_context[13],
+                distinct_source_package_count=d1_context[13],
             )
         d1_source_count = d1_context[-2]
         d1_row_count = d1_context[-1]
         if d1_row_count != d1_source_count * len(_STRUCTURE_TYPES):
             return incomplete_result(
-                namespace_id,
                 "D1逐股五类结构行数不闭合",
                 source_symbol_count=d1_source_count,
                 observed_structure_rows=d1_row_count,
@@ -1119,7 +1076,7 @@ def read_source_research_day(
             )
         cursor.execute(
             f"SELECT structure_type, count(*), count(DISTINCT source_symbol) "
-            f"FROM stock.source_d1_structure_day_facts WHERE {d1_predicate} "
+            f"FROM source_d1_structure_day_facts WHERE {d1_predicate} "
             "GROUP BY structure_type ORDER BY structure_type",
             d1_params,
         )
@@ -1129,32 +1086,25 @@ def read_source_research_day(
             for row in type_counts
         ):
             return incomplete_result(
-                namespace_id,
                 "D1五类结构逐股分母不一致",
                 structure_type_counts=[list(row) for row in type_counts],
                 source_symbol_count=d1_source_count,
             )
         cursor.execute(
             f"SELECT count(*), sum(persisted_detail_count) "
-            f"FROM stock.source_d1_structure_day_facts WHERE {d1_predicate}",
+            f"FROM source_d1_structure_day_facts WHERE {d1_predicate}",
             d1_params,
         )
         d1_rows_count, expected_anchor_count = cursor.fetchone()
-        anchor_predicate = (
-            "namespace_id=%s AND target_session=%s AND package_sha256=%s "
-            "AND target_capture_id=%s AND d1_history_session_count=%s "
-            "AND calendar_revision=%s AND calendar_sha256=%s "
-            "AND producer_contract=%s AND producer_version=%s "
-            "AND material_change_contract=%s"
-        )
         cursor.execute(
-            f"SELECT count(*) FROM stock.source_d1_material_anchor_day_facts WHERE {anchor_predicate}",
+            "SELECT count(*) FROM source_d1_material_anchor_day_facts "
+            "WHERE d1_structure_id = ANY (SELECT id FROM source_d1_structure_day_facts "
+            f"WHERE {d1_predicate})",
             d1_params,
         )
         actual_anchor_count = cursor.fetchone()[0]
         if actual_anchor_count != expected_anchor_count:
             return incomplete_result(
-                namespace_id,
                 "D1锚明细与逐股分母不一致",
                 expected_anchor_rows=expected_anchor_count,
                 observed_anchor_rows=actual_anchor_count,
@@ -1162,66 +1112,56 @@ def read_source_research_day(
         cursor.execute(
             "SELECT DISTINCT before_capture_id, producer_version, algorithm_contract, session_contract, "
             "before_source_count, target_source_count, union_source_count, before_window_start, "
-            "target_window_start, calendar_id, calendar_revision, calendar_sha256, "
+            "target_window_start, calendar_id, calendar_revision, "
             "source_time_quality, source_clock_role, source_available_at, research_mode, price_coordinate, "
-            "source_content_id, before_session "
-            "FROM stock.source_d0_launch_day_facts WHERE namespace_id=%s AND target_session=%s "
-            "AND package_sha256=%s AND target_capture_id=%s ORDER BY before_capture_id, producer_version, session_contract",
-            (namespace_id, target_session, package_sha256, target_capture_id),
+            "source_package_id, before_session "
+            "FROM source_d0_launch_day_facts WHERE target_session=%s "
+            "AND source_package_id=%s AND target_capture_id=%s ORDER BY before_capture_id, producer_version, session_contract",
+            (target_session, source_package_id, target_capture_id),
         )
         d0_scopes = cursor.fetchall()
         if not d0_scopes:
-            return incomplete_result(namespace_id, "精确目标D0事实缺失")
+            return incomplete_result("精确目标D0事实缺失")
         if len(d0_scopes) != 1:
             raise ResearchDayPgError(
                 "RESEARCH_DAY_D0_SCOPE_MISSING_OR_AMBIGUOUS",
                 "目标D0事实缺失或读取键不唯一",
             )
         d0_scope = d0_scopes[0]
-        if d0_scope[17] != source_content_id:
+        if d0_scope[16] != source_package_id:
             return incomplete_result(
-                namespace_id,
-                "D0与D1绑定的来源内容摘要不一致",
-                d0_source_content_id=d0_scope[17],
-                d1_source_content_id=source_content_id,
+                "D0与D1绑定的来源数据包编号不一致",
+                d0_source_package_id=d0_scope[16],
+                d1_source_package_id=source_package_id,
             )
-        if (
-            d0_scope[10] != calendar_revision
-            or d0_scope[11] != calendar_sha256
-            or d0_scope[18] != before_session
-        ):
+        if d0_scope[10] != calendar_revision or d0_scope[17] != before_session:
             return incomplete_result(
-                namespace_id,
                 "D0与D1目标日、前态或官方日历上下文不一致",
-                d0_before_session=_json_value(d0_scope[18]),
+                d0_before_session=_json_value(d0_scope[17]),
                 d1_before_session=_json_value(before_session),
                 d0_calendar_revision=d0_scope[10],
                 d1_calendar_revision=calendar_revision,
-                d0_calendar_sha256=d0_scope[11],
-                d1_calendar_sha256=calendar_sha256,
             )
         d0_predicate = (
-            "namespace_id=%s AND target_session=%s AND package_sha256=%s "
+            "target_session=%s AND source_package_id=%s "
             "AND before_capture_id=%s AND target_capture_id=%s "
             "AND producer_version=%s AND algorithm_contract=%s AND session_contract=%s "
-            "AND calendar_revision=%s AND calendar_sha256=%s"
+            "AND calendar_revision=%s"
         )
         d0_params = (
-            namespace_id,
             target_session,
-            package_sha256,
+            source_package_id,
             d0_scope[0],
             target_capture_id,
             d0_scope[1],
             d0_scope[2],
             d0_scope[3],
             d0_scope[10],
-            d0_scope[11],
         )
         cursor.execute(
             "SELECT count(*), count(DISTINCT source_symbol), min(union_source_count), "
             "max(union_source_count), count(*) FILTER (WHERE after_state IS NOT NULL) "
-            f"FROM stock.source_d0_launch_day_facts WHERE {d0_predicate}",
+            f"FROM source_d0_launch_day_facts WHERE {d0_predicate}",
             d0_params,
         )
         d0_counts = cursor.fetchone()
@@ -1233,7 +1173,6 @@ def read_source_research_day(
             or d0_counts[4] != d1_source_count
         ):
             return incomplete_result(
-                namespace_id,
                 "D0并集分母或目标态股票数不闭合",
                 observed_d0_rows=d0_counts[0],
                 distinct_d0_symbols=d0_counts[1],
@@ -1242,18 +1181,18 @@ def read_source_research_day(
                 d1_target_symbols=d1_source_count,
             )
         cursor.execute(
-            "SELECT EXISTS ((SELECT DISTINCT source_symbol FROM stock.source_d1_structure_day_facts "
-            f"WHERE {d1_predicate}) EXCEPT (SELECT source_symbol FROM stock.source_d0_launch_day_facts "
+            "SELECT EXISTS ((SELECT DISTINCT source_symbol FROM source_d1_structure_day_facts "
+            f"WHERE {d1_predicate}) EXCEPT (SELECT source_symbol FROM source_d0_launch_day_facts "
             f"WHERE {d0_predicate} AND after_state IS NOT NULL)) "
-            "OR EXISTS ((SELECT source_symbol FROM stock.source_d0_launch_day_facts "
+            "OR EXISTS ((SELECT source_symbol FROM source_d0_launch_day_facts "
             f"WHERE {d0_predicate} AND after_state IS NOT NULL) "
-            f"EXCEPT (SELECT DISTINCT source_symbol FROM stock.source_d1_structure_day_facts WHERE {d1_predicate}))",
+            f"EXCEPT (SELECT DISTINCT source_symbol FROM source_d1_structure_day_facts WHERE {d1_predicate}))",
             d1_params + d0_params + d0_params + d1_params,
         )
         if cursor.fetchone()[0]:
-            return incomplete_result(namespace_id, "D0目标态与D1逐股集合不一致")
+            return incomplete_result("D0目标态与D1逐股集合不一致")
         cursor.execute(
-            "SELECT before_state, after_state, transition, count(*) FROM stock.source_d0_launch_day_facts "
+            "SELECT before_state, after_state, transition, count(*) FROM source_d0_launch_day_facts "
             f"WHERE {d0_predicate} "
             "GROUP BY before_state, after_state, transition ORDER BY before_state NULLS FIRST, after_state NULLS FIRST, transition",
             d0_params,
@@ -1270,7 +1209,7 @@ def read_source_research_day(
         cursor.execute(
             "SELECT sum(material_change_anchor_count), sum(unknown_anchor_count), "
             "sum(not_comparable_anchor_count), sum(not_evaluable_anchor_count) "
-            f"FROM stock.source_d1_structure_day_facts WHERE {d1_predicate}",
+            f"FROM source_d1_structure_day_facts WHERE {d1_predicate}",
             d1_params,
         )
         material_count, unknown_count, not_comparable_count, not_evaluable_count = (
@@ -1291,61 +1230,43 @@ def read_source_research_day(
         )
 
         d1_alias_predicate = (
-            "d.namespace_id=%s AND d.target_session=%s AND d.package_sha256=%s "
+            "d.target_session=%s AND d.source_package_id=%s "
             "AND d.target_capture_id=%s AND d.d1_history_session_count=%s "
-            "AND d.calendar_revision=%s AND d.calendar_sha256=%s "
+            "AND d.calendar_revision=%s "
             "AND d.producer_contract=%s AND d.producer_version=%s "
             "AND d.material_change_contract=%s"
         )
         filters = []
         filter_params = []
         if structure_type is not None:
-            filters.append(
-                "EXISTS (SELECT 1 FROM stock.source_d1_structure_day_facts f "
-                "WHERE f.namespace_id=d.namespace_id AND f.target_session=d.target_session "
-                "AND f.source_symbol=d.source_symbol AND f.structure_type=%s "
-                "AND f.package_sha256=d.package_sha256 AND f.target_capture_id=d.target_capture_id "
-                "AND f.d1_history_session_count=d.d1_history_session_count "
-                "AND f.calendar_revision=d.calendar_revision AND f.calendar_sha256=d.calendar_sha256 "
-                "AND f.producer_contract=d.producer_contract AND f.producer_version=d.producer_version "
-                "AND f.material_change_contract=d.material_change_contract "
-                "AND f.material_change_anchor_count>0)"
-            )
+            filters.extend(("d.structure_type=%s", "d.material_change_anchor_count>0"))
             filter_params.append(structure_type)
         if material_change_reason is not None:
             filters.append(
-                "EXISTS (SELECT 1 FROM stock.source_d1_material_anchor_day_facts a "
-                "WHERE a.namespace_id=d.namespace_id AND a.target_session=d.target_session "
-                "AND a.source_symbol=d.source_symbol AND a.package_sha256=d.package_sha256 "
-                "AND a.target_capture_id=d.target_capture_id "
-                "AND a.d1_history_session_count=d.d1_history_session_count "
-                "AND a.calendar_revision=d.calendar_revision AND a.calendar_sha256=d.calendar_sha256 "
-                "AND a.producer_contract=d.producer_contract AND a.producer_version=d.producer_version "
-                "AND a.material_change_contract=d.material_change_contract "
+                "EXISTS (SELECT 1 FROM source_d1_material_anchor_day_facts a "
+                "WHERE a.d1_structure_id=d.id "
                 "AND a.material_change_classification='MATERIAL_CHANGE' "
-                + ("AND a.structure_type=%s " if structure_type is not None else "")
                 + "AND %s = ANY(a.material_change_reasons))"
             )
-            if structure_type is not None:
-                filter_params.append(structure_type)
             filter_params.append(material_change_reason)
         if board_kind is not None and board_native_id is not None:
-            snapshot_uuid = next(
+            snapshot_id = next(
                 snapshot for snapshot, kind in snapshot_specs if kind == board_kind
             )
             filters.append(
-                "EXISTS (SELECT 1 FROM stock.tdx_sector_members m "
-                "WHERE m.snapshot_id=%s AND m.board_kind=%s AND m.board_native_id=%s "
+                "EXISTS (SELECT 1 FROM tdx_sector_catalog c "
+                "JOIN tdx_sector_members m ON m.catalog_id=c.id "
+                "WHERE c.snapshot_id=%s AND c.board_kind=%s AND c.board_native_id=%s "
                 "AND m.source_symbol=d.source_symbol)"
             )
-            filter_params.extend((snapshot_uuid, board_kind, board_native_id))
+            filter_params.extend((snapshot_id, board_kind, board_native_id))
         if symbol is not None:
             filters.append("d.source_symbol=%s")
             filter_params.append(symbol)
         filter_sql = "".join(f" AND ({item})" for item in filters)
         selected_query = (
             "SELECT d.source_symbol, d.market, d.board "
-            "FROM stock.source_d1_structure_day_facts d "
+            "FROM source_d1_structure_day_facts d "
             f"WHERE {d1_alias_predicate}{filter_sql} "
             "GROUP BY d.source_symbol, d.market, d.board ORDER BY d.source_symbol"
         )
@@ -1365,30 +1286,32 @@ def read_source_research_day(
         page_symbols = [row[0] for row in stock_page]
         board_summaries = []
         membership_coverage = []
-        for snapshot_uuid, kind in snapshot_specs:
-            anchor_filters = ["material_change_classification='MATERIAL_CHANGE'"]
+        for snapshot_id, kind in snapshot_specs:
+            anchor_filters = ["a.material_change_classification='MATERIAL_CHANGE'"]
             anchor_params = []
             if structure_type is not None:
-                anchor_filters.append("structure_type=%s")
+                anchor_filters.append("d.structure_type=%s")
                 anchor_params.append(structure_type)
             if material_change_reason is not None:
-                anchor_filters.append("%s = ANY(material_change_reasons)")
+                anchor_filters.append("%s = ANY(a.material_change_reasons)")
                 anchor_params.append(material_change_reason)
             cursor.execute(
                 "WITH source_symbols AS (SELECT DISTINCT source_symbol "
-                f"FROM stock.source_d1_structure_day_facts WHERE {d1_predicate} "
-                "), selected_anchors AS (SELECT source_symbol, count(*) AS material_anchor_count "
-                f"FROM stock.source_d1_material_anchor_day_facts WHERE {d1_predicate} AND "
+                f"FROM source_d1_structure_day_facts WHERE {d1_predicate} "
+                "), selected_anchors AS (SELECT d.source_symbol, count(*) AS material_anchor_count "
+                "FROM source_d1_structure_day_facts d "
+                "JOIN source_d1_material_anchor_day_facts a ON a.d1_structure_id=d.id "
+                f"WHERE {d1_alias_predicate} AND "
                 + " AND ".join(anchor_filters)
-                + " GROUP BY source_symbol), stock_summary AS (SELECT s.source_symbol, "
+                + " GROUP BY d.source_symbol), stock_summary AS (SELECT s.source_symbol, "
                 "coalesce(a.material_anchor_count, 0) AS material_anchor_count "
                 "FROM source_symbols s LEFT JOIN selected_anchors a USING (source_symbol)) "
                 "SELECT c.board_kind, c.board_native_id, c.board_name, "
                 "count(DISTINCT m.source_symbol) FILTER (WHERE s.source_symbol IS NOT NULL), "
                 "count(DISTINCT m.source_symbol) FILTER (WHERE s.material_anchor_count>0), "
                 "coalesce(sum(s.material_anchor_count), 0) "
-                "FROM stock.tdx_sector_catalog c JOIN stock.tdx_sector_members m "
-                "ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind "
+                "FROM tdx_sector_catalog c JOIN tdx_sector_members m "
+                "ON m.catalog_id=c.id AND m.board_kind=c.board_kind "
                 "AND m.board_native_id=c.board_native_id "
                 "LEFT JOIN stock_summary s ON s.source_symbol=m.source_symbol "
                 "WHERE c.snapshot_id=%s AND c.board_kind=%s "
@@ -1397,7 +1320,7 @@ def read_source_research_day(
                 d1_params
                 + d1_params
                 + tuple(anchor_params)
-                + (snapshot_uuid, kind, offset, limit),
+                + (snapshot_id, kind, offset, limit),
             )
             board_summaries.extend(
                 {
@@ -1407,25 +1330,26 @@ def read_source_research_day(
                     "source_stock_count": row[3],
                     "material_change_stock_count": row[4],
                     "material_change_anchor_count": int(row[5]),
-                    "snapshot_id": str(snapshot_uuid),
+                    "snapshot_id": snapshot_id,
                     "membership_scope": "NON_PIT_CURRENT_SNAPSHOT",
                 }
                 for row in cursor.fetchall()
             )
             cursor.execute(
                 "WITH source_symbols AS (SELECT DISTINCT source_symbol "
-                f"FROM stock.source_d1_structure_day_facts WHERE {d1_predicate}) "
+                f"FROM source_d1_structure_day_facts WHERE {d1_predicate}) "
                 "SELECT count(*), count(*) FILTER (WHERE m.source_symbol IS NULL) "
-                "FROM source_symbols s LEFT JOIN (SELECT DISTINCT snapshot_id, source_symbol "
-                "FROM stock.tdx_sector_members WHERE snapshot_id=%s) m "
+                "FROM source_symbols s LEFT JOIN (SELECT DISTINCT c.snapshot_id, m.source_symbol "
+                "FROM tdx_sector_members m JOIN tdx_sector_catalog c ON c.id=m.catalog_id "
+                "WHERE c.snapshot_id=%s) m "
                 "ON m.source_symbol=s.source_symbol",
-                d1_params + (snapshot_uuid,),
+                d1_params + (snapshot_id,),
             )
             coverage_total, unmapped_count = cursor.fetchone()
             membership_coverage.append(
                 {
                     "board_kind": kind,
-                    "snapshot_id": str(snapshot_uuid),
+                    "snapshot_id": snapshot_id,
                     "source_symbol_denominator": coverage_total,
                     "mapped_source_symbol_count": coverage_total - unmapped_count,
                     "unmapped_source_symbol_count": unmapped_count,
@@ -1436,7 +1360,7 @@ def read_source_research_day(
             d1_selected, d0_selected, anchors_selected = [], [], []
         else:
             cursor.execute(
-                f"SELECT {', '.join(_D1_COLUMNS)} FROM stock.source_d1_structure_day_facts "
+                f"SELECT {', '.join(_D1_COLUMNS)} FROM source_d1_structure_day_facts "
                 f"WHERE {d1_predicate} AND source_symbol = ANY(%s) "
                 "ORDER BY source_symbol, structure_type",
                 d1_params + (page_symbols,),
@@ -1444,30 +1368,36 @@ def read_source_research_day(
             d1_selected = [_as_dict(_D1_COLUMNS, row) for row in cursor.fetchall()]
             d0_columns = _D0_COLUMNS
             cursor.execute(
-                f"SELECT {', '.join(d0_columns)} FROM stock.source_d0_launch_day_facts "
+                f"SELECT {', '.join(d0_columns)} FROM source_d0_launch_day_facts "
                 f"WHERE {d0_predicate} AND source_symbol = ANY(%s) ORDER BY source_symbol",
                 d0_params + (page_symbols,),
             )
             d0_selected = [_as_dict(d0_columns, row) for row in cursor.fetchall()]
             cursor.execute(
-                f"SELECT {', '.join(_ANCHOR_COLUMNS)} FROM stock.source_d1_material_anchor_day_facts "
-                f"WHERE {anchor_predicate} AND source_symbol = ANY(%s) "
-                "ORDER BY source_symbol, structure_type, created_session, anchor_id",
+                "SELECT d.source_symbol, d.structure_type, "
+                + ", ".join(f"a.{column}" for column in _ANCHOR_COLUMNS)
+                + " FROM source_d1_structure_day_facts d "
+                "JOIN source_d1_material_anchor_day_facts a ON a.d1_structure_id=d.id "
+                f"WHERE {d1_alias_predicate} AND d.source_symbol = ANY(%s) "
+                "ORDER BY d.source_symbol, d.structure_type, a.created_session",
                 d1_params + (page_symbols,),
             )
-            anchors_selected = [
-                _as_dict(_ANCHOR_COLUMNS, row) for row in cursor.fetchall()
-            ]
+            anchors_selected = []
+            for row in cursor.fetchall():
+                anchor = _as_dict(_ANCHOR_COLUMNS, row[2:])
+                anchor["source_symbol"] = row[0]
+                anchor["structure_type"] = row[1]
+                anchors_selected.append(anchor)
         memberships_by_symbol: dict[str, list[dict[str, Any]]] = {}
         if snapshot_specs and page_symbols:
             snapshot_ids = [snapshot for snapshot, _kind in snapshot_specs]
             cursor.execute(
                 "SELECT m.source_symbol, c.board_kind, c.board_native_id, c.board_name, "
-                "m.membership_quality, m.snapshot_id "
-                "FROM stock.tdx_sector_members m JOIN stock.tdx_sector_catalog c "
-                "ON c.snapshot_id=m.snapshot_id AND c.board_kind=m.board_kind "
+                "m.membership_quality, c.snapshot_id "
+                "FROM tdx_sector_members m JOIN tdx_sector_catalog c "
+                "ON c.id=m.catalog_id AND c.board_kind=m.board_kind "
                 "AND c.board_native_id=m.board_native_id "
-                "WHERE m.snapshot_id = ANY(%s::uuid[]) AND m.source_symbol = ANY(%s) "
+                "WHERE c.snapshot_id = ANY(%s) AND m.source_symbol = ANY(%s) "
                 "ORDER BY m.source_symbol, c.board_kind, c.board_name, c.board_native_id",
                 (snapshot_ids, page_symbols),
             )
@@ -1478,7 +1408,7 @@ def read_source_research_day(
                         "board_native_id": row[2],
                         "board_name": row[3],
                         "membership_quality": row[4],
-                        "snapshot_id": str(row[5]),
+                        "snapshot_id": row[5],
                         "scope": "NON_PIT_CURRENT_SNAPSHOT",
                     }
                 )
@@ -1502,15 +1432,12 @@ def read_source_research_day(
             )
         return {
             "storage_status": "SAVED",
-            "namespace_id": namespace_id,
             "target_session": target_session.isoformat(),
             "before_session": _json_value(before_session),
-            "package_sha256": package_sha256,
-            "source_content_id": source_content_id,
-            "target_capture_id": str(target_capture_id),
+            "source_package_id": source_package_id,
+            "target_capture_id": target_capture_id,
             "d1_history_session_count": d1_history_session_count,
             "calendar_revision": calendar_revision,
-            "calendar_sha256": calendar_sha256,
             "d1_producer_contract": producer_contract,
             "d1_producer_version": d1_producer_version,
             "d1_material_change_contract": material_change_contract,
@@ -1520,10 +1447,10 @@ def read_source_research_day(
             "membership_snapshots": [
                 {
                     "board_kind": kind,
-                    "snapshot_id": str(snapshot_uuid),
+                    "snapshot_id": snapshot_id,
                     "scope": "NON_PIT_CURRENT_SNAPSHOT",
                 }
-                for snapshot_uuid, kind in snapshot_specs
+                for snapshot_id, kind in snapshot_specs
             ],
             "membership_coverage": membership_coverage,
             "board_summaries": board_summaries,

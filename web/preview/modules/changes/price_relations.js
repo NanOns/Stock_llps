@@ -4,24 +4,22 @@ function relationDetailQueryKey(query, relationData, sourceSymbol) {
   if (!query || !relationData || !sourceSymbol) return null;
   const snapshotIdentity = (snapshot) => ({
     target_session: snapshot?.target_session,
-    package_sha256: snapshot?.package_sha256,
+    source_package_id: snapshot?.source_package_id,
     profile_revision: snapshot?.profile_revision,
   });
   const before = snapshotIdentity(query.before);
   const after = snapshotIdentity(query.after);
   if (
     !before.target_session ||
-    !before.package_sha256 ||
+    !before.source_package_id ||
     !before.profile_revision ||
     !after.target_session ||
-    !after.package_sha256 ||
-    !after.profile_revision ||
-    !relationData.namespace_id
+    !after.source_package_id ||
+    !after.profile_revision
   )
     return null;
   return JSON.stringify({
     relation_request: state.relationRequest,
-    namespace_id: relationData.namespace_id,
     before,
     after,
     source_symbol: sourceSymbol,
@@ -61,13 +59,12 @@ function relationDetailResponseMatches(
 ) {
   const sameSnapshot = (actual, expected) =>
     actual?.target_session === expected?.target_session &&
-    actual?.package_sha256 === expected?.package_sha256 &&
+    actual?.source_package_id === expected?.source_package_id &&
     actual?.profile_revision === expected?.profile_revision;
   return (
     data?.source_symbol === sourceSymbol &&
     (data?.item?.source_symbol === undefined ||
       data?.item?.source_symbol === sourceSymbol) &&
-    data?.namespace_id === relationData?.namespace_id &&
     sameSnapshot(data?.before_snapshot, query?.before) &&
     sameSnapshot(data?.after_snapshot, query?.after) &&
     sameSnapshot(data?.before_snapshot, relationData?.before_snapshot) &&
@@ -102,7 +99,7 @@ function clearRelationScreen(message = "请选择两个完整PG画像快照。")
   $("priceRelationLast").disabled = true;
 }
 function relationSnapshotParams(params, prefix, snapshot) {
-  params.set(prefix + "_package_sha256", snapshot.package_sha256);
+  params.set(prefix + "_source_package_id", snapshot.source_package_id);
   params.set(prefix + "_profile_revision", snapshot.profile_revision);
 }
 function relationValueText(item, field, side) {
@@ -241,18 +238,16 @@ function renderRelationScreen(data, requestId) {
     data.page.total +
     "。未知原因：" +
     (reasonText || "本字段无UNKNOWN端点") +
-    "。namespace " +
-    data.namespace_id +
-    "；起始 " +
+    "。起始 " +
     data.before_snapshot.target_session +
-    " / SHA " +
-    data.before_snapshot.package_sha256 +
+    " / 来源包ID " +
+    data.before_snapshot.source_package_id +
     " / revision " +
     data.before_snapshot.profile_revision +
     "；结束 " +
     data.after_snapshot.target_session +
-    " / SHA " +
-    data.after_snapshot.package_sha256 +
+    " / 来源包ID " +
+    data.after_snapshot.source_package_id +
     " / revision " +
     data.after_snapshot.profile_revision +
     "。来源代码级RAW_UNADJUSTED · NON_PIT；上市总体未知。";
@@ -276,11 +271,11 @@ function renderRelationScreen(data, requestId) {
     const identity =
       item.source_symbol +
       " · " +
-      item.before_package_sha256 +
+      item.before_source_package_id +
       " / " +
       item.before_profile_revision +
       " → " +
-      item.after_package_sha256 +
+      item.after_source_package_id +
       " / " +
       item.after_profile_revision;
     cell(row, identity);
@@ -522,7 +517,6 @@ async function openRelationDetail(relationRow) {
   );
   state.changeBinding = {
     origin: "relation",
-    namespace_id: state.relationData?.namespace_id,
     before_snapshot: state.relationData?.before_snapshot,
     after_snapshot: state.relationData?.after_snapshot,
     session_relation: state.relationData?.session_relation,

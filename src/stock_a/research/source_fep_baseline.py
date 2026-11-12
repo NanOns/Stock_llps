@@ -27,7 +27,6 @@ def summarize_day(
     *,
     target,
     source,
-    namespace_id,
     calendar_revision,
     session_versions,
     frozen,
@@ -261,7 +260,6 @@ def summarize_day(
             )
     return {
         "target_session": target.isoformat(),
-        "namespace_id": namespace_id,
         "source_version": source,
         "calendar_revision": calendar_revision,
         "forward_session_versions": session_versions,
@@ -269,9 +267,8 @@ def summarize_day(
             key: d1_identity.get(key)
             for key in (
                 "core_producer_symbol",
-                "core_producer_source_sha256",
                 "execution_adapter_symbol",
-                "execution_adapter_source_sha256",
+                "core_field_ids",
             )
         },
         "market": market,
@@ -308,9 +305,7 @@ def aggregate_days(days):
     """对每个同日对照等权；市场宽度正负是预先固定的条件分层。"""
     identities = {
         (
-            d["namespace_id"],
-            d["source_version"].get("package_sha256"),
-            d["source_version"].get("source_content_id"),
+            d["source_version"].get("source_package_id"),
             d["source_version"].get("parser_contract"),
             d["source_version"].get("source_time_quality"),
             d["calendar_revision"],

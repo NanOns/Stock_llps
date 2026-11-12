@@ -87,7 +87,6 @@ def _render_basic_fact_summary(result: dict[str, Any]) -> str:
     lines.append(
         f"Canonical只读选择：{canonical.get('selection_status', '未生成')}；"
         f"目标字段OBSERVED={canonical_observed}/{len(canonical_fields)}；"
-        f"来源SHA-256={str(canonical_source.get('raw_byte_sha256', '未知'))[:12]}…。"
     )
     group_labels = (
         ("price_trend", "价格与趋势"),
@@ -288,8 +287,8 @@ def _render_universe_summary(result: dict[str, Any]) -> str:
         lines.insert(
             3,
             (
-                "分段耗时：ZIP SHA/CRC="
-                f"{performance['zip_sha_crc_validation_seconds']}秒，候选目录="
+                "分段耗时：原件完整性校验="
+                f"{performance['package_integrity_validation_seconds']}秒，候选目录="
                 f"{performance['candidate_pool_metadata_seconds']}秒，页条目解码="
                 f"{performance['page_entry_decode_seconds']}秒，Core+Profile="
                 f"{performance['page_core_profile_seconds']}秒，全池质量扫描="

@@ -78,10 +78,10 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             "目标交易会话晚于研究截止会话，拒绝读取PG",
             _EXIT_ARGUMENT,
         )
-    if re.fullmatch(r"[0-9a-f]{64}", args.package_sha256) is None:
+    if type(args.source_package_id) is not int or args.source_package_id <= 0:
         raise DiagnosticError(
-            "D1_BREAKOUT_PACKAGE_SHA_INVALID",
-            "必须提供完整64位小写package SHA-256",
+            "D1_BREAKOUT_PACKAGE_ID_INVALID",
+            "必须提供正数TDX来源包BIGINT数字ID",
             _EXIT_ARGUMENT,
         )
     history_mode = any(
@@ -378,7 +378,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 cutoff,
                 sessions,
                 calendar_revision,
-                args.package_sha256,
+                args.source_package_id,
                 event_window_start,
                 offset,
                 limit,
@@ -391,7 +391,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 target_session=target,
                 research_cutoff=cutoff,
                 sessions=sessions,
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 offset=offset,
                 limit=limit,
                 structure_symbol=args.structure_symbol,
@@ -410,7 +410,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 cutoff,
                 sessions,
                 calendar_revision,
-                args.package_sha256,
+                args.source_package_id,
                 support_cohort_anchor,
                 offset,
                 limit,
@@ -426,7 +426,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 cutoff,
                 sessions,
                 calendar_revision,
-                args.package_sha256,
+                args.source_package_id,
                 offset,
                 limit,
                 previous_state=args.previous_state,
@@ -436,7 +436,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
         page = read_raw_daily_history_page(
             config,
             target_session=target,
-            package_sha256=args.package_sha256,
+            source_package_id=args.source_package_id,
             sessions=sessions,
             offset=offset,
             limit=limit,
@@ -453,8 +453,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
         source_context = read_source_version_context(
             config,
             target_session=target,
-            package_sha256=args.package_sha256,
-            namespace_id=page["namespace_id"],
+            source_package_id=args.source_package_id,
             target_raw_rows=target_rows,
             expected_raw_row_count=page["version_row_count"],
         )
@@ -472,14 +471,10 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             )
 
         profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
-        calendar_payload, calendar_metadata, _, _ = _load_calendar(target)
-        target_calendar_metadata = next(
-            item for item in calendar_metadata if item["year"] == target.year
-        )
+        calendar_payload, _, _, _ = _load_calendar(target)
         official_calendar = {
             "calendar_id": calendar_payload["calendar_id"],
             "calendar_revision": calendar_payload["revision"],
-            "calendar_sha256": target_calendar_metadata["resource_sha256"],
         }
         if history_mode:
             candidate = page["candidates"][0]
@@ -496,10 +491,9 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 observed = research_stock_pg_history_preview(
                     symbol=source_symbol,
                     target_session=day.isoformat(),
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     session_dates=window,
                     history_rows=bounded_rows,
-                    namespace_id=page["namespace_id"],
                     profile_contract=profile_contract,
                     include_profile_preview=False,
                     include_raw_breakout=True,
@@ -516,9 +510,6 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 point = {
                     "session": day.isoformat(),
                     "source_capture_id": str(row["source_capture_id"]) if row else None,
-                    "source_entry_sha256": row.get("source_entry_sha256")
-                    if row
-                    else None,
                     "source_available_at": row.get("source_available_at")
                     if row
                     else None,
@@ -562,7 +553,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     official_sessions=sessions,
                     requested_sessions=history_sessions,
                     history_points=support_history_points,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     source_context=source_context,
                     official_calendar=official_calendar,
                 )
@@ -572,8 +563,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                     symbol=source_symbol,
                     sessions=sessions,
                     history_rows=rows,
-                    namespace_id=page["namespace_id"],
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     core_previews_by_session=structure_previews,
                 )
                 timeline_points = {
@@ -634,7 +624,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
             return _EXIT_OK
         preview = research_universe_pg_history_preview(
             target_session=target.isoformat(),
-            package_sha256=args.package_sha256,
+            source_package_id=args.source_package_id,
             session_dates=sessions,
             page=page,
             profile_contract=profile_contract,
@@ -710,10 +700,8 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
                 "history_records_complete": item.get("history_records_complete"),
                 "price_window_status": item.get("price_window_status"),
                 "source_revision": {
-                    "source_entry_sha256": target_row.get("source_entry_sha256"),
                     "source_capture_id": str(target_row["source_capture_id"]),
-                    "source_content_id": target_row.get("source_content_id"),
-                    "package_sha256": target_row["package_sha256"].strip(),
+                    "source_package_id": target_row.get("source_package_id"),
                     "source_clock_role": target_row.get("source_clock_role"),
                     "source_time_quality": source_context["source_time_quality"],
                     "source_available_at": target_row.get("source_available_at"),
@@ -741,8 +729,7 @@ def _run_source_d1_breakout_preview(args: argparse.Namespace) -> int:
         "target_session": target.isoformat(),
         "research_cutoff": cutoff.isoformat(),
         "calendar_revision": calendar_revision,
-        "package_sha256": args.package_sha256,
-        "namespace_id": source_context["namespace_id"],
+        "source_package_id": args.source_package_id,
         "source_time_quality": source_context["source_time_quality"],
         "source_available_at": source_context["source_available_at"],
         "price_qualities": source_context["price_qualities"],

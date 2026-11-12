@@ -55,14 +55,13 @@ function renderPersistedProfileObservation(point) {
   const snapshot = state.timelineContext?.persistedProfileSnapshot;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-    snapshot.target_session === point.session_date &&
-    snapshot.package_sha256 === point.package_sha256 &&
-    snapshot.namespace_id === point.namespace_id &&
-    snapshot.field_ids?.length,
+      snapshot.target_session === point.session_date &&
+      snapshot.source_package_id === point.source_package_id &&
+      snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
-      "本次轨迹未附带与所选日期、完整包SHA及profile_revision一致的Profile11快照；此处仅展示RAW Core事实，不重新评价持久画像或选股状态。";
+      "本次轨迹未附带与所选日期、来源包ID及profile_revision一致的Profile11快照；此处仅展示RAW Core事实，不重新评价持久画像或选股状态。";
     tableRow(rows, [
       "未绑定精确Profile11",
       "NOT_EVALUATED",
@@ -73,7 +72,7 @@ function renderPersistedProfileObservation(point) {
   }
   const comparable = snapshot.semantic_compatible === true;
   status.textContent =
-    `已绑定PG持久化快照 · ${snapshot.target_session} · 包SHA ${snapshot.package_sha256} · Profile修订 ${snapshot.profile_revision}。` +
+    `已绑定PG持久化快照 · ${snapshot.target_session} · 来源包ID ${snapshot.source_package_id} · Profile修订 ${snapshot.profile_revision}。` +
     (comparable
       ? " 此快照与两日变化合同兼容。"
       : " 仅展示本快照原值；两期语义不兼容，不能作变化比较。") +
@@ -113,7 +112,7 @@ function renderPriceStructureObservation(point) {
   }
   panel.hidden = false;
   $("priceStructureIdentity").textContent =
-    `${point.session_date} · ${state.timeline?.symbol || "—"} · RAW_UNADJUSTED / ${state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · namespace ${point.namespace_id || "UNKNOWN"} · 来源包SHA ${point.package_sha256 || "UNKNOWN"}`;
+    `${point.session_date} · ${state.timeline?.symbol || "—"} · RAW_UNADJUSTED / ${state.timeline?.pit_status || "NON_PIT_RETROSPECTIVE"} · 来源包ID ${point.source_package_id || "UNKNOWN"}`;
   const ohlc = dayOhlc(point);
   const summaries = [
     [
@@ -252,12 +251,9 @@ function renderPriceRelationHistory(history) {
     })
     .join("；");
   summary.append(fieldSummary);
-  const identity = state.timeline?.snapshot_identity || {};
   status.textContent =
     `${state.timeline?.symbol || "—"} · ${state.timeline?.target_session || "—"} · ` +
-    `namespace ${state.timeline?.namespace_id || "UNKNOWN"} · ` +
-    `完整包SHA ${state.timeline?.package_sha256 || "UNKNOWN"} · ` +
-    `事件身份SHA ${text(history.identity_ref || identity.identity_sha256 || "UNKNOWN")}。` +
+    `来源包ID ${state.timeline?.source_package_id || "UNKNOWN"}。` +
     "已知关系未变化不列为事件；UNKNOWN / 不可比原因独立统计。";
 
   const fieldFilter = $("priceRelationFieldFilter").value;
@@ -294,7 +290,7 @@ function renderPriceRelationHistory(history) {
     const captureText = `${text(observation.before_source_capture_id || "无前态捕获引用")} → ${text(observation.after_source_capture_id || "无当日捕获引用")}`;
     cell(
       row,
-      `${observation.before_close?.quality || "UNKNOWN"} / ${observation.before_threshold?.quality || "UNKNOWN"} → ${observation.after_close?.quality || "UNKNOWN"} / ${observation.after_threshold?.quality || "UNKNOWN"}；${text(observation.producer)} · ${text(observation.semantic_version)}；捕获 ${captureText}；身份 ${text(observation.identity_ref || "UNKNOWN")}`,
+      `${observation.before_close?.quality || "UNKNOWN"} / ${observation.before_threshold?.quality || "UNKNOWN"} → ${observation.after_close?.quality || "UNKNOWN"} / ${observation.after_threshold?.quality || "UNKNOWN"}；${text(observation.producer)} · ${text(observation.semantic_version)}；捕获 ${captureText}`,
     );
     const action = document.createElement("td");
     const button = document.createElement("button");
@@ -371,11 +367,10 @@ function renderMa20DirectionHistory(history) {
       : "");
   identity.textContent =
     `${binding.target_session || "—"} · ${binding.source_symbol || "—"} · ` +
-    `来源版本 · namespace ${binding.namespace_id || "UNKNOWN"} · ` +
+    `来源版本 · ` +
     `日历 ${binding.calendar_id || "UNKNOWN"}/${binding.calendar_revision || "UNKNOWN"} · ` +
     `${binding.price_coordinate || "UNKNOWN"} / ${binding.coordinate_id || "UNKNOWN"} · ` +
-    `package SHA ${binding.package_sha256 || "UNKNOWN"} · ` +
-    `身份 ${history.identity_ref || "UNKNOWN"}。`;
+    `来源包ID ${binding.source_package_id || "UNKNOWN"}。`;
   for (const pair of windowData.pairs || []) {
     const row = document.createElement("tr");
     cell(row, pair.from_session || "—");
@@ -423,7 +418,7 @@ function invalidateTimeline(errorMessage = "") {
 function openTimelineSession(point) {
   const context = state.timelineContext;
   if (!context || !state.timeline || point.raw_row_present !== true) return;
-  const value = `${point.session_date}|${context.package_sha256}`;
+  const value = `${point.session_date}|${context.source_package_id}`;
   const select = $("versionSelect");
   const option = Array.from(select.options).find(
     (item) => item.value === value,
@@ -433,7 +428,7 @@ function openTimelineSession(point) {
     !state.versions.some(
       (item) =>
         item.session_date === point.session_date &&
-        item.package_sha256 === context.package_sha256,
+        item.source_package_id === context.source_package_id,
     )
   )
     return;
@@ -442,10 +437,9 @@ function openTimelineSession(point) {
       ...context,
       returnSelection: {
         target_session: context.target_session,
-        package_sha256: context.package_sha256,
+        source_package_id: context.source_package_id,
         symbol: context.symbol,
         session_count: context.session_count,
-        namespace_id: context.namespace_id || state.timeline.namespace_id,
       },
     };
   }
@@ -453,9 +447,8 @@ function openTimelineSession(point) {
   state.chartSelection = null;
   state.chartPeriodContext = {
     target_session: point.session_date,
-    package_sha256: context.package_sha256,
+    source_package_id: context.source_package_id,
     symbol: context.symbol,
-    namespace_id: state.timeline.namespace_id,
   };
   state.timeline = null;
   renderTimeline(null);
@@ -468,7 +461,7 @@ function returnToTimelineCutoff() {
   const context = state.timelineContext;
   const selection = context?.returnSelection;
   if (!context || !selection || context.origin === "change") return;
-  const value = `${selection.target_session}|${selection.package_sha256}`;
+  const value = `${selection.target_session}|${selection.source_package_id}`;
   if (
     !Array.from($("versionSelect").options).some((item) => item.value === value)
   )
@@ -476,9 +469,8 @@ function returnToTimelineCutoff() {
   state.timelineNavigation = true;
   state.chartPeriodContext = {
     target_session: selection.target_session,
-    package_sha256: selection.package_sha256,
+    source_package_id: selection.source_package_id,
     symbol: selection.symbol || context.symbol,
-    namespace_id: selection.namespace_id || state.timeline?.namespace_id,
   };
   $("symbolInput").value = selection.symbol || context.symbol;
   $("windowInput").value = String(
@@ -493,15 +485,11 @@ function exactSymbolReturnState(context) {
   if (
     context?.origin !== "exact-symbol" ||
     binding?.origin !== "exact-symbol" ||
-    !binding.namespace_id ||
     !binding.symbol ||
     !binding.before_snapshot?.complete ||
     !binding.after_snapshot?.complete ||
     binding.before_snapshot.target_session >=
       binding.after_snapshot.target_session ||
-    context.namespace_id !== binding.namespace_id ||
-    selection?.namespace_id !== binding.namespace_id ||
-    state.namespace_id !== binding.namespace_id ||
     selection?.symbol !== binding.symbol ||
     selection?.session_count !== 75
   )
@@ -519,7 +507,7 @@ function exactSymbolReturnState(context) {
   const returnVersion = state.versions.find(
     (version) =>
       version.session_date === selection.target_session &&
-      version.package_sha256 === selection.package_sha256,
+      version.source_package_id === selection.source_package_id,
   );
   if (!beforeSnapshot || !afterSnapshot || !returnVersion) return null;
   return { binding, selection, beforeSnapshot, afterSnapshot, returnVersion };
@@ -566,12 +554,13 @@ async function returnToChanges() {
     const mainSelectionChanged =
       !currentVersion ||
       currentVersion.target_session !== originalSelection.target_session ||
-      currentVersion.package_sha256 !== originalSelection.package_sha256 ||
+      currentVersion.source_package_id !==
+        originalSelection.source_package_id ||
       $("symbolInput").value.trim().toUpperCase() !== binding.symbol ||
       Number($("windowInput").value) !== originalSelection.session_count;
     const returnNotice =
       queryContextChanged || mainSelectionChanged
-        ? `已恢复原精确双日查询 ${binding.before_snapshot.target_session} → ${binding.after_snapshot.target_session} · ${binding.symbol}；重点候选序位已按原完整包SHA和profile revision重新读取。`
+        ? `已恢复原精确双日查询 ${binding.before_snapshot.target_session} → ${binding.after_snapshot.target_session} · ${binding.symbol}；重点候选序位已按原来源包ID和profile revision重新读取。`
         : null;
 
     $("changeBeforeSelect").value = profileSnapshotKey(binding.before_snapshot);
@@ -588,7 +577,7 @@ async function returnToChanges() {
     state.changeOffset = binding.change_offset ?? 0;
     state.changeLimit = binding.change_limit ?? state.changeLimit;
     $("versionSelect").value =
-      `${originalSelection.target_session}|${originalSelection.package_sha256}`;
+      `${originalSelection.target_session}|${originalSelection.source_package_id}`;
     $("symbolInput").value = originalSelection.symbol;
     $("windowInput").value = String(originalSelection.session_count);
     state.stockRequest++;
@@ -630,12 +619,7 @@ async function returnToChanges() {
         profileSnapshotKey(snapshot) ===
         profileSnapshotKey(changeReturnBinding.after_snapshot),
     );
-    if (
-      !beforeSnapshot?.complete ||
-      !afterSnapshot?.complete ||
-      changeReturnBinding.namespace_id !== state.namespace_id
-    )
-      return;
+    if (!beforeSnapshot?.complete || !afterSnapshot?.complete) return;
     $("changeBeforeSelect").value = profileSnapshotKey(beforeSnapshot);
     $("changeAfterSelect").value = profileSnapshotKey(afterSnapshot);
     $("changeTypeSelect").value = changeReturnBinding.change_type || "ALL";
@@ -654,7 +638,7 @@ async function returnToChanges() {
     state.changeLimit = changeReturnBinding.change_limit ?? state.changeLimit;
     state.changeBinding = { ...changeReturnBinding, origin: "change" };
   }
-  const value = `${selection.target_session}|${selection.package_sha256}`;
+  const value = `${selection.target_session}|${selection.source_package_id}`;
   if (
     !Array.from($("versionSelect").options).some((item) => item.value === value)
   )
@@ -686,7 +670,7 @@ function returnToProfileBreadthMembers() {
   if (state.timelineContext?.origin === "breadth") {
     const selection = returnState.selectedVersion;
     if (selection) {
-      const value = `${selection.target_session}|${selection.package_sha256}`;
+      const value = `${selection.target_session}|${selection.source_package_id}`;
       if (
         Array.from($("versionSelect").options).some(
           (option) => option.value === value,

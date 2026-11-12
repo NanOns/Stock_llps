@@ -5,17 +5,13 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import date, datetime
-from hashlib import sha256
 import json
-import re
-from uuid import UUID
 
 from stock_a.domain import ContractError
 from stock_a.sources.tdx.day_source import DayFileSummary, FileSourceIdentity
 from stock_a.sources.tdx.day_stream import DayScanSummary, FieldGroupCount
 
 
-_HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _EXCLUDED_SCOPE_KEYS = frozenset(
     {"request_id", "cache_hit", "temporary_path", "wall_clock_duration"}
 )
@@ -33,7 +29,6 @@ class TdxCaptureError(ContractError):
 class TdxCaptureRequest:
     """调用方提供的数据集和解析合同；不会从路径或当前时间推断。"""
 
-    capture_id: str
     dataset_id: str
     dataset_version: str
     query_scope: Mapping[str, object]
@@ -47,8 +42,6 @@ class TdxCaptureRequest:
 class TdxPackageEntryReference:
     """官网ZIP条目的来源身份与本次本地重验时钟；不代表PIT或官方成员身份。"""
 
-    package_id: str
-    package_sha256: str
     official_package_url: str
     package_verified_at: datetime
     package_file_size: int
@@ -56,7 +49,6 @@ class TdxPackageEntryReference:
     zip_crc: str
     source_symbol: str
     zip_entry_path: str
-    entry_sha256: str
     entry_byte_count: int
     target_session: date
     observed_started_at: datetime
@@ -70,7 +62,6 @@ class TdxPackageEntryReference:
 class TdxCaptureEnvelope:
     """完成扫描的审计投影，不代表PIT或覆盖通过。"""
 
-    capture_id: str
     dataset_id: str
     dataset_version: str
     query_scope_canonical_json: str
@@ -78,8 +69,6 @@ class TdxCaptureEnvelope:
     query_end: date
     parser_version: str
     validation_contract: str
-    content_sha256: str
-    business_digest_sha256: str
     record_count: int
     byte_count: int
     first_date: date
@@ -207,17 +196,6 @@ def _validate_package_entry_reference(
         raise TdxCaptureError(
             "CAPTURE_SOURCE_IDENTITY_INVALID", "缺少已核验的官网ZIP条目来源身份"
         )
-    if (
-        not isinstance(source.package_id, str)
-        or source.package_id != f"TDX-HSJDAY-SHA256:{source.package_sha256}"
-        or not isinstance(source.package_sha256, str)
-        or not _HEX_SHA256.fullmatch(source.package_sha256)
-        or not isinstance(source.entry_sha256, str)
-        or not _HEX_SHA256.fullmatch(source.entry_sha256)
-    ):
-        raise TdxCaptureError(
-            "CAPTURE_SOURCE_IDENTITY_INVALID", "ZIP包或条目SHA身份无效"
-        )
     if source.official_package_url != "https://data.tdx.com.cn/vipdoc/hsjday.zip":
         raise TdxCaptureError(
             "CAPTURE_SOURCE_IDENTITY_INVALID", "ZIP条目未绑定登记的通达信官网端点"
@@ -230,10 +208,9 @@ def _validate_package_entry_reference(
         or source.zip_crc != "PASS"
         or type(source.entry_byte_count) is not int
         or source.entry_byte_count != scan.byte_count
-        or source.entry_sha256 != scan.raw_byte_sha256
     ):
         raise TdxCaptureError(
-            "CAPTURE_SOURCE_IDENTITY_INVALID", "ZIP条目字节数或SHA与完整扫描摘要不一致"
+            "CAPTURE_SOURCE_IDENTITY_INVALID", "ZIP条目字节数与完整扫描不一致"
         )
     if (
         not isinstance(source.source_symbol, str)
@@ -321,14 +298,6 @@ def build_tdx_capture_envelope(
                 "Capture来源不得混合本地解压文件与ZIP条目身份",
             )
         _validate_package_entry_reference(source_package_entry, scan, request)
-    capture_id = _required_text(request.capture_id, "capture_id")
-    try:
-        if str(UUID(capture_id)) != capture_id:
-            raise ValueError("noncanonical")
-    except (ValueError, AttributeError, TypeError) as error:
-        raise TdxCaptureError(
-            "CAPTURE_IDENTITY_INVALID", "capture_id必须是规范UUID字符串"
-        ) from error
     dataset_id = _required_text(request.dataset_id, "dataset_id")
     dataset_version = _required_text(request.dataset_version, "dataset_version")
     parser_version = _required_text(request.parser_version, "parser_version")
@@ -368,10 +337,6 @@ def build_tdx_capture_envelope(
         raise TdxCaptureError(
             "CAPTURE_COVERAGE_INVALID", "扫描首末交易日不在显式查询范围内"
         )
-    if not isinstance(scan.raw_byte_sha256, str) or not _HEX_SHA256.fullmatch(
-        scan.raw_byte_sha256
-    ):
-        raise TdxCaptureError("CAPTURE_DIGEST_INVALID", "原始字节SHA-256格式无效")
     unit_version = _required_text(scan.unit_version, "unit_version")
     _validate_group(scan.prices, scan.record_count, "prices")
     _validate_group(scan.amount, scan.record_count, "amount")
@@ -391,37 +356,7 @@ def build_tdx_capture_envelope(
         )
     if source_identity is not None:
         _validate_source_identity(source_identity, scan.byte_count)
-    digest_payload = {
-        "dataset_id": dataset_id,
-        "dataset_version": dataset_version,
-        "query_scope": scope_projection,
-        "query_start": request.query_start.isoformat(),
-        "query_end": request.query_end.isoformat(),
-        "parser_version": parser_version,
-        "validation_contract": validation_contract,
-        "raw_byte_sha256": scan.raw_byte_sha256,
-        "record_count": scan.record_count,
-        "byte_count": scan.byte_count,
-        "first_date": scan.first_date.isoformat(),
-        "last_date": scan.last_date.isoformat(),
-        "unit_version": unit_version,
-        "quality": {
-            name: {
-                "observed": getattr(scan, name).observed,
-                "unknown": getattr(scan, name).unknown,
-                "not_applicable": getattr(scan, name).not_applicable,
-                "reasons": sorted(getattr(scan, name).reasons),
-            }
-            for name in ("prices", "amount", "volume")
-        },
-    }
-    business_digest = sha256(
-        json.dumps(
-            digest_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-    ).hexdigest()
     return TdxCaptureEnvelope(
-        capture_id=capture_id,
         dataset_id=dataset_id,
         dataset_version=dataset_version,
         query_scope_canonical_json=scope_json,
@@ -429,8 +364,6 @@ def build_tdx_capture_envelope(
         query_end=request.query_end,
         parser_version=parser_version,
         validation_contract=validation_contract,
-        content_sha256=scan.raw_byte_sha256,
-        business_digest_sha256=business_digest,
         record_count=scan.record_count,
         byte_count=scan.byte_count,
         first_date=scan.first_date,

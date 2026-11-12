@@ -28,9 +28,9 @@
 
 所有TDX配置源根只读，写入前解析绝对路径及链接/别名，覆盖子进程/GBBQ/解压/日志/缓存。缺根配置时拒绝写，临时输出仅在G:/codex_tmp，源根永不写；规范业务事实落PG，不要求在来源盘落文件。新项目阶段0核对输入能力/来源身份/坐标及保护边界，输出FULL_PASS/DEGRADED_PASS/BLOCKED和影响scope；不借用旧项目的FULL_PASS。
 
-TDX本地日线/合法官方包为核心，GBBQ及本地仿射引擎生成复权；BaoStock承担有合同的换手/状态交叉核验等补充。包重复大小写成员、路径穿越、symlink/reparse、坏CRC/SHA、解压漂移、重复证券日期记录必须拒绝或精确隔离，不能字典后写覆盖。
+TDX本地日线/合法官方包为核心，GBBQ及本地仿射引擎生成复权；BaoStock承担有合同的换手/状态交叉核验等补充。包重复大小写成员、路径穿越、symlink/reparse、坏CRC、TDX原始包入口SHA不符、解压漂移、重复证券日期记录必须拒绝或精确隔离，不能字典后写覆盖。自定义SHA-256只保存在TDX原始包接收校验入口，不用于其它来源、下游事实或消费者。
 
-只读来源和必要原件按来源合同保护；新增下载默认临时/流式处理，不默认保存逐日副本。PG保存有业务消费者的规范事实、来源内容摘要、捕获时钟和解析版本，不存原包/响应体/文件二进制。source_content_id与capture_id分开，相同内容不同捕获时钟仍保留各自采集事实；原件缺失时记录受影响范围，不能用派生输出反证输入存在。
+只读来源和必要原件按来源合同保护；新增下载默认临时/流式处理，不默认保存逐日副本。PG只为TDX原始下载包入口保留一个package_sha256，供包接收/导入前校验；来源包用普通BIGINT IDENTITY主键，捕获记录用独立数字ID保存实际捕获时钟、解析版本与行数，不把SHA、摘要或其派生值传入规范事实和研究结果。PG不存原包/响应体/文件二进制；原件缺失时记录受影响范围，不能用派生输出反证输入存在。
 
 请求ready时钟不早于完整下载、校验及必要多源最晚可用；旧缓存/包日期不能提前。基础来源缺失只阻断真实依赖，不因可选turnover失败停止Core。免费来源预算按实际ledger计含登录/查询/重试/退出，未验证能力不得无限探测。
 
@@ -38,7 +38,7 @@ TDX本地日线/合法官方包为核心，GBBQ及本地仿射引擎生成复权
 
 security_entity_id与当前symbol分离；源记录保留source_instrument_id。官方事件/稳定身份不足时隔离provisional/unmapped，不靠代码形状/行情连续自动合并实体。指纹只作候选发现，盲测少量成功不证明全市场误报率；合并/吸收后继与纯换码区分。
 
-Data Universe、制度可交易Universe、Research Universe分别登记日期、成员、排除与摘要。全市场画像基于有效身份来源，未知身份原行保留在隔离分母；当前query_all_stock不得覆盖已绑定历史Lifecycle。
+Data Universe、制度可交易Universe、Research Universe分别登记日期、成员、排除与明确版本。全市场画像基于有效身份来源，未知身份原行保留在隔离分母；当前query_all_stock不得覆盖已绑定历史Lifecycle。
 
 交易日历来自有版本的交易所事实；窗口索引越界明确失败，不将自然工作日当交易日、不使用负索引环绕。ST/停复牌/IPO特殊期/退市/板别有当日有效来源和known time，现行ST不证明过去ST，代码首次观测不证明IPO。
 
@@ -68,7 +68,7 @@ RAW OHLCV/amount按供应方原单位验证并规范，金额CNY、量的股/手
 
 ## S08 核心因子与完整字段合同
 
-每字段登记producer、表达/AST、参数、单位/值域、窗口、t或t−1角色、所用Universe、坐标、源/输出摘要、必需/可选、消费者、未知/NA处理。结构校验后还需独立数值执行，不能把预计算字段引用当算法本身。
+每字段登记producer、表达/AST、参数及显式版本、单位/值域、窗口、t或t−1角色、所用Universe、坐标、源/输出字段与依赖、必需/可选、消费者、未知/NA处理。结构校验后还需独立数值执行，不能把预计算字段引用当算法本身。
 
 | 字段 | 确定口径与边界 |
 |---|---|
@@ -106,7 +106,7 @@ HH_PROGRESS=max(H[t−4:t])>max(H[t−9:t−5])；LL_PROGRESS=min(L[t−4:t])<mi
 
 量额ratio20分界0.5/0.8/1.2/2；参与结果区分高参与反转、有效推进（ret1>0且CLV≥0.7）、低效、低参与涨/跌与正常，缺CLV的高优先分支不直接降成已知低效。extension以bias≥4 EXTREME，≥3或(ret5≥3*ATR20/C且amount_ratio20≥2且ret1≤0)为HIGH，≥2 MEDIUM，其余LOW，逐分支依赖。
 
-这些阈值是继承的版本化研究规则，不是最优参数/上涨概率。新实现必须给每状态的完整有序表达、全部必需字段/正反边界及独立Oracle；摘要不得替代精确AST。更换规则须显式新算法版本，不静默改旧结果。
+这些阈值是继承的版本化研究规则，不是最优参数/上涨概率。新实现必须给每状态的完整有序表达、全部必需字段/正反边界及独立Oracle；概述不得替代精确AST。更换规则须显式新算法版本，不静默改旧结果。
 
 ## S09 Seed、板块、LOO与轮动
 
@@ -122,7 +122,7 @@ Seed宽度记录k/n/未知与Wilson下界启发式(z=1.96)，其值为`(p+z²/(2
 
 Rotation有NONE/PULSE/IN/ACCEPTED/EXPANDING/REACCELERATING/OUT/FAILED/UNKNOWN；pulse使用dq5≥10且breadth_delta1≥0.05，冻结pulse前基准/当时成员/Seed和上涨集合。价格retention用固定篮子，不将每日中位收益拼成指数。
 
-来源级板块PULSE相邻变化只在两日均有完整现存PULSE事实、使用严格相邻官方会话且引用相同板块快照时比较；类型化结果保存两端Raw捕获/内容/摘要与Profile修订、日历修订、PULSE三态及原因。FALSE→TRUE、TRUE→TRUE、TRUE→FALSE、FALSE→FALSE分别标为新出现、连续成立、不再成立、连续未成立；任一端UNKNOWN则变化为UNKNOWN，缺少精确日期PULSE事实保持NOT_COMPUTED，不映射为FALSE。此变化是NON_PIT描述事实，正式Rotation状态固定为NOT_EVALUATED，不更改PULSE阈值或生命周期。
+来源级板块PULSE相邻变化只在两日均有完整现存PULSE事实、使用严格相邻官方会话且引用相同板块快照时比较；类型化结果通过两端Raw捕获/数字来源包ID、Profile显式修订、日历业务版本及PULSE父事实行ID绑定，并保留三态及原因。FALSE→TRUE、TRUE→TRUE、TRUE→FALSE、FALSE→FALSE分别标为新出现、连续成立、不再成立、连续未成立；任一端UNKNOWN则变化为UNKNOWN，缺少精确日期PULSE事实保持NOT_COMPUTED，不映射为FALSE。此变化是NON_PIT描述事实，正式Rotation状态固定为NOT_EVALUATED，不更改PULSE阈值或生命周期。
 
 early与mature retention分开，前强势分母0只影响mature；单龙头高集中且无扩散不得通过接受/扩散。脉冲后至少1个可评估会话才IN、至少2个才ACCEPTED，成熟留存/扩散才EXPANDING或REACCELERATING；失败/连续衰退/第6个可评估会话仍未接受按冻结有序规则终止；未知暂停计数。新项目已采用`ROTATION_RESEARCH_DEFAULTS_R1`阈值并由ROTATION_EXECUTION_R2限定执行，继承旧R5工程候选数值但重新登记采用状态：early_seed_retention≥2/3、early_breadth_retention≥0.6、breadth_delta≥0、early_top1_concentration≤1/3、mature_strong_retention≥0.75、diffusion_top1≤0.5。emergence HIGH阈值为dq5≥10、breadth_delta3≥0.05、adjusted_seed_width≥0.1。各字段分母、冻结pulse基准与未知规则按前述固定篮子/共同成员合同执行，不能仅有阈值而缺公式。旧配置formal_consumer_enabled=false不继承；以上阈值在本项目已采用，精确篮子/计时/转换见算法§11.3，不是旧系统权限继承或市场效果证明。
 
@@ -132,7 +132,7 @@ early与mature retention分开，前强势分母0只影响mature；单龙头高�
 
 Breadth主式`mean(I(ret1_t>0)−I(ret1_t−3>0))`，零收益为0，精确比较日集合及两端收益可核验；SIGN差单列诊断，不替换。Core仅在日期/范围/精确身份集合与合法历史Universe相等时作为加速，不能只比数量。
 
-Participation为合法amount_ratio20中位数；压力等级为同日合法限价覆盖下跌停数/可评估数，压力变化用前后同口径可比集合。缺当日限价只关压力，缺前日只关变化；共享身份/摘要损坏关其全部依赖，不能全局抹掉独立可算轴。
+Participation为合法amount_ratio20中位数；压力等级为同日合法限价覆盖下跌停数/可评估数，压力变化用前后同口径可比集合。缺当日限价只关压力，缺前日只关变化；共享业务身份或输入字段不一致仅关闭其实际依赖，不能全局抹掉独立可算轴。
 
 继承研究阈值：宽度±0.05，参与扩张≥1.2/稀薄<0.8，限价最低覆盖0.8，压力elevated≥0.01/high≥0.05。复合环境按算法§11.4已采用有序规则和hysteresis，不用投票补缺轴；真实可计算和获准用于Priority是不同状态。指数参考、横截面均值、Forward固定篮子不得互换。
 
@@ -162,7 +162,7 @@ Focus是研究跟踪，不是持仓，也不是验证样本全集。独立Cohort
 
 为消除排序空白，提出新项目`FOCUS_RECENCY_ORDER_R1`：默认按最后已验证跟踪事件交易日降序，再entity_id/episode_id稳定排序；风险/有效性为显式过滤/分组，手动置顶作为独立用户视图，不改研究Priority/Cohort。本项目通过CHG-016正式采用，事件白名单和手动操作语义见算法§11.8，非旧合同追认；后续变更另升版本，不临场改权重。
 
-观察身份含T0、Lane H/L/late、rule/version、entity、capture revision、source digest；同revision异内容拒绝，合法变化追加，高revision查询不改first。hook走真实分Lane分组/发布路径，覆盖缺import、重复lane字段、混合实体与部分成功重试。
+观察身份含T0、Lane H/L/late、rule/version、entity及数字来源捕获ID；同业务键异数值内容拒绝，合法变化追加，高revision查询不改first。hook走真实分Lane分组/发布路径，覆盖缺import、重复lane字段、混合实体与部分成功重试。
 
 Schedule与outcome分层：PENDING是计划/观测状态，不能以同source+key永久挡住到期DUE结果。结算key=observation/horizon/settlement_revision与明确evaluation identity，不能简单加运行时间逃避幂等。仅用接受的后继来源追加，不改T0；T+1/3/5/10/20按交易会话，不到期/停牌/缺失/右删失各有原因。
 
@@ -190,7 +190,7 @@ ENTRY与DAILY_LANDMARK分开；所有候选今日排序使用当天feature/预�
 
 ## S15 来源事实、研究结果与写入
 
-来源导入将验证后的Raw行与采集时间写入stock.source_raw_daily；Core/Profile和研究查询按日期、来源代码、包摘要及实际捕获事实读取。业务范围和计算窗口由调用者明确。
+来源导入将验证后的Raw行与采集时间写入stock.source_raw_daily；Core/Profile和研究查询按日期、来源代码、数字来源包ID及实际捕获事实读取。TDX原包SHA只用于入口校验，不是下游查询条件。业务范围和计算窗口由调用者明确。
 
 数据库中保留具备实际消费者的来源、Core、Profile和市场/板块/个股结果。使用明确业务键、类型化字段和普通数据库事务；重复输入按唯一键幂等处理。同一输入修订时仅重算受影响日期和消费者。错误在具体输入或结果范围内返回，不生成全局候选发布状态、恢复状态机或后台控制计划。
 
@@ -200,7 +200,7 @@ ENTRY与DAILY_LANDMARK分开；所有候选今日排序使用当天feature/预�
 
 算法事件和Focus跟踪是业务事实，保留来源、时间和规则依据。价格研究、事件跟踪和统计结算分别使用实际业务身份；API读取以日期和精确来源/画像键定位，不需要全局发布令牌或读修订水位。
 
-## S16 API、上下文、摘要与错误
+## S16 API、上下文与错误
 
 本节完整正文已移动到[工程与存储规范](docs/design/工程与存储规范.md#s16)，所有原约束继续适用；本节仅作稳定定位入口。
 
@@ -208,7 +208,7 @@ ENTRY与DAILY_LANDMARK分开；所有候选今日排序使用当天feature/预�
 
 | 入口 | 必须交付 |
 |---|---|
-| 今日总览 | 环境各轴/允许复合、今日轮动、板块与独立个股新变化、三族风险；先回答发生什么/为什么/待验证，不堆digest |
+| 今日总览 | 环境各轴/允许复合、今日轮动、板块与独立个股新变化、三族风险；先回答发生什么/为什么/待验证，不堆摘要字段 |
 | 板块研究 | 全行业/概念目录、筛选分页、生命周期/健康/轮动时间线、扩散/留存/Overlap、全部成员/风险、来源覆盖 |
 | 个股研究 | 任意有效代码/名称搜索、全市场Profile、入选/未入选/Near-Miss谓词、日周月K、MA/锚点、事实/规则解释/研究假设、板块/Focus |
 | 关注跟踪 | episode、事件、Anchor/observation、退出/失效/重入、等待与失效条件，独立显示跟踪与研究排序 |
@@ -237,7 +237,7 @@ ENTRY与DAILY_LANDMARK分开；所有候选今日排序使用当天feature/预�
 
 正式配置文件唯一根为G:/codex work/Stock A/config，按配置目录登记并拒绝根外/未知/测试配置；测试文档与报告不进入正式规范目录。启动配置必须明确：用户批准源码/产物/源根、PG逻辑身份/实际合法凭据加载、单schema、固定端口角色、日历/参考目录、当前数据集/算法/参数/成员/价格合同、请求及资源预算、保留/备份/恢复、已启用能力。缺少必需项拒绝对应操作，不默取旧V4路径/日期/证券。
 
-PG默认G盘为用户设置的物理位置约束，不属于候选资源预算。物理路径独立实测与业务账号/安装身份状态分开记录；用户对G盘位置的明确确认须标记`USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED`，不能声称独立实测通过。当前明确任务的业务范围授权Codex自主判断并执行解决实际问题所必需的数据库操作，不按SQL类型、对象或影响行数逐项申请批准；执行前核对固定库、schema、账号、应用/项目/部署身份、迁移摘要、目标数据键、影响范围及事务恢复路径，执行后独立读回。存储位置确认不扩张业务范围，也不授权无关旧库处置、实例/角色改造、服务切换或生产发布。当前E盘实例可读只证明旧数据仍可访问；不因本规则改变服务或旧库。
+PG默认G盘为用户设置的物理位置约束，不属于候选资源预算。物理路径独立实测与业务账号/安装身份状态分开记录；用户对G盘位置的明确确认须标记`USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED`，不能声称独立实测通过。当前明确任务的业务范围授权Codex自主判断并执行解决实际问题所必需的数据库操作，不按SQL类型、对象或影响行数逐项申请批准；执行前核对固定库、schema、账号、应用/项目/部署身份、迁移lineage及连续编号、目标数据键、影响范围及事务恢复路径，执行后独立读回。存储位置确认不扩张业务范围，也不授权无关旧库处置、实例/角色改造、服务切换或生产发布。当前E盘实例可读只证明旧数据仍可访问；不因本规则改变服务或旧库。
 
 确定继承：三窗口、RPS中秩、amr分母排除当前、breadth主式、Core/Supplemental隔离、单PG/schema、完整安装路线与FEP方法。板块资格、Rotation阈值、D0 raw谓词、D2失效规则和Focus顺序按算法合同中的现行数学定义执行。资源预算是工程限额，不是市场规律；实际实现和数据可用范围分别披露。
 

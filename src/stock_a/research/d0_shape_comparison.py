@@ -13,11 +13,9 @@ def compare_shape_observations(results):
         raise ValueError("需要至少一个来源观察对象")
     first = results[0]
     identity = (
-        first["namespace_id"],
         first["target_session"],
         first["research_cutoff"],
-        first["source_version"]["package_sha256"],
-        first["source_version"]["source_content_id"],
+        first["source_version"]["source_package_id"],
     )
     groups = {
         state: {"symbols": [], "event_counts": Counter(), "returns": []}
@@ -29,11 +27,9 @@ def compare_shape_observations(results):
     endpoint = None
     for result in results:
         actual = (
-            result["namespace_id"],
             result["target_session"],
             result["research_cutoff"],
-            result["source_version"]["package_sha256"],
-            result["source_version"]["source_content_id"],
+            result["source_version"]["source_package_id"],
         )
         if actual != identity or len(result["results"]) != 1:
             raise ValueError("比较对象须绑定相同目标日、截止日及来源版本")
@@ -82,7 +78,7 @@ def compare_shape_observations(results):
         "scenario": "STRONG_PULLBACK",
         "scope": "EXPLICIT_SOURCE_SAMPLE_NON_PIT_NOT_MATCHED_CONTROLS",
         "selection": "EXPLICIT_INPUT_SELECTION_TIME_NOT_VERIFIED",
-        "target_session": identity[1],
+        "target_session": identity[0],
         "followup_sessions": endpoint,
         "events": {
             state: {

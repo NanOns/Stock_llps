@@ -5,7 +5,6 @@ from __future__ import annotations
 from datetime import date
 import re
 from typing import Any, Mapping
-from uuid import UUID
 
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
@@ -18,7 +17,7 @@ from stock_a.application.source_d0_raw import (
 
 
 _SOURCE_SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
-_SHA256 = re.compile(r"^[0-9a-f]{64}$")
+_PROFILE_REVISION = re.compile(r"^PROFILE_R[0-9]{2}$")
 
 
 class SourceStockChangeContextError(ValueError):
@@ -44,49 +43,30 @@ def _validate_profile_identity(
     if before_profile_revision is None:
         return False
     if any(
-        not isinstance(value, str) or _SHA256.fullmatch(value) is None
+        not isinstance(value, str) or _PROFILE_REVISION.fullmatch(value) is None
         for value in (before_profile_revision, after_profile_revision)
     ):
         raise SourceStockChangeContextError(
             "PROFILE_CHANGE_REVISION_INVALID",
-            "Profile修订必须是小写64位SHA-256。",
+            "Profile修订必须是显式PROFILE_R两位版本标签。",
             category="ARGUMENT",
         )
     return True
 
 
-def _validate_namespace_id(namespace_id: str) -> None:
-    try:
-        canonical = str(UUID(namespace_id))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise SourceStockChangeContextError(
-            "SOURCE_CHANGE_NAMESPACE_INVALID",
-            "namespace_id必须是规范小写UUID。",
-            category="ARGUMENT",
-        ) from error
-    if canonical != namespace_id:
-        raise SourceStockChangeContextError(
-            "SOURCE_CHANGE_NAMESPACE_INVALID",
-            "namespace_id必须是规范小写UUID。",
-            category="ARGUMENT",
-        )
-
-
 def query_source_stock_change_context(
     config: Mapping[str, Any],
     *,
-    namespace_id: str,
     before_session: date,
     target_session: date,
     research_cutoff: date,
-    before_package_sha256: str,
-    package_sha256: str,
+    before_source_package_id: int,
+    source_package_id: int,
     symbol: str,
     before_profile_revision: str | None = None,
     after_profile_revision: str | None = None,
 ) -> dict[str, Any]:
     """为单个来源股票读取两端完整D0三态上下文及可选Profile变化。"""
-    _validate_namespace_id(namespace_id)
     if not isinstance(symbol, str) or _SOURCE_SYMBOL.fullmatch(symbol) is None:
         raise SourceStockChangeContextError(
             "D0_SOURCE_SYMBOL_INVALID",
@@ -94,12 +74,12 @@ def query_source_stock_change_context(
             category="ARGUMENT",
         )
     if any(
-        not isinstance(value, str) or _SHA256.fullmatch(value) is None
-        for value in (before_package_sha256, package_sha256)
+        type(value) is not int or value <= 0
+        for value in (before_source_package_id, source_package_id)
     ):
         raise SourceStockChangeContextError(
-            "D0_CHANGE_PACKAGE_SHA_INVALID",
-            "前后来源包必须显式绑定小写64位SHA-256。",
+            "D0_CHANGE_PACKAGE_ID_INVALID",
+            "前后来源包必须使用正BIGINT来源包ID。",
             category="ARGUMENT",
         )
     profile_requested = _validate_profile_identity(
@@ -112,26 +92,15 @@ def query_source_stock_change_context(
         scenario="LAUNCH_CONFIRM",
         action="changes",
         before_session=before_session,
-        before_package_sha256=before_package_sha256,
+        before_source_package_id=before_source_package_id,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         symbol=symbol,
         transition="ALL",
         offset=0,
         limit=1,
-        expected_namespace_id=namespace_id,
     )
-    for endpoint_name in ("before", "after"):
-        endpoint = d0.get(endpoint_name)
-        if (
-            not isinstance(endpoint, Mapping)
-            or endpoint.get("namespace_id") != namespace_id
-        ):
-            raise SourceStockChangeContextError(
-                "SOURCE_CHANGE_NAMESPACE_MISMATCH",
-                f"D0 {endpoint_name}端实际namespace与请求绑定不一致。",
-            )
     rows = d0.get("results")
     if not isinstance(rows, list) or len(rows) != 1:
         raise SourceStockChangeContextError(
@@ -163,11 +132,10 @@ def query_source_stock_change_context(
                 offset=0,
                 limit=1,
                 source_symbol=symbol,
-                before_package_sha256=before_package_sha256,
+                before_source_package_id=before_source_package_id,
                 before_profile_revision=before_profile_revision,
-                after_package_sha256=package_sha256,
+                after_source_package_id=source_package_id,
                 after_profile_revision=after_profile_revision,
-                expected_namespace_id=namespace_id,
             )
         except PgPriceProfileError as error:
             if getattr(error, "code", None) == "PROFILE_CHANGE_SNAPSHOT_MISSING":
@@ -182,36 +150,31 @@ def query_source_stock_change_context(
                     str(error),
                 ) from error
         else:
-            if profile_result.get("namespace_id") != namespace_id:
-                raise SourceStockChangeContextError(
-                    "PROFILE_CHANGE_NAMESPACE_MISMATCH",
-                    "Profile变化读取的实际namespace与请求绑定不一致。",
-                )
             expected_snapshots = (
                 (
                     profile_result.get("before_snapshot"),
                     before_session,
-                    before_package_sha256,
+                    before_source_package_id,
                     before_profile_revision,
                 ),
                 (
                     profile_result.get("after_snapshot"),
                     target_session,
-                    package_sha256,
+                    source_package_id,
                     after_profile_revision,
                 ),
             )
             for (
                 snapshot,
                 session,
-                package_sha,
+                package_id,
                 revision,
             ) in expected_snapshots:
                 if not isinstance(snapshot, Mapping) or any(
                     snapshot.get(key) != expected
                     for key, expected in (
                         ("target_session", session),
-                        ("package_sha256", package_sha),
+                        ("source_package_id", package_id),
                         ("profile_revision", revision),
                     )
                     if expected is not None
@@ -257,7 +220,6 @@ def query_source_stock_change_context(
         "scenario_role": "DIAGNOSTIC_ONLY",
         "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
         "formal_evaluation_status": "NOT_EVALUATED",
-        "namespace_id": namespace_id,
         "source_symbol": symbol,
         "before_session": before_session.isoformat(),
         "target_session": target_session.isoformat(),

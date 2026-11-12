@@ -3,7 +3,6 @@
 const $ = (id) => document.getElementById(id);
 const state = {
   versions: [],
-  namespace_id: null,
   version: null,
   offset: 0,
   limit: 20,
@@ -269,8 +268,11 @@ async function api(url, options) {
 function selectedVersion() {
   const option = $("versionSelect").selectedOptions[0];
   if (!option || !option.value.includes("|")) return null;
-  const [target_session, package_sha256] = option.value.split("|");
-  return { target_session, package_sha256 };
+  const [target_session, rawPackageId] = option.value.split("|");
+  const source_package_id = Number(rawPackageId);
+  if (!Number.isSafeInteger(source_package_id) || source_package_id <= 0)
+    return null;
+  return { target_session, source_package_id };
 }
 function clearResult() {
   $("stockResult").hidden = true;

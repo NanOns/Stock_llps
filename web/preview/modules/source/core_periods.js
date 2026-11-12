@@ -24,10 +24,10 @@ function rawItems(raw, sourceVersion) {
       "价格质量",
       `${text(raw.quality.price_quality)} · ${text(raw.quality.price_reason)}`,
     ],
-    ["来源包SHA", text(raw.source.package_sha256)],
+    ["来源包ID", text(raw.source.source_package_id)],
     [
       "PG来源捕获 / 内容",
-      `${text(sourceVersion?.source_capture_id)} · ${text(sourceVersion?.source_content_id)}`,
+      `${text(sourceVersion?.source_capture_id)} · ${text(sourceVersion?.source_package_id)}`,
     ],
     [
       "来源对象 / 目标日Bar",
@@ -41,7 +41,6 @@ function rawItems(raw, sourceVersion) {
       "本机观察时钟",
       `${text(raw.source.observed_started_at)} → ${text(raw.source.observed_validated_at)}`,
     ],
-    ["来源条目SHA", text(raw.source.source_entry_sha256)],
     [
       "身份与坐标",
       `${raw.identity_status} · ${raw.price_coordinate} · ${raw.pit_status}`,
@@ -104,8 +103,8 @@ function renderRawPeriodRows(parent, periods) {
       "Bar状态",
       "价格质量 / 原因",
       "原始OHLC",
-      "包SHA-256",
-      "捕获 / 内容 / 条目SHA",
+      "来源包ID",
+      "捕获ID / 来源包ID",
     ]);
     const body = document.createElement("tbody");
     for (const daily of period.daily_rows) {
@@ -117,8 +116,8 @@ function renderRawPeriodRows(parent, periods) {
         `${text(daily.bar_status)} · ${text(daily.bar_reason)}`,
         `${text(daily.price_quality)} · ${text(daily.price_reason)}`,
         dailyOhlc,
-        daily.package_sha256,
-        `${text(daily.source_capture_id)} · ${text(daily.source_content_id)} · ${text(daily.source_entry_sha256)}`,
+        daily.source_package_id,
+        `${text(daily.source_capture_id)} · ${text(daily.source_package_id)}`,
       ]);
     }
     table.append(head, body);
@@ -140,17 +139,15 @@ function renderRawPeriodRows(parent, periods) {
 function rawPeriodBinding(data) {
   return {
     target_session: data.target_session,
-    package_sha256: data.package_sha256,
+    source_package_id: data.source_package_id,
     symbol: data.symbol || data.source_symbol,
-    namespace_id: data.namespace_id,
   };
 }
 function rawPeriodCacheKey(binding) {
   return [
     binding.target_session,
-    binding.package_sha256,
+    binding.source_package_id,
     binding.symbol,
-    binding.namespace_id,
   ].join("|");
 }
 function rawPeriodsMatch(binding) {
@@ -175,12 +172,9 @@ async function loadRawPeriods(
 ) {
   const binding = {
     target_session: version.target_session,
-    package_sha256: version.package_sha256,
+    source_package_id: version.source_package_id,
     symbol,
-    namespace_id: expectedIdentity?.namespace_id || null,
   };
-  if (!binding.namespace_id)
-    throw new Error("周期查询缺少已核验的namespace身份。");
   if (!isCurrent()) return null;
   const requestId = ++state.rawPeriodRequest;
   const cacheKey = rawPeriodCacheKey(binding);
@@ -196,17 +190,14 @@ async function loadRawPeriods(
   renderRawPeriods(null, "正在读取精确来源身份下的自然周/月PG Raw…");
   const query = new URLSearchParams({
     target_session: binding.target_session,
-    package_sha256: binding.package_sha256,
+    source_package_id: binding.source_package_id,
     symbol: binding.symbol,
-    namespace_id: binding.namespace_id,
   });
   const data = await api(`/api/source-symbol/raw-periods?${query}`);
   if (requestId !== state.rawPeriodRequest || !isCurrent()) return null;
   const actual = rawPeriodBinding(data);
   if (rawPeriodCacheKey(actual) !== cacheKey) {
-    throw new Error(
-      "周期响应日期、代码、namespace或完整包SHA不匹配，已拒绝展示。",
-    );
+    throw new Error("周期响应日期、来源包ID或代码不匹配，已拒绝展示。");
   }
   state.rawPeriods = data;
   state.rawPeriodContext = actual;
@@ -240,7 +231,7 @@ function renderRawPeriods(data, errorMessage = null) {
     `缺Bar ${window.target_missing_count}，读取失败 ${window.read_failed_count}，` +
     `未保存会话 ${window.missing_history_sessions.length}。`;
   identity.textContent =
-    `${data.source_symbol} · 目标日 ${data.target_session} · 包SHA ${data.package_sha256} · ` +
+    `${data.source_symbol} · 目标日 ${data.target_session} · 来源包ID ${data.source_package_id} · ` +
     `日历 ${data.calendar_revision} · 复权/公司行为 ${data.adjustment_status}/${data.corporate_action_status} · ` +
     `正式闭周/月 ${data.formal_period_profile.closed_week}/${data.formal_period_profile.closed_month}：${data.formal_period_profile.reason}`;
   trends.replaceChildren();

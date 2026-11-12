@@ -26,29 +26,24 @@ function priorHighRelationLabel(relation) {
 function comparisonIdentityOf(item) {
   return {
     target_session: item.target_session,
-    namespace_id: item.namespace_id,
-    package_sha256: item.package_sha256,
+    source_package_id: item.source_package_id,
     profile_revision: item.profile_revision,
   };
 }
 function sameComparisonIdentity(left, right) {
   if (!left || !right) return false;
-  return [
-    "target_session",
-    "namespace_id",
-    "package_sha256",
-    "profile_revision",
-  ].every((key) => left[key] === right[key]);
+  return ["target_session", "source_package_id", "profile_revision"].every(
+    (key) => left[key] === right[key],
+  );
 }
 function relationComparisonCandidate(item) {
   const data = state.relationData;
   const snapshot = data?.after_snapshot;
-  if (!snapshot || !data.namespace_id) return null;
+  if (!snapshot) return null;
   return {
     source_symbol: item.source_symbol,
     target_session: snapshot.target_session,
-    namespace_id: data.namespace_id,
-    package_sha256: item.after_package_sha256,
+    source_package_id: item.after_source_package_id,
     profile_revision: item.after_profile_revision,
     origin_label: "两日RAW结构结果",
   };
@@ -57,9 +52,10 @@ function addComparisonCandidate(candidate) {
   if (
     !candidate?.source_symbol ||
     !candidate.target_session ||
-    !candidate.namespace_id ||
-    !/^[0-9a-f]{64}$/.test(candidate.package_sha256 || "") ||
-    !/^[0-9a-f]{64}$/.test(candidate.profile_revision || "") ||
+    !Number.isSafeInteger(candidate.source_package_id) ||
+    candidate.source_package_id <= 0 ||
+    typeof candidate.profile_revision !== "string" ||
+    !candidate.profile_revision ||
     !/^(SH|SZ)\.[0-9]{6}$/.test(candidate.source_symbol)
   ) {
     state.comparisonMessage =
@@ -73,7 +69,7 @@ function addComparisonCandidate(candidate) {
     : null;
   if (currentIdentity && !sameComparisonIdentity(identity, currentIdentity)) {
     state.comparisonMessage =
-      "该来源属于不同目标日、namespace、包SHA或画像修订；请先清空对照篮再选。";
+      "该来源属于不同目标日、来源包或画像修订；请先清空对照篮再选。";
     renderComparisonBasket();
     return;
   }
@@ -94,7 +90,7 @@ function addComparisonCandidate(candidate) {
   state.comparisonBasket.push({ ...candidate });
   state.comparisonMessage =
     `已加入 ${candidate.source_symbol}（${candidate.origin_label}）；选择身份固定为 ` +
-    `${candidate.target_session} / ${candidate.package_sha256} / ${candidate.profile_revision}。`;
+    `${candidate.target_session} / ${candidate.source_package_id} / ${candidate.profile_revision}。`;
   invalidateComparisonResults(
     "选择已变化；请重新读取同一快照下的75个官方会话。",
   );
@@ -143,7 +139,7 @@ function renderComparisonBasket() {
   $("comparisonNotice").textContent =
     state.comparisonMessage ||
     (basket.length
-      ? `同一快照 ${basket[0].target_session} · namespace ${basket[0].namespace_id} · SHA ${basket[0].package_sha256} · profile_revision ${basket[0].profile_revision}。`
+      ? `同一快照 ${basket[0].target_session} · 来源包ID ${basket[0].source_package_id} · profile_revision ${basket[0].profile_revision}。`
       : "从两日RAW关系结果或完整PG画像页加入同一来源快照的代码。");
   if (!basket.length) {
     appendText(root, "span", "尚未选择来源代码。", "muted");
@@ -476,7 +472,7 @@ function renderComparisonSummary(entry) {
   appendText(
     card,
     "p",
-    `namespace ${data.namespace_id} · package SHA ${data.package_sha256} · profile_revision ${entry.selection.profile_revision}`,
+    `来源包ID ${data.source_package_id} · profile_revision ${entry.selection.profile_revision}`,
   );
   appendText(
     card,

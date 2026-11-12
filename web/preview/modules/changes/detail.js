@@ -11,15 +11,14 @@ function exactPairComparisonCandidate(item) {
     item.after_present !== true ||
     (binding.origin === "exact-symbol" &&
       item.source_symbol !== binding.symbol) ||
-    item.after_package_sha256 !== snapshot.package_sha256 ||
+    item.after_source_package_id !== snapshot.source_package_id ||
     item.after_profile_revision !== snapshot.profile_revision
   )
     return null;
   return {
     source_symbol: item.source_symbol,
     target_session: snapshot.target_session,
-    namespace_id: binding.namespace_id,
-    package_sha256: snapshot.package_sha256,
+    source_package_id: snapshot.source_package_id,
     profile_revision: snapshot.profile_revision,
     origin_label:
       binding.origin === "change" ? "双日状态筛查" : "精确双日画像核对",
@@ -33,7 +32,7 @@ function resolveChangeTimelineSide(item, side, binding, versions) {
     ? versions.find(
         (version) =>
           version.session_date === snapshot.target_session &&
-          version.package_sha256 === snapshot.package_sha256,
+          version.source_package_id === snapshot.source_package_id,
       )
     : null;
   return { snapshot, member, rawStored, exactVersion };
@@ -55,11 +54,12 @@ function openChangeTimeline(item, side) {
   const selected = selectedVersion();
   const fallback = state.changeBinding?.after_snapshot;
   const returnDate = selected?.target_session || fallback?.target_session;
-  const returnSha = selected?.package_sha256 || fallback?.package_sha256;
+  const returnPackageId =
+    selected?.source_package_id || fallback?.source_package_id;
   const returnVersion = state.versions.find(
     (version) =>
       version.session_date === returnDate &&
-      version.package_sha256 === returnSha,
+      version.source_package_id === returnPackageId,
   );
   if (!returnVersion) return;
   const returnBinding =
@@ -93,7 +93,7 @@ function openChangeTimeline(item, side) {
           }
         : null;
   $("versionSelect").value =
-    `${snapshot.target_session}|${snapshot.package_sha256}`;
+    `${snapshot.target_session}|${snapshot.source_package_id}`;
   $("symbolInput").value = item.source_symbol;
   $("windowInput").value = "75";
   state.stockRequest++;
@@ -105,17 +105,15 @@ function openChangeTimeline(item, side) {
   $("resultMode").textContent =
     "变化快照关联历史轨迹 · SOURCE_SYMBOL_ONLY · NON_PIT · RAW_UNADJUSTED";
   $("snapshotId").textContent =
-    `研究版本 ${snapshot.target_session} · namespace ${state.changeBinding.namespace_id} · 包SHA ${snapshot.package_sha256} · 画像修订 ${snapshot.profile_revision}`;
+    `研究版本 ${snapshot.target_session} · 来源包ID ${snapshot.source_package_id} · 画像修订 ${snapshot.profile_revision}`;
   $("windowText").textContent =
     "此视图只读取该快照绑定的官方会话轨迹；每日Core/周月详情须从存在Raw行的轨迹点进入。";
   state.timeline = null;
   queryTimeline({
     origin: state.changeBinding?.origin || "change",
-    namespace_id: state.changeBinding.namespace_id,
     persistedProfileSnapshot: {
       target_session: snapshot.target_session,
-      package_sha256: snapshot.package_sha256,
-      namespace_id: state.changeBinding.namespace_id,
+      source_package_id: snapshot.source_package_id,
       profile_revision: item[`${side}_profile_revision`],
       field_ids: item[`${side}_profile_field_ids`] || [],
       statuses: item[`${side}_profile_statuses`] || [],
@@ -125,8 +123,7 @@ function openChangeTimeline(item, side) {
     },
     returnSelection: {
       target_session: returnVersion.session_date,
-      package_sha256: returnVersion.package_sha256,
-      namespace_id: state.changeBinding.namespace_id,
+      source_package_id: returnVersion.source_package_id,
       symbol: item.source_symbol,
       session_count: 75,
     },
@@ -157,7 +154,7 @@ function appendChangeTimelineLinks(root, item) {
     } else if (!rawStored) {
       button.title = `${label}目标日没有保存该来源代码的Raw行，不能生成历史轨迹。`;
     } else if (!exactVersion) {
-      button.title = `${label}快照的日期和完整包SHA不在当前PG目录中，不能回退版本。`;
+      button.title = `${label}快照的日期和来源包ID不在当前PG目录中，不能回退版本。`;
     } else {
       button.addEventListener("click", () => openChangeTimeline(item, side));
     }
@@ -168,7 +165,7 @@ function appendChangeTimelineLinks(root, item) {
   appendText(
     root,
     "p",
-    "轨迹按变化快照的日期、完整包SHA、namespace和画像修订绑定；缺Bar保留解释，未保存Raw会话不可展开。结果为SOURCE_SYMBOL_ONLY、NON_PIT研究，不表示选股资格。",
+    "轨迹按变化快照的日期、来源包ID和画像修订绑定；缺Bar保留解释，未保存Raw会话不可展开。结果为SOURCE_SYMBOL_ONLY、NON_PIT研究，不表示选股资格。",
     "muted",
   );
 }
@@ -347,7 +344,7 @@ function showChangeDetail(item) {
     appendText(
       root,
       "p",
-      "需在同一结束日、namespace、完整包SHA和profile_revision下选2–3只；这是临时来源版对照，不代表正式Focus或选股名单。",
+      "需在同一结束日、来源包ID和profile_revision下选2–3只；这是临时来源版对照，不代表正式Focus或选股名单。",
       "muted",
     );
   }
@@ -551,9 +548,9 @@ async function compareSourceProfilePair(notice = null) {
     before_session: before.target_session,
     after_session: after.target_session,
     symbol,
-    before_package_sha256: before.package_sha256,
+    before_source_package_id: before.source_package_id,
     before_profile_revision: before.profile_revision,
-    after_package_sha256: after.package_sha256,
+    after_source_package_id: after.source_package_id,
     after_profile_revision: after.profile_revision,
   });
   root.hidden = false;
@@ -569,7 +566,6 @@ async function compareSourceProfilePair(notice = null) {
     if (requestId !== state.pairRequest) return;
     if (data.status === "NO_SAVED_SOURCE_CODE_MATCH") {
       state.changeBinding = {
-        namespace_id: data.namespace_id,
         before_snapshot: data.before_snapshot,
         after_snapshot: data.after_snapshot,
         session_relation: data.session_relation,
@@ -594,14 +590,13 @@ async function compareSourceProfilePair(notice = null) {
       appendText(
         root,
         "p",
-        `${before.target_session} · SHA ${before.package_sha256} · revision ${before.profile_revision} → ${after.target_session} · SHA ${after.package_sha256} · revision ${after.profile_revision}`,
+        `${before.target_session} · 包ID ${before.source_package_id} · revision ${before.profile_revision} → ${after.target_session} · 包ID ${after.source_package_id} · revision ${after.profile_revision}`,
         "muted",
       );
       if (notice) appendText(root, "p", notice, "muted");
       return;
     }
     state.changeBinding = {
-      namespace_id: data.namespace_id,
       before_snapshot: data.before_snapshot,
       after_snapshot: data.after_snapshot,
       session_relation: data.session_relation,
@@ -636,7 +631,7 @@ function populateChangeSnapshots(snapshots) {
     .sort(
       (a, b) =>
         a.target_session.localeCompare(b.target_session) ||
-        a.package_sha256.localeCompare(b.package_sha256) ||
+        a.source_package_id - b.source_package_id ||
         a.profile_revision.localeCompare(b.profile_revision),
     );
   state.changeSnapshots = complete;
@@ -645,10 +640,10 @@ function populateChangeSnapshots(snapshots) {
     select.replaceChildren(new Option("— 选择完整PG画像快照 —", ""));
     for (const item of complete) {
       const option = new Option(
-        `${item.target_session} · SHA ${item.package_sha256.slice(0, 8)} · rev ${item.profile_revision.slice(0, 12)} · ${item.source_symbol_count}/${item.expected_source_symbol_count}`,
+        `${item.target_session} · 包ID ${item.source_package_id} · rev ${item.profile_revision} · ${item.source_symbol_count}/${item.expected_source_symbol_count}`,
         profileSnapshotKey(item),
       );
-      option.title = `${item.target_session} · package SHA ${item.package_sha256} · profile revision ${item.profile_revision}`;
+      option.title = `${item.target_session} · 来源包ID ${item.source_package_id} · profile revision ${item.profile_revision}`;
       select.append(option);
     }
     select.disabled = complete.length < 2;
@@ -721,7 +716,7 @@ function populateChangeProfileFields() {
 function profileSnapshotKey(snapshot) {
   return [
     snapshot.target_session,
-    snapshot.package_sha256,
+    snapshot.source_package_id,
     snapshot.profile_revision,
   ].join("|");
 }

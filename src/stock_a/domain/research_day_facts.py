@@ -62,7 +62,6 @@ class D1StructureFact:
     not_evaluable_anchor_count: int
     not_applicable_anchor_count: int
     persisted_detail_count: int
-    anchor_id: str | None = None
     anchor_created_session: date | None = None
     anchor_available_from_session: date | None = None
     anchor_test_from_session: date | None = None
@@ -70,7 +69,6 @@ class D1StructureFact:
     relation: str | None = None
     lower: ExactRational | None = None
     upper: ExactRational | None = None
-    source_event_id: str | None = None
     source_ref: str | None = None
 
 
@@ -80,7 +78,6 @@ class D1MaterialAnchorFact:
 
     source_symbol: str
     structure_type: str
-    anchor_id: str
     relation: str
     created_session: date
     previous_session: date
@@ -89,10 +86,7 @@ class D1MaterialAnchorFact:
     upper: ExactRational | None
     birth_status: str
     birth_capture_id: str | None
-    birth_entry_sha256: str | None
     previous_capture_id: str | None
-    previous_entry_sha256: str | None
-    target_entry_sha256: str | None
     official_sessions_adjacent: bool
     anchor_birth_before_previous_session: bool
     change_classification: str
@@ -132,19 +126,16 @@ class D1MaterialAnchorFact:
 class ResearchDayFacts:
     """完整的单日生产者输出和全部typed结果行。"""
 
-    namespace_id: str
     before_session: date
     target_session: date
-    package_sha256: str
-    source_content_id: str
-    before_capture_id: str
-    target_capture_id: str
+    source_package_id: int
+    before_capture_id: int
+    target_capture_id: int
     source_time_quality: str
     source_clock_role: str
     source_available_at: str | None
     calendar_id: str
     calendar_revision: str
-    calendar_sha256: str
     d0_before_window_start: date
     d0_target_window_start: date
     d0_before_source_count: int

@@ -5,7 +5,6 @@ from decimal import Decimal
 from collections.abc import Mapping
 from typing import Any
 from uuid import UUID
-import hashlib
 import json
 
 
@@ -27,14 +26,3 @@ def _json_value(value: Any) -> Any:
             raise ValueError("JSON拒绝NaN和Infinity")
         return value
     raise TypeError(f"不支持的预览响应类型：{type(value).__name__}")
-
-
-def canonical_sha(value: Any) -> str:
-    encoded = json.dumps(
-        _json_value(value),
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()

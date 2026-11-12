@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from datetime import date, timedelta
 from fractions import Fraction
-from hashlib import sha256
-import re
 from typing import Any, Iterable, Mapping, Sequence
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 from stock_a.sources.tdx.day import DAY_STRUCT, DecodedDay, UnitContract
@@ -234,7 +232,7 @@ def research_stock_pg_support_followup_preview(
     official_sessions: Sequence[date],
     requested_sessions: Sequence[date],
     history_points: Sequence[Mapping[str, Any]],
-    package_sha256: str,
+    source_package_id: int,
     source_context: Mapping[str, Any],
     official_calendar: Mapping[str, Any],
 ) -> dict[str, Any]:
@@ -248,19 +246,16 @@ def research_stock_pg_support_followup_preview(
     if (
         source_context.get("status") != "AVAILABLE"
         or source_context.get("target_session") != target_session.isoformat()
-        or source_context.get("source_content_id") is None
-        or source_context.get("source_capture_id") is None
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or source_context.get("source_package_id") != source_package_id
+        or type(source_context.get("source_capture_id")) is not int
+        or source_context.get("source_capture_id") <= 0
         or source_context.get("raw_row_count")
         != source_context.get("capture_expected_row_count")
-        or not isinstance(source_context.get("capture_digest"), str)
-        or re.fullmatch(r"[0-9a-f]{64}", source_context["capture_digest"]) is None
-        or not isinstance(package_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
-        or source_context.get("package_sha256") != package_sha256
         or not isinstance(official_calendar, Mapping)
         or not official_calendar.get("calendar_id")
         or not official_calendar.get("calendar_revision")
-        or not official_calendar.get("calendar_sha256")
     ):
         raise ResearchEntryError(
             "SUPPORT_SOURCE_BINDING_INVALID", "支撑研究没有绑定同一Raw捕获与包版本"
@@ -294,7 +289,6 @@ def research_stock_pg_support_followup_preview(
             "SUPPORT_HISTORY_POINTS_INVALID", "支撑D1证据没有覆盖请求的连续会话"
         )
 
-    namespace_id = source_context.get("namespace_id")
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
     point_by_session: dict[date, Mapping[str, Any]] = {}
     row_by_session: dict[date, Mapping[str, Any] | None] = {}
@@ -319,8 +313,7 @@ def research_stock_pg_support_followup_preview(
                 and (
                     row.get("session_date") != day
                     or row.get("source_symbol") != normalized
-                    or row.get("package_sha256") != package_sha256
-                    or row.get("namespace_id") != namespace_id
+                    or row.get("source_package_id") != source_package_id
                 )
             )
         ):
@@ -349,9 +342,8 @@ def research_stock_pg_support_followup_preview(
     d1 = anchor_predicate["predicates"]
     d1_state = d1["result"].get("state")
     source_identity = {
-        "namespace_id": namespace_id,
+        "source_package_id": source_package_id,
         "source_capture_id": source_context.get("source_capture_id"),
-        "package_sha256": package_sha256,
         "source_symbol": normalized,
         "anchor_session": support_anchor_session.isoformat(),
     }
@@ -371,12 +363,8 @@ def research_stock_pg_support_followup_preview(
         "formal_anchor_created": False,
         "formal_p15_admission": "NOT_EVALUATED",
         "source": {
-            "namespace_id": namespace_id,
-            "package_sha256": package_sha256,
-            "source_content_id": source_context.get("source_content_id"),
+            "source_package_id": source_context.get("source_package_id"),
             "source_capture_id": source_context.get("source_capture_id"),
-            "source_digest": source_context.get("source_digest"),
-            "source_raw_digest": source_context.get("source_raw_digest"),
             "source_clock_role": source_context.get("source_clock_role"),
             "source_time_quality": source_context.get("source_time_quality"),
             "source_available_at": source_context.get("source_available_at"),
@@ -386,7 +374,6 @@ def research_stock_pg_support_followup_preview(
         "official_calendar": {
             "calendar_id": official_calendar.get("calendar_id"),
             "source_calendar_revision": official_calendar.get("calendar_revision"),
-            "calendar_sha256": official_calendar.get("calendar_sha256"),
             "history_calendar_revision": anchor_predicate[
                 "official_dependency_window"
             ].get("calendar_revision"),
@@ -402,12 +389,7 @@ def research_stock_pg_support_followup_preview(
             "predicate": d1,
             "inputs": anchor_predicate.get("inputs"),
             "source_capture_id": (
-                str(row_by_session[support_anchor_session]["source_capture_id"])
-                if row_by_session[support_anchor_session]
-                else None
-            ),
-            "source_entry_sha256": (
-                row_by_session[support_anchor_session].get("source_entry_sha256")
+                row_by_session[support_anchor_session]["source_capture_id"]
                 if row_by_session[support_anchor_session]
                 else None
             ),
@@ -463,15 +445,12 @@ def research_stock_pg_support_followup_preview(
         base["reason_code"] = "BREAKOUT_PLATFORM_ACTUAL_BAR_REQUIRED"
         base["reason"] = "D1 TRUE出生会话缺少可验证Raw OHLC actual Bar。"
         return base
-    symbol_scope = "|".join(str(source_identity[key]) for key in source_identity)
-    shadow_entity_id = (
-        "SOURCE_SYMBOL_SCOPED_NONFORMAL:"
-        + sha256(symbol_scope.encode("utf-8")).hexdigest()
+    shadow_entity_id = "SOURCE_SYMBOL_SCOPED_NONFORMAL:" + ":".join(
+        str(source_identity[key]) for key in source_identity
     )
     source_ref = "PG_SOURCE_RAW:" + ":".join(
         (
-            str(namespace_id),
-            package_sha256,
+            str(source_package_id),
             str(source_context.get("source_capture_id")),
             normalized,
             support_anchor_session.isoformat(),
@@ -491,7 +470,7 @@ def research_stock_pg_support_followup_preview(
             + ":"
             + str(dependency.get("end_session"))
             + ":"
-            + package_sha256
+            + str(source_package_id)
         ),
         actual=FieldValue(True),
         today=Bar(anchor_index, decoded_anchor.prices),
@@ -617,8 +596,7 @@ def research_stock_pg_support_followup_preview(
                 "role": "ANCHOR_BIRTH"
                 if day == support_anchor_session
                 else "FOLLOWUP_OBSERVATION",
-                "source_capture_id": str(row["source_capture_id"]) if row else None,
-                "source_entry_sha256": row.get("source_entry_sha256") if row else None,
+                "source_capture_id": row["source_capture_id"] if row else None,
                 "source_clock_role": (
                     row.get("capture_clock_role") or row.get("source_clock_role")
                     if row

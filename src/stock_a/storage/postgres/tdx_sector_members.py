@@ -11,7 +11,6 @@ from fractions import Fraction
 import re
 import time
 from typing import Any, Iterable, Iterator, Mapping, Sequence
-import uuid
 
 from stock_a.sources.tdx.sector_members import (
     SectorCatalogRow,
@@ -43,7 +42,6 @@ MAX_BREADTH_PAGE_SIZE = 30
 MAX_STRENGTH_BOARD_PAGE_SIZE = 100
 MAX_STRENGTH_MEMBER_PAGE_SIZE = 100
 MAX_STRENGTH_HISTORY_ROWS = 500_000
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 _CORE_TRANSITION_KIND_TO_STATUS = {
     "DAMAGE_NEW": ("price_damage_transition", "FALSE_TO_TRUE"),
     "DAMAGE_RECOVERED": ("price_damage_transition", "TRUE_TO_FALSE"),
@@ -78,7 +76,6 @@ class TdxSectorStrengthReadContext:
 
     connection: Any
     cursor: Any
-    namespace_id: str
     active: bool = True
     validated_source_versions: dict[tuple[Any, ...], dict[str, Any]] = field(
         default_factory=dict
@@ -96,11 +93,10 @@ def tdx_sector_strength_read_context(
     config: dict[str, Any],
 ) -> Iterator[TdxSectorStrengthReadContext]:
     """为一次多板块查询持有同一个REPEATABLE READ READ ONLY事务。"""
-    with _transaction(config, write=False) as (connection, cursor, namespace_id):
+    with _transaction(config, write=False) as (connection, cursor, _scope):
         context = TdxSectorStrengthReadContext(
             connection=connection,
             cursor=cursor,
-            namespace_id=namespace_id,
         )
         try:
             yield context
@@ -111,9 +107,8 @@ def tdx_sector_strength_read_context(
 def _read_strength_inputs(
     cursor: Any,
     *,
-    namespace_id: str,
-    source_capture_id: str,
-    package_sha256: str,
+    source_capture_id: int,
+    source_package_id: int,
     target_session: date,
     profile_revision: str,
     official_calendar_id: str,
@@ -130,9 +125,8 @@ def _read_strength_inputs(
     """读取或在同一事务内复用精确来源键的成员历史。"""
     ordered_symbols = tuple(sorted(set(symbols)))
     cache_key = (
-        namespace_id,
         source_capture_id,
-        package_sha256,
+        source_package_id,
         target_session,
         profile_revision,
         official_calendar_id,
@@ -178,21 +172,20 @@ def _read_strength_inputs(
     if missing_profile_symbols:
         fetched["profile_queries"] = 1
         cursor.execute(
-            """SELECT p.source_symbol, p.source_capture_id::text,
+            """SELECT p.source_symbol, p.source_capture_id,
        p.price_coordinate, p.calculation_scope, p.producer_contract,
-       p.producer_version, p.producer_contract_sha256::text,
+       p.producer_version,
        p.ret20::text, p.ret20_exact_numerator::text,
        p.ret20_exact_denominator::text, p.ret20_quality, p.ret20_reason
-FROM stock.source_symbol_price_profiles p
-WHERE p.namespace_id=%s::uuid AND p.target_session=%s::date
-  AND p.source_capture_id=%s::uuid AND p.package_sha256=%s
+FROM source_symbol_price_profiles p
+WHERE p.target_session=%s::date
+  AND p.source_capture_id=%s AND p.source_package_id=%s
   AND p.profile_revision=%s AND p.source_symbol=ANY(%s)
 ORDER BY p.source_symbol COLLATE "C" """,
             (
-                namespace_id,
                 target_session,
                 source_capture_id,
-                package_sha256,
+                source_package_id,
                 profile_revision,
                 list(missing_profile_symbols),
             ),
@@ -222,13 +215,13 @@ ORDER BY p.source_symbol COLLATE "C" """,
         fetched["revision_queries"] = 1
         cursor.execute(
             """SELECT source_symbol, session_date,
-       count(*)::bigint, count(DISTINCT package_sha256)::bigint,
+       count(*)::bigint, count(DISTINCT source_package_id)::bigint,
        count(DISTINCT source_capture_id)::bigint
-FROM stock.source_raw_daily
-WHERE namespace_id=%s::uuid AND source_symbol=ANY(%s)
+FROM source_raw_daily
+WHERE source_symbol=ANY(%s)
   AND session_date=ANY(%s::date[])
 GROUP BY source_symbol, session_date""",
-            (namespace_id, list(missing_revision_symbols), list(window_sessions)),
+            (list(missing_revision_symbols), list(window_sessions)),
         )
         revision_rows = cursor.fetchall()
         fetched["revision_groups"] = len(revision_rows)
@@ -257,10 +250,9 @@ GROUP BY source_symbol, session_date""",
         fetched["raw_queries"] = 1
         fetched_rows = _read_history_rows(
             cursor,
-            namespace_id=namespace_id,
             source_symbols=missing_raw_symbols,
             sessions=window_sessions,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
         )
         fetched["raw_rows"] = len(fetched_rows)
         for row in fetched_rows:
@@ -276,24 +268,11 @@ GROUP BY source_symbol, session_date""",
     return profile_rows, revision_counts, raw_rows, fetched
 
 
-def _snapshot_key(snapshot: SectorSourceSnapshot) -> str:
-    key = (
-        f"STOCK_A_TDX_SECTOR|{snapshot.source_kind}|"
-        f"{snapshot.source_file_sha256}|{snapshot.parse_contract_version}"
-    )
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
-
-
 def _validate_snapshot(snapshot: SectorSourceSnapshot) -> None:
     if not isinstance(snapshot, SectorSourceSnapshot):
         raise TdxSectorMembersPgError("SNAPSHOT_INPUT_INVALID", "板块来源快照类型无效")
-    if snapshot.snapshot_id != _snapshot_key(snapshot):
-        raise TdxSectorMembersPgError(
-            "SNAPSHOT_ID_MISMATCH", "来源快照UUID不匹配来源类型、文件SHA与解析合同"
-        )
     if (
         snapshot.source_kind not in {"TDX_TDXHY_CFG", "TDX_INFOHARBOR_BLOCK_DAT"}
-        or _SHA256.fullmatch(snapshot.source_file_sha256) is None
         or snapshot.source_file_size < 0
         or snapshot.rows_declared < 0
         or snapshot.clock_quality != "UNKNOWN"
@@ -353,20 +332,22 @@ def _validate_limits(snapshots: Sequence[SectorSourceSnapshot]) -> tuple[int, in
         raise TdxSectorMembersPgError(
             "PG_INSERT_BUDGET_EXCEEDED", "目录或成员写入超过本批固定行数上限"
         )
-    if len({item.snapshot_id for item in snapshots}) != len(snapshots):
+    if len({item.source_kind for item in snapshots}) != len(snapshots):
         raise TdxSectorMembersPgError(
-            "SNAPSHOT_KEY_DUPLICATE", "本次输入的来源快照键重复"
+            "SNAPSHOT_KEY_DUPLICATE", "本次输入包含重复的TDX来源类别"
         )
     return catalog_count, member_count
 
 
-def _read_snapshot_rows(cursor: Any, snapshot_id: str) -> tuple[dict | None, set, set]:
+def _read_snapshot_rows(cursor: Any, snapshot_id: int) -> tuple[dict | None, set, set]:
+    if type(snapshot_id) is not int or snapshot_id <= 0:
+        raise TdxSectorMembersPgError("SNAPSHOT_ID_INVALID", "快照ID必须为正BIGINT")
     cursor.execute(
-        """SELECT snapshot_id::text, source_kind, source_file_sha256,
+        """SELECT snapshot_id, source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
-FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
+FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
         (snapshot_id,),
     )
     row = cursor.fetchone()
@@ -377,7 +358,6 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
             (
                 "snapshot_id",
                 "source_kind",
-                "source_file_sha256",
                 "source_path_role",
                 "source_file_size",
                 "observed_at",
@@ -395,14 +375,16 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
     )
     cursor.execute(
         """SELECT board_kind, board_native_id, board_name
-FROM stock.tdx_sector_catalog WHERE snapshot_id=%s::uuid""",
+FROM tdx_sector_catalog WHERE snapshot_id=%s""",
         (snapshot_id,),
     )
     catalog = set(cursor.fetchall())
     cursor.execute(
-        """SELECT board_kind, board_native_id, source_symbol,
-       membership_quality, source_record_ordinal
-FROM stock.tdx_sector_members WHERE snapshot_id=%s::uuid""",
+        """SELECT m.board_kind, m.board_native_id, m.source_symbol,
+       m.membership_quality, m.source_record_ordinal
+FROM tdx_sector_members m
+JOIN tdx_sector_catalog c ON c.id=m.catalog_id
+WHERE c.snapshot_id=%s""",
         (snapshot_id,),
     )
     members = set(cursor.fetchall())
@@ -433,9 +415,7 @@ def _expected_members(
 
 def _stable_snapshot_matches(actual: dict, expected: SectorSourceSnapshot) -> bool:
     return (
-        actual["snapshot_id"] == expected.snapshot_id
-        and actual["source_kind"] == expected.source_kind
-        and actual["source_file_sha256"].strip() == expected.source_file_sha256
+        actual["source_kind"] == expected.source_kind
         and actual["source_path_role"] == expected.source_path_role
         and actual["source_file_size"] == expected.source_file_size
         and actual["source_valid_on"] == expected.source_valid_on
@@ -449,44 +429,39 @@ def _stable_snapshot_matches(actual: dict, expected: SectorSourceSnapshot) -> bo
     )
 
 
-def _assert_existing_snapshot(cursor: Any, snapshot: SectorSourceSnapshot) -> bool:
-    actual, catalog, members = _read_snapshot_rows(cursor, snapshot.snapshot_id)
-    if actual is None:
-        cursor.execute(
-            """SELECT snapshot_id::text FROM stock.tdx_sector_source_snapshots
-WHERE source_kind=%s AND source_file_sha256=%s AND parse_contract_version=%s""",
-            (
-                snapshot.source_kind,
-                snapshot.source_file_sha256,
-                snapshot.parse_contract_version,
-            ),
-        )
-        if cursor.fetchone() is not None:
-            raise TdxSectorMembersPgError(
-                "SOURCE_REVISION_KEY_CONFLICT",
-                "来源类型、文件SHA和解析合同已绑定其它快照UUID",
-            )
-        return False
-    if not _stable_snapshot_matches(actual, snapshot):
-        raise TdxSectorMembersPgError(
-            "SOURCE_REVISION_CONTENT_CONFLICT",
-            "同一来源修订键对应不同目录或时态内容；拒绝覆盖原快照",
-        )
-    if catalog != _expected_catalog(snapshot) or members != _expected_members(snapshot):
-        raise TdxSectorMembersPgError(
-            "SOURCE_REVISION_CONTENT_CONFLICT",
-            "同一来源修订键的PG目录或成员集合与本次独立解析不一致",
-        )
-    return True
+def _assert_existing_snapshot(
+    cursor: Any, snapshot: SectorSourceSnapshot
+) -> int | None:
+    cursor.execute(
+        """SELECT snapshot_id
+FROM tdx_sector_source_snapshots
+WHERE source_kind=%s AND source_file_size=%s
+  AND parse_contract_version=%s AND rows_declared=%s
+ORDER BY observed_at DESC, snapshot_id DESC""",
+        (
+            snapshot.source_kind,
+            snapshot.source_file_size,
+            snapshot.parse_contract_version,
+            snapshot.rows_declared,
+        ),
+    )
+    for (snapshot_id,) in cursor.fetchall():
+        actual, catalog, members = _read_snapshot_rows(cursor, int(snapshot_id))
+        if (
+            actual is not None
+            and _stable_snapshot_matches(actual, snapshot)
+            and catalog == _expected_catalog(snapshot)
+            and members == _expected_members(snapshot)
+        ):
+            return int(snapshot_id)
+    return None
 
 
 def _stable_snapshot_matches_without_source_path(
     actual: dict, expected: SectorSourceSnapshot
 ) -> bool:
     return (
-        actual["snapshot_id"] == expected.snapshot_id
-        and actual["source_kind"] == expected.source_kind
-        and actual["source_file_sha256"].strip() == expected.source_file_sha256
+        actual["source_kind"] == expected.source_kind
         and actual["source_file_size"] == expected.source_file_size
         and actual["source_valid_on"] == expected.source_valid_on
         and actual["source_known_at"] == expected.source_known_at
@@ -497,13 +472,6 @@ def _stable_snapshot_matches_without_source_path(
         and actual["rows_declared"] == expected.rows_declared
         and actual["source_quality"] == expected.source_quality
     )
-
-
-def _directory_sha256(source_path_role: str) -> str | None:
-    match = re.search(
-        r"(?:^|;)DIRECTORY_SHA256=([0-9a-f]{64})(?:;|$)", source_path_role
-    )
-    return match.group(1) if match else None
 
 
 def inspect_remote_sector_source_revisions(
@@ -518,74 +486,31 @@ def inspect_remote_sector_source_revisions(
         _validate_snapshot(snapshot)
     revisions: list[dict[str, Any]] = []
     try:
-        with _transaction(config, write=False) as (_connection, cursor, _namespace_id):
+        with _transaction(config, write=False) as (_connection, cursor, _scope):
             cursor.execute(
                 """SELECT
-    (SELECT count(*) FROM stock.tdx_sector_source_snapshots),
-    (SELECT count(*) FROM stock.tdx_sector_catalog),
-    (SELECT count(*) FROM stock.tdx_sector_members)"""
+    (SELECT count(*) FROM tdx_sector_source_snapshots),
+    (SELECT count(*) FROM tdx_sector_catalog),
+    (SELECT count(*) FROM tdx_sector_members)"""
             )
             snapshot_count, catalog_count, member_count = map(int, cursor.fetchone())
             for snapshot in snapshots:
-                actual, catalog, members = _read_snapshot_rows(
-                    cursor, snapshot.snapshot_id
-                )
-                if actual is None:
-                    cursor.execute(
-                        """SELECT snapshot_id::text FROM stock.tdx_sector_source_snapshots
-WHERE source_kind=%s AND source_file_sha256=%s AND parse_contract_version=%s""",
-                        (
-                            snapshot.source_kind,
-                            snapshot.source_file_sha256,
-                            snapshot.parse_contract_version,
-                        ),
-                    )
-                    collision = cursor.fetchone()
-                    revisions.append(
-                        {
-                            "snapshot_id": snapshot.snapshot_id,
-                            "source_kind": snapshot.source_kind,
-                            "decision": (
-                                "BLOCKED_REVISION_KEY" if collision else "NEW_VERSION"
-                            ),
-                            "existing_snapshot_id": collision[0] if collision else None,
-                            "reason_code": (
-                                "SOURCE_REVISION_UNIQUE_KEY_COLLISION"
-                                if collision
-                                else None
-                            ),
-                        }
-                    )
-                    continue
-
-                directory_sha_changed = (
-                    snapshot.source_kind == "TDX_TDXHY_CFG"
-                    and _directory_sha256(actual["source_path_role"])
-                    != _directory_sha256(snapshot.source_path_role)
-                )
-                content_matches = (
-                    _stable_snapshot_matches_without_source_path(actual, snapshot)
-                    and catalog == _expected_catalog(snapshot)
-                    and members == _expected_members(snapshot)
-                )
-                if directory_sha_changed:
-                    decision = "BLOCKED_REVISION_KEY"
-                    reason_code = "INDUSTRY_DIRECTORY_SHA_CHANGED_WITH_SAME_PRIMARY_KEY"
-                elif not content_matches:
-                    decision = "BLOCKED_REVISION_KEY"
-                    reason_code = "SOURCE_REVISION_CONTENT_CONFLICT"
-                else:
-                    decision = "REUSE_IDENTICAL_VERSION"
-                    reason_code = None
+                existing_id = _assert_existing_snapshot(cursor, snapshot)
                 revisions.append(
                     {
-                        "snapshot_id": snapshot.snapshot_id,
+                        "source_input_key": [
+                            snapshot.source_kind,
+                            snapshot.source_file_size,
+                            snapshot.parse_contract_version,
+                            snapshot.rows_declared,
+                        ],
                         "source_kind": snapshot.source_kind,
-                        "decision": decision,
-                        "reason_code": reason_code,
-                        "existing_source_path_role": actual["source_path_role"],
-                        "existing_catalog_rows": len(catalog),
-                        "existing_member_rows": len(members),
+                        "decision": (
+                            "REUSE_IDENTICAL_VERSION"
+                            if existing_id is not None
+                            else "NEW_VERSION"
+                        ),
+                        "existing_snapshot_id": existing_id,
                     }
                 )
     except TdxSectorMembersPgError:
@@ -606,26 +531,28 @@ WHERE source_kind=%s AND source_file_sha256=%s AND parse_contract_version=%s""",
 
 
 def verify_remote_sector_source_readback(
-    config: dict[str, Any], snapshots: Sequence[SectorSourceSnapshot]
+    config: dict[str, Any],
+    snapshots: Sequence[SectorSourceSnapshot],
+    snapshot_ids: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """以新只读事务重新核验已存在的来源行与完整集合。"""
     readback: dict[str, dict[str, int | str]] = {}
     try:
-        with _transaction(config, write=False) as (_connection, cursor, _namespace_id):
+        with _transaction(config, write=False) as (_connection, cursor, _scope):
             for snapshot in snapshots:
-                actual, catalog, members = _read_snapshot_rows(
-                    cursor, snapshot.snapshot_id
+                snapshot_id = (
+                    snapshot_ids.get(snapshot.source_kind)
+                    if isinstance(snapshot_ids, Mapping)
+                    else _assert_existing_snapshot(cursor, snapshot)
                 )
-                same_directory = (
-                    snapshot.source_kind != "TDX_TDXHY_CFG"
-                    or _directory_sha256(actual["source_path_role"])
-                    == _directory_sha256(snapshot.source_path_role)
-                    if actual is not None
-                    else False
-                )
+                if type(snapshot_id) is not int or snapshot_id <= 0:
+                    raise TdxSectorMembersPgError(
+                        "REMOTE_SOURCE_READBACK_MISMATCH",
+                        "远端来源没有可读回的BIGINT快照ID",
+                    )
+                actual, catalog, members = _read_snapshot_rows(cursor, snapshot_id)
                 if (
                     actual is None
-                    or not same_directory
                     or not _stable_snapshot_matches_without_source_path(
                         actual, snapshot
                     )
@@ -636,10 +563,9 @@ def verify_remote_sector_source_readback(
                         "REMOTE_SOURCE_READBACK_MISMATCH",
                         "远端成员来源经独立只读事务回读不匹配",
                     )
-                readback[snapshot.snapshot_id] = {
+                readback[str(snapshot_id)] = {
                     "catalog_rows": len(catalog),
                     "member_rows": len(members),
-                    "source_file_sha256": snapshot.source_file_sha256,
                 }
     except TdxSectorMembersPgError:
         raise
@@ -655,18 +581,17 @@ def verify_remote_sector_source_readback(
     }
 
 
-def _insert_snapshot(cursor: Any, snapshot: SectorSourceSnapshot) -> None:
+def _insert_snapshot(cursor: Any, snapshot: SectorSourceSnapshot) -> int:
     cursor.execute(
-        """INSERT INTO stock.tdx_sector_source_snapshots (
-    snapshot_id, source_kind, source_file_sha256, source_path_role,
+        """INSERT INTO tdx_sector_source_snapshots (
+    source_kind, source_path_role,
     source_file_size, observed_at, source_valid_on, source_known_at,
     source_available_at, clock_quality, research_mode,
     parse_contract_version, rows_declared, source_quality
-) VALUES (%s::uuid, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)""",
+) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+RETURNING snapshot_id""",
         (
-            snapshot.snapshot_id,
             snapshot.source_kind,
-            snapshot.source_file_sha256,
             snapshot.source_path_role,
             snapshot.source_file_size,
             snapshot.observed_at,
@@ -680,32 +605,43 @@ def _insert_snapshot(cursor: Any, snapshot: SectorSourceSnapshot) -> None:
             snapshot.source_quality,
         ),
     )
+    row = cursor.fetchone()
+    if row is None or type(row[0]) is not int or row[0] <= 0:
+        raise TdxSectorMembersPgError(
+            "SNAPSHOT_IDENTITY_INSERT_FAILED", "PostgreSQL未分配正BIGINT快照ID"
+        )
+    snapshot_id = int(row[0])
+    catalog_ids = {}
     if snapshot.catalog_rows:
-        cursor.executemany(
-            """INSERT INTO stock.tdx_sector_catalog (
+        for row in snapshot.catalog_rows:
+            cursor.execute(
+                """INSERT INTO tdx_sector_catalog (
     snapshot_id, board_kind, board_native_id, board_name
-) VALUES (%s::uuid, %s, %s, %s)""",
-            [
+) VALUES (%s, %s, %s, %s) RETURNING id""",
                 (
-                    snapshot.snapshot_id,
+                    snapshot_id,
                     row.board_kind,
                     row.board_native_id,
                     row.board_name,
+                ),
+            )
+            inserted_catalog = cursor.fetchone()
+            if inserted_catalog is None or type(inserted_catalog[0]) is not int:
+                raise TdxSectorMembersPgError(
+                    "CATALOG_IDENTITY_INSERT_FAILED",
+                    "PostgreSQL未分配正BIGINT板块目录ID",
                 )
-                for row in snapshot.catalog_rows
-            ],
-        )
+            catalog_ids[(row.board_kind, row.board_native_id)] = int(
+                inserted_catalog[0]
+            )
     if snapshot.member_rows:
         cursor.executemany(
-            """INSERT INTO stock.tdx_sector_members (
-    snapshot_id, board_kind, board_native_id, source_symbol,
-    membership_quality, source_record_ordinal
-) VALUES (%s::uuid, %s, %s, %s, %s, %s)""",
+            """INSERT INTO tdx_sector_members (
+    catalog_id, source_symbol, membership_quality, source_record_ordinal
+) VALUES (%s, %s, %s, %s)""",
             [
                 (
-                    snapshot.snapshot_id,
-                    row.board_kind,
-                    row.board_native_id,
+                    catalog_ids[(row.board_kind, row.board_native_id)],
                     row.source_symbol,
                     row.membership_quality,
                     row.source_record_ordinal,
@@ -713,6 +649,7 @@ def _insert_snapshot(cursor: Any, snapshot: SectorSourceSnapshot) -> None:
                 for row in snapshot.member_rows
             ],
         )
+    return snapshot_id
 
 
 def persist_sector_source_snapshots(
@@ -722,30 +659,31 @@ def persist_sector_source_snapshots(
     catalog_budget, member_budget = _validate_limits(snapshots)
     for snapshot in snapshots:
         _validate_snapshot(snapshot)
-    existed: set[str] = set()
+    snapshot_ids: dict[str, int] = {}
+    new_source_kinds: set[str] = set()
     try:
-        with _transaction(config, write=True) as (_connection, cursor, _namespace_id):
+        with _transaction(config, write=True) as (_connection, cursor, _scope):
             cursor.execute(
-                "SELECT source_sha FROM stock.migration_ledger WHERE migration_id=9"
+                "LOCK TABLE tdx_sector_source_snapshots IN SHARE ROW EXCLUSIVE MODE"
             )
+            cursor.execute("SELECT 1 FROM migration_ledger WHERE migration_id=9")
             migration_row = cursor.fetchone()
             if migration_row is None:
                 raise TdxSectorMembersPgError(
                     "MIGRATION_0009_REQUIRED", "必须先按本批任务范围应用迁移0009"
                 )
-            cursor.execute("SELECT count(*) FROM stock.tdx_sector_source_snapshots")
+            cursor.execute("SELECT count(*) FROM tdx_sector_source_snapshots")
             current_snapshot_count = int(cursor.fetchone()[0])
             if current_snapshot_count > 8:
                 raise TdxSectorMembersPgError(
                     "SNAPSHOT_ROW_LIMIT_EXCEEDED", "现有来源快照已超过本批8行预算"
                 )
             for snapshot in snapshots:
-                if _assert_existing_snapshot(cursor, snapshot):
-                    existed.add(snapshot.snapshot_id)
+                existing_id = _assert_existing_snapshot(cursor, snapshot)
+                if existing_id is not None:
+                    snapshot_ids[snapshot.source_kind] = existing_id
             to_insert = [
-                snapshot
-                for snapshot in snapshots
-                if snapshot.snapshot_id not in existed
+                item for item in snapshots if item.source_kind not in snapshot_ids
             ]
             new_catalog_count = sum(
                 len(snapshot.catalog_rows) for snapshot in to_insert
@@ -757,8 +695,8 @@ def persist_sector_source_snapshots(
                 )
             cursor.execute(
                 """SELECT
-    (SELECT count(*) FROM stock.tdx_sector_catalog),
-    (SELECT count(*) FROM stock.tdx_sector_members)"""
+    (SELECT count(*) FROM tdx_sector_catalog),
+    (SELECT count(*) FROM tdx_sector_members)"""
             )
             current_catalog_count, current_member_count = map(int, cursor.fetchone())
             if (
@@ -770,7 +708,8 @@ def persist_sector_source_snapshots(
                     "本批新增目录或成员将超过对应正式表行数上限",
                 )
             for snapshot in to_insert:
-                _insert_snapshot(cursor, snapshot)
+                snapshot_ids[snapshot.source_kind] = _insert_snapshot(cursor, snapshot)
+                new_source_kinds.add(snapshot.source_kind)
     except TdxSectorMembersPgError:
         raise
     except RawSourcePgError as error:
@@ -778,11 +717,10 @@ def persist_sector_source_snapshots(
 
     readback: dict[str, dict] = {}
     try:
-        with _transaction(config, write=False) as (_connection, cursor, _namespace_id):
+        with _transaction(config, write=False) as (_connection, cursor, _scope):
             for snapshot in snapshots:
-                actual, catalog, members = _read_snapshot_rows(
-                    cursor, snapshot.snapshot_id
-                )
+                snapshot_id = snapshot_ids[snapshot.source_kind]
+                actual, catalog, members = _read_snapshot_rows(cursor, snapshot_id)
                 if (
                     actual is None
                     or not _stable_snapshot_matches(actual, snapshot)
@@ -793,30 +731,32 @@ def persist_sector_source_snapshots(
                         "POST_COMMIT_READBACK_MISMATCH",
                         "提交后独立只读事务读回的来源快照或成员集合不匹配",
                     )
-                readback[snapshot.snapshot_id] = {
+                readback[str(snapshot_id)] = {
                     "catalog_rows": len(catalog),
                     "member_rows": len(members),
-                    "source_file_sha256": snapshot.source_file_sha256,
                 }
     except TdxSectorMembersPgError:
         raise
     except RawSourcePgError as error:
         raise TdxSectorMembersPgError(error.code, str(error)) from error
 
-    inserted_snapshots = len(snapshots) - len(existed)
+    inserted_snapshots = len(new_source_kinds)
     inserted_catalog = sum(
-        len(item.catalog_rows) for item in snapshots if item.snapshot_id not in existed
+        len(item.catalog_rows)
+        for item in snapshots
+        if item.source_kind in new_source_kinds
     )
     inserted_members = sum(
-        len(item.member_rows) for item in snapshots if item.snapshot_id not in existed
+        len(item.member_rows)
+        for item in snapshots
+        if item.source_kind in new_source_kinds
     )
     return {
         "status": "IDEMPOTENT_READBACK" if not inserted_snapshots else "INSERTED",
         "snapshots": [
             {
-                "snapshot_id": item.snapshot_id,
+                "snapshot_id": snapshot_ids[item.source_kind],
                 "source_kind": item.source_kind,
-                "source_file_sha256": item.source_file_sha256,
                 "source_file_size": item.source_file_size,
                 "rows_declared": item.rows_declared,
                 "source_quality": item.source_quality,
@@ -847,7 +787,6 @@ def _snapshot_payload(row: Sequence[Any]) -> dict[str, Any]:
     fields = (
         "snapshot_id",
         "source_kind",
-        "source_file_sha256",
         "source_path_role",
         "source_file_size",
         "observed_at",
@@ -861,7 +800,6 @@ def _snapshot_payload(row: Sequence[Any]) -> dict[str, Any]:
         "source_quality",
     )
     payload = dict(zip(fields, row))
-    payload["source_file_sha256"] = str(payload["source_file_sha256"]).strip()
     payload["observed_at"] = payload["observed_at"].isoformat()
     for name in ("source_valid_on",):
         if payload[name] is not None:
@@ -888,17 +826,17 @@ def query_latest_sector_source_observation(
     config: dict[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     source_profile: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """读取最新TDX行业/GN快照摘要，并可选核对其与精确画像的交集。"""
     if (
         type(target_session) is not date
-        or not isinstance(package_sha256, str)
-        or _SHA256.fullmatch(package_sha256) is None
+        or type(source_package_id) is not int
+        or source_package_id <= 0
     ):
         raise TdxSectorMembersPgError(
-            "SECTOR_OBSERVATION_TARGET_INVALID", "板块观察必须绑定目标日和完整来源包SHA"
+            "SECTOR_OBSERVATION_TARGET_INVALID", "板块观察必须绑定目标日和正数来源包ID"
         )
     profile = source_profile if isinstance(source_profile, Mapping) else {}
     selected_profile = profile.get("selected_revision")
@@ -909,28 +847,26 @@ def query_latest_sector_source_observation(
         and isinstance(set_comparison, Mapping)
         and set_comparison.get("symbol_sets_match") is True
         and profile.get("target_session") == target_session.isoformat()
-        and profile.get("package_sha256") == package_sha256
+        and profile.get("source_package_id") == source_package_id
     )
     source_capture_id = profile.get("source_capture_id") if has_exact_profile else None
     profile_revision = (
         selected_profile.get("profile_revision") if has_exact_profile else None
     )
     try:
-        if has_exact_profile:
-            source_capture_id = str(uuid.UUID(source_capture_id))
-        with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        with _transaction(config, write=False) as (_connection, cursor, _scope):
             cursor.execute(
                 """WITH latest AS (
     SELECT DISTINCT ON (source_kind)
-           snapshot_id,source_kind,source_file_sha256,observed_at,source_valid_on,
+           snapshot_id,source_kind,observed_at,source_valid_on,
            source_known_at,source_available_at,clock_quality,research_mode,
            parse_contract_version,rows_declared,source_quality
-    FROM stock.tdx_sector_source_snapshots
+    FROM tdx_sector_source_snapshots
     WHERE source_kind IN ('TDX_TDXHY_CFG','TDX_INFOHARBOR_BLOCK_DAT')
     ORDER BY source_kind,observed_at DESC,snapshot_id DESC
 )
-SELECT s.snapshot_id::text AS snapshot_id,s.source_kind,
-       s.source_file_sha256,s.observed_at,s.source_valid_on,
+SELECT s.snapshot_id,s.source_kind,
+       s.observed_at,s.source_valid_on,
        s.source_known_at,s.source_available_at,s.clock_quality,s.research_mode,
        s.parse_contract_version,s.rows_declared,s.source_quality,
        c.catalog_rows,c.industry_catalog_rows,c.concept_catalog_rows,
@@ -948,7 +884,7 @@ LEFT JOIN LATERAL (
                AS concept_catalog_rows,
            count(*) FILTER (WHERE board_kind NOT IN ('INDUSTRY','CONCEPT'))::bigint
                AS excluded_catalog_rows
-    FROM stock.tdx_sector_catalog
+    FROM tdx_sector_catalog
     WHERE snapshot_id=s.snapshot_id
 ) c ON TRUE
 LEFT JOIN LATERAL (
@@ -960,8 +896,9 @@ LEFT JOIN LATERAL (
            count(DISTINCT source_symbol)::bigint AS distinct_member_symbols,
            count(*) FILTER (WHERE membership_quality<>'OBSERVED_SOURCE_RELATION')::bigint
                AS invalid_membership_quality_rows
-    FROM stock.tdx_sector_members
-    WHERE snapshot_id=s.snapshot_id
+    FROM tdx_sector_members member
+    JOIN tdx_sector_catalog catalog ON catalog.id=member.catalog_id
+    WHERE catalog.snapshot_id=s.snapshot_id
 ) m ON TRUE
 LEFT JOIN LATERAL (
     SELECT count(DISTINCT m.source_symbol)::bigint AS profile_overlap_symbols,
@@ -973,20 +910,19 @@ LEFT JOIN LATERAL (
                WHERE p.history_stored_session_count>=75
                  AND p.history_requested_session_count>=75
            )::bigint AS history_75_session_overlap_symbols
-    FROM stock.tdx_sector_members m
-    JOIN stock.source_symbol_price_profiles p
-      ON p.namespace_id=%s::uuid
-     AND p.target_session=%s::date AND p.package_sha256=%s
-     AND p.source_capture_id=%s::uuid
+    FROM tdx_sector_members m
+    JOIN source_symbol_price_profiles p
+      ON p.target_session=%s::date AND p.source_package_id=%s
+     AND p.source_capture_id=%s
      AND p.profile_revision=%s
      AND p.source_symbol=m.source_symbol
-    WHERE m.snapshot_id=s.snapshot_id
+    JOIN tdx_sector_catalog c ON c.id=m.catalog_id
+    WHERE c.snapshot_id=s.snapshot_id
 ) o ON TRUE
 ORDER BY s.source_kind""",
                 (
-                    namespace_id,
                     target_session,
-                    package_sha256,
+                    source_package_id,
                     source_capture_id,
                     profile_revision,
                 ),
@@ -1006,8 +942,7 @@ ORDER BY s.source_kind""",
         ) from error
 
     for snapshot in snapshots:
-        snapshot["source_file_sha256"] = str(snapshot["source_file_sha256"]).strip()
-        snapshot["snapshot_id"] = str(snapshot["snapshot_id"])
+        snapshot["snapshot_id"] = int(snapshot["snapshot_id"])
         snapshot["observed_at"] = snapshot["observed_at"].isoformat()
         for name in ("source_valid_on",):
             if snapshot[name] is not None:
@@ -1025,9 +960,8 @@ ORDER BY s.source_kind""",
 
     return {
         "status": "AVAILABLE" if snapshots else "NO_MATCH",
-        "namespace_id": namespace_id,
         "target_session": target_session.isoformat(),
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "source_profile_revision": profile_revision,
         "selection_rule": "MAX_OBSERVED_AT_PER_EXACT_TDX_SOURCE_KIND",
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
@@ -1040,17 +974,17 @@ ORDER BY s.source_kind""",
 def query_tdx_sector_source_snapshot_catalog(config: dict[str, Any]) -> dict[str, Any]:
     """读取PG内全部行业与GN概念快照身份，供用户显式选择。"""
     try:
-        with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        with _transaction(config, write=False) as (_connection, cursor, _scope):
             cursor.execute(
-                """SELECT s.snapshot_id::text AS snapshot_id,s.source_kind,
-       s.source_file_sha256,s.observed_at,s.source_valid_on,
+                """SELECT s.snapshot_id,s.source_kind,
+       s.observed_at,s.source_valid_on,
        s.source_known_at,s.source_available_at,s.clock_quality,
        s.research_mode,s.parse_contract_version,s.rows_declared,s.source_quality,
        c.catalog_rows,c.industry_catalog_rows,c.concept_catalog_rows,
        c.excluded_catalog_rows,m.member_rows,m.industry_member_rows,
        m.concept_member_rows,m.distinct_member_symbols,
        m.invalid_membership_quality_rows
-FROM stock.tdx_sector_source_snapshots s
+FROM tdx_sector_source_snapshots s
 LEFT JOIN LATERAL (
     SELECT count(*)::bigint AS catalog_rows,
            count(*) FILTER (WHERE board_kind='INDUSTRY')::bigint
@@ -1059,7 +993,7 @@ LEFT JOIN LATERAL (
                AS concept_catalog_rows,
            count(*) FILTER (WHERE board_kind NOT IN ('INDUSTRY','CONCEPT'))::bigint
                AS excluded_catalog_rows
-    FROM stock.tdx_sector_catalog
+    FROM tdx_sector_catalog
     WHERE snapshot_id=s.snapshot_id
 ) c ON TRUE
 LEFT JOIN LATERAL (
@@ -1071,8 +1005,9 @@ LEFT JOIN LATERAL (
            count(DISTINCT source_symbol)::bigint AS distinct_member_symbols,
            count(*) FILTER (WHERE membership_quality<>'OBSERVED_SOURCE_RELATION')::bigint
                AS invalid_membership_quality_rows
-    FROM stock.tdx_sector_members
-    WHERE snapshot_id=s.snapshot_id
+    FROM tdx_sector_members member
+    JOIN tdx_sector_catalog catalog ON catalog.id=member.catalog_id
+    WHERE catalog.snapshot_id=s.snapshot_id
 ) m ON TRUE
 WHERE s.source_kind IN ('TDX_TDXHY_CFG','TDX_INFOHARBOR_BLOCK_DAT')
 ORDER BY s.source_kind,s.observed_at,s.snapshot_id"""
@@ -1106,8 +1041,7 @@ ORDER BY s.source_kind,s.observed_at,s.snapshot_id"""
         "invalid_membership_quality_rows",
     }
     for snapshot in snapshots:
-        snapshot["snapshot_id"] = str(snapshot["snapshot_id"])
-        snapshot["source_file_sha256"] = str(snapshot["source_file_sha256"]).strip()
+        snapshot["snapshot_id"] = int(snapshot["snapshot_id"])
         for field in date_fields:
             if snapshot[field] is not None:
                 snapshot[field] = snapshot[field].isoformat()
@@ -1123,7 +1057,6 @@ ORDER BY s.source_kind,s.observed_at,s.snapshot_id"""
 
     return {
         "status": "AVAILABLE" if snapshots else "NO_MATCH",
-        "namespace_id": namespace_id,
         "snapshots": snapshots,
         "database_write": False,
         "ddl_executed": False,
@@ -1136,9 +1069,8 @@ def query_tdx_sector_symbol_membership(
     exchange: str,
     source_symbol: str,
     target_session: date,
-    industry_snapshot_id: str,
-    concept_snapshot_id: str,
-    expected_namespace_id: str,
+    industry_snapshot_id: int,
+    concept_snapshot_id: int,
 ) -> dict[str, Any]:
     """按显式行业和概念快照读取单个来源代码的当前成员关系。"""
     if exchange not in {"SH", "SZ"} or not isinstance(source_symbol, str):
@@ -1157,24 +1089,19 @@ def query_tdx_sector_symbol_membership(
         raise TdxSectorMembersPgError(
             "TARGET_SESSION_INVALID", "研究目标日必须是有效交易日期"
         )
-    try:
-        industry_snapshot_id = str(uuid.UUID(industry_snapshot_id))
-        concept_snapshot_id = str(uuid.UUID(concept_snapshot_id))
-    except (TypeError, ValueError, AttributeError) as error:
+    if (
+        type(industry_snapshot_id) is not int
+        or industry_snapshot_id <= 0
+        or type(concept_snapshot_id) is not int
+        or concept_snapshot_id <= 0
+    ):
         raise TdxSectorMembersPgError(
-            "SNAPSHOT_ID_INVALID", "行业及概念snapshot_id必须是UUID"
-        ) from error
+            "SNAPSHOT_ID_INVALID", "行业及概念快照ID必须为正BIGINT"
+        )
     if industry_snapshot_id == concept_snapshot_id:
         raise TdxSectorMembersPgError(
             "SECTOR_SNAPSHOT_IDS_NOT_DISTINCT", "行业和概念必须使用两个独立快照"
         )
-    try:
-        normalized_namespace_id = str(uuid.UUID(expected_namespace_id))
-    except (TypeError, ValueError, AttributeError) as error:
-        raise TdxSectorMembersPgError(
-            "DEV_NAMESPACE_INVALID", "必须显式绑定有效DEV namespace UUID"
-        ) from error
-
     expected_kinds = {
         industry_snapshot_id: "TDX_TDXHY_CFG",
         concept_snapshot_id: "TDX_INFOHARBOR_BLOCK_DAT",
@@ -1183,21 +1110,16 @@ def query_tdx_sector_symbol_membership(
         with _transaction(config, write=False) as (
             _connection,
             cursor,
-            namespace_id,
+            _scope,
         ):
-            if namespace_id != normalized_namespace_id:
-                raise TdxSectorMembersPgError(
-                    "DEV_NAMESPACE_MISMATCH",
-                    "显式namespace与当前Stock A DEV部署绑定不一致",
-                )
             requested_ids = [industry_snapshot_id, concept_snapshot_id]
             cursor.execute(
-                """SELECT snapshot_id::text, source_kind, source_file_sha256,
+                """SELECT snapshot_id, source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
-FROM stock.tdx_sector_source_snapshots
-WHERE snapshot_id=ANY(%s::uuid[])
+FROM tdx_sector_source_snapshots
+WHERE snapshot_id=ANY(%s::bigint[])
 ORDER BY snapshot_id""",
                 (requested_ids,),
             )
@@ -1206,7 +1128,7 @@ ORDER BY snapshot_id""",
                 dict(zip(snapshot_columns, row, strict=True))
                 for row in cursor.fetchall()
             ]
-            snapshots_by_id = {str(row["snapshot_id"]): row for row in snapshot_rows}
+            snapshots_by_id = {int(row["snapshot_id"]): row for row in snapshot_rows}
             if set(snapshots_by_id) != set(expected_kinds):
                 raise TdxSectorMembersPgError(
                     "SECTOR_SNAPSHOT_NOT_FOUND",
@@ -1226,14 +1148,13 @@ ORDER BY snapshot_id""",
                     )
 
             cursor.execute(
-                """SELECT m.snapshot_id::text, m.board_kind,
+                """SELECT c.snapshot_id, m.board_kind,
        m.board_native_id, c.board_name, m.source_symbol,
        m.membership_quality, m.source_record_ordinal
-FROM stock.tdx_sector_members m
-JOIN stock.tdx_sector_catalog c
-  ON c.snapshot_id=m.snapshot_id AND c.board_kind=m.board_kind
- AND c.board_native_id=m.board_native_id
-WHERE m.snapshot_id=ANY(%s::uuid[]) AND m.source_symbol=%s
+FROM tdx_sector_members m
+JOIN tdx_sector_catalog c
+  ON c.id=m.catalog_id
+WHERE c.snapshot_id=ANY(%s::bigint[]) AND m.source_symbol=%s
   AND m.board_kind IN ('INDUSTRY','CONCEPT')
 ORDER BY m.board_kind COLLATE "C", m.board_native_id COLLATE "C"
 """,
@@ -1282,7 +1203,7 @@ ORDER BY m.board_kind COLLATE "C", m.board_native_id COLLATE "C"
     }
     memberships: list[dict[str, Any]] = []
     for row in membership_rows:
-        snapshot_id = str(row[0])
+        snapshot_id = int(row[0])
         board_kind = str(row[1])
         if (
             snapshot_id not in expected_kind_by_snapshot
@@ -1305,7 +1226,6 @@ ORDER BY m.board_kind COLLATE "C", m.board_native_id COLLATE "C"
                 "source_symbol": str(row[4]),
                 "membership_quality": str(row[5]),
                 "source_record_ordinal": int(row[6]),
-                "source_file_sha256": snapshot["source_file_sha256"],
                 "observed_at": snapshot["observed_at"],
                 "source_observed_at": snapshot["source_observed_at"],
                 "source_valid_on": snapshot["source_valid_on"],
@@ -1324,7 +1244,6 @@ ORDER BY m.board_kind COLLATE "C", m.board_native_id COLLATE "C"
     status = "AVAILABLE" if memberships else "AVAILABLE_EMPTY"
     return {
         "status": status,
-        "namespace_id": namespace_id,
         "exchange": exchange,
         "source_symbol": source_symbol,
         "target_session": target_session.isoformat(),
@@ -1347,9 +1266,8 @@ def query_tdx_sector_memberships_for_symbols(
     *,
     source_symbols: Sequence[str],
     target_session: date,
-    industry_snapshot_id: str | None,
-    concept_snapshot_id: str | None,
-    expected_namespace_id: str,
+    industry_snapshot_id: int | None,
+    concept_snapshot_id: int | None,
 ) -> dict[str, Any]:
     """在一个只读事务内批量读取FT来源代码的可用TDX成员快照。"""
     if isinstance(source_symbols, (str, bytes)) or not isinstance(
@@ -1382,22 +1300,13 @@ def query_tdx_sector_memberships_for_symbols(
         raise TdxSectorMembersPgError(
             "TARGET_SESSION_INVALID", "研究目标日必须是有效交易日期"
         )
-    try:
-        industry_snapshot_id = (
-            str(uuid.UUID(industry_snapshot_id))
-            if industry_snapshot_id is not None
-            else None
-        )
-        concept_snapshot_id = (
-            str(uuid.UUID(concept_snapshot_id))
-            if concept_snapshot_id is not None
-            else None
-        )
-        normalized_namespace_id = str(uuid.UUID(expected_namespace_id))
-    except (TypeError, ValueError, AttributeError) as error:
+    if any(
+        value is not None and (type(value) is not int or value <= 0)
+        for value in (industry_snapshot_id, concept_snapshot_id)
+    ):
         raise TdxSectorMembersPgError(
-            "SECTOR_IDENTITY_INVALID", "双TDX快照和DEV namespace必须是UUID"
-        ) from error
+            "SECTOR_IDENTITY_INVALID", "TDX成员快照ID必须为空或正BIGINT"
+        )
     if industry_snapshot_id is not None and industry_snapshot_id == concept_snapshot_id:
         raise TdxSectorMembersPgError(
             "SECTOR_SNAPSHOT_IDS_NOT_DISTINCT", "行业和概念必须使用两个独立快照"
@@ -1418,22 +1327,17 @@ def query_tdx_sector_memberships_for_symbols(
         with _transaction(config, write=False) as (
             _connection,
             cursor,
-            namespace_id,
+            _scope,
         ):
-            if namespace_id != normalized_namespace_id:
-                raise TdxSectorMembersPgError(
-                    "DEV_NAMESPACE_MISMATCH",
-                    "显式namespace与当前Stock A DEV部署绑定不一致",
-                )
             select_started = time.perf_counter()
             cursor.execute(
                 """WITH requested(snapshot_id, expected_source_kind, expected_board_kind) AS (
-    VALUES (%s::uuid, %s::text, %s::text), (%s::uuid, %s::text, %s::text)
+    VALUES (%s::bigint, %s::text, %s::text), (%s::bigint, %s::text, %s::text)
 )
-SELECT requested.snapshot_id::text AS requested_snapshot_id,
+SELECT requested.snapshot_id AS requested_snapshot_id,
        requested.expected_source_kind, requested.expected_board_kind,
-       snapshot.snapshot_id::text AS snapshot_row_id,
-       snapshot.source_kind, snapshot.source_file_sha256,
+       snapshot.snapshot_id AS snapshot_row_id,
+       snapshot.source_kind,
        snapshot.source_path_role, snapshot.source_file_size,
        snapshot.observed_at, snapshot.source_valid_on,
        snapshot.source_known_at, snapshot.source_available_at,
@@ -1444,16 +1348,17 @@ SELECT requested.snapshot_id::text AS requested_snapshot_id,
        member.source_symbol AS member_source_symbol,
        member.membership_quality, member.source_record_ordinal
 FROM requested
-LEFT JOIN stock.tdx_sector_source_snapshots AS snapshot
+LEFT JOIN tdx_sector_source_snapshots AS snapshot
   ON snapshot.snapshot_id=requested.snapshot_id
-LEFT JOIN stock.tdx_sector_members AS member
-  ON member.snapshot_id=snapshot.snapshot_id
+LEFT JOIN tdx_sector_members AS member
+  ON member.catalog_id IN (
+      SELECT catalog.id FROM tdx_sector_catalog catalog
+      WHERE catalog.snapshot_id=snapshot.snapshot_id
+  )
  AND member.board_kind=requested.expected_board_kind
  AND member.source_symbol=ANY(%s::text[])
-LEFT JOIN stock.tdx_sector_catalog AS catalog
-  ON catalog.snapshot_id=member.snapshot_id
- AND catalog.board_kind=member.board_kind
- AND catalog.board_native_id=member.board_native_id
+LEFT JOIN tdx_sector_catalog AS catalog
+  ON catalog.id=member.catalog_id
 WHERE requested.snapshot_id IS NOT NULL
 ORDER BY requested.expected_board_kind COLLATE "C",
          member.board_native_id COLLATE "C",
@@ -1481,7 +1386,7 @@ ORDER BY requested.expected_board_kind COLLATE "C",
             f"批量TDX成员关系只读读取失败（{type(error).__name__}）",
         ) from error
 
-    snapshots_by_id: dict[str, dict[str, Any]] = {}
+    snapshots_by_id: dict[int, dict[str, Any]] = {}
     memberships: list[dict[str, Any]] = []
     seen_relations: set[tuple[str, str, str]] = set()
     expected_by_id = {
@@ -1489,12 +1394,12 @@ ORDER BY requested.expected_board_kind COLLATE "C",
         for snapshot_id, source_kind, board_kind in expected_snapshots
     }
     for row in rows:
-        requested_id = row["requested_snapshot_id"]
+        requested_id = int(row["requested_snapshot_id"])
         if row["snapshot_row_id"] is None:
             raise TdxSectorMembersPgError(
                 "SECTOR_SNAPSHOT_NOT_FOUND", "未找到显式绑定的行业及概念TDX快照"
             )
-        if row["snapshot_row_id"] != requested_id:
+        if int(row["snapshot_row_id"]) != requested_id:
             raise TdxSectorMembersPgError(
                 "SECTOR_SNAPSHOT_IDENTITY_MISMATCH",
                 "成员行返回的快照身份与请求ID不一致",
@@ -1523,7 +1428,6 @@ ORDER BY requested.expected_board_kind COLLATE "C",
                 "native_category": "GN"
                 if expected_board_kind == "CONCEPT"
                 else "INDUSTRY",
-                "source_file_sha256": row["source_file_sha256"],
                 "source_path_role": row["source_path_role"],
                 "source_file_size": int(row["source_file_size"]),
                 "observed_at": row["observed_at"].isoformat(),
@@ -1594,7 +1498,6 @@ ORDER BY requested.expected_board_kind COLLATE "C",
                 "source_symbol": row["member_source_symbol"],
                 "membership_quality": row["membership_quality"],
                 "source_record_ordinal": int(row["source_record_ordinal"]),
-                "source_file_sha256": row["source_file_sha256"],
                 "observed_at": snapshots_by_id[requested_id]["observed_at"],
                 "source_observed_at": snapshots_by_id[requested_id]["observed_at"],
                 "source_valid_on": snapshots_by_id[requested_id]["source_valid_on"],
@@ -1627,7 +1530,6 @@ ORDER BY requested.expected_board_kind COLLATE "C",
     )
     return {
         "status": "AVAILABLE" if memberships else "AVAILABLE_EMPTY",
-        "namespace_id": normalized_namespace_id,
         "target_session": target_session.isoformat(),
         "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
         "source_symbols_requested": normalized_symbols,
@@ -1663,21 +1565,22 @@ ORDER BY requested.expected_board_kind COLLATE "C",
 
 
 def read_rotation_snapshot_members(
-    config: dict[str, Any], *, snapshot_id: str, board_kind: str
+    config: dict[str, Any], *, snapshot_id: int, board_kind: str
 ) -> dict[str, Any]:
     """读取同类板块的完整后验快照成员，不依赖当日画像。"""
-    _validate_snapshot_uuid(snapshot_id)
+    if type(snapshot_id) is not int or snapshot_id <= 0:
+        raise TdxSectorMembersPgError("SNAPSHOT_ID_INVALID", "快照ID必须为正BIGINT")
     if board_kind not in {"INDUSTRY", "CONCEPT"}:
         raise TdxSectorMembersPgError(
             "BOARD_KIND_INVALID", "板块类型必须为INDUSTRY或CONCEPT"
         )
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+    with _transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
-            """SELECT snapshot_id::text, source_kind, source_file_sha256,
+            """SELECT snapshot_id, source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
-FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
+FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
             (snapshot_id,),
         )
         snapshot_row = cursor.fetchone()
@@ -1697,17 +1600,24 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                 "SECTOR_SNAPSHOT_MODE_REJECTED", "成员快照来源或后验研究模式不匹配"
             )
         cursor.execute(
-            """SELECT c.board_native_id, c.board_name, m.source_symbol
-FROM stock.tdx_sector_catalog c LEFT JOIN stock.tdx_sector_members m
-ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind AND m.board_native_id=c.board_native_id
-WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s
+            """SELECT c.id, c.board_native_id, c.board_name, m.source_symbol
+FROM tdx_sector_catalog c LEFT JOIN tdx_sector_members m
+ON m.catalog_id=c.id
+WHERE c.snapshot_id=%s AND c.board_kind=%s
 ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
 """,
             (snapshot_id, board_kind),
         )
         boards: dict[str, dict[str, Any]] = {}
-        for board_id, board_name, symbol in cursor.fetchall():
-            board = boards.setdefault(board_id, {"name": board_name, "members": []})
+        for catalog_id, board_id, board_name, symbol in cursor.fetchall():
+            board = boards.setdefault(
+                board_id,
+                {
+                    "catalog_id": int(catalog_id),
+                    "name": board_name,
+                    "members": [],
+                },
+            )
             if board["name"] != board_name:
                 raise TdxSectorMembersPgError(
                     "SECTOR_SNAPSHOT_INCONSISTENT", "板块名称不一致"
@@ -1719,7 +1629,6 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
                     )
                 board["members"].append(symbol)
     return {
-        "namespace_id": namespace_id,
         "snapshot": snapshot,
         "board_kind": board_kind,
         "boards": boards,
@@ -1729,14 +1638,15 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
 def query_sector_catalog(
     config: dict[str, Any],
     *,
-    snapshot_id: str,
+    snapshot_id: int,
     board_kind: str | None,
     search: str | None,
     offset: int,
     limit: int,
 ) -> dict[str, Any]:
     _validate_page(offset, limit)
-    _validate_snapshot_uuid(snapshot_id)
+    if type(snapshot_id) is not int or snapshot_id <= 0:
+        raise TdxSectorMembersPgError("SNAPSHOT_ID_INVALID", "快照ID必须为正BIGINT")
     if board_kind is not None and board_kind not in {"INDUSTRY", "CONCEPT"}:
         raise TdxSectorMembersPgError(
             "BOARD_KIND_INVALID", "板块类型必须为INDUSTRY或CONCEPT"
@@ -1751,13 +1661,13 @@ def query_sector_catalog(
     kind_filter = board_kind
     search_filter = normalized_search
     try:
-        with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        with _transaction(config, write=False) as (_connection, cursor, _scope):
             cursor.execute(
-                """SELECT snapshot_id::text, source_kind, source_file_sha256,
+                """SELECT snapshot_id, source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
-FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
+FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
                 (snapshot_id,),
             )
             snapshot_row = cursor.fetchone()
@@ -1768,8 +1678,8 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
             snapshot = _snapshot_payload(snapshot_row)
             cursor.execute(
                 """SELECT count(*)::bigint
-FROM stock.tdx_sector_catalog c
-WHERE c.snapshot_id=%s::uuid
+FROM tdx_sector_catalog c
+WHERE c.snapshot_id=%s
   AND (%s::text IS NULL OR c.board_kind=%s)
   AND (%s::text IS NULL OR position(lower(%s) in lower(c.board_name))>0
        OR position(%s in c.board_native_id)>0)""",
@@ -1784,19 +1694,20 @@ WHERE c.snapshot_id=%s::uuid
             )
             filtered_count = int(cursor.fetchone()[0])
             cursor.execute(
-                """SELECT count(*)::bigint FROM stock.tdx_sector_members
-WHERE snapshot_id=%s::uuid""",
+                """SELECT count(*)::bigint
+FROM tdx_sector_members m
+JOIN tdx_sector_catalog c ON c.id=m.catalog_id
+WHERE c.snapshot_id=%s""",
                 (snapshot_id,),
             )
             snapshot_member_count = int(cursor.fetchone()[0])
             cursor.execute(
                 """SELECT c.board_kind, c.board_native_id, c.board_name,
        count(m.source_symbol)::bigint AS source_member_count
-FROM stock.tdx_sector_catalog c
-LEFT JOIN stock.tdx_sector_members m
-  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
- AND m.board_native_id=c.board_native_id
-WHERE c.snapshot_id=%s::uuid
+FROM tdx_sector_catalog c
+LEFT JOIN tdx_sector_members m
+  ON m.catalog_id=c.id
+WHERE c.snapshot_id=%s
   AND (%s::text IS NULL OR c.board_kind=%s)
   AND (%s::text IS NULL OR position(lower(%s) in lower(c.board_name))>0
        OR position(%s in c.board_native_id)>0)
@@ -1829,7 +1740,6 @@ LIMIT %s OFFSET %s""",
         raise TdxSectorMembersPgError(error.code, str(error)) from error
     return {
         "status": "AVAILABLE" if filtered_count else "NO_MATCH",
-        "namespace_id": namespace_id,
         "snapshot": snapshot,
         "source_quality_counts": _source_quality_counts(snapshot["source_quality"]),
         "snapshot_unmapped_source_rows": max(
@@ -1852,18 +1762,19 @@ LIMIT %s OFFSET %s""",
 def query_sector_members(
     config: dict[str, Any],
     *,
-    snapshot_id: str,
+    snapshot_id: int,
     board_kind: str,
     board_native_id: str,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str | None,
     offset: int,
     limit: int,
 ) -> dict[str, Any]:
     _validate_page(offset, limit)
-    _validate_snapshot_uuid(snapshot_id)
+    if type(snapshot_id) is not int or snapshot_id <= 0:
+        raise TdxSectorMembersPgError("SNAPSHOT_ID_INVALID", "快照ID必须为正BIGINT")
     if board_kind not in {"INDUSTRY", "CONCEPT"}:
         raise TdxSectorMembersPgError(
             "BOARD_KIND_INVALID", "板块类型必须为INDUSTRY或CONCEPT"
@@ -1878,23 +1789,26 @@ def query_sector_members(
         raise TdxSectorMembersPgError(
             "SESSION_AFTER_CUTOFF", "目标交易日不得晚于显式研究截止日"
         )
-    if not isinstance(package_sha256, str) or _SHA256.fullmatch(package_sha256) is None:
+    if type(source_package_id) is not int or source_package_id <= 0:
         raise TdxSectorMembersPgError(
-            "PACKAGE_SHA_INVALID", "来源包SHA必须是64位小写十六进制值"
+            "SOURCE_PACKAGE_ID_INVALID", "来源包ID必须是正BIGINT"
         )
-    if profile_revision is not None and _SHA256.fullmatch(profile_revision) is None:
+    if (
+        profile_revision is not None
+        and re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
+    ):
         raise TdxSectorMembersPgError(
-            "PROFILE_REVISION_INVALID", "画像修订SHA必须是64位小写十六进制值"
+            "PROFILE_REVISION_INVALID", "画像修订必须是显式PROFILE_RNN版本标签"
         )
 
     try:
-        with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        with _transaction(config, write=False) as (_connection, cursor, _scope):
             cursor.execute(
-                """SELECT snapshot_id::text, source_kind, source_file_sha256,
+                """SELECT snapshot_id, source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
-FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
+FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
                 (snapshot_id,),
             )
             snapshot_row = cursor.fetchone()
@@ -1908,27 +1822,26 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                     "SECTOR_SNAPSHOT_MODE_REJECTED", "不接受未经声明的历史PIT成员快照"
                 )
             cursor.execute(
-                """SELECT DISTINCT r.source_content_id, r.source_capture_id::text,
+                """SELECT DISTINCT r.source_package_id, r.source_capture_id,
        c.read_started_at, c.validated_at, c.source_available_at,
        c.source_time_quality, c.source_clock_role, c.parser_contract,
-       c.canonical_digest, c.normalized_count, s.dataset_id, s.byte_sha, s.byte_count
-FROM stock.source_raw_daily r
-JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
-  AND c.capture_id=r.source_capture_id
-JOIN stock.source_contents s ON s.namespace_id=r.namespace_id
-  AND s.content_id=r.source_content_id
-WHERE r.namespace_id=%s::uuid AND r.session_date=%s::date AND r.package_sha256=%s
-ORDER BY r.source_capture_id::text, r.source_content_id LIMIT 2""",
-                (namespace_id, target_session, package_sha256),
+       c.normalized_count, s.dataset_id, s.byte_count
+FROM source_raw_daily r
+JOIN source_captures c ON c.capture_id=r.source_capture_id
+  AND c.source_package_id=r.source_package_id AND c.target_session=r.session_date
+JOIN source_packages s ON s.source_package_id=r.source_package_id
+WHERE r.session_date=%s::date AND r.source_package_id=%s
+ORDER BY r.source_capture_id, r.source_package_id LIMIT 2""",
+                (target_session, source_package_id),
             )
             source_version = cursor.fetchall()
             if len(source_version) != 1:
                 raise TdxSectorMembersPgError(
                     "SOURCE_VERSION_NOT_UNIQUE",
-                    "目标日与包SHA没有唯一Raw捕获和内容引用",
+                    "目标日与来源包数字ID没有唯一Raw捕获引用",
                 )
             (
-                source_content_id,
+                source_package_id,
                 source_capture_id,
                 _capture_started_at,
                 _capture_validated_at,
@@ -1936,15 +1849,12 @@ ORDER BY r.source_capture_id::text, r.source_content_id LIMIT 2""",
                 source_time_quality,
                 source_clock_role,
                 parser_contract,
-                source_digest,
                 expected_row_count,
                 source_dataset_id,
-                content_sha,
                 source_byte_count,
             ) = source_version[0]
             if (
                 source_dataset_id != source_raw._DATASET_ID
-                or str(content_sha).strip() != package_sha256
                 or type(expected_row_count) is not int
                 or expected_row_count <= 0
             ):
@@ -1956,9 +1866,9 @@ ORDER BY r.source_capture_id::text, r.source_content_id LIMIT 2""",
        count(*) FILTER (WHERE bar_status='TARGET_PRESENT')::bigint,
        count(*) FILTER (WHERE bar_status='TARGET_MISSING')::bigint,
        count(*) FILTER (WHERE bar_status='READ_FAILED')::bigint
-FROM stock.source_raw_daily WHERE namespace_id=%s::uuid
-  AND source_capture_id=%s::uuid AND session_date=%s::date AND package_sha256=%s""",
-                (namespace_id, source_capture_id, target_session, package_sha256),
+FROM source_raw_daily
+WHERE source_capture_id=%s AND session_date=%s::date AND source_package_id=%s""",
+                (source_capture_id, target_session, source_package_id),
             )
             raw_counts = cursor.fetchone()
             if (
@@ -1971,15 +1881,13 @@ FROM stock.source_raw_daily WHERE namespace_id=%s::uuid
                 )
             cursor.execute(
                 """SELECT DISTINCT profile_revision COLLATE "C" AS profile_revision
-FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
-  AND target_session=%s::date AND package_sha256=%s
+FROM source_symbol_price_profiles
+WHERE source_capture_id=%s AND target_session=%s::date AND source_package_id=%s
 ORDER BY 1""",
                 (
-                    namespace_id,
                     source_capture_id,
                     target_session,
-                    package_sha256,
+                    source_package_id,
                 ),
             )
             profile_revisions = [str(row[0]).strip() for row in cursor.fetchall()]
@@ -2005,24 +1913,22 @@ ORDER BY 1""",
        count(r.source_symbol) FILTER (WHERE r.bar_status='TARGET_MISSING')::bigint,
        count(r.source_symbol) FILTER (WHERE r.bar_status='READ_FAILED')::bigint,
        count(p.source_symbol)::bigint
-FROM stock.tdx_sector_members m
-LEFT JOIN stock.source_raw_daily r ON r.namespace_id=%s::uuid
-  AND r.source_capture_id=%s::uuid AND r.source_symbol=m.source_symbol
-  AND r.session_date=%s::date AND r.package_sha256=%s
-LEFT JOIN stock.source_symbol_price_profiles p ON p.namespace_id=%s::uuid
-  AND p.source_capture_id=%s::uuid
-  AND p.target_session=%s::date AND p.package_sha256=%s
+FROM tdx_sector_members m
+JOIN tdx_sector_catalog c ON c.id=m.catalog_id
+LEFT JOIN source_raw_daily r ON r.source_capture_id=%s
+  AND r.source_symbol=m.source_symbol
+  AND r.session_date=%s::date AND r.source_package_id=%s
+LEFT JOIN source_symbol_price_profiles p ON p.source_capture_id=%s
+  AND p.target_session=%s::date AND p.source_package_id=%s
   AND p.source_symbol=m.source_symbol AND p.profile_revision=%s
-WHERE m.snapshot_id=%s::uuid AND m.board_kind=%s AND m.board_native_id=%s""",
+WHERE c.snapshot_id=%s AND m.board_kind=%s AND m.board_native_id=%s""",
                 (
-                    namespace_id,
                     source_capture_id,
                     target_session,
-                    package_sha256,
-                    namespace_id,
+                    source_package_id,
                     source_capture_id,
                     target_session,
-                    package_sha256,
+                    source_package_id,
                     selected_profile,
                     snapshot_id,
                     board_kind,
@@ -2033,8 +1939,8 @@ WHERE m.snapshot_id=%s::uuid AND m.board_kind=%s AND m.board_native_id=%s""",
             source_member_count = int(counts[0])
             if source_member_count == 0:
                 cursor.execute(
-                    """SELECT 1 FROM stock.tdx_sector_catalog
-WHERE snapshot_id=%s::uuid AND board_kind=%s AND board_native_id=%s""",
+                    """SELECT 1 FROM tdx_sector_catalog
+WHERE snapshot_id=%s AND board_kind=%s AND board_native_id=%s""",
                     (snapshot_id, board_kind, board_native_id),
                 )
                 if cursor.fetchone() is None:
@@ -2062,25 +1968,23 @@ WHERE snapshot_id=%s::uuid AND board_kind=%s AND board_native_id=%s""",
        p.bias20_atr::text, p.bias20_atr_quality, p.bias20_atr_reason,
        p.profile_field_ids, p.profile_statuses, p.profile_qualities,
        p.profile_reasons
-FROM stock.tdx_sector_members m
-LEFT JOIN stock.source_raw_daily r ON r.namespace_id=%s::uuid
-  AND r.source_capture_id=%s::uuid AND r.source_symbol=m.source_symbol
-  AND r.session_date=%s::date AND r.package_sha256=%s
-LEFT JOIN stock.source_symbol_price_profiles p ON p.namespace_id=%s::uuid
-  AND p.source_capture_id=%s::uuid
-  AND p.target_session=%s::date AND p.package_sha256=%s
+FROM tdx_sector_members m
+JOIN tdx_sector_catalog c ON c.id=m.catalog_id
+LEFT JOIN source_raw_daily r ON r.source_capture_id=%s
+  AND r.source_symbol=m.source_symbol
+  AND r.session_date=%s::date AND r.source_package_id=%s
+LEFT JOIN source_symbol_price_profiles p ON p.source_capture_id=%s
+  AND p.target_session=%s::date AND p.source_package_id=%s
   AND p.source_symbol=m.source_symbol AND p.profile_revision=%s
-WHERE m.snapshot_id=%s::uuid AND m.board_kind=%s AND m.board_native_id=%s
+WHERE c.snapshot_id=%s AND m.board_kind=%s AND m.board_native_id=%s
 ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
                 (
-                    namespace_id,
                     source_capture_id,
                     target_session,
-                    package_sha256,
-                    namespace_id,
+                    source_package_id,
                     source_capture_id,
                     target_session,
-                    package_sha256,
+                    source_package_id,
                     selected_profile,
                     snapshot_id,
                     board_kind,
@@ -2114,15 +2018,12 @@ ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
     unmatched_count = total_member_count - matched_count
     return {
         "status": "AVAILABLE" if total_member_count else "NO_MATCH",
-        "namespace_id": namespace_id,
         "snapshot": snapshot,
         "source_version": {
             "target_session": target_session.isoformat(),
-            "package_sha256": package_sha256,
-            "source_content_id": str(source_content_id).strip(),
-            "source_capture_id": str(source_capture_id),
+            "source_package_id": source_package_id,
+            "source_capture_id": int(source_capture_id),
             "parser_contract": parser_contract,
-            "source_digest": str(source_digest).strip(),
             "raw_row_count": expected_row_count,
             "source_byte_count": int(source_byte_count),
             "source_time_quality": source_time_quality,
@@ -2172,47 +2073,41 @@ ORDER BY m.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
 def _breadth_source_version(
     cursor: Any,
     *,
-    namespace_id: str,
     target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str,
 ) -> dict[str, Any]:
     cursor.execute(
-        """SELECT DISTINCT r.source_content_id, r.source_capture_id::text,
+        """SELECT DISTINCT r.source_package_id, r.source_capture_id,
        c.source_available_at, c.source_time_quality, c.source_clock_role,
-       c.parser_contract, c.canonical_digest, c.normalized_count,
-       s.dataset_id, s.byte_sha, s.byte_count
-FROM stock.source_raw_daily r
-JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
-  AND c.capture_id=r.source_capture_id
-JOIN stock.source_contents s ON s.namespace_id=r.namespace_id
-  AND s.content_id=r.source_content_id
-WHERE r.namespace_id=%s::uuid AND r.session_date=%s::date AND r.package_sha256=%s
-ORDER BY r.source_capture_id::text, r.source_content_id LIMIT 2""",
-        (namespace_id, target_session, package_sha256),
+       c.parser_contract, c.normalized_count, s.dataset_id, s.byte_count
+FROM source_raw_daily r
+JOIN source_captures c ON c.capture_id=r.source_capture_id
+  AND c.source_package_id=r.source_package_id AND c.target_session=r.session_date
+JOIN source_packages s ON s.source_package_id=r.source_package_id
+WHERE r.session_date=%s::date AND r.source_package_id=%s
+ORDER BY r.source_capture_id, r.source_package_id LIMIT 2""",
+        (target_session, source_package_id),
     )
     rows = cursor.fetchall()
     if len(rows) != 1:
         raise TdxSectorMembersPgError(
             "SOURCE_VERSION_NOT_UNIQUE",
-            "目标日与包SHA没有唯一Raw捕获和内容引用",
+            "目标日与来源包数字ID没有唯一Raw捕获",
         )
     (
-        source_content_id,
+        source_package_id,
         source_capture_id,
         source_available_at,
         source_time_quality,
         source_clock_role,
         parser_contract,
-        source_digest,
         raw_count,
         dataset_id,
-        content_sha,
         source_byte_count,
     ) = rows[0]
     if (
         dataset_id != source_raw._DATASET_ID
-        or str(content_sha).strip() != package_sha256
         or type(raw_count) is not int
         or raw_count <= 0
     ):
@@ -2230,10 +2125,9 @@ ORDER BY r.source_capture_id::text, r.source_content_id LIMIT 2""",
        count(*) FILTER (WHERE bar_status='TARGET_PRESENT')::bigint,
        count(*) FILTER (WHERE bar_status='TARGET_MISSING')::bigint,
        count(*) FILTER (WHERE bar_status='READ_FAILED')::bigint
-FROM stock.source_raw_daily
-WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
-  AND session_date=%s::date AND package_sha256=%s""",
-        (namespace_id, source_capture_id, target_session, package_sha256),
+FROM source_raw_daily
+WHERE source_capture_id=%s AND session_date=%s::date AND source_package_id=%s""",
+        (source_capture_id, target_session, source_package_id),
     )
     raw_counts = cursor.fetchone()
     if int(raw_counts[0]) != raw_count or int(raw_counts[1]) != raw_count:
@@ -2244,18 +2138,14 @@ WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
     cursor.execute(
         """SELECT count(*)::bigint,
        count(DISTINCT source_symbol)::bigint,
-       count(DISTINCT source_capture_id)::bigint,
-       count(*) FILTER (WHERE source_capture_id=%s::uuid)::bigint
-FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
-  AND target_session=%s::date AND package_sha256=%s
+       count(DISTINCT source_capture_id)::bigint
+FROM source_symbol_price_profiles
+WHERE source_capture_id=%s AND target_session=%s::date AND source_package_id=%s
   AND profile_revision=%s""",
         (
             source_capture_id,
-            namespace_id,
-            source_capture_id,
             target_session,
-            package_sha256,
+            source_package_id,
             profile_revision,
         ),
     )
@@ -2264,7 +2154,6 @@ WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
         int(profile_counts[0]) != raw_count
         or int(profile_counts[1]) != raw_count
         or int(profile_counts[2]) != 1
-        or int(profile_counts[3]) != raw_count
     ):
         raise TdxSectorMembersPgError(
             "PROFILE_SOURCE_IDENTITY_MISMATCH",
@@ -2272,11 +2161,9 @@ WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
         )
     return {
         "target_session": target_session,
-        "package_sha256": package_sha256,
-        "source_content_id": str(source_content_id).strip(),
-        "source_capture_id": str(source_capture_id),
+        "source_package_id": int(source_package_id),
+        "source_capture_id": int(source_capture_id),
         "source_symbol_count": raw_count,
-        "source_digest": str(source_digest).strip(),
         "parser_contract": parser_contract,
         "source_time_quality": str(source_time_quality),
         "source_clock_role": str(source_clock_role),
@@ -2290,13 +2177,13 @@ WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
 
 def _validate_breadth_request(
     *,
-    snapshot_id: str,
+    snapshot_id: int,
     board_kind: str,
     board_native_id: str | None,
     before_session: date,
     after_session: date,
     research_cutoff: date,
-    identities: Sequence[str],
+    identities: Sequence[Any],
     offset: int,
     limit: int,
     member_offset: int,
@@ -2304,7 +2191,8 @@ def _validate_breadth_request(
     include_core_transitions: bool,
     core_transition_kind: str,
 ) -> None:
-    _validate_snapshot_uuid(snapshot_id)
+    if type(snapshot_id) is not int or snapshot_id <= 0:
+        raise TdxSectorMembersPgError("SNAPSHOT_ID_INVALID", "快照ID必须为正BIGINT")
     if board_kind not in {"INDUSTRY", "CONCEPT"}:
         raise TdxSectorMembersPgError(
             "BOARD_KIND_INVALID", "板块类型必须为INDUSTRY或CONCEPT"
@@ -2345,15 +2233,21 @@ def _validate_breadth_request(
             "BREADTH_SESSION_RANGE_INVALID",
             "对照会话必须递增且结束日不晚于显式研究截止日",
         )
-    if len(identities) != 4 or any(not isinstance(value, str) for value in identities):
-        raise TdxSectorMembersPgError(
-            "BREADTH_PROFILE_IDENTITY_INVALID",
-            "两端必须提供package SHA和profile revision SHA",
+    if (
+        len(identities) != 4
+        or type(identities[0]) is not int
+        or type(identities[2]) is not int
+        or identities[0] <= 0
+        or identities[2] <= 0
+        or any(
+            not isinstance(value, str)
+            or re.fullmatch(r"PROFILE_R[0-9]{2}", value) is None
+            for value in (identities[1], identities[3])
         )
-    if any(_SHA256.fullmatch(value) is None for value in identities):
+    ):
         raise TdxSectorMembersPgError(
             "BREADTH_PROFILE_IDENTITY_INVALID",
-            "两端必须提供package SHA和profile revision SHA",
+            "两端必须提供正数来源包ID及显式PROFILE_RNN画像修订",
         )
     if (
         type(offset) is not int
@@ -2558,7 +2452,7 @@ def _core_transition_summary(
                 return {
                     "target_session": source["target_session"].isoformat(),
                     "source_capture_id": source["source_capture_id"],
-                    "package_sha256": source["package_sha256"],
+                    "source_package_id": source["source_package_id"],
                     "profile_revision": source["profile_revision"],
                     "raw_close": row.get(f"{side}_raw_close"),
                     "raw_price_quality": row.get(f"{side}_raw_price_quality"),
@@ -2930,7 +2824,7 @@ def _summarize_sector_breadth_rows(
                     "board_native_id": board["board_native_id"],
                     "target_session": after_source["target_session"].isoformat(),
                     "research_cutoff": after_source["research_cutoff"].isoformat(),
-                    "package_sha256": after_source["package_sha256"],
+                    "source_package_id": after_source["source_package_id"],
                     "profile_revision": after_source["profile_revision"],
                     "offset": 0,
                     "limit": 30,
@@ -2948,15 +2842,15 @@ def _summarize_sector_breadth_rows(
 def query_sector_breadth(
     config: dict[str, Any],
     *,
-    snapshot_id: str,
+    snapshot_id: int,
     board_kind: str,
     board_native_id: str | None,
     before_session: date,
     after_session: date,
     research_cutoff: date,
-    before_package_sha256: str,
+    before_source_package_id: int,
     before_profile_revision: str,
-    after_package_sha256: str,
+    after_source_package_id: int,
     after_profile_revision: str,
     official_calendar_id: str,
     official_calendar_revision: str,
@@ -2968,9 +2862,9 @@ def query_sector_breadth(
     core_transition_kind: str = "ALL",
 ) -> dict[str, Any]:
     identities = (
-        before_package_sha256,
+        before_source_package_id,
         before_profile_revision,
-        after_package_sha256,
+        after_source_package_id,
         after_profile_revision,
     )
     _validate_breadth_request(
@@ -2995,13 +2889,13 @@ def query_sector_breadth(
         )
 
     try:
-        with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+        with _transaction(config, write=False) as (_connection, cursor, _unused):
             cursor.execute(
-                """SELECT snapshot_id::text, source_kind, source_file_sha256,
+                """SELECT snapshot_id, source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
-FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
+FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
                 (snapshot_id,),
             )
             snapshot_row = cursor.fetchone()
@@ -3021,18 +2915,16 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
             try:
                 before_profile = _snapshot_for_session(
                     cursor,
-                    namespace_id=namespace_id,
                     target_session=before_session,
                     max_target_session=research_cutoff,
-                    package_sha256=before_package_sha256,
+                    source_package_id=before_source_package_id,
                     profile_revision=before_profile_revision,
                 )
                 after_profile = _snapshot_for_session(
                     cursor,
-                    namespace_id=namespace_id,
                     target_session=after_session,
                     max_target_session=research_cutoff,
-                    package_sha256=after_package_sha256,
+                    source_package_id=after_source_package_id,
                     profile_revision=after_profile_revision,
                 )
             except PriceProfilePgError as error:
@@ -3051,16 +2943,14 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
 
             before_source = _breadth_source_version(
                 cursor,
-                namespace_id=namespace_id,
                 target_session=before_session,
-                package_sha256=before_package_sha256,
+                source_package_id=before_source_package_id,
                 profile_revision=before_profile_revision,
             )
             after_source = _breadth_source_version(
                 cursor,
-                namespace_id=namespace_id,
                 target_session=after_session,
-                package_sha256=after_package_sha256,
+                source_package_id=after_source_package_id,
                 profile_revision=after_profile_revision,
             )
             before_source["research_cutoff"] = research_cutoff
@@ -3074,11 +2964,10 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
             cursor.execute(
                 """SELECT count(DISTINCT c.board_native_id)::bigint,
        count(m.source_symbol)::bigint
-FROM stock.tdx_sector_catalog c
-LEFT JOIN stock.tdx_sector_members m
-  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
- AND m.board_native_id=c.board_native_id
-WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
+FROM tdx_sector_catalog c
+LEFT JOIN tdx_sector_members m
+  ON m.catalog_id=c.id
+WHERE c.snapshot_id=%s AND c.board_kind=%s"""
                 + filter_sql,
                 (snapshot_id, board_kind, *filter_params),
             )
@@ -3096,8 +2985,8 @@ WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
 
             cursor.execute(
                 """SELECT c.board_native_id
-FROM stock.tdx_sector_catalog c
-WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
+FROM tdx_sector_catalog c
+WHERE c.snapshot_id=%s AND c.board_kind=%s"""
                 + filter_sql
                 + ' ORDER BY c.board_native_id COLLATE "C" OFFSET %s LIMIT %s',
                 (
@@ -3171,36 +3060,33 @@ SELECT c.board_kind, c.board_native_id, c.board_name,
        x.ma_slope20_pair_compatibility AS ma_slope20_pair_compatibility,
        x.ma_slope20_pair_reason AS ma_slope20_pair_reason,
        x.ma_slope20_transition_status AS ma_slope20_transition_status
-FROM stock.tdx_sector_catalog c
-LEFT JOIN stock.tdx_sector_members m
-  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
- AND m.board_native_id=c.board_native_id
+FROM tdx_sector_catalog c
+LEFT JOIN tdx_sector_members m
+  ON m.catalog_id=c.id
 LEFT JOIN classified x ON x.source_symbol=m.source_symbol
-LEFT JOIN stock.source_raw_daily rb
-  ON rb.namespace_id=%s::uuid AND rb.source_capture_id=%s::uuid
+LEFT JOIN source_raw_daily rb
+  ON rb.source_capture_id=%s
  AND rb.source_symbol=m.source_symbol AND rb.session_date=%s::date
- AND rb.package_sha256=%s
-LEFT JOIN stock.source_raw_daily ra
-  ON ra.namespace_id=%s::uuid AND ra.source_capture_id=%s::uuid
+ AND rb.source_package_id=%s
+LEFT JOIN source_raw_daily ra
+  ON ra.source_capture_id=%s
  AND ra.source_symbol=m.source_symbol AND ra.session_date=%s::date
- AND ra.package_sha256=%s
-WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
+ AND ra.source_package_id=%s
+WHERE c.snapshot_id=%s AND c.board_kind=%s"""
                 + member_filter_sql
                 + """
 ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
 """
             )
             parameters = (
-                *_profile_change_snapshot_parameters(namespace_id, before_profile),
-                *_profile_change_snapshot_parameters(namespace_id, after_profile),
-                namespace_id,
+                *_profile_change_snapshot_parameters(before_profile),
+                *_profile_change_snapshot_parameters(after_profile),
                 before_source["source_capture_id"],
                 before_session,
-                before_package_sha256,
-                namespace_id,
+                before_source_package_id,
                 after_source["source_capture_id"],
                 after_session,
-                after_package_sha256,
+                after_source_package_id,
                 snapshot_id,
                 board_kind,
                 page_board_ids,
@@ -3233,7 +3119,6 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
         "snapshot": {
             "snapshot_id": source_snapshot["snapshot_id"],
             "source_kind": source_snapshot["source_kind"],
-            "source_file_sha256": source_snapshot["source_file_sha256"],
             "source_path_role": source_snapshot["source_path_role"],
             "source_file_size": source_snapshot["source_file_size"],
             "source_observed_at": source_snapshot["observed_at"],
@@ -3284,12 +3169,12 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C"
 def query_sector_strength(
     config: dict[str, Any],
     *,
-    snapshot_id: str,
+    snapshot_id: int,
     board_kind: str,
     board_native_id: str | None,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str | None,
     official_calendar_id: str,
     official_calendar_revision: str,
@@ -3297,7 +3182,8 @@ def query_sector_strength(
     read_context: TdxSectorStrengthReadContext | None = None,
 ) -> dict[str, Any]:
     """在一个只读快照中读取精确板块、目标价格画像与同包Raw历史。"""
-    _validate_snapshot_uuid(snapshot_id)
+    if type(snapshot_id) is not int or snapshot_id <= 0:
+        raise TdxSectorMembersPgError("SNAPSHOT_ID_INVALID", "快照ID必须为正BIGINT")
     if board_kind not in {"INDUSTRY", "CONCEPT"}:
         raise TdxSectorMembersPgError(
             "BOARD_KIND_INVALID", "板块类型必须为INDUSTRY或CONCEPT"
@@ -3318,13 +3204,16 @@ def query_sector_strength(
         raise TdxSectorMembersPgError(
             "SESSION_DATE_INVALID", "目标官方会话必须不晚于显式研究截止日"
         )
-    if _SHA256.fullmatch(package_sha256) is None:
+    if type(source_package_id) is not int or source_package_id <= 0:
         raise TdxSectorMembersPgError(
-            "PACKAGE_SHA_INVALID", "来源包SHA必须是64位小写十六进制值"
+            "SOURCE_PACKAGE_ID_INVALID", "来源包ID必须是正BIGINT"
         )
-    if profile_revision is not None and _SHA256.fullmatch(profile_revision) is None:
+    if (
+        profile_revision is not None
+        and re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
+    ):
         raise TdxSectorMembersPgError(
-            "PROFILE_REVISION_INVALID", "画像修订SHA必须是64位小写十六进制值"
+            "PROFILE_REVISION_INVALID", "画像修订必须为显式PROFILE_RNN标签"
         )
     if (
         not official_calendar_id
@@ -3354,20 +3243,20 @@ def query_sector_strength(
             (
                 read_context.connection,
                 read_context.cursor,
-                read_context.namespace_id,
+                None,
             )
         )
         if read_context is not None
         else _transaction(config, write=False)
     )
     try:
-        with transaction_context as (_connection, cursor, namespace_id):
+        with transaction_context as (_connection, cursor, _unused):
             cursor.execute(
-                """SELECT snapshot_id::text, source_kind, source_file_sha256,
+                """SELECT snapshot_id, source_kind,
        source_path_role, source_file_size, observed_at, source_valid_on,
        source_known_at, source_available_at, clock_quality, research_mode,
        parse_contract_version, rows_declared, source_quality
-FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
+FROM tdx_sector_source_snapshots WHERE snapshot_id=%s""",
                 (snapshot_id,),
             )
             snapshot_row = cursor.fetchone()
@@ -3386,27 +3275,26 @@ FROM stock.tdx_sector_source_snapshots WHERE snapshot_id=%s::uuid""",
                 )
 
             cursor.execute(
-                """SELECT DISTINCT source_capture_id::text
-FROM stock.source_raw_daily
-WHERE namespace_id=%s::uuid AND session_date=%s::date
-  AND package_sha256=%s
-ORDER BY source_capture_id::text LIMIT 2""",
-                (namespace_id, target_session, package_sha256),
+                """SELECT DISTINCT source_capture_id
+FROM source_raw_daily
+WHERE session_date=%s::date
+  AND source_package_id=%s
+ORDER BY source_capture_id LIMIT 2""",
+                (target_session, source_package_id),
             )
-            raw_capture_ids = [str(row[0]) for row in cursor.fetchall()]
+            raw_capture_ids = [int(row[0]) for row in cursor.fetchall()]
             if len(raw_capture_ids) != 1:
                 raise TdxSectorMembersPgError(
                     "SOURCE_VERSION_NOT_UNIQUE",
-                    "目标日与包SHA没有唯一Raw捕获和内容引用",
+                    "目标日与来源包ID没有唯一Raw捕获",
                 )
             source_capture_id = raw_capture_ids[0]
             cursor.execute(
                 """SELECT DISTINCT profile_revision
-FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND target_session=%s::date
-  AND source_capture_id=%s::uuid AND package_sha256=%s
+FROM source_symbol_price_profiles
+WHERE target_session=%s::date AND source_capture_id=%s AND source_package_id=%s
 ORDER BY profile_revision""",
-                (namespace_id, target_session, source_capture_id, package_sha256),
+                (target_session, source_capture_id, source_package_id),
             )
             profile_revisions = [str(row[0]).strip() for row in cursor.fetchall()]
             selected_profile = profile_revision
@@ -3429,9 +3317,8 @@ ORDER BY profile_revision""",
                 )
 
             validation_key = (
-                namespace_id,
                 source_capture_id,
-                package_sha256,
+                source_package_id,
                 target_session,
                 research_cutoff,
                 selected_profile,
@@ -3448,10 +3335,9 @@ ORDER BY profile_revision""",
                 try:
                     profile_snapshot = _snapshot_for_session(
                         cursor,
-                        namespace_id=namespace_id,
                         target_session=target_session,
                         max_target_session=research_cutoff,
-                        package_sha256=package_sha256,
+                        source_package_id=source_package_id,
                         profile_revision=selected_profile,
                     )
                 except PriceProfilePgError as error:
@@ -3477,9 +3363,8 @@ ORDER BY profile_revision""",
             if source_version is None:
                 source_version = _breadth_source_version(
                     cursor,
-                    namespace_id=namespace_id,
                     target_session=target_session,
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     profile_revision=selected_profile,
                 )
                 if read_context is not None:
@@ -3495,11 +3380,10 @@ ORDER BY profile_revision""",
             cursor.execute(
                 """SELECT count(DISTINCT c.board_native_id)::bigint,
        count(m.source_symbol)::bigint
-FROM stock.tdx_sector_catalog c
-LEFT JOIN stock.tdx_sector_members m
-  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
- AND m.board_native_id=c.board_native_id
-WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
+FROM tdx_sector_catalog c
+LEFT JOIN tdx_sector_members m
+  ON m.catalog_id=c.id
+WHERE c.snapshot_id=%s AND c.board_kind=%s"""
                 + board_filter_sql,
                 (snapshot_id, board_kind, *board_filter_params),
             )
@@ -3517,11 +3401,10 @@ WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
             cursor.execute(
                 """SELECT c.board_kind, c.board_native_id, c.board_name,
        m.source_symbol, m.membership_quality, m.source_record_ordinal
-FROM stock.tdx_sector_catalog c
-LEFT JOIN stock.tdx_sector_members m
-  ON m.snapshot_id=c.snapshot_id AND m.board_kind=c.board_kind
- AND m.board_native_id=c.board_native_id
-WHERE c.snapshot_id=%s::uuid AND c.board_kind=%s"""
+FROM tdx_sector_catalog c
+LEFT JOIN tdx_sector_members m
+  ON m.catalog_id=c.id
+WHERE c.snapshot_id=%s AND c.board_kind=%s"""
                 + board_filter_sql
                 + """
 ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
@@ -3568,9 +3451,8 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
                     input_read_counts,
                 ) = _read_strength_inputs(
                     cursor,
-                    namespace_id=namespace_id,
                     source_capture_id=source_version["source_capture_id"],
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     target_session=target_session,
                     profile_revision=selected_profile,
                     official_calendar_id=official_calendar_id,
@@ -3618,7 +3500,6 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
                     row["calculation_scope"],
                     row["producer_contract"],
                     row["producer_version"],
-                    row["producer_contract_sha256"],
                 )
                 for row in profile_rows
             }
@@ -3641,7 +3522,6 @@ ORDER BY c.board_native_id COLLATE "C", m.source_symbol COLLATE "C" """,
         raise TdxSectorMembersPgError(error.code, str(error)) from error
 
     return {
-        "namespace_id": namespace_id,
         "snapshot": source_snapshot,
         "source_version": source_version,
         "profile_snapshot": profile_snapshot,
@@ -3840,12 +3720,3 @@ def _validate_page(offset: int, limit: int) -> None:
         )
     if type(limit) is not int or not 1 <= limit <= MAX_PAGE_SIZE:
         raise TdxSectorMembersPgError("PAGE_LIMIT_INVALID", "分页大小必须在1至100之间")
-
-
-def _validate_snapshot_uuid(value: str) -> None:
-    try:
-        uuid.UUID(value)
-    except (AttributeError, ValueError) as error:
-        raise TdxSectorMembersPgError(
-            "SNAPSHOT_ID_INVALID", "snapshot_id必须是UUID"
-        ) from error

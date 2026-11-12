@@ -131,7 +131,7 @@ $("profileBreadthOpenFull").addEventListener("click", () => {
   const exact = state.profileSnapshots.find(
     (item) =>
       item.target_session === snapshot.target_session &&
-      item.package_sha256 === snapshot.package_sha256 &&
+      item.source_package_id === snapshot.source_package_id &&
       item.profile_revision === snapshot.profile_revision,
   );
   if (!exact) {
@@ -223,10 +223,10 @@ $("versionSelect").addEventListener("change", () => {
     binding &&
     (!selected ||
       selected.target_session !== binding.target_session ||
-      selected.package_sha256 !== binding.package_sha256)
+      selected.source_package_id !== binding.source_package_id)
   )
     clearComparisonBasket(
-      "预览来源日期或包SHA已切换；旧临时对照已失效并清空。",
+      "预览来源日期或来源包ID已切换；旧临时对照已失效并清空。",
     );
 });
 $("compareSymbols").addEventListener("click", compareSelectedSymbols);

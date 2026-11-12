@@ -298,7 +298,7 @@ def _validate_config(config: Any) -> None:
         if (
             instance_id != "BIND_DURING_EXPLICIT_ENABLEMENT"
             or cluster_id != "BIND_DURING_EXPLICIT_ENABLEMENT"
-            or app.get("migration_digest") != "BIND_DURING_EXPLICIT_ENABLEMENT"
+            or app.get("migration_version") != "BIND_DURING_EXPLICIT_ENABLEMENT"
         ):
             raise DiagnosticError(
                 "CONFIG_INVALID", "未部署状态必须使用明确的实例与簇绑定占位值"
@@ -318,10 +318,11 @@ def _validate_config(config: Any) -> None:
             or int(cluster_id) <= 0
         ):
             raise DiagnosticError("CONFIG_INVALID", "已部署状态的实例或簇身份无效")
-        if not isinstance(app.get("migration_digest"), str) or not re.fullmatch(
-            r"[0-9a-f]{64}", app["migration_digest"]
+        if (
+            type(app.get("migration_version")) is not int
+            or app["migration_version"] <= 0
         ):
-            raise DiagnosticError("CONFIG_INVALID", "已部署状态的迁移账本摘要无效")
+            raise DiagnosticError("CONFIG_INVALID", "已部署状态的迁移账本版本无效")
     if app.get("business_login") != "stock_a":
         raise DiagnosticError(
             "CONFIG_INVALID", "PostgreSQL业务连接账号必须固定为stock_a"

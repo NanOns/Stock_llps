@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-import hashlib
 from importlib.resources import files
 import json
 import re
@@ -23,16 +22,15 @@ _CALENDAR_EVIDENCE_VERIFIED = "VERIFIED_EXCHANGE_NOTICES_CROSSCHECKED"
 
 def _calendar_payload(
     resource_name: str, year: int
-) -> tuple[dict[str, Any], str, tuple[date, ...]]:
+) -> tuple[dict[str, Any], tuple[date, ...]]:
     try:
         raw = files("stock_a.research.calendars").joinpath(resource_name).read_bytes()
     except OSError as error:
         raise ResearchEntryError(
             "CALENDAR_RESOURCE_UNAVAILABLE", "随包日历资源不可读取"
         ) from error
-    canonical_raw = raw.replace(b"\r\n", b"\n")
     try:
-        payload = json.loads(canonical_raw.decode("utf-8"))
+        payload = json.loads(raw.decode("utf-8"))
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise ResearchEntryError(
             "CALENDAR_RESOURCE_INVALID", "内置日历资源无法解析"
@@ -129,7 +127,7 @@ def _calendar_payload(
         )
     if payload.get("calendar_id") != "CN_SSE_SZSE_EQUITY":
         raise ResearchEntryError("CALENDAR_RESOURCE_INVALID", "内置日历市场身份不匹配")
-    return payload, hashlib.sha256(canonical_raw).hexdigest(), sessions
+    return payload, sessions
 
 
 def _parse_target(value: str) -> date:
@@ -166,17 +164,17 @@ def _load_calendar(
         selected_years_descending.append(year)
         year -= 1
     selected_years = tuple(reversed(selected_years_descending))
-    loaded: list[tuple[int, dict[str, Any], str, tuple[date, ...]]] = []
+    loaded: list[tuple[int, dict[str, Any], tuple[date, ...]]] = []
     for year in selected_years:
-        payload, digest, sessions = _calendar_payload(resources[year], year)
-        loaded.append((year, payload, digest, sessions))
+        payload, sessions = _calendar_payload(resources[year], year)
+        loaded.append((year, payload, sessions))
     target_item = next(item for item in loaded if item[0] == target.year)
-    target_sessions = target_item[3]
+    target_sessions = target_item[2]
     if target not in target_sessions:
         raise ResearchEntryError(
             "TARGET_NOT_TRADING_SESSION", "目标日期不是资源中已核验的交易会话"
         )
-    sessions = tuple(day for _, _, _, year_sessions in loaded for day in year_sessions)
+    sessions = tuple(day for _, _, year_sessions in loaded for day in year_sessions)
     if any(left >= right for left, right in zip(sessions, sessions[1:])):
         raise ResearchEntryError(
             "CALENDAR_RESOURCE_INVALID", "跨年度日历资源重叠或错序"
@@ -220,10 +218,9 @@ def _load_calendar(
             "source_snapshot_as_of": payload["source_snapshot_as_of"],
             "coverage": [payload["valid_from"], payload["valid_through"]],
             "session_count": len(year_sessions),
-            "resource_sha256": digest,
             "source_urls": payload["source_urls"],
         }
-        for year, payload, digest, year_sessions in loaded
+        for year, payload, year_sessions in loaded
     )
     metadata = (*metadata[:-1], {**metadata[-1], "coverage_context": coverage_context})
     revisions = "+".join(f"{item['year']}:{item['revision']}" for item in metadata)

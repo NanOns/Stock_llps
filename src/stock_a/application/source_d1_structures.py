@@ -97,8 +97,7 @@ def _history_observations(
     symbol: str,
     sessions: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
-    namespace_id: str,
-    package_sha256: str,
+    source_package_id: int,
 ) -> tuple[
     tuple[CoreObservation, ...],
     tuple[Bar, ...],
@@ -127,12 +126,11 @@ def _history_observations(
             or day not in days
             or day in row_map
             or row.get("source_symbol") != normalized
-            or row.get("namespace_id") != namespace_id
-            or row.get("package_sha256") != package_sha256
+            or row.get("source_package_id") != source_package_id
         ):
             raise PgResearchBindingError(
                 "D1_STRUCTURE_RAW_BINDING_INVALID",
-                "D1结构历史混入错日、错代码、错namespace或错包",
+                "D1结构历史混入错日、错代码或错包",
             )
         row_map[day] = row
 
@@ -232,13 +230,10 @@ def _source_row_identity(row: Mapping[str, Any] | None) -> dict[str, Any]:
         "bar_reason": row.get("bar_reason"),
         "price_quality": row.get("price_quality"),
         "price_reason": row.get("price_reason"),
-        "namespace_id": row.get("namespace_id"),
-        "package_sha256": row.get("package_sha256"),
-        "source_capture_id": str(row["source_capture_id"])
+        "source_capture_id": int(row["source_capture_id"])
         if row.get("source_capture_id") is not None
         else None,
-        "source_content_id": row.get("source_content_id"),
-        "source_entry_sha256": row.get("source_entry_sha256"),
+        "source_package_id": row.get("source_package_id"),
         "parser_contract": row.get("parser_contract"),
         "source_clock_role": row.get("source_clock_role"),
         "source_time_quality": row.get("source_time_quality"),
@@ -441,8 +436,7 @@ def _generate_day(
     observations: Sequence[CoreObservation],
     bars: Sequence[Bar],
     row_map: Mapping[date, Mapping[str, Any]],
-    namespace_id: str,
-    package_sha256: str,
+    source_package_id: int,
     calendar_id: str,
     calendar_revision: str,
     core_previous: Mapping[str, FieldValue] | None,
@@ -453,10 +447,9 @@ def _generate_day(
     day = sessions[target_index]
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
     window_ref = (
-        f"{namespace_id}:{package_sha256}:{symbol}:"
-        f"{sessions[0].isoformat()}:{day.isoformat()}"
+        f"{source_package_id}:{symbol}:{sessions[0].isoformat()}:{day.isoformat()}"
     )
-    source_ref = f"stock.source_raw_daily:{namespace_id}:{package_sha256}:{symbol}"
+    source_ref = f"source_raw_daily:{source_package_id}:{symbol}"
     statuses = tuple(
         (position, "ACTUAL" if item.state == "ACTUAL" else "UNKNOWN")
         for position, item in enumerate(observations[: target_index + 1])
@@ -497,7 +490,7 @@ def _generate_day(
             continue
         value = generate(
             kind,
-            entity_id=f"SOURCE_SYMBOL_ONLY:{namespace_id}:{symbol}",
+            entity_id=f"SOURCE_SYMBOL_ONLY:{symbol}",
             ordinal=target_index,
             coordinate_id=coordinate_id,
             source_ref=source_ref,
@@ -573,8 +566,7 @@ def _range_candidates_for_previous_session(
     sessions: Sequence[date],
     observations: Sequence[CoreObservation],
     bars: Sequence[Bar],
-    namespace_id: str,
-    package_sha256: str,
+    source_package_id: int,
     calendar_id: str,
     calendar_revision: str,
     core_previous: Mapping[str, FieldValue] | None,
@@ -594,10 +586,9 @@ def _range_candidates_for_previous_session(
     previous_index = target_index - 1
     day = sessions[previous_index]
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{symbol}"
-    source_ref = f"stock.source_raw_daily:{namespace_id}:{package_sha256}:{symbol}"
+    source_ref = f"source_raw_daily:{source_package_id}:{symbol}"
     window_ref = (
-        f"{namespace_id}:{package_sha256}:{symbol}:"
-        f"{sessions[0].isoformat()}:{day.isoformat()}"
+        f"{source_package_id}:{symbol}:{sessions[0].isoformat()}:{day.isoformat()}"
     )
     statuses = tuple(
         (position, "ACTUAL" if item.state == "ACTUAL" else "UNKNOWN")
@@ -616,7 +607,7 @@ def _range_candidates_for_previous_session(
         }
         value = generate(
             kind,
-            entity_id=f"SOURCE_SYMBOL_ONLY:{namespace_id}:{symbol}",
+            entity_id=f"SOURCE_SYMBOL_ONLY:{symbol}",
             ordinal=previous_index,
             coordinate_id=coordinate_id,
             source_ref=source_ref,
@@ -680,8 +671,7 @@ def _pool_candidate_result(
     candidate: Mapping[str, Any],
     sessions: Sequence[date],
     target_index: int,
-    namespace_id: str,
-    package_sha256: str,
+    source_package_id: int,
     calendar_id: str,
     calendar_revision: str,
     history_inputs=None,
@@ -694,8 +684,7 @@ def _pool_candidate_result(
             symbol=symbol,
             sessions=sessions,
             history_rows=candidate["history_rows"],
-            namespace_id=namespace_id,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
         )
     observations, bars, row_map, _decoded_by_session = history_inputs
     core_cache: dict[int, dict[str, FieldValue]] = {}
@@ -733,8 +722,7 @@ def _pool_candidate_result(
             sessions=sessions,
             observations=observations,
             bars=bars,
-            namespace_id=namespace_id,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             calendar_id=calendar_id,
             calendar_revision=calendar_revision,
             core_previous=core_at(target_index - 2),
@@ -806,8 +794,7 @@ def _pool_candidate_result(
                     sessions=sessions,
                     observations=observations,
                     bars=bars,
-                    namespace_id=namespace_id,
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     calendar_id=calendar_id,
                     calendar_revision=calendar_revision,
                     core_previous=older_core,
@@ -889,8 +876,7 @@ def _pool_candidate_result(
         observations=observations,
         bars=bars,
         row_map=row_map,
-        namespace_id=namespace_id,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         calendar_id=calendar_id,
         calendar_revision=calendar_revision,
         core_previous=previous_core,
@@ -929,8 +915,7 @@ def _structure_history_core_previews(
     symbol: str,
     sessions: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
-    namespace_id: str,
-    package_sha256: str,
+    source_package_id: int,
     preview_context,
     decoded_by_session: Mapping[date, Any] | None = None,
 ) -> dict[date, dict[str, Any]]:
@@ -939,9 +924,8 @@ def _structure_history_core_previews(
         event_sessions=sessions,
         followup_session=sessions[-1],
         session_dates=sessions,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         history_rows=history_rows,
-        namespace_id=namespace_id,
         context=preview_context,
         _decoded_by_session=decoded_by_session,
     )
@@ -1199,7 +1183,7 @@ def discover_source_d1_structures(
     target_session: date,
     research_cutoff: date,
     sessions: Sequence[date],
-    package_sha256: str,
+    source_package_id: int,
     offset: int,
     limit: int,
     structure_symbol: str | None = None,
@@ -1226,8 +1210,8 @@ def discover_source_d1_structures(
         or offset < 0
         or type(limit) is not int
         or not 1 <= limit <= 100
-        or not isinstance(package_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
+        or type(source_package_id) is not int
+        or source_package_id <= 0
         or type(structure_changes) is not bool
         or type(material_changes_only) is not bool
         or type(include_source_symbol_change_summary) is not bool
@@ -1286,7 +1270,6 @@ def discover_source_d1_structures(
     )
     calendar_id = calendar_payload["calendar_id"]
     target_calendar_revision = calendar_revision
-    target_calendar_sha256 = calendar_meta["resource_sha256"]
     target_index = len(days) - 1
     previous_session = days[target_index - 1] if target_index >= 1 else None
     structure_preview_context = (
@@ -1346,7 +1329,7 @@ def discover_source_d1_structures(
         page = read_raw_daily_history_page(
             config,
             target_session=target_session,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             sessions=days,
             offset=source_offset,
             limit=100,
@@ -1370,14 +1353,13 @@ def discover_source_d1_structures(
                 or len(target_matches) != 1
                 or any(
                     row.get("source_symbol") != symbol
-                    or row.get("package_sha256") != package_sha256
-                    or row.get("namespace_id") != page["namespace_id"]
+                    or row.get("source_package_id") != source_package_id
                     for row in rows
                 )
             ):
                 raise PgResearchBindingError(
                     "D1_STRUCTURE_RAW_HISTORY_INVALID",
-                    "来源历史重复、缺唯一目标行或跨代码、包、namespace、截止日",
+                    "来源历史重复、缺唯一目标行或跨代码、来源包、截止日",
                 )
             seen_symbols.add(symbol)
             last_symbol = symbol
@@ -1387,8 +1369,7 @@ def discover_source_d1_structures(
             source_context = read_source_version_context(
                 config,
                 target_session=target_session,
-                package_sha256=package_sha256,
-                namespace_id=page["namespace_id"],
+                source_package_id=source_package_id,
                 target_raw_rows=target_rows,
                 expected_raw_row_count=page["version_row_count"],
             )
@@ -1399,15 +1380,14 @@ def discover_source_d1_structures(
             page["version_status"] != "CLOSED"
             or not page["partition_closed"]
             or page["total_count"] != page["version_row_count"]
-            or page["namespace_id"] != source_context.get("namespace_id")
             or page["target_session"] != target_session.isoformat()
-            or page["package_sha256"] != package_sha256
+            or page["source_package_id"] != source_package_id
             or source_context.get("status") != "AVAILABLE"
             or context.get("raw_row_count") != page["version_row_count"]
             or page["version_expected_row_count"]
             != context.get("capture_expected_row_count")
             or any(
-                row.get("source_content_id") != source_context.get("source_content_id")
+                row.get("source_package_id") != source_context.get("source_package_id")
                 or str(row.get("source_capture_id"))
                 != str(source_context.get("source_capture_id"))
                 for row in target_rows
@@ -1426,16 +1406,14 @@ def discover_source_d1_structures(
                     symbol=candidate["source_symbol"],
                     sessions=days,
                     history_rows=candidate["history_rows"],
-                    namespace_id=page["namespace_id"],
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                 )
                 history_rows_decoded += len(history_inputs[2])
                 core_previews = _structure_history_core_previews(
                     symbol=candidate["source_symbol"],
                     sessions=days,
                     history_rows=candidate["history_rows"],
-                    namespace_id=page["namespace_id"],
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     preview_context=structure_preview_context,
                     decoded_by_session=history_inputs[3],
                 )
@@ -1445,8 +1423,7 @@ def discover_source_d1_structures(
                     candidate=candidate,
                     sessions=days,
                     target_index=target_index,
-                    namespace_id=page["namespace_id"],
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     calendar_id=calendar_id,
                     calendar_revision=target_calendar_revision,
                     history_inputs=history_inputs,
@@ -1499,8 +1476,7 @@ def discover_source_d1_structures(
                     symbol=candidate["source_symbol"],
                     sessions=days,
                     history_rows=candidate["history_rows"],
-                    namespace_id=page["namespace_id"],
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     core_previews_by_session=core_previews,
                     history_inputs=history_inputs,
                 )
@@ -1801,7 +1777,6 @@ def discover_source_d1_structures(
         "calendar": {
             "calendar_id": calendar_id,
             "calendar_revision": target_calendar_revision,
-            "calendar_sha256": target_calendar_sha256,
             "official_session_count": len(days),
             "history_start": days[0].isoformat(),
             "history_end": days[-1].isoformat(),
@@ -1911,10 +1886,6 @@ def discover_source_d1_structures(
             },
             "filtered_anchor_count": filtered_anchor_count,
             "source_symbol_anchor_details": selected_change_detail,
-            "material_change_status_counts_by_type": {
-                kind: dict(sorted(material_change_status_counts_by_type[kind].items()))
-                for kind in STRUCTURE_TYPES
-            },
             "source_symbol_material_summary": source_symbol_material_summary,
             "source_symbol_d1_details": (
                 source_symbol_d1_details if include_source_symbol_d1_details else None
@@ -1997,8 +1968,7 @@ def evaluate_source_d1_structure_timeline(
     symbol: str,
     sessions: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
-    namespace_id: str,
-    package_sha256: str,
+    source_package_id: int,
     core_previews_by_session: Mapping[date, Mapping[str, Any]],
     history_inputs=None,
 ) -> dict[str, Any]:
@@ -2009,8 +1979,7 @@ def evaluate_source_d1_structure_timeline(
             symbol=normalized,
             sessions=sessions,
             history_rows=history_rows,
-            namespace_id=namespace_id,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
         )
     observations, bars, row_map, _decoded_by_session = history_inputs
     if set(core_previews_by_session) != set(sessions):
@@ -2060,8 +2029,7 @@ def evaluate_source_d1_structure_timeline(
             observations=observations,
             bars=bars,
             row_map=row_map,
-            namespace_id=namespace_id,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             calendar_id="OFFICIAL_SESSION_CALENDAR",
             calendar_revision="SOURCE_WINDOW_BOUND",
             core_previous=previous_fields,
@@ -2281,9 +2249,7 @@ def discover_source_d1_prior_support_reference(
     symbol: str,
     sessions: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
-    namespace_id: str,
-    package_sha256: str,
-    source_content_id: str,
+    source_package_id: int,
     parser_contract: str | None = None,
 ) -> dict[str, Any]:
     """按单股历史生成截至窗口末会话已可见的来源支撑参考。"""
@@ -2292,27 +2258,25 @@ def discover_source_d1_prior_support_reference(
         not days
         or tuple(sorted(set(days))) != days
         or len(days) > 75
-        or not isinstance(source_content_id, str)
-        or not source_content_id
+        or type(source_package_id) is not int
+        or source_package_id <= 0
     ):
         raise PgResearchBindingError(
             "D1_SOURCE_PRIOR_REFERENCE_REQUEST_INVALID",
-            "单股D1前态需要完整内容身份及最多75个递增官方会话",
+            "单股D1前态需要正数来源包ID及最多75个递增官方会话",
         )
     normalized = symbol.strip().upper()
     history_inputs = _history_observations(
         symbol=normalized,
         sessions=days,
         history_rows=history_rows,
-        namespace_id=namespace_id,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
     )
     core_previews = _structure_history_core_previews(
         symbol=normalized,
         sessions=days,
         history_rows=history_rows,
-        namespace_id=namespace_id,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         preview_context=prepare_source_d1_preview_context(days),
         decoded_by_session=history_inputs[3],
     )
@@ -2320,8 +2284,7 @@ def discover_source_d1_prior_support_reference(
         symbol=normalized,
         sessions=days,
         history_rows=history_rows,
-        namespace_id=namespace_id,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         core_previews_by_session=core_previews,
         history_inputs=history_inputs,
     )
@@ -2372,12 +2335,8 @@ def discover_source_d1_prior_support_reference(
             if not isinstance(row, Mapping):
                 quality_reasons.append(f"{label}_SOURCE_IDENTITY_MISSING")
                 continue
-            if row.get("namespace_id") != namespace_id:
-                quality_reasons.append(f"{label}_NAMESPACE_MISMATCH")
-            if row.get("package_sha256") != package_sha256:
-                quality_reasons.append(f"{label}_PACKAGE_SHA_MISMATCH")
-            if row.get("source_content_id") != source_content_id:
-                quality_reasons.append(f"{label}_SOURCE_CONTENT_MISMATCH")
+            if row.get("source_package_id") != source_package_id:
+                quality_reasons.append(f"{label}_SOURCE_PACKAGE_ID_MISMATCH")
             if (
                 parser_contract is not None
                 and row.get("parser_contract") != parser_contract
@@ -2450,9 +2409,7 @@ def discover_source_d1_prior_support_reference(
     ]
     return {
         "source_symbol": normalized,
-        "namespace_id": namespace_id,
-        "package_sha256": package_sha256,
-        "source_content_id": source_content_id,
+        "source_package_id": source_package_id,
         "parser_contract": parser_contract,
         "state": "TRUE" if usable else "UNKNOWN",
         "reason": "SOURCE_SUPPORT_OBSERVED"

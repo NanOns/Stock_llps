@@ -2,142 +2,42 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import tempfile
 from typing import Any
 
 from . import identity
 
-_MIGRATIONS = (
-    (
-        1,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0001_stock_identity.sql"),
-        "010b4fcd0497b847c1dc5e1c90725b9c692012cc2d7dbede0ce702c40a1a7428",
-    ),
-    (
-        2,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0002_stock_a_business_login.sql"),
-        "b991f72174ffed1747b616b4d75264ddafca48776cccab9c251bcc9198da2abb",
-    ),
-    (
-        3,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0003_r01_source_identity_canonical.sql"),
-        "293c6d24a04b05200cc3f0df6f4b7673626055a15da99a7eeac69f0ffe441d5a",
-    ),
-    (
-        4,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0004_r01_source_raw_daily.sql"),
-        "6b14004deb034e2441fb0ec2288aa46c980f808dc27d02ce2dcb34fe1ca8eed4",
-    ),
-    (
-        5,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0005_r01_p03_source_set_candidate.sql"),
-        "cb069824c9c41144d10e4e78cc3b2d18c615c18f8a8c0132d74a902410ba29ba",
-    ),
-    (
-        6,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0006_r01_p03_formal_source_set.sql"),
-        "0ccf175991947e18de88aca809653dc49e9b4669cfcd5a0a62a0f6f6879921b8",
-    ),
-    (
-        7,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0007_r02_tdx_source_symbol_price_profile.sql"),
-        "0ef16c44b9c07d0aa6f494f6793690fae84651a3e5bcc3fac3a5dc83dbafbc48",
-    ),
-    (
-        8,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0008_r02_price_profile_ma10_comment.sql"),
-        "b9128fa7def0dbeeddc8658c11cc5804c7c8e895df6270d4ce115ee9dd2eafb2",
-    ),
-    (
-        9,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0009_r03_tdx_sector_source_members.sql"),
-        "397cd13c11cc1b0859704c5dd4b1aa9ef8ddb310189714981ff870363f4030e2",
-    ),
-    (
-        10,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0010_r02_source_profile_price_damage_slope.sql"),
-        "2a75996ddfada890a6ff3830d10e4b5bfcdc25e5bc77b32918d2f2a0c3447eca",
-    ),
-    (
-        11,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0011_r02_source_native_amount_volume_ratios.sql"),
-        "43e8ef668ea896775f9c6c83e4fee7fdf8198d17299732633649e54342ca04dd",
-    ),
-    (
-        12,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0012_r02_profile_direct_key_drop_old_control_tables.sql"),
-        "e06cbc351651017be8607dc41a4ba43e405df04bbc6a6ffed96e06b001af575d",
-    ),
-    (
-        13,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0013_source_research_facts.sql"),
-        "6fa10c3a278a2ab462d53ced60cea0c10436b327b4b29b15771d69b26731f7b2",
-    ),
-    (
-        14,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0014_source_research_events.sql"),
-        "cba9dc57698ac74487221ee30f097636ab2cfd502bdad20137732da0e80e45f8",
-    ),
-    (
-        15,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0015_r06_source_research_day_facts.sql"),
-        "759e4a06c5417dd7f3e52c5430234e49a3addc7a571666970ecd3193510e870c",
-    ),
-    (
-        16,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0016_r06_profile_consumed_core.sql"),
-        "705ea6cbe695e30ed0b177c0b9cbb83c74105daa0a408e701aaae5bc6bb18b09",
-    ),
-    (
-        17,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0017_r06_source_market_breadth.sql"),
-        "d4d00de94e6158c84153b20d87c54ec870787fd7529e1b93dadd6510a3cbea28",
-    ),
-    (
-        18,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0018_r06_source_pool_static_facts.sql"),
-        "e78d5057e705e70f7f5c9ee1947c6b099086bdfffe11c250a1665d5d8a6d61a7",
-    ),
-    (
-        19,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0019_r06_sector_cross_period_pulse_facts.sql"),
-        "9938e29d8e7e4652d72390d44efb0e4848591bd2f01732e3cc6fb99f2f46e6f0",
-    ),
-    (
-        20,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0020_r06_sector_pulse_adjacent_transitions.sql"),
-        "9a6603d0b0c58fd25b4ccf2d840652b4e686ef6f70c0bc42003790cdc233abfc",
-    ),
-    (
-        21,
-        "STOCK_A_INITIAL_R1",
-        ("migrations", "0021_r06_sector_pulse_followup_outcomes.sql"),
-        "91184572f1991c492efdf7126e09848a40309e997d33375946341ea54a69d646",
-    ),
+_MIGRATION_FILES = (
+    "0001_stock_identity.sql",
+    "0002_stock_a_business_login.sql",
+    "0003_r01_source_identity_canonical.sql",
+    "0004_r01_source_raw_daily.sql",
+    "0005_r01_p03_source_set_candidate.sql",
+    "0006_r01_p03_formal_source_set.sql",
+    "0007_r02_tdx_source_symbol_price_profile.sql",
+    "0008_r02_price_profile_ma10_comment.sql",
+    "0009_r03_tdx_sector_source_members.sql",
+    "0010_r02_source_profile_price_damage_slope.sql",
+    "0011_r02_source_native_amount_volume_ratios.sql",
+    "0012_r02_profile_direct_key_drop_old_control_tables.sql",
+    "0013_source_research_facts.sql",
+    "0014_source_research_events.sql",
+    "0015_r06_source_research_day_facts.sql",
+    "0016_r06_profile_consumed_core.sql",
+    "0017_r06_source_market_breadth.sql",
+    "0018_r06_source_pool_static_facts.sql",
+    "0019_r06_sector_cross_period_pulse_facts.sql",
+    "0020_r06_sector_pulse_adjacent_transitions.sql",
+    "0021_r06_sector_pulse_followup_outcomes.sql",
+    "0022_r06_pg_identity_simplification.sql",
+)
+_MIGRATIONS = tuple(
+    (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
+    for migration_id, filename in enumerate(_MIGRATION_FILES, start=1)
 )
 _TASK_SCOPE_MIGRATIONS = {
     "R01_R02_PG_TASK_AUTHORITY_AND_SOURCE_PERSIST_R1": frozenset({3}),
@@ -155,6 +55,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R06_SECTOR_CROSS_PERIOD_PULSE_FACTS_R1": frozenset({19}),
     "R06_SECTOR_PULSE_ADJACENT_TRANSITION_R1": frozenset({20}),
     "R06_SECTOR_PULSE_FOLLOWUP_REAL_OUTCOMES_R1": frozenset({21}),
+    "R06_STOCK_A_PG_ID_SHA_KEY_SIMPLIFICATION_R1": frozenset({22}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -258,6 +159,18 @@ _RELATIONS_BY_MIGRATION_COUNT[20] = _RELATIONS_BY_MIGRATION_COUNT[19] | {
 _RELATIONS_BY_MIGRATION_COUNT[21] = _RELATIONS_BY_MIGRATION_COUNT[20] | {
     "source_sector_pulse_followup_facts",
 }
+_RELATIONS_BY_MIGRATION_COUNT[22] = (
+    _RELATIONS_BY_MIGRATION_COUNT[21]
+    - {
+        "source_contents",
+        "calendar_sessions",
+        "canonical_daily",
+        "identity_observations",
+        "entities",
+        "role_bindings",
+        "namespaces",
+    }
+) | {"source_packages"}
 
 
 class BindingRefused(Exception):
@@ -276,11 +189,11 @@ def _validate_task_scope(task_scope: str | None, migration_id: int) -> None:
         raise BindingRefused("PG绑定必须绑定已批准任务范围及其唯一迁移ID")
 
 
-def _validate_migration_source(migration_id: int, source_sha: str) -> None:
-    """固定迁移登记表内各SQL字节摘要，避免替换已批准源码扩大写入。"""
-    expected = next((item[3] for item in _MIGRATIONS if item[0] == migration_id), None)
-    if expected != source_sha:
-        raise BindingRefused("本批批准的迁移源码SHA不匹配；拒绝执行DDL")
+def _validate_migration_source(migration_id: int, raw: bytes) -> None:
+    """核对迁移序号及其唯一受控路径；运行期不为迁移SQL生成摘要。"""
+    migration = next((item for item in _MIGRATIONS if item[0] == migration_id), None)
+    if migration is None or not raw:
+        raise BindingRefused("迁移序号或迁移SQL无效；拒绝执行DDL")
 
 
 def registered_task_scopes() -> tuple[str, ...]:
@@ -303,25 +216,16 @@ def registered_migration_ids() -> tuple[int, ...]:
 
 def _validate_migration_history(
     existing: list[tuple[Any, Any, Any]],
-    expected_rows: list[tuple[int, str, str]],
+    expected_rows: list[tuple[int, str]],
 ) -> int:
-    """验证不可变迁移前缀，允许精确已应用迁移的幂等读回。"""
+    """只按连续迁移编号和lineage验证不可变前缀。"""
     if (
         len(existing) < 2
         or len(existing) > len(expected_rows)
-        or existing != expected_rows[: len(existing)]
+        or [(row[0], row[-1]) for row in existing] != expected_rows[: len(existing)]
     ):
-        raise BindingRefused("现有迁移账本与不可变历史迁移摘要不匹配")
+        raise BindingRefused("现有迁移账本编号或lineage不匹配")
     return len(existing)
-
-
-def _ledger_digest(rows: list[tuple[int, str, str]]) -> str:
-    """按既有稳定语义摘要一个已应用迁移前缀。"""
-    return hashlib.sha256(
-        "\n".join(
-            f"{mid}:{source_sha}:{lineage}" for mid, source_sha, lineage in rows
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def _relation_names(cursor: Any) -> set[str]:
@@ -373,10 +277,10 @@ def _validate_application_identity(
             raise BindingRefused(f"迁移前安装身份不匹配：{field}")
 
 
-def _migration_sources() -> list[tuple[int, str, bytes, str]]:
+def _migration_sources() -> list[tuple[int, str, bytes]]:
     root = Path("G:/codex work/Stock A").resolve(strict=True)
     result = []
-    for migration_id, lineage, parts, expected_sha in _MIGRATIONS:
+    for migration_id, lineage, parts in _MIGRATIONS:
         path = root.joinpath(*parts)
         if path.is_symlink():
             raise BindingRefused("集中迁移文件不能通过链接替换")
@@ -386,10 +290,7 @@ def _migration_sources() -> list[tuple[int, str, bytes, str]]:
         raw = resolved.read_bytes()
         if not raw or len(raw) > 128 * 1024:
             raise BindingRefused("集中迁移文件为空或超过固定大小预算")
-        actual_sha = hashlib.sha256(raw).hexdigest()
-        if actual_sha != expected_sha:
-            raise BindingRefused(f"集中迁移{migration_id:04d}源码SHA与登记摘要不匹配")
-        result.append((migration_id, lineage, raw, actual_sha))
+        result.append((migration_id, lineage, raw))
     return result
 
 
@@ -409,10 +310,10 @@ def _connection_parameters() -> dict[str, Any]:
 
 
 def _update_runtime_config(
-    config_path: Path, config: dict[str, Any], digest: str
+    config_path: Path, config: dict[str, Any], migration_version: int
 ) -> None:
     updated = json.loads(json.dumps(config))
-    updated["application_identity"]["migration_digest"] = digest
+    updated["application_identity"]["migration_version"] = migration_version
     encoded = (
         json.dumps(updated, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     ).encode("utf-8")
@@ -433,19 +334,23 @@ def _update_runtime_config(
             temp_path.unlink()
 
 
-def bind_stock_namespace(
+def apply_stock_migration(
     config: dict[str, Any],
     config_path: Path,
     *,
     task_scope: str,
     migration_id: int,
-    timeout_seconds: float = 20.0,
+    timeout_seconds: float = 600.0,
 ) -> dict[str, Any]:
-    """在固定stock_a.stock中执行当前已授权且唯一的集中迁移。"""
+    """在固定stock_a.stock中执行已授权的连续集中迁移。"""
     import psycopg
 
-    if type(timeout_seconds) not in (int, float) or not 0 < timeout_seconds <= 30:
-        raise ValueError("迁移耗时必须在(0,30]秒内")
+    max_timeout_seconds = 14400 if migration_id == 22 else 900
+    if (
+        type(timeout_seconds) not in (int, float)
+        or not 0 < timeout_seconds <= max_timeout_seconds
+    ):
+        raise ValueError(f"集中迁移耗时必须在(0,{max_timeout_seconds}]秒内")
     _validate_task_scope(task_scope, migration_id)
     expected_identity = (
         config.get("application_identity") if isinstance(config, dict) else None
@@ -462,13 +367,11 @@ def bind_stock_namespace(
     ):
         raise BindingRefused("迁移配置中的项目/部署身份未完整绑定；拒绝连接和迁移")
     migrations = _migration_sources()
-    expected_rows = [
-        (mid, digest, lineage) for mid, lineage, _raw, digest in migrations
-    ]
+    expected_rows = [(mid, lineage) for mid, lineage, _raw in migrations]
     selected = [item for item in migrations if item[0] == migration_id]
     if len(selected) != 1:
         raise BindingRefused("任务登记的迁移ID未对应唯一集中迁移源码")
-    _validate_migration_source(selected[0][0], selected[0][3])
+    _validate_migration_source(selected[0][0], selected[0][2])
     try:
         parameters = _connection_parameters()
     except ValueError as error:
@@ -486,10 +389,11 @@ def bind_stock_namespace(
             "-c search_path=stock,pg_catalog "
             "-c default_transaction_isolation=serializable "
             f"-c statement_timeout={max(1, int(timeout_seconds * 1000))} "
-            "-c lock_timeout=1000"
+            "-c lock_timeout=15000"
         ),
     )
     transaction_committed = False
+    active_migration_source: bytes | None = None
     try:
         with psycopg.connect(**parameters) as connection:
             with connection.cursor() as cursor:
@@ -529,24 +433,21 @@ def bind_stock_namespace(
                         "现有安装身份或迁移账本缺失；本命令不会初始化安装或创建schema"
                     )
                 cursor.execute(
-                    "SELECT migration_id, source_sha, lineage FROM stock.migration_ledger ORDER BY migration_id"
+                    "SELECT migration_id, lineage FROM stock.migration_ledger ORDER BY migration_id"
                 )
                 existing = cursor.fetchall()
                 applied_count = _validate_migration_history(existing, expected_rows)
-                current_digest = _ledger_digest(expected_rows[:applied_count])
-                target_digest = _ledger_digest(expected_rows[:migration_id])
-                prior_digest = _ledger_digest(expected_rows[: migration_id - 1])
-                if business.get("migration_digest") != current_digest:
+                if business.get("migration_version") != applied_count:
                     raise BindingRefused(
-                        "数据库业务身份读取到的迁移摘要与精确账本前缀不匹配"
+                        "数据库业务身份读取到的迁移版本与精确账本前缀不匹配"
                     )
-                if config["application_identity"].get("migration_digest") not in {
-                    current_digest,
-                    prior_digest,
-                    target_digest,
+                if config["application_identity"].get("migration_version") not in {
+                    applied_count,
+                    migration_id - 1,
+                    migration_id,
                 }:
                     raise BindingRefused(
-                        "runtime.defaults迁移摘要不对应本次精确迁移前缀"
+                        "runtime.defaults迁移版本不对应本次精确迁移前缀"
                     )
                 if not actual_identity.get(
                     "migration_lineage"
@@ -575,18 +476,23 @@ def bind_stock_namespace(
                 ):
                     raise BindingRefused("部署核验后安装身份发生变化；拒绝提交迁移")
                 cursor.execute(
-                    "SELECT migration_id, source_sha, lineage FROM stock.migration_ledger ORDER BY migration_id FOR UPDATE"
+                    "SELECT migration_id, lineage FROM stock.migration_ledger ORDER BY migration_id FOR UPDATE"
                 )
                 locked_rows = cursor.fetchall()
                 if locked_rows != existing:
                     raise BindingRefused("部署核验后迁移账本发生变化；拒绝提交迁移")
                 applied = []
                 if applied_count == migration_id - 1:
-                    mid, lineage, raw, digest = selected[0]
+                    mid, lineage, raw = selected[0]
+                    active_migration_source = raw
                     cursor.execute(raw.decode("utf-8"))
+                    if mid == 1:
+                        cursor.execute(
+                            "ALTER TABLE stock.migration_ledger DROP COLUMN IF EXISTS source_sha"
+                        )
                     cursor.execute(
-                        "INSERT INTO stock.migration_ledger(migration_id, source_sha, applied_at, lineage) VALUES (%s,%s,clock_timestamp(),%s)",
-                        (mid, digest, lineage),
+                        "INSERT INTO stock.migration_ledger(migration_id, applied_at, lineage) VALUES (%s,clock_timestamp(),%s)",
+                        (mid, lineage),
                     )
                     applied.append(mid)
                 elif applied_count != migration_id:
@@ -594,11 +500,13 @@ def bind_stock_namespace(
                         "只允许逐步应用当前登记的下一条迁移；不自动执行或跳过其它迁移"
                     )
                 cursor.execute(
-                    "SELECT migration_id, source_sha, lineage FROM stock.migration_ledger ORDER BY migration_id"
+                    "SELECT migration_id, lineage FROM stock.migration_ledger ORDER BY migration_id"
                 )
                 committed_rows = cursor.fetchall()
-                if committed_rows != expected_rows:
-                    raise BindingRefused("集中迁移提交前账本精确读回不匹配")
+                if [(row[0], row[-1]) for row in committed_rows] != expected_rows[
+                    :migration_id
+                ]:
+                    raise BindingRefused("集中迁移提交前账本编号/lineage读回不匹配")
                 final_relations = _RELATIONS_BY_MIGRATION_COUNT.get(migration_id)
                 if (
                     final_relations is None
@@ -611,13 +519,12 @@ def bind_stock_namespace(
                 if cursor.fetchone() != ("stock_a", "stock_a", 1):
                     raise BindingRefused("身份单例或实际业务登录读回不匹配")
         transaction_committed = True
-        new_digest = _ledger_digest(expected_rows[:migration_id])
-        if config["application_identity"].get("migration_digest") != new_digest:
+        if config["application_identity"].get("migration_version") != migration_id:
             try:
-                _update_runtime_config(config_path, config, new_digest)
+                _update_runtime_config(config_path, config, migration_id)
             except Exception as error:
                 raise BindingCommittedConfigError(
-                    "PG迁移已提交，但runtime.defaults.json摘要未同步；修复配置写入后重试幂等读回"
+                    "PG迁移已提交，但runtime.defaults.json迁移版本未同步；修复配置后重试幂等读回"
                 ) from error
         return {
             "status": "BOUND",
@@ -626,7 +533,7 @@ def bind_stock_namespace(
             "session_user": session_user,
             "applied_migrations": applied,
             "migration_count": len(expected_rows),
-            "migration_digest": new_digest,
+            "migration_version": migration_id,
             "task_scope": task_scope,
             "migration_id": migration_id,
             "storage_location_status": "USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED",
@@ -639,6 +546,52 @@ def bind_stock_namespace(
             raise BindingCommittedConfigError(
                 "PG迁移已提交，但迁移后本地配置处理失败；重试前先只读核验ledger和配置摘要"
             ) from error
+        diagnostic = getattr(error, "diag", None)
+        failure_location = " ".join(
+            str(value)
+            for value in (
+                getattr(diagnostic, "schema_name", None),
+                getattr(diagnostic, "table_name", None),
+                getattr(diagnostic, "constraint_name", None),
+                getattr(diagnostic, "column_name", None),
+            )
+            if value
+        )
+        location_detail = (
+            f"；数据库对象为{failure_location}" if failure_location else ""
+        )
+        statement_location = ""
+        statement_position = getattr(diagnostic, "statement_position", None)
+        if active_migration_source and statement_position:
+            try:
+                position = int(statement_position) - 1
+                migration_text = active_migration_source.decode("utf-8")
+                if 0 <= position <= len(migration_text):
+                    statement_line = migration_text.count("\n", 0, position) + 1
+                    statement_location = f"；迁移SQL行号{statement_line}"
+            except (UnicodeDecodeError, TypeError, ValueError):
+                statement_location = ""
+        sqlstate = getattr(error, "sqlstate", None)
+        sqlstate_detail = f"；SQLSTATE {sqlstate}" if sqlstate else ""
+        safe_primary = getattr(diagnostic, "message_primary", None)
+        primary_detail = ""
+        if sqlstate == "42703" and isinstance(safe_primary, str):
+            missing_column = re.fullmatch(
+                r'column "([A-Za-z_][A-Za-z_0-9]*)" does not exist', safe_primary
+            )
+            if missing_column is not None:
+                primary_detail = f"；缺失列{missing_column.group(1)}"
+        internal_context = getattr(diagnostic, "context", None)
+        context_match = (
+            re.search(r"inline_code_block line ([0-9]+) at", internal_context)
+            if isinstance(internal_context, str)
+            else None
+        )
+        context_detail = (
+            f"；DO代码行{context_match.group(1)}" if context_match is not None else ""
+        )
         raise BindingRefused(
-            f"前向迁移失败，底层错误类别为{type(error).__name__}；异常文本已省略"
+            f"前向迁移失败，底层错误类别为{type(error).__name__}"
+            f"{location_detail}{statement_location}{context_detail}"
+            f"{primary_detail}{sqlstate_detail}；行值及SQL内容已省略"
         ) from error

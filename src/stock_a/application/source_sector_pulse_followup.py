@@ -67,6 +67,8 @@ def _readback_pulse_day(context: Mapping[str, Any]) -> dict[str, Any]:
                 row["board_native_id"]: {
                     "state": row["pulse_state"],
                     "member_count": int(row["member_count"]),
+                    "pulse_fact_id": int(row["id"]),
+                    "catalog_id": int(row["catalog_id"]),
                 }
                 for row in group
             },
@@ -76,11 +78,8 @@ def _readback_pulse_day(context: Mapping[str, Any]) -> dict[str, Any]:
         "target_session": identity["target_session"].isoformat(),
         "profile_revision": identity["profile_revision"],
         "source_version": {
-            "namespace_id": identity["namespace_id"],
-            "package_sha256": identity["package_sha256"],
+            "source_package_id": identity["source_package_id"],
             "source_capture_id": identity["source_capture_id"],
-            "source_content_id": identity["source_content_id"],
-            "source_raw_digest": identity["source_raw_digest"],
         },
         "by_kind": by_kind,
     }
@@ -115,21 +114,24 @@ def run_source_sector_pulse_followup_day(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
 ) -> dict[str, Any]:
     """只消费PG已存PULSE，批量读取固定篮子必要Raw并原子保存后继结果。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or not isinstance(package_sha256, str)
-        or len(package_sha256) != 64
-        or any(character not in "0123456789abcdef" for character in package_sha256)
+        or type(source_package_id) is not int
+        or source_package_id <= 0
     ):
         raise SourceSectorPulseFollowupError(
-            "PULSE_FOLLOWUP_REQUEST_INVALID", "T0、研究截止或来源包参数无效"
+            "PULSE_FOLLOWUP_REQUEST_INVALID", "T0、研究截止或来源包数字ID无效"
         )
     calendar = _official_calendar(research_cutoff)
+    calendar_identity = {
+        "calendar_id": calendar["calendar_id"],
+        "calendar_revision": calendar["calendar_revision"],
+    }
     all_targets, due_targets = _horizon_targets(
         target_session, research_cutoff, tuple(calendar["sessions"])
     )
@@ -137,7 +139,7 @@ def run_source_sector_pulse_followup_day(
         config,
         t0_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         due_targets=due_targets,
     )
     pulse_states = Counter(row["pulse_state"] for row in context["pulse_rows"])
@@ -162,9 +164,7 @@ def run_source_sector_pulse_followup_day(
                 rows_by_symbol=context["rows_by_symbol"],
                 t0_session=target_session,
                 target_session=target,
-                namespace_id=context["namespace_id"],
-                package_sha256=package_sha256,
-                source_content_id=pulse["source_content_id"],
+                source_package_id=source_package_id,
             )
             outcomes.append(
                 {
@@ -181,14 +181,14 @@ def run_source_sector_pulse_followup_day(
             config,
             context=context,
             outcomes=outcomes,
-            calendar_identity=calendar,
+            calendar_identity=calendar_identity,
         )
         readback = read_source_sector_pulse_followups(
             config,
             pulse_day=_readback_pulse_day(context),
             research_cutoff=research_cutoff,
             horizon_targets=all_targets,
-            calendar_identity=calendar,
+            calendar_identity=calendar_identity,
         )
         for item in outcomes:
             fact = (
@@ -257,7 +257,7 @@ def run_source_sector_pulse_followup_day(
         "status": "PERSISTED" if outcomes else persistence["status"],
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "pulse_state_counts": dict(sorted(pulse_states.items())),
         "pulse_board_count": len(context["pulse_rows"]),
         "followup_summaries": summary,
@@ -270,8 +270,7 @@ def run_source_sector_pulse_followup_day(
         "readback_saved_through": readback.get("saved_through") if readback else None,
         "input": {
             "t0_source_capture_id": context["t0_source_version"]["source_capture_id"],
-            "t0_source_content_id": context["t0_source_version"]["source_content_id"],
-            "t0_source_raw_digest": context["t0_source_version"]["source_raw_digest"],
+            "t0_source_package_id": context["t0_source_version"]["source_package_id"],
             "profile_revision": context["pulse_rows"][0]["profile_revision"],
             "snapshot_ids": {
                 kind: next(
@@ -281,9 +280,8 @@ def run_source_sector_pulse_followup_day(
                 )
                 for kind in ("INDUSTRY", "CONCEPT")
             },
-            "calendar_id": calendar["calendar_id"],
-            "calendar_revision": calendar["calendar_revision"],
-            "calendar_sha256": calendar["calendar_sha256"],
+            "calendar_id": calendar_identity["calendar_id"],
+            "calendar_revision": calendar_identity["calendar_revision"],
             "raw_sessions": [
                 target_session.isoformat(),
                 *[

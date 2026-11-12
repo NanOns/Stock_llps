@@ -105,10 +105,10 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
                 _EXIT_ARGUMENT,
             )
         return _run_pg_raw_stock(args)
-    if getattr(args, "pg_source_sha256", None) is not None:
+    if getattr(args, "pg_source_package_id", None) is not None:
         raise DiagnosticError(
             "PG_SOURCE_FLAG_REQUIRED",
-            "提供来源SHA时必须同时显式启用--pg-source-raw",
+            "提供来源包ID时必须同时显式启用--pg-source-raw",
             _EXIT_ARGUMENT,
         )
     cli_started = time.perf_counter()
@@ -516,7 +516,7 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         source_package = result.get("source_package")
         if isinstance(source_package, dict):
             summary = (
-                f"显式VIPDATA来源包 {source_package['package_id']}；ZIP SHA-256={source_package['sha256']}；"
+                f"显式VIPDATA来源包文件 {source_package['file_name']}；"
                 f"条目={source_package['zip_entry_path']}；CRC={source_package['zip_crc']}\n"
                 + summary
             )
@@ -531,10 +531,10 @@ def _run_research_universe(args: argparse.Namespace) -> int:
         return _run_pg_history_universe(args)
     if getattr(args, "pg_source_raw", False):
         return _run_pg_raw_universe(args)
-    if getattr(args, "pg_source_sha256", None) is not None:
+    if getattr(args, "pg_source_package_id", None) is not None:
         raise DiagnosticError(
             "PG_SOURCE_FLAG_REQUIRED",
-            "提供来源SHA时必须同时显式启用--pg-source-raw",
+            "提供来源包ID时必须同时显式启用--pg-source-raw",
             _EXIT_ARGUMENT,
         )
     command_started = time.monotonic()
@@ -633,7 +633,7 @@ def _run_research_universe(args: argparse.Namespace) -> int:
             )
             result["performance"].update(
                 {
-                    "zip_sha_crc_validation_seconds": round(
+                    "package_integrity_validation_seconds": round(
                         package_verification_seconds, 6
                     ),
                     "candidate_pool_metadata_seconds": round(
@@ -757,7 +757,7 @@ def _run_research_universe(args: argparse.Namespace) -> int:
             )
             result["performance"] = {
                 "timing_contract": "STOCK_A_RESEARCH_UNIVERSE_SEGMENTS_R1",
-                "zip_sha_crc_validation_seconds": round(
+                "package_integrity_validation_seconds": round(
                     package_verification_seconds, 6
                 ),
                 "candidate_pool_metadata_seconds": round(candidate_index_seconds, 6),
@@ -784,8 +784,6 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                 "quality_scan_candidate_total": target_quality_report.candidate_total,
             }
             result["source_package"] = {
-                "package_id": f"TDX-HSJDAY-SHA256:{package.sha256}",
-                "sha256": package.sha256,
                 "file_name": package.file_name,
                 "file_size": package.file_size,
                 "zip_crc": package.zip_crc,
@@ -861,7 +859,7 @@ def _run_research_universe(args: argparse.Namespace) -> int:
             source_package = result.get("source_package", {})
             lines = [
                 f"全范围来源候选 Core/Profile：{full_observation['status']}；日期={full_observation['target_session']}；"
-                f"ZIP SHA-256={source_package.get('sha256')}；坐标=RAW_UNADJUSTED；NON_PIT_RETROSPECTIVE",
+                f"来源包文件={source_package.get('file_name')}；坐标=RAW_UNADJUSTED；NON_PIT_RETROSPECTIVE",
                 f"来源候选={full_observation['source_candidate_total']}；来源状态="
                 f"{json.dumps(full_observation['source_status_counts'], ensure_ascii=False, sort_keys=True)}；"
                 f"Core/Profile已生产={full_observation['core_profile_produced']}；未生产={full_observation['core_profile_not_produced']}；"
@@ -892,7 +890,6 @@ def _run_research_universe(args: argparse.Namespace) -> int:
                     "source_bar_status": sample["source_bar_status"],
                     "source_reason": sample["source_reason"],
                     "consumer_status": sample.get("consumer_status"),
-                    "entry_sha256": sample.get("entry_sha256"),
                     "core": {
                         name: sample.get("core_fields", {}).get(name)
                         for name in ("core.ma20", "core.atr20", "core.ret5")
@@ -927,7 +924,7 @@ def _run_research_universe(args: argparse.Namespace) -> int:
         source_package = result.get("source_package")
         if isinstance(source_package, dict):
             summary = (
-                f"显式VIPDATA来源包 {source_package['package_id']}；ZIP SHA-256={source_package['sha256']}；"
+                f"显式VIPDATA来源包文件 {source_package['file_name']}；"
                 f"CRC={source_package['zip_crc']}；沪深主板/GEM为代码池，不是官方上市总体\n"
                 + summary
             )

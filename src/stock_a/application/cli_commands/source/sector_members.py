@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import uuid
 from stock_a.storage.postgres.source_raw import (
     RAW_DAILY_APPEND_TASK_SCOPES,
     RawSourcePgError,
@@ -160,8 +159,6 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
             result = refresh_remote_tdx_sector_members(
                 config,
                 validate_only=args.validate_only,
-                validated_source_sha256=args.validated_source_sha256,
-                oracle_set_sha256=args.oracle_set_sha256,
             )
         elif args.sector_action == "catalog":
             result = read_tdx_sector_catalog(
@@ -180,7 +177,7 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 board_native_id=args.board_native_id,
                 target_session=_parse_session_date(args.target_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 profile_revision=args.profile_revision,
                 offset=args.offset,
                 limit=args.limit,
@@ -194,9 +191,9 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                 before_session=_parse_session_date(args.before_session),
                 after_session=_parse_session_date(args.after_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
-                before_package_sha256=args.before_package_sha256,
+                before_source_package_id=args.before_source_package_id,
                 before_profile_revision=args.before_profile_revision,
-                after_package_sha256=args.after_package_sha256,
+                after_source_package_id=args.after_source_package_id,
                 after_profile_revision=args.after_profile_revision,
                 offset=args.offset,
                 limit=args.limit,
@@ -246,7 +243,7 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                     start_session=_parse_session_date(args.rotation_start),
                     target_session=_parse_session_date(args.target_session),
                     research_cutoff=_parse_session_date(args.research_cutoff),
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     profile_revision=args.profile_revision,
                     profile_contract=profile_contract,
                 )
@@ -258,7 +255,7 @@ def _run_source_tdx_sector_members(args: argparse.Namespace) -> int:
                     board_native_id=args.board_native_id,
                     target_session=_parse_session_date(args.target_session),
                     research_cutoff=_parse_session_date(args.research_cutoff),
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     profile_revision=args.profile_revision,
                     changed_only=args.changed_only,
                     sort_by=args.sort_by,
@@ -404,28 +401,23 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             error=True,
         )
         return _EXIT_ARGUMENT
-    if re.fullmatch(r"[0-9a-f]{64}", args.package_sha256) is None:
+    if type(args.source_package_id) is not int or args.source_package_id <= 0:
         raise DiagnosticError(
-            "SECTOR_CHANGE_PACKAGE_SHA_INVALID",
-            "完整TDX来源包SHA必须是64位小写十六进制值",
+            "SECTOR_CHANGE_PACKAGE_ID_INVALID",
+            "必须提供正数TDX来源包BIGINT数字ID",
             _EXIT_ARGUMENT,
         )
-    try:
-        industry_snapshot_id = str(uuid.UUID(args.industry_snapshot_id))
-        concept_snapshot_id = str(uuid.UUID(args.concept_snapshot_id))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise DiagnosticError(
-            "SECTOR_CHANGE_SOURCE_ID_INVALID",
-            "快照编号必须为规范UUID",
-            _EXIT_ARGUMENT,
-        ) from error
+    industry_snapshot_id = args.industry_snapshot_id
+    concept_snapshot_id = args.concept_snapshot_id
     if (
-        industry_snapshot_id != args.industry_snapshot_id
-        or concept_snapshot_id != args.concept_snapshot_id
+        type(industry_snapshot_id) is not int
+        or industry_snapshot_id <= 0
+        or type(concept_snapshot_id) is not int
+        or concept_snapshot_id <= 0
     ):
         raise DiagnosticError(
             "SECTOR_CHANGE_SOURCE_ID_INVALID",
-            "快照编号必须为规范UUID",
+            "快照编号必须是正数BIGINT数字ID",
             _EXIT_ARGUMENT,
         )
     if not 1 <= args.pg_history_session_count <= 75:
@@ -484,7 +476,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
             research_cutoff=cutoff,
             industry_snapshot_id=industry_snapshot_id,
             concept_snapshot_id=concept_snapshot_id,
-            package_sha256=args.package_sha256,
+            source_package_id=args.source_package_id,
             profile_revision=args.profile_revision,
             event_window_start=event_window_start,
             pg_history_session_count=args.pg_history_session_count,
@@ -523,10 +515,9 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 scenario="RECOVERY_TURN",
                 target_session=target,
                 research_cutoff=cutoff,
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 symbol=args.d0_structure_symbol,
                 limit=1,
-                expected_namespace_id=inputs.discovery["source"]["namespace_id"],
                 _include_shape_observation=True,
             )
             if len(d0["results"]) != 1:
@@ -541,8 +532,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                     target=target,
                     followup=_parse_session_date(args.d0_followup_session),
                     cutoff=cutoff,
-                    package_sha256=args.package_sha256,
-                    namespace_id=d0["namespace_id"],
+                    source_package_id=args.source_package_id,
                 )
             if args.d0_risk_readiness:
                 attach_stock_risk_readiness(
@@ -550,17 +540,16 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                     d0,
                     target=target,
                     cutoff=cutoff,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                 )
                 launch = query_source_d0_raw_launch(
                     config,
                     scenario="LAUNCH_CONFIRM",
                     target_session=target,
                     research_cutoff=cutoff,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     symbol=args.d0_structure_symbol,
                     limit=1,
-                    expected_namespace_id=d0["namespace_id"],
                 )
                 if len(launch["results"]) != 1:
                     raise SourceD0RawError(
@@ -570,7 +559,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                     "d1_prior_structure_reference"
                 ]
                 launch["results"][0]["diagnostic_admission"] = diagnostic_admission(
-                    launch, target=target, package_sha256=args.package_sha256
+                    launch, target=target, source_package_id=args.source_package_id
                 )
                 if args.d0_followup_session:
                     attach_recovery_failure_followup(
@@ -579,8 +568,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                         target=target,
                         followup=_parse_session_date(args.d0_followup_session),
                         cutoff=cutoff,
-                        package_sha256=args.package_sha256,
-                        namespace_id=launch["namespace_id"],
+                        source_package_id=args.source_package_id,
                     )
                 result["d0_launch_diagnostic"] = launch
             result["d0_d1_structure_diagnostic"] = d0
@@ -602,8 +590,7 @@ def _run_source_tdx_sector_change_stocks(args: argparse.Namespace) -> int:
                 config,
                 target_session=target,
                 research_cutoff=cutoff,
-                package_sha256=args.package_sha256,
-                namespace_id=inputs.discovery["source"]["namespace_id"],
+                source_package_id=args.source_package_id,
                 profile_revision=args.profile_revision,
                 profile_contract=load_price_profile_contract(_CONFIG_ROOT).document,
                 history_session_count=args.pg_history_session_count,

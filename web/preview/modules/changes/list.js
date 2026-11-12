@@ -134,7 +134,7 @@ async function runChanges(requestId) {
     ["before", beforeSnapshot],
     ["after", afterSnapshot],
   ]) {
-    params.set(`${prefix}_package_sha256`, snapshot.package_sha256);
+    params.set(`${prefix}_source_package_id`, snapshot.source_package_id);
     params.set(`${prefix}_profile_revision`, snapshot.profile_revision);
   }
   const symbol = $("changeSymbolInput").value.trim();
@@ -200,9 +200,6 @@ async function runChanges(requestId) {
             expected.expected_source_symbol_count,
       );
     if (
-      data.namespace_id !== state.namespace_id ||
-      beforeSnapshot.namespace_id !== state.namespace_id ||
-      afterSnapshot.namespace_id !== state.namespace_id ||
       !snapshotMatches(data.before_snapshot, beforeSnapshot) ||
       !snapshotMatches(data.after_snapshot, afterSnapshot) ||
       data.before_snapshot.history_calendar_id !==
@@ -227,7 +224,6 @@ async function runChanges(requestId) {
         "双日MA20/ATR状态筛选与PG完整并集响应身份不一致，已停止展示。",
       );
     state.changeBinding = {
-      namespace_id: data.namespace_id,
       before_snapshot: data.before_snapshot,
       after_snapshot: data.after_snapshot,
       before_session: before,

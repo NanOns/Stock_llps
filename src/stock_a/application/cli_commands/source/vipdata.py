@@ -97,7 +97,7 @@ def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
     ):
         raise DiagnosticError(
             "VIPDATA_BUDGET_INVALID",
-            "ZIP SHA/CRC验证预算须大于0且不超过600秒",
+            "ZIP原件完整性校验预算须大于0且不超过600秒",
             _EXIT_ARGUMENT,
         )
     package = _verify_explicit_vipdata_package(args)
@@ -181,7 +181,6 @@ def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
             "committed_row_count": error.committed_rows,
             "target_session": target.isoformat(),
             "session_count": args.history_session_count,
-            "package_sha256": package.sha256,
             "zip_crc": package.zip_crc,
             "package_file_size": package.file_size,
             "task_scope": args.task_scope,
@@ -286,7 +285,6 @@ def _run_source_inspect(args: argparse.Namespace) -> int:
             "byte_count": summary.byte_count,
             "first_date": summary.first_date.isoformat(),
             "last_date": summary.last_date.isoformat(),
-            "raw_byte_sha256": summary.raw_byte_sha256,
             "unit_version": summary.unit_version,
             "groups": {
                 name: asdict(getattr(summary, name))
@@ -309,20 +307,12 @@ def _run_source_inspect(args: argparse.Namespace) -> int:
 
 def _verify_explicit_vipdata_package(args: argparse.Namespace):
     package_path = getattr(args, "vipdata_package", None)
-    expected_sha256 = getattr(args, "vipdata_package_sha256", None)
-    if (package_path is None) != (expected_sha256 is None):
-        raise DiagnosticError(
-            "VIPDATA_PACKAGE_BINDING_REQUIRED",
-            "必须同时提供--vipdata-package和--vipdata-package-sha256",
-            _EXIT_ARGUMENT,
-        )
     if package_path is None:
         return None
     try:
         budgets = VipdataBudgets(max_total_seconds=args.max_vipdata_validation_seconds)
         return verify_existing_vipdata_package(
             package_path,
-            expected_sha256=expected_sha256,
             budgets=budgets,
         )
     except VipdataError as error:
@@ -410,8 +400,6 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
         "scope": "DYNAMIC_SH_SZ_MAIN_BOARD_AND_GEM_ZIP_SOURCE_CODE_CANDIDATES",
         "official_valid_listing_denominator": "UNKNOWN_NOT_PROVED_BY_ZIP_FILENAMES",
         "package": {
-            "package_id": report.package_id,
-            "sha256": report.package_sha256,
             "file_size": package.file_size,
             "zip_crc": package.zip_crc,
             "zip_entry_count": package.zip_entry_count,
@@ -442,7 +430,6 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
             "elapsed_seconds": report.elapsed_seconds,
             "entry_read_elapsed_seconds": report.entry_read_elapsed_seconds,
             "budget": asdict(report.budget),
-            "package_sha_recalculated_per_candidate": False,
             "official_network_requested": False,
             "database_io_attempted": False,
             "business_write_attempted": False,
@@ -450,7 +437,9 @@ def _run_vipdata_target_quality(args: argparse.Namespace) -> int:
         "performance": {
             "timing_contract": "STOCK_A_RESEARCH_UNIVERSE_SEGMENTS_R1",
             "evaluation_mode": "FULL_TARGET_QUALITY",
-            "zip_sha_crc_validation_seconds": round(package_verification_seconds, 6),
+            "package_integrity_validation_seconds": round(
+                package_verification_seconds, 6
+            ),
             "candidate_pool_metadata_seconds": round(candidate_index_seconds, 6),
             "full_pool_entry_decode_seconds": report.entry_read_elapsed_seconds,
             "full_pool_target_scan_wall_seconds": round(quality_scan_wall_seconds, 6),
@@ -479,12 +468,10 @@ def _run_vipdata_revision_compare(args: argparse.Namespace) -> int:
         budgets = VipdataBudgets(max_total_seconds=args.max_validation_seconds)
         old_package = verify_existing_vipdata_package(
             args.old_package,
-            expected_sha256=args.old_package_sha256,
             budgets=budgets,
         )
         new_package = verify_existing_vipdata_package(
             args.new_package,
-            expected_sha256=args.new_package_sha256,
             budgets=budgets,
         )
         comparison = compare_vipdata_package_revisions(
@@ -516,7 +503,6 @@ def _run_vipdata_revision_compare(args: argparse.Namespace) -> int:
         "target_session": comparison.target_session.isoformat(),
         "old_package": {
             "path": str(old_package.file_path),
-            "sha256": old_package.sha256,
             "file_size": old_package.file_size,
             "zip_crc": old_package.zip_crc,
             "verified_at": old_package.verified_at.isoformat(),
@@ -525,7 +511,6 @@ def _run_vipdata_revision_compare(args: argparse.Namespace) -> int:
         },
         "new_package": {
             "path": str(new_package.file_path),
-            "sha256": new_package.sha256,
             "file_size": new_package.file_size,
             "zip_crc": new_package.zip_crc,
             "verified_at": new_package.verified_at.isoformat(),
@@ -710,7 +695,6 @@ def _consume_source_vipdata_inner(
                 "sample_symbol": symbol,
                 "archive_entry": entry_scan.entry.path,
                 "temporary_source_consumed": True,
-                "source_sha256": consumer["source"]["raw_byte_sha256"],
                 "zip_entry_first_date": entry_scan.first_date.isoformat(),
                 "zip_entry_last_date": entry_scan.last_date.isoformat(),
                 "zip_entry_record_count": entry_scan.record_count,

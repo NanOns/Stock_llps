@@ -48,10 +48,9 @@ def exploratory_raw_path(
     binding_valid = birth is not None and all(
         birth.get(key)
         for key in (
-            "source_entry_sha256",
-            "source_content_id",
-            "package_sha256",
-            "namespace_id",
+            "source_package_id",
+            "source_capture_id",
+            "parser_contract",
         )
     )
     for row in rows:
@@ -67,10 +66,8 @@ def exploratory_raw_path(
             present
             and row["session_date"] != sessions[0]
             and (
-                row.get("source_entry_sha256") != birth.get("source_entry_sha256")
-                or row.get("source_content_id") != birth.get("source_content_id")
-                or row.get("package_sha256") != birth.get("package_sha256")
-                or row.get("namespace_id") != birth.get("namespace_id")
+                row.get("source_package_id") != birth.get("source_package_id")
+                or row.get("parser_contract") != birth.get("parser_contract")
                 or row.get("price_coordinate") != "RAW_UNADJUSTED"
             )
         ):

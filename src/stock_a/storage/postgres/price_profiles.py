@@ -4,14 +4,11 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal, InvalidOperation
-from hashlib import sha256
-import json
 import random
 import re
 import time
 from fractions import Fraction
 from typing import Any, Mapping, Sequence
-from uuid import UUID
 
 from .source_raw import RawSourcePgError, _transaction
 
@@ -41,19 +38,17 @@ _CORE_COLUMN_NAMES = (
     "volume_ratio20",
 )
 _PROFILE_COLUMNS = (
-    "namespace_id",
+    "source_raw_id",
     "source_capture_id",
     "source_symbol",
     "market",
     "board",
     "target_session",
-    "package_sha256",
+    "source_package_id",
     "profile_revision",
-    "record_content_sha256",
     "calculation_scope",
     "producer_contract",
     "producer_version",
-    "producer_contract_sha256",
     "price_coordinate",
     "identity_status",
     "stable_security_id_status",
@@ -80,7 +75,6 @@ _PROFILE_COLUMNS = (
     "price_window_usable",
     "price_window_status",
     "price_window_reason",
-    "history_window_sha256",
     "amount_unit_status",
     "volume_unit_status",
     *(
@@ -443,25 +437,22 @@ def validate_profile_batch_size(row_count: int) -> None:
 
 
 def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
-    if frozenset(record) not in {
-        frozenset(set(_PROFILE_COLUMNS) - {"record_content_sha256"}),
-        frozenset(_PROFILE_COLUMNS),
-    }:
+    if frozenset(record) != frozenset(_PROFILE_COLUMNS):
         raise PriceProfilePgError(
             "PROFILE_RECORD_FIELDS_INVALID", "价格画像写入字段与typed表合同不一致"
         )
     normalized = dict(record)
-    if not isinstance(normalized.get("namespace_id"), str):
-        raise PriceProfilePgError("PROFILE_NAMESPACE_INVALID", "画像命名空间无效")
-    try:
-        normalized["namespace_id"] = str(UUID(normalized["namespace_id"]))
-        normalized["source_capture_id"] = str(
-            UUID(str(normalized["source_capture_id"]))
-        )
-    except (ValueError, TypeError, AttributeError) as error:
+    if (
+        type(normalized.get("source_package_id")) is not int
+        or normalized["source_package_id"] <= 0
+        or type(normalized.get("source_capture_id")) is not int
+        or normalized["source_capture_id"] <= 0
+        or type(normalized.get("source_raw_id")) is not int
+        or normalized["source_raw_id"] <= 0
+    ):
         raise PriceProfilePgError(
-            "PROFILE_REFERENCE_INVALID", "画像来源引用无效"
-        ) from error
+            "PROFILE_REFERENCE_INVALID", "画像Raw父ID、来源包ID与捕获ID必须为正BIGINT"
+        )
     if type(normalized.get("target_session")) is not date:
         raise PriceProfilePgError("PROFILE_TARGET_DATE_INVALID", "画像目标日期无效")
     if (
@@ -509,13 +500,14 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
         raise PriceProfilePgError(
             "PROFILE_COMPONENTS_INVALID", "Profile字段标识存在重复"
         )
-    for name in ("package_sha256", "profile_revision"):
-        value = normalized.get(name)
-        if not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None:
-            raise PriceProfilePgError(
-                "PROFILE_BUSINESS_KEY_INVALID",
-                "画像包SHA和修订SHA必须是规范小写SHA-256",
-            )
+    revision = normalized.get("profile_revision")
+    if (
+        not isinstance(revision, str)
+        or re.fullmatch(r"PROFILE_R[0-9]{2}", revision) is None
+    ):
+        raise PriceProfilePgError(
+            "PROFILE_BUSINESS_KEY_INVALID", "画像修订必须使用显式PROFILE_Rnn版本"
+        )
     if (
         not isinstance(normalized.get("source_symbol"), str)
         or re.fullmatch(r"(SH|SZ)\.[0-9]{6}", normalized["source_symbol"]) is None
@@ -597,41 +589,13 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
             "PROFILE_PRICE_DAMAGE_QUALITY_INVALID",
             "价格损伤质量必须为OBSERVED或UNKNOWN",
         )
-    normalized["record_content_sha256"] = _content_sha(normalized)
     return normalized
-
-
-def _canonical_value(value: Any) -> Any:
-    if isinstance(value, date):
-        return value.isoformat()
-    if isinstance(value, list):
-        return [_canonical_value(item) for item in value]
-    if hasattr(value, "as_tuple") and value.__class__.__name__ == "Decimal":
-        return format(value, "f")
-    return value
-
-
-def _content_sha(record: Mapping[str, Any]) -> str:
-    content = {
-        name: _canonical_value(value)
-        for name, value in sorted(record.items())
-        if name != "record_content_sha256"
-    }
-    return sha256(
-        json.dumps(
-            content,
-            sort_keys=True,
-            ensure_ascii=False,
-            separators=(",", ":"),
-            allow_nan=False,
-        ).encode("utf-8")
-    ).hexdigest()
 
 
 def insert_profile_records_in_transaction(
     cursor: Any, records: Sequence[Mapping[str, Any]]
-) -> list[tuple[str, str]]:
-    """用受控批量INSERT返回数据库实际写入的来源代码与内容摘要。"""
+) -> list[str]:
+    """按显式来源版本与业务键批量插入画像行。"""
     if not isinstance(records, (tuple, list)) or not records:
         raise PriceProfilePgError("PROFILE_BATCH_EMPTY", "价格画像批次不能为空")
     validate_profile_batch_size(len(records))
@@ -645,7 +609,7 @@ def insert_profile_records_in_transaction(
         raise PriceProfilePgError(
             "PROFILE_BATCH_DATE_MIXED", "单次画像写入不得混合目标日期"
         )
-    inserted: list[tuple[str, str]] = []
+    inserted: list[str] = []
     columns = ", ".join(_PROFILE_COLUMNS)
     row_template = f"({', '.join(['%s'] * len(_PROFILE_COLUMNS))})"
     for offset in range(0, len(prepared), INSERT_CHUNK_SIZE):
@@ -653,18 +617,14 @@ def insert_profile_records_in_transaction(
         values_sql = ", ".join(row_template for _ in chunk)
         parameters = [item[name] for item in chunk for name in _PROFILE_COLUMNS]
         cursor.execute(
-            f"INSERT INTO stock.source_symbol_price_profiles ({columns}) "
-            f"VALUES {values_sql} RETURNING source_symbol, record_content_sha256",
+            f"INSERT INTO source_symbol_price_profiles ({columns}) "
+            f"VALUES {values_sql} "
+            "ON CONFLICT (source_raw_id, profile_revision) "
+            "DO NOTHING RETURNING source_symbol",
             parameters,
         )
         returned = cursor.fetchall()
-        if len(returned) != len(chunk):
-            raise PriceProfilePgError(
-                "PROFILE_INSERT_RETURNING_MISMATCH", "画像INSERT返回行数不匹配"
-            )
-        inserted.extend(
-            (str(symbol), str(content_sha).strip()) for symbol, content_sha in returned
-        )
+        inserted.extend(str(row[0]) for row in returned)
     return inserted
 
 
@@ -685,23 +645,21 @@ def persist_profile_records(
 def _persist_profile_records_once(
     config: Mapping[str, Any], records: Sequence[Mapping[str, Any]]
 ) -> dict[str, Any]:
-    """同一SERIALIZABLE事务逐键核对内容后只INSERT缺失记录。"""
+    """同一SERIALIZABLE事务比较全部typed列后只补写缺失记录。"""
     if not isinstance(records, (tuple, list)) or not records:
         raise PriceProfilePgError("PROFILE_BATCH_EMPTY", "价格画像批次不能为空")
     validate_profile_batch_size(len(records))
     prepared = [_normalize_record(item) for item in records]
     first = prepared[0]
     batch_key = (
-        first["namespace_id"],
         first["target_session"],
-        first["package_sha256"],
+        first["source_package_id"],
         first["profile_revision"],
     )
     for item in prepared:
         if (
-            item["namespace_id"],
             item["target_session"],
-            item["package_sha256"],
+            item["source_package_id"],
             item["profile_revision"],
         ) != batch_key:
             raise PriceProfilePgError(
@@ -714,21 +672,15 @@ def _persist_profile_records_once(
         )
     source_capture_id = next(iter(capture_ids))
     requested = {item["source_symbol"]: item for item in prepared}
-    with _transaction(config, write=True) as (_connection, cursor, namespace_id):
-        if namespace_id != first["namespace_id"]:
-            raise PriceProfilePgError(
-                "PROFILE_NAMESPACE_MISMATCH", "画像命名空间与PG连接不一致"
-            )
+    with _transaction(config, write=True) as (_connection, cursor, _scope):
         cursor.execute(
-            """SELECT source_symbol, market, board, source_capture_id::text
-FROM stock.source_raw_daily
-WHERE namespace_id=%s::uuid AND session_date=%s AND package_sha256=%s
-  AND source_capture_id=%s::uuid
+            """SELECT id, source_symbol, market, board, source_capture_id
+FROM source_raw_daily
+WHERE session_date=%s AND source_package_id=%s AND source_capture_id=%s
 ORDER BY source_symbol""",
             (
-                namespace_id,
                 first["target_session"],
-                first["package_sha256"],
+                first["source_package_id"],
                 source_capture_id,
             ),
         )
@@ -739,6 +691,7 @@ ORDER BY source_symbol""",
             )
         expected_by_symbol = {
             item["source_symbol"]: (
+                item["source_raw_id"],
                 item["market"],
                 item["board"],
                 item["source_capture_id"],
@@ -746,8 +699,8 @@ ORDER BY source_symbol""",
             for item in prepared
         }
         actual_by_symbol = {
-            symbol: (market, board, capture_id)
-            for symbol, market, board, capture_id in source_rows
+            symbol: (raw_id, market, board, capture_id)
+            for raw_id, symbol, market, board, capture_id in source_rows
         }
         if actual_by_symbol != expected_by_symbol or set(expected_by_symbol) != set(
             requested
@@ -756,44 +709,34 @@ ORDER BY source_symbol""",
                 "PROFILE_SOURCE_SYMBOL_SET_MISMATCH", "画像来源代码集合与PG Raw不一致"
             )
         cursor.execute(
-            """SELECT source_symbol, record_content_sha256
-FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND target_session=%s
-  AND package_sha256=%s AND profile_revision=%s
+            f"""SELECT {", ".join(_PROFILE_COLUMNS)}
+FROM source_symbol_price_profiles
+WHERE target_session=%s AND source_package_id=%s AND profile_revision=%s
 ORDER BY source_symbol""",
             batch_key,
         )
-        existing = {
-            symbol: str(content_sha).strip()
-            for symbol, content_sha in cursor.fetchall()
-        }
-        expected_sha = {
-            symbol: item["record_content_sha256"] for symbol, item in requested.items()
-        }
-        for symbol, content_sha in existing.items():
-            if expected_sha.get(symbol) != content_sha:
+        existing_rows = cursor.fetchall()
+        existing = {}
+        for row in existing_rows:
+            stored = dict(zip(_PROFILE_COLUMNS, row, strict=True))
+            symbol = stored["source_symbol"]
+            expected = requested.get(symbol)
+            if expected is None or stored != expected:
                 raise PriceProfilePgError(
                     "PROFILE_CONTENT_CONFLICT",
                     "同一画像业务键已保存不同内容；拒绝覆盖并回滚事务",
                 )
+            existing[symbol] = stored
         missing_records = [
             item for symbol, item in sorted(requested.items()) if symbol not in existing
         ]
         if missing_records:
             inserted = insert_profile_records_in_transaction(cursor, missing_records)
-            if {symbol: digest for symbol, digest in inserted} != {
-                item["source_symbol"]: item["record_content_sha256"]
-                for item in missing_records
-            }:
-                raise PriceProfilePgError(
-                    "PROFILE_INSERT_READBACK_MISMATCH", "画像INSERT内容回执不匹配"
-                )
         else:
             inserted = []
         cursor.execute(
-            """SELECT count(*)::bigint FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND target_session=%s
-  AND package_sha256=%s AND profile_revision=%s""",
+            """SELECT count(*)::bigint FROM source_symbol_price_profiles
+WHERE target_session=%s AND source_package_id=%s AND profile_revision=%s""",
             batch_key,
         )
         row_count_after = int(cursor.fetchone()[0])
@@ -801,14 +744,33 @@ WHERE namespace_id=%s::uuid AND target_session=%s
             raise PriceProfilePgError(
                 "PROFILE_DAY_COUNT_MISMATCH", "画像日分母未精确闭合"
             )
+        cursor.execute(
+            f"""SELECT {", ".join(_PROFILE_COLUMNS)}
+FROM source_symbol_price_profiles
+WHERE target_session=%s AND source_package_id=%s AND profile_revision=%s
+ORDER BY source_symbol""",
+            batch_key,
+        )
+        actual_rows = cursor.fetchall()
+        if len(actual_rows) != len(prepared) or any(
+            dict(zip(_PROFILE_COLUMNS, actual, strict=True)) != expected
+            for actual, expected in zip(
+                actual_rows,
+                sorted(prepared, key=lambda item: item["source_symbol"]),
+                strict=True,
+            )
+        ):
+            raise PriceProfilePgError(
+                "PROFILE_INSERT_READBACK_MISMATCH", "画像完整typed行事务读回不一致"
+            )
     return {
         "status": "PERSISTED" if inserted else "IDEMPOTENT_READBACK",
         "target_session": first["target_session"].isoformat(),
-        "package_sha256": first["package_sha256"],
+        "source_package_id": first["source_package_id"],
         "profile_revision": first["profile_revision"],
         "requested_count": len(prepared),
         "inserted_count": len(inserted),
-        "existing_same_content_count": len(existing),
+        "existing_same_typed_row_count": len(existing),
         "row_count_after": row_count_after,
         "transaction": "SERIALIZABLE_COMMITTED",
     }
@@ -821,88 +783,83 @@ def list_profile_snapshots(
         raise PriceProfilePgError(
             "PROFILE_SNAPSHOT_CUTOFF_REQUIRED", "画像目录必须绑定显式研究截止日期"
         )
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+    with _transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
-            """SELECT p.target_session, p.package_sha256,
+            """SELECT p.target_session, p.source_package_id, min(p.source_capture_id),
        p.profile_revision, p.history_window_start, p.history_window_end,
        p.history_requested_session_count, count(*)::bigint,
-        min(r.raw_row_count),
-        count(*)=min(r.raw_row_count)
+       min(r.raw_row_count),
+       count(*)=min(r.raw_row_count)
          AND min(r.raw_symbol_count)=min(r.raw_row_count)
          AND min(r.capture_count)=1
          AND count(DISTINCT p.source_capture_id)=1
-         AND min(p.source_capture_id::text)=min(r.raw_capture_id),
+         AND min(p.source_capture_id)=min(r.raw_capture_id),
        p.history_calendar_id, p.history_calendar_revision, p.price_coordinate
-FROM stock.source_symbol_price_profiles p
+FROM source_symbol_price_profiles p
 LEFT JOIN (
-    SELECT namespace_id, session_date, package_sha256,
+    SELECT session_date, source_package_id,
            count(*)::bigint AS raw_row_count,
            count(DISTINCT source_symbol)::bigint AS raw_symbol_count,
            count(DISTINCT source_capture_id)::bigint AS capture_count,
-           min(source_capture_id::text) AS raw_capture_id
-    FROM stock.source_raw_daily
-    GROUP BY namespace_id, session_date, package_sha256
-) r ON r.namespace_id=p.namespace_id AND r.session_date=p.target_session
-  AND r.package_sha256=p.package_sha256
-WHERE p.namespace_id=%s::uuid AND p.target_session<=%s
-GROUP BY p.target_session, p.package_sha256, p.profile_revision,
-         p.history_window_start, p.history_window_end, p.history_requested_session_count,
-         p.history_calendar_id, p.history_calendar_revision, p.price_coordinate
-ORDER BY p.target_session DESC, p.package_sha256, p.profile_revision""",
-            (namespace_id, max_target_session),
+           min(source_capture_id) AS raw_capture_id
+    FROM source_raw_daily
+    GROUP BY session_date, source_package_id
+) r ON r.session_date=p.target_session
+  AND r.source_package_id=p.source_package_id
+WHERE p.target_session<=%s
+GROUP BY p.target_session, p.source_package_id, p.profile_revision,
+         p.history_window_start, p.history_window_end,
+         p.history_requested_session_count, p.history_calendar_id,
+         p.history_calendar_revision, p.price_coordinate
+ORDER BY p.target_session DESC, p.source_package_id, p.profile_revision
+LIMIT 2000""",
+            (max_target_session,),
         )
         snapshots = [
             {
                 "target_session": row[0].isoformat(),
-                "package_sha256": str(row[1]).strip(),
-                "profile_revision": str(row[2]).strip(),
-                "window_start": row[3].isoformat(),
-                "window_end": row[4].isoformat(),
-                "history_session_count": int(row[5]),
-                "source_symbol_count": int(row[6]),
-                "expected_source_symbol_count": int(row[7]),
-                "complete": bool(row[8]),
-                "history_calendar_id": row[9],
-                "history_calendar_revision": row[10],
-                "price_coordinate": row[11],
+                "source_package_id": int(row[1]),
+                "source_capture_id": int(row[2]),
+                "profile_revision": str(row[3]),
+                "window_start": row[4].isoformat(),
+                "window_end": row[5].isoformat(),
+                "history_session_count": int(row[6]),
+                "source_symbol_count": int(row[7]),
+                "expected_source_symbol_count": int(row[8] or 0),
+                "complete": bool(row[9]),
+                "history_calendar_id": row[10],
+                "history_calendar_revision": row[11],
+                "price_coordinate": row[12],
             }
             for row in cursor.fetchall()
         ]
-    return {
-        "status": "AVAILABLE" if snapshots else "EMPTY",
-        "namespace_id": namespace_id,
-        "snapshots": snapshots,
-    }
+    return {"status": "AVAILABLE" if snapshots else "EMPTY", "snapshots": snapshots}
 
 
 def read_source_profile_observability(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    source_capture_id: str,
-    current_semantics_sha256: str,
+    source_package_id: int,
+    source_capture_id: int,
+    current_profile_revision: str,
+    current_producer_version: str,
 ) -> dict[str, Any]:
-    """按画像行键与Raw捕获读取画像版本、符号集合和字段质量摘要。"""
+    """按数字来源与捕获ID核验Raw分母、画像版本、代码集合及字段质量。"""
     if (
         type(target_session) is not date
-        or not isinstance(package_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
-        or not isinstance(current_semantics_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", current_semantics_sha256) is None
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or not isinstance(current_profile_revision, str)
+        or re.fullmatch(r"PROFILE_R[0-9]{2}", current_profile_revision) is None
+        or not isinstance(current_producer_version, str)
+        or not current_producer_version
     ):
         raise PriceProfilePgError(
-            "PROFILE_OBSERVATION_KEY_INVALID", "画像观察必须绑定精确日期、SHA与修订"
-        )
-    try:
-        canonical_capture_id = str(UUID(source_capture_id))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise PriceProfilePgError(
-            "PROFILE_OBSERVATION_KEY_INVALID", "画像观察行键或捕获UUID无效"
-        ) from error
-    if canonical_capture_id != source_capture_id:
-        raise PriceProfilePgError(
-            "PROFILE_OBSERVATION_KEY_INVALID", "画像行键与捕获UUID必须使用规范格式"
+            "PROFILE_OBSERVATION_KEY_INVALID",
+            "画像观察必须绑定日期、数字来源/捕获ID及显式修订",
         )
 
     core_values = ", ".join(
@@ -912,74 +869,72 @@ def read_source_profile_observability(
     core_values += (
         ", ('core.price_damage',p.price_damage_quality,p.price_damage_reason)"
     )
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+    with _transaction(config, write=False) as (_connection, cursor, _scope):
         cursor.execute(
             """SELECT count(*)::bigint AS raw_rows,
        count(DISTINCT r.source_symbol)::bigint AS raw_symbols,
        count(DISTINCT r.source_capture_id)::bigint AS capture_count,
-       min(c.normalized_count) AS expected_count,
-       max(c.normalized_count) AS expected_count_max
-FROM stock.source_raw_daily r
-LEFT JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
-  AND c.capture_id=r.source_capture_id
-WHERE r.namespace_id=%s::uuid AND r.source_capture_id=%s::uuid
-  AND r.session_date=%s::date AND r.package_sha256=%s""",
-            (namespace_id, canonical_capture_id, target_session, package_sha256),
+       min(c.normalized_count), max(c.normalized_count),
+       min(c.target_session), max(c.target_session),
+       min(c.source_package_id), max(c.source_package_id)
+FROM source_raw_daily r
+LEFT JOIN source_captures c ON c.capture_id=r.source_capture_id
+WHERE r.source_capture_id=%s AND r.session_date=%s
+  AND r.source_package_id=%s""",
+            (source_capture_id, target_session, source_package_id),
         )
-        raw_row, raw_symbol_row, capture_count, expected_count, expected_count_max = (
-            cursor.fetchone()
-        )
+        (
+            raw_row,
+            raw_symbol_row,
+            capture_count,
+            expected_count,
+            expected_count_max,
+            capture_session_min,
+            capture_session_max,
+            capture_package_min,
+            capture_package_max,
+        ) = cursor.fetchone()
         raw_rows = int(raw_row)
         raw_symbols = int(raw_symbol_row)
         if (
             not 1 <= raw_rows <= MAX_PROFILE_ROWS_PER_BATCH
-            or raw_rows > MAX_PROFILE_ROWS_PER_BATCH
-            or raw_symbols > MAX_PROFILE_ROWS_PER_BATCH
             or raw_symbols != raw_rows
             or capture_count != 1
             or expected_count != raw_rows
             or expected_count != expected_count_max
+            or capture_session_min != target_session
+            or capture_session_max != target_session
+            or capture_package_min != source_package_id
+            or capture_package_max != source_package_id
         ):
             raise PriceProfilePgError(
                 "PROFILE_OBSERVATION_ROW_BUDGET_EXCEEDED",
-                "画像观察的Raw代码集合与唯一捕获分母不一致",
+                "画像观察的Raw代码集合与唯一来源捕获分母不一致",
             )
 
         cursor.execute(
-            """SELECT profile_revision::text AS profile_revision,
-       producer_contract,producer_version,producer_contract_sha256,
+            """SELECT profile_revision::text, producer_contract, producer_version,
        count(*)::bigint AS stored_rows,
        count(DISTINCT source_symbol)::bigint AS distinct_source_symbols,
-       count(*) FILTER (WHERE history_records_complete)::bigint
-           AS history_records_complete_rows,
+       count(*) FILTER (WHERE history_records_complete)::bigint,
        count(*) FILTER (WHERE history_stored_session_count>=24
-                         AND history_requested_session_count>=24)::bigint
-           AS history_24_session_eligible_rows,
-       count(*) FILTER (WHERE history_requested_session_count>=24)::bigint
-           AS history_requested_24_plus_rows,
-       min(history_requested_session_count) AS min_history_requested_sessions,
-       max(history_requested_session_count) AS max_history_requested_sessions,
-       min(history_stored_session_count) AS min_history_stored_sessions,
-       max(history_stored_session_count) AS max_history_stored_sessions,
-       count(*) FILTER (WHERE price_window_usable)::bigint
-           AS price_window_usable_rows,
-       array_agg(DISTINCT target_bar_status ORDER BY target_bar_status)
-           AS target_bar_statuses,
-       array_agg(DISTINCT target_price_quality ORDER BY target_price_quality)
-           AS target_price_qualities,
+                         AND history_requested_session_count>=24)::bigint,
+       count(*) FILTER (WHERE history_requested_session_count>=24)::bigint,
+       min(history_requested_session_count), max(history_requested_session_count),
+       min(history_stored_session_count), max(history_stored_session_count),
+       count(*) FILTER (WHERE price_window_usable)::bigint,
+       array_agg(DISTINCT target_bar_status ORDER BY target_bar_status),
+       array_agg(DISTINCT target_price_quality ORDER BY target_price_quality),
        array_agg(DISTINCT price_window_status ORDER BY price_window_status)
-           AS price_window_statuses
-FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND target_session=%s::date AND package_sha256=%s
-  AND source_capture_id=%s::uuid
-GROUP BY profile_revision,producer_contract,producer_version,producer_contract_sha256
+FROM source_symbol_price_profiles
+WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
+GROUP BY profile_revision,producer_contract,producer_version
 ORDER BY profile_revision
 LIMIT %s""",
             (
-                namespace_id,
                 target_session,
-                package_sha256,
-                canonical_capture_id,
+                source_package_id,
+                source_capture_id,
                 MAX_PROFILE_OBSERVATION_REVISIONS + 1,
             ),
         )
@@ -993,21 +948,16 @@ LIMIT %s""",
                 "精确来源集合画像修订数超过固定上限",
             )
         for revision in revisions:
-            revision["profile_revision"] = str(revision["profile_revision"]).strip()
-            revision["producer_contract_sha256"] = str(
-                revision["producer_contract_sha256"]
-            ).strip()
+            revision["profile_revision"] = str(revision["profile_revision"])
             for name in (
                 "history_records_complete_rows",
                 "history_24_session_eligible_rows",
                 "history_requested_24_plus_rows",
                 "price_window_usable_rows",
+                "stored_rows",
+                "distinct_source_symbols",
             ):
                 revision[name] = int(revision[name])
-            revision["stored_rows"] = int(revision["stored_rows"])
-            revision["distinct_source_symbols"] = int(
-                revision["distinct_source_symbols"]
-            )
             for name in (
                 "target_bar_statuses",
                 "target_price_qualities",
@@ -1018,16 +968,16 @@ LIMIT %s""",
         matching_current = [
             item
             for item in revisions
-            if item["producer_contract_sha256"] == current_semantics_sha256
+            if item["profile_revision"] == current_profile_revision
+            and item["producer_version"] == current_producer_version
         ]
-        selected = None
+        selected = matching_current[0] if len(matching_current) == 1 else None
         if len(matching_current) == 1:
-            selected = matching_current[0]
-            selection_rule = "UNIQUE_CURRENT_SEMANTICS_SHA256"
+            selection_rule = "EXACT_PROFILE_AND_PRODUCER_VERSION"
         elif len(matching_current) > 1:
-            selection_rule = "AMBIGUOUS_NO_UNIQUE_SEMANTICS_MATCH"
+            selection_rule = "AMBIGUOUS_DUPLICATE_CURRENT_VERSION"
         elif revisions:
-            selection_rule = "NO_MATCHING_CURRENT_SEMANTICS"
+            selection_rule = "NO_MATCHING_CURRENT_VERSION"
         else:
             selection_rule = "NO_STORED_PROFILE_REVISION"
 
@@ -1047,54 +997,29 @@ LIMIT %s""",
             profile_revision = selected["profile_revision"]
             cursor.execute(
                 """WITH raw_symbols AS (
-    SELECT DISTINCT source_symbol
-    FROM stock.source_raw_daily
-    WHERE namespace_id=%s::uuid AND source_capture_id=%s::uuid
-      AND session_date=%s::date AND package_sha256=%s
+    SELECT DISTINCT source_symbol FROM source_raw_daily
+    WHERE source_capture_id=%s AND session_date=%s AND source_package_id=%s
 ), profile_symbols AS (
-    SELECT DISTINCT source_symbol
-    FROM stock.source_symbol_price_profiles
-    WHERE namespace_id=%s::uuid AND target_session=%s::date
-      AND package_sha256=%s AND source_capture_id=%s::uuid
-      AND profile_revision=%s
+    SELECT DISTINCT source_symbol FROM source_symbol_price_profiles
+    WHERE target_session=%s AND source_package_id=%s
+      AND source_capture_id=%s AND profile_revision=%s
 )
-SELECT count(r.source_symbol)::bigint AS raw_symbol_count,
-       count(p.source_symbol)::bigint AS profile_symbol_count,
-       count(*) FILTER (WHERE r.source_symbol IS NOT NULL
-                         AND p.source_symbol IS NOT NULL)::bigint
-           AS matched_symbol_count,
-       count(*) FILTER (WHERE r.source_symbol IS NOT NULL
-                         AND p.source_symbol IS NULL)::bigint
-           AS raw_only_symbol_count,
-       count(*) FILTER (WHERE r.source_symbol IS NULL
-                         AND p.source_symbol IS NOT NULL)::bigint
-           AS profile_only_symbol_count,
-       array_agg(r.source_symbol ORDER BY r.source_symbol)
-           FILTER (WHERE r.source_symbol IS NOT NULL) AS raw_symbol_set,
-       array_agg(p.source_symbol ORDER BY p.source_symbol)
-           FILTER (WHERE p.source_symbol IS NOT NULL) AS profile_symbol_set
+SELECT count(r.source_symbol)::bigint, count(p.source_symbol)::bigint,
+       count(*) FILTER (WHERE r.source_symbol IS NOT NULL AND p.source_symbol IS NOT NULL)::bigint,
+       count(*) FILTER (WHERE r.source_symbol IS NOT NULL AND p.source_symbol IS NULL)::bigint,
+       count(*) FILTER (WHERE r.source_symbol IS NULL AND p.source_symbol IS NOT NULL)::bigint
 FROM raw_symbols r FULL OUTER JOIN profile_symbols p USING (source_symbol)""",
                 (
-                    namespace_id,
-                    canonical_capture_id,
+                    source_capture_id,
                     target_session,
-                    package_sha256,
-                    namespace_id,
+                    source_package_id,
                     target_session,
-                    package_sha256,
-                    canonical_capture_id,
+                    source_package_id,
+                    source_capture_id,
                     profile_revision,
                 ),
             )
             comparison = cursor.fetchone()
-            raw_symbol_set = comparison[5] or []
-            profile_symbol_set = comparison[6] or []
-            raw_symbol_set_sha256 = sha256(
-                "\n".join(raw_symbol_set).encode("utf-8")
-            ).hexdigest()
-            profile_symbol_set_sha256 = sha256(
-                "\n".join(profile_symbol_set).encode("utf-8")
-            ).hexdigest()
             set_comparison.update(
                 {
                     "raw_symbol_count": int(comparison[0]),
@@ -1103,35 +1028,26 @@ FROM raw_symbols r FULL OUTER JOIN profile_symbols p USING (source_symbol)""",
                     "matched_symbol_count": int(comparison[2]),
                     "raw_only_symbol_count": int(comparison[3]),
                     "profile_only_symbol_count": int(comparison[4]),
-                    "raw_symbol_set_sha256": raw_symbol_set_sha256,
-                    "profile_symbol_set_sha256": profile_symbol_set_sha256,
-                    "symbol_sets_sha256_match": (
-                        raw_symbol_set_sha256 == profile_symbol_set_sha256
-                    ),
                     "symbol_sets_match": (
                         comparison[3] == 0
                         and comparison[4] == 0
                         and int(selected["stored_rows"]) == int(comparison[0])
-                        and raw_symbol_set_sha256 == profile_symbol_set_sha256
                     ),
                 }
             )
             cursor.execute(
                 f"""SELECT f.field_id,f.quality,f.reason_code,count(*)::bigint AS row_count
-FROM stock.source_symbol_price_profiles p
-CROSS JOIN LATERAL (VALUES {core_values})
-     AS f(field_id,quality,reason_code)
-WHERE p.namespace_id=%s::uuid AND p.target_session=%s::date
-  AND p.package_sha256=%s AND p.source_capture_id=%s::uuid
-  AND p.profile_revision=%s
+FROM source_symbol_price_profiles p
+CROSS JOIN LATERAL (VALUES {core_values}) AS f(field_id,quality,reason_code)
+WHERE p.target_session=%s AND p.source_package_id=%s
+  AND p.source_capture_id=%s AND p.profile_revision=%s
 GROUP BY f.field_id,f.quality,f.reason_code
 ORDER BY f.field_id,f.quality,f.reason_code
 LIMIT %s""",
                 (
-                    namespace_id,
                     target_session,
-                    package_sha256,
-                    canonical_capture_id,
+                    source_package_id,
+                    source_capture_id,
                     profile_revision,
                     MAX_PROFILE_OBSERVATION_QUALITY_ROWS + 1,
                 ),
@@ -1147,23 +1063,20 @@ LIMIT %s""",
                     "Core画像字段质量分组超过固定上限",
                 )
             cursor.execute(
-                """SELECT f.field_id,f.status,f.quality,f.reason_code,
-       count(*)::bigint AS row_count
-FROM stock.source_symbol_price_profiles p
+                """SELECT f.field_id,f.status,f.quality,f.reason_code,count(*)::bigint AS row_count
+FROM source_symbol_price_profiles p
 CROSS JOIN LATERAL unnest(
     p.profile_field_ids,p.profile_statuses,p.profile_qualities,p.profile_reasons
 ) AS f(field_id,status,quality,reason_code)
-WHERE p.namespace_id=%s::uuid AND p.target_session=%s::date
-  AND p.package_sha256=%s AND p.source_capture_id=%s::uuid
-  AND p.profile_revision=%s
+WHERE p.target_session=%s AND p.source_package_id=%s
+  AND p.source_capture_id=%s AND p.profile_revision=%s
 GROUP BY f.field_id,f.status,f.quality,f.reason_code
 ORDER BY f.field_id,f.status,f.quality,f.reason_code
 LIMIT %s""",
                 (
-                    namespace_id,
                     target_session,
-                    package_sha256,
-                    canonical_capture_id,
+                    source_package_id,
+                    source_capture_id,
                     profile_revision,
                     MAX_PROFILE_OBSERVATION_QUALITY_ROWS + 1,
                 ),
@@ -1179,32 +1092,27 @@ LIMIT %s""",
                     "Profile字段质量分组超过固定上限",
                 )
 
-    if selected is None:
-        status = (
-            "AMBIGUOUS_STORED_REVISIONS"
-            if len(matching_current) > 1
-            else "NOT_COMPUTED"
-        )
-    else:
-        status = (
-            "PG_SOURCE_PROFILE_STORED"
-            if set_comparison["symbol_sets_match"]
-            else "SOURCE_PROFILE_SYMBOL_SET_MISMATCH"
-        )
+    status = (
+        "AMBIGUOUS_STORED_REVISIONS"
+        if len(matching_current) > 1
+        else "NOT_COMPUTED"
+        if selected is None
+        else "PG_SOURCE_PROFILE_STORED"
+        if set_comparison["symbol_sets_match"]
+        else "SOURCE_PROFILE_SYMBOL_SET_MISMATCH"
+    )
     return {
         "status": status,
-        "namespace_id": namespace_id,
         "target_session": target_session.isoformat(),
-        "source_capture_id": canonical_capture_id,
-        "package_sha256": package_sha256,
-        "current_semantics_sha256": current_semantics_sha256,
+        "source_capture_id": source_capture_id,
+        "source_package_id": source_package_id,
         "profile_revision_selection": {
             "rule": selection_rule,
-            "selected_profile_revision": (
-                selected["profile_revision"] if selected is not None else None
-            ),
+            "selected_profile_revision": selected["profile_revision"]
+            if selected
+            else None,
             "candidate_revision_count": len(revisions),
-            "current_semantics_match_count": len(matching_current),
+            "current_version_match_count": len(matching_current),
         },
         "revision_candidates": revisions,
         "selected_revision": selected,
@@ -1219,48 +1127,34 @@ LIMIT %s""",
 def _snapshot_for_session(
     cursor: Any,
     *,
-    namespace_id: str,
     target_session: date,
     max_target_session: date,
-    package_sha256: str | None = None,
+    source_package_id: int | None = None,
     profile_revision: str | None = None,
 ) -> dict[str, Any]:
-    exact_identity = (package_sha256, profile_revision)
+    exact_identity = (source_package_id, profile_revision)
     if any(value is not None for value in exact_identity):
-        if not all(
-            isinstance(value, str) and value
-            for value in (package_sha256, profile_revision)
-        ):
+        if type(source_package_id) is not int or source_package_id <= 0:
             raise PriceProfilePgError(
                 "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-                "精确快照必须同时提供package_sha256和profile_revision",
+                "精确快照须使用正BIGINT source_package_id和显式画像修订",
             )
-        if len(package_sha256) != 64 or any(
-            character not in "0123456789abcdef" for character in package_sha256
+        if (
+            not isinstance(profile_revision, str)
+            or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
         ):
             raise PriceProfilePgError(
                 "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-                "package_sha256不是小写SHA-256",
-            )
-        if len(profile_revision) != 64 or any(
-            character not in "0123456789abcdef" for character in profile_revision
-        ):
-            raise PriceProfilePgError(
-                "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-                "profile_revision不是小写SHA-256",
+                "精确快照的profile_revision格式无效",
             )
 
-    predicates = [
-        "p.namespace_id=%s::uuid",
-        "p.target_session=%s",
-        "p.target_session<=%s",
-    ]
-    parameters: list[Any] = [namespace_id, target_session, max_target_session]
-    if package_sha256 is not None:
-        predicates.extend(("p.package_sha256=%s", "p.profile_revision=%s"))
-        parameters.extend((package_sha256, profile_revision))
+    predicates = ["p.target_session=%s", "p.target_session<=%s"]
+    parameters: list[Any] = [target_session, max_target_session]
+    if source_package_id is not None:
+        predicates.extend(("p.source_package_id=%s", "p.profile_revision=%s"))
+        parameters.extend((source_package_id, profile_revision))
     cursor.execute(
-        """SELECT p.target_session, p.package_sha256,
+        """SELECT p.target_session, p.source_package_id, min(p.source_capture_id),
        p.profile_revision, p.history_calendar_id, p.history_calendar_revision,
        p.history_window_start, p.history_window_end,
        p.history_requested_session_count, count(*)::bigint,
@@ -1269,26 +1163,28 @@ def _snapshot_for_session(
          AND min(r.raw_symbol_count)=min(r.raw_row_count)
          AND min(r.capture_count)=1
          AND count(DISTINCT p.source_capture_id)=1
-         AND min(p.source_capture_id::text)=min(r.raw_capture_id)
-FROM stock.source_symbol_price_profiles p
+         AND min(p.source_capture_id)=min(r.raw_capture_id)
+FROM source_symbol_price_profiles p
 LEFT JOIN (
-    SELECT namespace_id, session_date, package_sha256,
+    SELECT session_date, source_package_id,
            count(*)::bigint AS raw_row_count,
            count(DISTINCT source_symbol)::bigint AS raw_symbol_count,
            count(DISTINCT source_capture_id)::bigint AS capture_count,
-           min(source_capture_id::text) AS raw_capture_id
-    FROM stock.source_raw_daily
-    GROUP BY namespace_id, session_date, package_sha256
-) r ON r.namespace_id=p.namespace_id AND r.session_date=p.target_session
-  AND r.package_sha256=p.package_sha256
+           min(source_capture_id) AS raw_capture_id
+    FROM source_raw_daily
+    GROUP BY session_date, source_package_id
+) r ON r.session_date=p.target_session
+  AND r.source_package_id=p.source_package_id
 WHERE """
         + " AND ".join(predicates)
         + """
-GROUP BY p.target_session, p.package_sha256, p.profile_revision,
+GROUP BY p.target_session, p.source_package_id, p.profile_revision,
          p.history_calendar_id, p.history_calendar_revision,
-         p.history_window_start, p.history_window_end, p.history_requested_session_count
-ORDER BY p.package_sha256, p.profile_revision""",
-        parameters,
+         p.history_window_start, p.history_window_end,
+         p.history_requested_session_count
+ORDER BY p.source_package_id, p.profile_revision
+LIMIT %s""",
+        [*parameters, MAX_PROFILE_OBSERVATION_REVISIONS + 1],
     )
     rows = cursor.fetchall()
     if not rows:
@@ -1299,21 +1195,22 @@ ORDER BY p.package_sha256, p.profile_revision""",
     if len(rows) != 1:
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_AMBIGUOUS",
-            f"{target_session.isoformat()}仍有多个画像版本；请精确提供该端package_sha256和profile_revision",
+            f"{target_session.isoformat()}仍有多个画像版本；请精确提供该端source_package_id和profile_revision",
         )
     row = rows[0]
     snapshot = {
         "target_session": row[0],
-        "package_sha256": str(row[1]).strip(),
-        "profile_revision": str(row[2]).strip(),
-        "history_calendar_id": row[3],
-        "history_calendar_revision": row[4],
-        "window_start": row[5],
-        "window_end": row[6],
-        "history_session_count": int(row[7]),
-        "source_symbol_count": int(row[8]),
-        "expected_source_symbol_count": int(row[9]),
-        "complete": bool(row[10]),
+        "source_package_id": int(row[1]),
+        "source_capture_id": int(row[2]),
+        "profile_revision": str(row[3]),
+        "history_calendar_id": row[4],
+        "history_calendar_revision": row[5],
+        "window_start": row[6],
+        "window_end": row[7],
+        "history_session_count": int(row[8]),
+        "source_symbol_count": int(row[9]),
+        "expected_source_symbol_count": int(row[10] or 0),
+        "complete": bool(row[11]),
     }
     if not snapshot["complete"]:
         raise PriceProfilePgError(
@@ -1415,11 +1312,6 @@ _BIAS20_ATR_PAIR_REASON_SQL = """CASE
       THEN 'PRICE_COORDINATE_NOT_RAW_UNADJUSTED:' ||
            COALESCE(before_price_coordinate, 'UNKNOWN') || '->' ||
            COALESCE(after_price_coordinate, 'UNKNOWN')
-    WHEN NOT core_compatible AND before_semantics_sha256
-         IS DISTINCT FROM after_semantics_sha256
-      THEN 'CORE_SEMANTICS_SHA_MISMATCH:' ||
-           COALESCE(before_semantics_sha256, 'UNKNOWN') || '->' ||
-           COALESCE(after_semantics_sha256, 'UNKNOWN')
     WHEN NOT core_compatible AND before_producer_contract
          IS DISTINCT FROM after_producer_contract
       THEN 'CORE_PRODUCER_CONTRACT_MISMATCH:' ||
@@ -1468,13 +1360,13 @@ WITH old_rows AS (
            r.raw_close AS joined_raw_close,
            r.price_quality AS joined_raw_price_quality,
            r.price_reason AS joined_raw_price_reason
-    FROM stock.source_symbol_price_profiles p
-    LEFT JOIN stock.source_raw_daily r
-      ON r.namespace_id=p.namespace_id AND r.source_symbol=p.source_symbol
-     AND r.session_date=p.target_session AND r.package_sha256=p.package_sha256
+    FROM source_symbol_price_profiles p
+    LEFT JOIN source_raw_daily r
+      ON r.source_symbol=p.source_symbol
+     AND r.session_date=p.target_session AND r.source_package_id=p.source_package_id
      AND r.source_capture_id=p.source_capture_id
-    WHERE p.namespace_id=%s::uuid AND p.target_session=%s
-      AND p.package_sha256=%s
+    WHERE p.target_session=%s
+      AND p.source_package_id=%s
       AND p.profile_revision=%s
 ), new_rows AS (
     SELECT p.*,
@@ -1485,13 +1377,13 @@ WITH old_rows AS (
            r.raw_close AS joined_raw_close,
            r.price_quality AS joined_raw_price_quality,
            r.price_reason AS joined_raw_price_reason
-    FROM stock.source_symbol_price_profiles p
-    LEFT JOIN stock.source_raw_daily r
-      ON r.namespace_id=p.namespace_id AND r.source_symbol=p.source_symbol
-     AND r.session_date=p.target_session AND r.package_sha256=p.package_sha256
+    FROM source_symbol_price_profiles p
+    LEFT JOIN source_raw_daily r
+      ON r.source_symbol=p.source_symbol
+     AND r.session_date=p.target_session AND r.source_package_id=p.source_package_id
      AND r.source_capture_id=p.source_capture_id
-    WHERE p.namespace_id=%s::uuid AND p.target_session=%s
-      AND p.package_sha256=%s
+    WHERE p.target_session=%s
+      AND p.source_package_id=%s
       AND p.profile_revision=%s
 ), paired AS (
     SELECT COALESCE(o.source_symbol, n.source_symbol) AS source_symbol,
@@ -1501,18 +1393,16 @@ WITH old_rows AS (
            n.market AS after_market,
            o.board AS before_board,
            n.board AS after_board,
-           o.source_capture_id::text AS before_source_capture_id,
-           n.source_capture_id::text AS after_source_capture_id,
-           o.package_sha256::text AS before_package_sha256,
-           n.package_sha256::text AS after_package_sha256,
+           o.source_capture_id AS before_source_capture_id,
+           n.source_capture_id AS after_source_capture_id,
+           o.source_package_id AS before_source_package_id,
+           n.source_package_id AS after_source_package_id,
            o.calculation_scope AS before_calculation_scope,
            n.calculation_scope AS after_calculation_scope,
            o.producer_contract AS before_producer_contract,
            n.producer_contract AS after_producer_contract,
            o.producer_version AS before_producer_version,
            n.producer_version AS after_producer_version,
-           o.producer_contract_sha256::text AS before_semantics_sha256,
-           n.producer_contract_sha256::text AS after_semantics_sha256,
            o.identity_status AS before_identity_status,
            n.identity_status AS after_identity_status,
            o.stable_security_id_status AS before_stable_security_id_status,
@@ -1630,7 +1520,6 @@ WITH old_rows AS (
            COALESCE(
                o.source_symbol IS NOT NULL AND n.source_symbol IS NOT NULL
                AND o.producer_contract=n.producer_contract
-               AND o.producer_contract_sha256=n.producer_contract_sha256
                AND o.producer_version=n.producer_version
                AND o.calculation_scope=n.calculation_scope
                AND o.price_coordinate=n.price_coordinate
@@ -1642,7 +1531,6 @@ WITH old_rows AS (
            COALESCE(
                o.source_symbol IS NOT NULL AND n.source_symbol IS NOT NULL
                AND o.producer_contract=n.producer_contract
-               AND o.producer_contract_sha256=n.producer_contract_sha256
                AND o.producer_version=n.producer_version
                AND o.calculation_scope=n.calculation_scope
                AND o.price_coordinate=n.price_coordinate
@@ -1686,7 +1574,7 @@ WITH old_rows AS (
                   AND before_calculation_scope IS NOT NULL
                   AND before_producer_contract IS NOT NULL
                   AND before_producer_version IS NOT NULL
-                  AND before_semantics_sha256 IS NOT NULL
+                  AND before_producer_contract IS NOT NULL
                 THEN CASE WHEN before_raw_close>before_ma20 THEN 'ABOVE'
                           WHEN before_raw_close<before_ma20 THEN 'BELOW'
                           ELSE 'EQUAL' END END AS before_close_ma20_relation_local,
@@ -1699,7 +1587,7 @@ WITH old_rows AS (
                   AND after_calculation_scope IS NOT NULL
                   AND after_producer_contract IS NOT NULL
                   AND after_producer_version IS NOT NULL
-                  AND after_semantics_sha256 IS NOT NULL
+                  AND after_producer_contract IS NOT NULL
                 THEN CASE WHEN after_raw_close>after_ma20 THEN 'ABOVE'
                           WHEN after_raw_close<after_ma20 THEN 'BELOW'
                           ELSE 'EQUAL' END END AS after_close_ma20_relation_local
@@ -1737,7 +1625,7 @@ WITH old_rows AS (
                     WHEN before_calculation_scope IS NULL
                       OR before_producer_contract IS NULL
                       OR before_producer_version IS NULL
-                      OR before_semantics_sha256 IS NULL
+                      OR before_producer_contract IS NULL
                       THEN 'CORE_SEMANTICS_UNKNOWN'
                     WHEN before_ma20_quality IS DISTINCT FROM 'OBSERVED'
                       THEN 'MA20_QUALITY_UNKNOWN:' ||
@@ -1763,7 +1651,7 @@ WITH old_rows AS (
                     WHEN after_calculation_scope IS NULL
                       OR after_producer_contract IS NULL
                       OR after_producer_version IS NULL
-                      OR after_semantics_sha256 IS NULL
+                      OR after_producer_contract IS NULL
                       THEN 'CORE_SEMANTICS_UNKNOWN'
                     WHEN after_ma20_quality IS DISTINCT FROM 'OBSERVED'
                       THEN 'MA20_QUALITY_UNKNOWN:' ||
@@ -2252,7 +2140,7 @@ _PROFILE_CHANGE_HIGHLIGHT_CTES = (
              WHEN 'CORE_QUALITY_CHANGED'=ANY(change_types)
                THEN 'CORE_QUALITY'::text
              WHEN 'BEFORE_ONLY'=ANY(change_types) OR 'AFTER_ONLY'=ANY(change_types)
-               THEN 'SOURCE_SET_MEMBERSHIP'::text
+               THEN 'SOURCE_DATE_MEMBERSHIP'::text
              ELSE 'RECORDED_CHANGE'::text
            END AS highlight_category
     FROM classified
@@ -2267,7 +2155,7 @@ _PROFILE_CHANGE_HIGHLIGHT_CTES = (
              WHEN 'PRICE_WINDOW_STATUS' THEN 3
              WHEN 'PROFILE_STATE' THEN 4
              WHEN 'CORE_QUALITY' THEN 5
-             WHEN 'SOURCE_SET_MEMBERSHIP' THEN 6
+             WHEN 'SOURCE_DATE_MEMBERSHIP' THEN 6
              ELSE 7
            END::integer AS highlight_priority
     FROM highlight_classified
@@ -2279,13 +2167,10 @@ _PROFILE_CHANGE_HIGHLIGHT_CTES = (
 MAX_PROFILE_CHANGE_HIGHLIGHTS = 30
 
 
-def _profile_change_snapshot_parameters(
-    namespace_id: str, snapshot: Mapping[str, Any]
-) -> tuple[Any, ...]:
+def _profile_change_snapshot_parameters(snapshot: Mapping[str, Any]) -> tuple[Any, ...]:
     return (
-        namespace_id,
         snapshot["target_session"],
-        snapshot["package_sha256"],
+        snapshot["source_package_id"],
         snapshot["profile_revision"],
     )
 
@@ -2306,11 +2191,10 @@ def read_profile_change_page(
     profile_change_kind: str | None = None,
     before_bias20_atr_state: str = "ALL",
     after_bias20_atr_state: str = "ALL",
-    before_package_sha256: str | None = None,
+    before_source_package_id: int | None = None,
     before_profile_revision: str | None = None,
-    after_package_sha256: str | None = None,
+    after_source_package_id: int | None = None,
     after_profile_revision: str | None = None,
-    expected_namespace_id: str | None = None,
 ) -> dict[str, Any]:
     """只比较两组精确PG画像；使用稳定SQL分页，不重算Core。"""
     change_types = {
@@ -2334,19 +2218,6 @@ def read_profile_change_page(
             "PROFILE_CHANGE_DATE_INVALID",
             "变化比较日期必须递增，且不晚于显式研究截止日",
         )
-    if expected_namespace_id is not None:
-        try:
-            canonical_namespace_id = str(UUID(expected_namespace_id))
-        except (ValueError, TypeError, AttributeError) as error:
-            raise PriceProfilePgError(
-                "PROFILE_NAMESPACE_ID_INVALID",
-                "expected_namespace_id必须是UUID",
-            ) from error
-        if canonical_namespace_id != expected_namespace_id:
-            raise PriceProfilePgError(
-                "PROFILE_NAMESPACE_ID_INVALID",
-                "expected_namespace_id必须为规范小写UUID",
-            )
     if (
         type(offset) is not int
         or not 0 <= offset <= 2**31 - 1
@@ -2418,42 +2289,35 @@ def read_profile_change_page(
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SYMBOL_INVALID", "来源代码搜索只接受字母、数字和点号"
         )
-    if (before_package_sha256 is None) != (before_profile_revision is None):
+    if (before_source_package_id is None) != (before_profile_revision is None):
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-            "起始快照须成对提供package_sha256与profile_revision；存量行键可省略",
+            "起始快照须成对提供source_package_id与profile_revision；存量行键可省略",
         )
-    if (after_package_sha256 is None) != (after_profile_revision is None):
+    if (after_source_package_id is None) != (after_profile_revision is None):
         raise PriceProfilePgError(
             "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
-            "结束快照须成对提供package_sha256与profile_revision；存量行键可省略",
+            "结束快照须成对提供source_package_id与profile_revision；存量行键可省略",
         )
     symbol_search = source_symbol.upper() if source_symbol else None
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
-        if expected_namespace_id is not None and namespace_id != expected_namespace_id:
-            raise PriceProfilePgError(
-                "PROFILE_NAMESPACE_MISMATCH",
-                "Profile变化读取namespace与请求绑定不一致；未读取画像表",
-            )
+    with _transaction(config, write=False) as (_connection, cursor, _unused):
         before = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=before_session,
             max_target_session=max_target_session,
-            package_sha256=before_package_sha256,
+            source_package_id=before_source_package_id,
             profile_revision=before_profile_revision,
         )
         after = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=after_session,
             max_target_session=max_target_session,
-            package_sha256=after_package_sha256,
+            source_package_id=after_source_package_id,
             profile_revision=after_profile_revision,
         )
         base_parameters = (
-            *_profile_change_snapshot_parameters(namespace_id, before),
-            *_profile_change_snapshot_parameters(namespace_id, after),
+            *_profile_change_snapshot_parameters(before),
+            *_profile_change_snapshot_parameters(after),
         )
         cursor.execute(
             _PROFILE_CHANGE_HIGHLIGHT_CTES
@@ -2462,7 +2326,7 @@ def read_profile_change_page(
        count(*) FILTER (WHERE before_present AND NOT after_present)::bigint AS before_only_count,
        count(*) FILTER (WHERE NOT before_present AND after_present)::bigint AS after_only_count,
        count(*) FILTER (WHERE before_present AND after_present
-           AND before_package_sha256 IS DISTINCT FROM after_package_sha256)::bigint AS cross_package_pair_count,
+           AND before_source_package_id IS DISTINCT FROM after_source_package_id)::bigint AS cross_package_pair_count,
        count(*) FILTER (WHERE before_present AND after_present
            AND before_price_coordinate IS DISTINCT FROM after_price_coordinate)::bigint AS cross_price_coordinate_pair_count,
        count(*) FILTER (WHERE before_present AND after_present AND NOT core_compatible)::bigint AS core_semantics_incomparable_count,
@@ -2516,7 +2380,7 @@ FROM classified""",
         cursor.execute(
             _PROFILE_CHANGE_HIGHLIGHT_CTES
             + """SELECT source_symbol, before_present, after_present,
-       before_package_sha256, after_package_sha256,
+       before_source_package_id, after_source_package_id,
        before_identity_status, after_identity_status,
        before_stable_security_id_status, after_stable_security_id_status,
        before_listing_status, after_listing_status,
@@ -2540,7 +2404,6 @@ FROM classified""",
        before_window_start, after_window_start, before_window_end, after_window_end,
        before_window_count, after_window_count,
        before_profile_revision, after_profile_revision,
-       before_semantics_sha256, after_semantics_sha256,
        before_ma5_quality, after_ma5_quality, before_ma5_reason, after_ma5_reason,
        before_ma10_quality, after_ma10_quality, before_ma10_reason, after_ma10_reason,
        before_ma20_quality, after_ma20_quality, before_ma60_quality, after_ma60_quality,
@@ -2649,7 +2512,7 @@ LIMIT %s""",
         cursor.execute(
             _PROFILE_CHANGE_CTES
             + """SELECT source_symbol, before_present, after_present,
-       before_package_sha256, after_package_sha256,
+       before_source_package_id, after_source_package_id,
        before_identity_status, after_identity_status,
        before_stable_security_id_status, after_stable_security_id_status,
        before_listing_status, after_listing_status,
@@ -2689,7 +2552,6 @@ LIMIT %s""",
        before_window_start, after_window_start, before_window_end, after_window_end,
        before_window_count, after_window_count,
        before_profile_revision, after_profile_revision,
-       before_semantics_sha256, after_semantics_sha256,
        before_ma5_quality, after_ma5_quality, before_ma5_reason, after_ma5_reason,
        before_ma10_quality, after_ma10_quality, before_ma10_reason, after_ma10_reason,
        before_ma20_quality, after_ma20_quality,
@@ -2885,7 +2747,6 @@ LIMIT %s OFFSET %s""",
     }
     return {
         "status": "AVAILABLE",
-        "namespace_id": namespace_id,
         "before_snapshot": before,
         "after_snapshot": after,
         "summary": summary_values,
@@ -2949,9 +2810,9 @@ def read_profile_relation_screen(
     source_symbol: str | None = None,
     after_amount_ratio20_min: Decimal | str | None = None,
     after_volume_ratio20_min: Decimal | str | None = None,
-    before_package_sha256: str,
+    before_source_package_id: int,
     before_profile_revision: str,
-    after_package_sha256: str,
+    after_source_package_id: int,
     after_profile_revision: str,
 ) -> dict[str, Any]:
     """在完整两端来源并集上读取关系转移及结束日位置联合筛选。"""
@@ -3060,37 +2921,35 @@ def read_profile_relation_screen(
     if any(
         not isinstance(value, str) or not value
         for value in (
-            before_package_sha256,
+            before_source_package_id,
             before_profile_revision,
-            after_package_sha256,
+            after_source_package_id,
             after_profile_revision,
         )
     ):
         raise PriceProfilePgError(
             "PROFILE_RELATION_SNAPSHOT_IDENTITY_INVALID",
-            "前后快照必须精确提供package SHA和profile revision",
+            "前后快照必须精确提供来源包数字ID和profile revision",
         )
 
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+    with _transaction(config, write=False) as (_connection, cursor, _unused):
         before = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=before_session,
             max_target_session=max_target_session,
-            package_sha256=before_package_sha256,
+            source_package_id=before_source_package_id,
             profile_revision=before_profile_revision,
         )
         after = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=after_session,
             max_target_session=max_target_session,
-            package_sha256=after_package_sha256,
+            source_package_id=after_source_package_id,
             profile_revision=after_profile_revision,
         )
         base_parameters = (
-            *_profile_change_snapshot_parameters(namespace_id, before),
-            *_profile_change_snapshot_parameters(namespace_id, after),
+            *_profile_change_snapshot_parameters(before),
+            *_profile_change_snapshot_parameters(after),
         )
         count_columns = [
             "count(*)::bigint AS source_symbol_union_count",
@@ -3310,8 +3169,8 @@ ORDER BY page_rows.source_symbol COLLATE "C" """,
         row["price_relation_transitions"] = transitions
         row["change_types"] = list(row["change_types"] or [])
         for key, value in tuple(row.items()):
-            if isinstance(value, (date, UUID)):
-                row[key] = value.isoformat() if isinstance(value, date) else str(value)
+            if isinstance(value, date):
+                row[key] = value.isoformat()
 
     transition_counts = {
         key.removesuffix("_count"): int(summary[key] or 0)
@@ -3361,7 +3220,6 @@ ORDER BY page_rows.source_symbol COLLATE "C" """,
         }
     return {
         "status": "AVAILABLE" if filtered_total else "NO_MATCH",
-        "namespace_id": namespace_id,
         "before_snapshot": before,
         "after_snapshot": after,
         "relation_field": relation_field,
@@ -3505,9 +3363,9 @@ def read_profile_breadth(
     before_session: date,
     after_session: date,
     max_target_session: date,
-    before_package_sha256: str,
+    before_source_package_id: int,
     before_profile_revision: str,
-    after_package_sha256: str,
+    after_source_package_id: int,
     after_profile_revision: str,
 ) -> dict[str, Any]:
     """按两份精确画像只读聚合来源池MA20关系。"""
@@ -3523,35 +3381,39 @@ def read_profile_breadth(
             "广度对照日期必须递增，且不晚于显式研究截止日",
         )
     identities = (
-        (before_package_sha256, before_profile_revision),
-        (after_package_sha256, after_profile_revision),
+        (before_source_package_id, before_profile_revision),
+        (after_source_package_id, after_profile_revision),
     )
-    if any(not package_sha or not revision for package_sha, revision in identities):
+    if any(
+        type(package_id) is not int
+        or package_id <= 0
+        or not isinstance(revision, str)
+        or re.fullmatch(r"PROFILE_R[0-9]{2}", revision) is None
+        for package_id, revision in identities
+    ):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
-            "广度对照必须显式提供前后package SHA和profile revision",
+            "广度对照必须显式提供前后来源包数字ID和PROFILE_RNN修订",
         )
 
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+    with _transaction(config, write=False) as (_connection, cursor, _unused):
         before = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=before_session,
             max_target_session=max_target_session,
-            package_sha256=before_package_sha256,
+            source_package_id=before_source_package_id,
             profile_revision=before_profile_revision,
         )
         after = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=after_session,
             max_target_session=max_target_session,
-            package_sha256=after_package_sha256,
+            source_package_id=after_source_package_id,
             profile_revision=after_profile_revision,
         )
         parameters = (
-            *_profile_change_snapshot_parameters(namespace_id, before),
-            *_profile_change_snapshot_parameters(namespace_id, after),
+            *_profile_change_snapshot_parameters(before),
+            *_profile_change_snapshot_parameters(after),
         )
         cursor.execute(_PROFILE_CHANGE_CTES + _PROFILE_BREADTH_SUMMARY_SQL, parameters)
         names = [column.name for column in cursor.description]
@@ -3691,7 +3553,6 @@ def read_profile_breadth(
     paired_above_after = summary["paired_above_after"]
     return {
         "status": "AVAILABLE",
-        "namespace_id": namespace_id,
         "before_snapshot": before,
         "after_snapshot": after,
         "membership": {
@@ -3743,9 +3604,9 @@ def read_profile_breadth_members(
     before_session: date,
     after_session: date,
     max_target_session: date,
-    before_package_sha256: str,
+    before_source_package_id: int,
     before_profile_revision: str,
-    after_package_sha256: str,
+    after_source_package_id: int,
     after_profile_revision: str,
     mode: str,
     offset: int,
@@ -3838,37 +3699,35 @@ def read_profile_breadth_members(
         )
 
     identities = (
-        before_package_sha256,
+        before_source_package_id,
         before_profile_revision,
-        after_package_sha256,
+        after_source_package_id,
         after_profile_revision,
     )
     if any(not isinstance(value, str) or not value for value in identities):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
-            "广度明细必须显式提供前后package SHA和profile revision",
+            "广度明细必须显式提供前后来源包数字ID和profile revision",
         )
 
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+    with _transaction(config, write=False) as (_connection, cursor, _unused):
         before = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=before_session,
             max_target_session=max_target_session,
-            package_sha256=before_package_sha256,
+            source_package_id=before_source_package_id,
             profile_revision=before_profile_revision,
         )
         after = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=after_session,
             max_target_session=max_target_session,
-            package_sha256=after_package_sha256,
+            source_package_id=after_source_package_id,
             profile_revision=after_profile_revision,
         )
         snapshot_parameters = (
-            *_profile_change_snapshot_parameters(namespace_id, before),
-            *_profile_change_snapshot_parameters(namespace_id, after),
+            *_profile_change_snapshot_parameters(before),
+            *_profile_change_snapshot_parameters(after),
         )
         cursor.execute(
             _PROFILE_CHANGE_CTES
@@ -3877,7 +3736,7 @@ def read_profile_breadth_members(
     SELECT source_symbol, before_present, after_present,
            before_market, after_market, before_board, after_board,
            before_source_capture_id, after_source_capture_id,
-           before_package_sha256, after_package_sha256,
+           before_source_package_id, after_source_package_id,
            before_profile_revision, after_profile_revision,
            before_identity_status, after_identity_status,
            before_stable_security_id_status, after_stable_security_id_status,
@@ -3910,7 +3769,7 @@ SELECT totals.total,
        page.source_symbol, page.before_present, page.after_present,
        page.before_market, page.after_market, page.before_board, page.after_board,
        page.before_source_capture_id, page.after_source_capture_id,
-       page.before_package_sha256, page.after_package_sha256,
+       page.before_source_package_id, page.after_source_package_id,
        page.before_profile_revision, page.after_profile_revision,
        page.before_identity_status, page.after_identity_status,
        page.before_stable_security_id_status, page.after_stable_security_id_status,
@@ -3958,7 +3817,6 @@ ORDER BY page.source_symbol COLLATE "C"
     next_offset = offset + len(rows) if offset + len(rows) < total else None
     return {
         "status": "AVAILABLE",
-        "namespace_id": namespace_id,
         "before_snapshot": before,
         "after_snapshot": after,
         "query": {
@@ -4109,9 +3967,9 @@ def read_profile_pair(
     after_session: date,
     max_target_session: date,
     source_symbol: str,
-    before_package_sha256: str,
+    before_source_package_id: int,
     before_profile_revision: str,
-    after_package_sha256: str,
+    after_source_package_id: int,
     after_profile_revision: str,
 ) -> dict[str, Any]:
     """按两端精确封口快照，从现役配对SQL读取单个来源代码。"""
@@ -4136,26 +3994,24 @@ def read_profile_pair(
         raise PriceProfilePgError(
             "PROFILE_SYMBOL_INVALID", "来源代码必须符合SH./SZ.六位数字格式"
         )
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+    with _transaction(config, write=False) as (_connection, cursor, _unused):
         before = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=before_session,
             max_target_session=max_target_session,
-            package_sha256=before_package_sha256,
+            source_package_id=before_source_package_id,
             profile_revision=before_profile_revision,
         )
         after = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=after_session,
             max_target_session=max_target_session,
-            package_sha256=after_package_sha256,
+            source_package_id=after_source_package_id,
             profile_revision=after_profile_revision,
         )
         parameters = (
-            *_profile_change_snapshot_parameters(namespace_id, before),
-            *_profile_change_snapshot_parameters(namespace_id, after),
+            *_profile_change_snapshot_parameters(before),
+            *_profile_change_snapshot_parameters(after),
         )
         cursor.execute(
             _PROFILE_CHANGE_CTES + "SELECT * FROM classified WHERE source_symbol=%s",
@@ -4199,7 +4055,6 @@ LEFT JOIN ranked_candidates candidate ON candidate.source_symbol=%s""",
         )
         return {
             "status": "NO_SAVED_SOURCE_CODE_MATCH",
-            "namespace_id": namespace_id,
             "source_symbol": source_symbol,
             "before_snapshot": before,
             "after_snapshot": after,
@@ -4341,7 +4196,6 @@ LEFT JOIN ranked_candidates candidate ON candidate.source_symbol=%s""",
     ]
     return {
         "status": "AVAILABLE",
-        "namespace_id": namespace_id,
         "source_symbol": source_symbol,
         "before_snapshot": before,
         "after_snapshot": after,
@@ -4357,7 +4211,7 @@ def read_profile_page(
     *,
     target_session: date,
     max_target_session: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str,
     offset: int,
     limit: int,
@@ -4397,11 +4251,10 @@ def read_profile_page(
         raise PriceProfilePgError("PROFILE_PAGE_INVALID", "画像页大小必须为1至100")
     if (
         not isinstance(profile_revision, str)
-        or len(profile_revision) != 64
-        or any(item not in "0123456789abcdef" for item in profile_revision)
+        or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
     ):
         raise PriceProfilePgError(
-            "PROFILE_REVISION_INVALID", "画像修订SHA必须是64位小写十六进制"
+            "PROFILE_REVISION_INVALID", "画像修订必须是显式PROFILE_RNN版本标签"
         )
     if market not in {"ALL", "SH", "SZ"} or board not in {"ALL", "MAIN_BOARD", "GEM"}:
         raise PriceProfilePgError("PROFILE_FILTER_INVALID", "市场或板别筛选值无效")
@@ -4543,15 +4396,13 @@ def read_profile_page(
         )
 
     conditions = [
-        "p.namespace_id=%s::uuid",
         "p.target_session=%s",
-        "p.package_sha256=%s",
+        "p.source_package_id=%s",
         "p.profile_revision=%s",
     ]
     parameters: list[Any] = [
-        None,
         target_session,
-        package_sha256,
+        source_package_id,
         profile_revision,
     ]
     if market != "ALL":
@@ -4626,27 +4477,25 @@ def read_profile_page(
             str(_BIAS20_ATR_BAND_DEFINITIONS[bias20_atr_band]["predicate"])
         )
     where_sql = " AND ".join(conditions)
-    with _transaction(config, write=False) as (_connection, cursor, namespace_id):
+    with _transaction(config, write=False) as (_connection, cursor, _unused):
         snapshot = _snapshot_for_session(
             cursor,
-            namespace_id=namespace_id,
             target_session=target_session,
             max_target_session=max_target_session,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             profile_revision=profile_revision,
         )
-        parameters[0] = namespace_id
         cursor.execute(
             """SELECT count(*)::bigint,
        count(DISTINCT r.source_symbol)::bigint,
        count(DISTINCT r.source_capture_id)::bigint,
        min(c.normalized_count), max(c.normalized_count)
-FROM stock.source_raw_daily r
-LEFT JOIN stock.source_captures c ON c.namespace_id=r.namespace_id
-  AND c.capture_id=r.source_capture_id
-WHERE r.namespace_id=%s::uuid AND r.session_date=%s
-  AND r.package_sha256=%s""",
-            (namespace_id, target_session, package_sha256),
+FROM source_raw_daily r
+LEFT JOIN source_captures c ON c.capture_id=r.source_capture_id
+  AND c.source_package_id=r.source_package_id AND c.target_session=r.session_date
+WHERE r.session_date=%s
+  AND r.source_package_id=%s""",
+            (target_session, source_package_id),
         )
         (
             raw_total,
@@ -4665,16 +4514,15 @@ WHERE r.namespace_id=%s::uuid AND r.session_date=%s
         ):
             raise PriceProfilePgError(
                 "PROFILE_RAW_SOURCE_INCOMPLETE",
-                "目标日期与包SHA没有唯一且完整的Raw捕获来源代码集合",
+                "目标日期与来源包数字ID没有唯一且完整的Raw捕获代码集合",
             )
         cursor.execute(
-            """SELECT count(*)::bigint FROM stock.source_symbol_price_profiles
-WHERE namespace_id=%s::uuid AND target_session=%s
-  AND package_sha256=%s AND profile_revision=%s""",
+            """SELECT count(*)::bigint FROM source_symbol_price_profiles
+WHERE target_session=%s
+  AND source_package_id=%s AND profile_revision=%s""",
             (
-                namespace_id,
                 target_session,
-                package_sha256,
+                source_package_id,
                 profile_revision,
             ),
         )
@@ -4688,9 +4536,8 @@ WHERE namespace_id=%s::uuid AND target_session=%s
             profile_ids = sorted(_PROFILE_QUERY_FIELD_IDS)
             cursor.execute(
                 """SELECT count(*)::bigint
-FROM stock.source_symbol_price_profiles p
-WHERE p.namespace_id=%s::uuid
-  AND p.target_session=%s AND p.package_sha256=%s AND p.profile_revision=%s
+FROM source_symbol_price_profiles p
+WHERE p.target_session=%s AND p.source_package_id=%s AND p.profile_revision=%s
   AND (
     COALESCE(array_ndims(p.profile_field_ids), 0) <> 1
     OR COALESCE(array_length(p.profile_field_ids, 1), 0) <> 11
@@ -4713,9 +4560,8 @@ WHERE p.namespace_id=%s::uuid
     OR array_position(p.profile_reasons, NULL) IS NOT NULL
   )""",
                 (
-                    namespace_id,
                     target_session,
-                    package_sha256,
+                    source_package_id,
                     profile_revision,
                     profile_ids,
                     profile_ids,
@@ -4731,18 +4577,16 @@ WHERE p.namespace_id=%s::uuid
                 """SELECT p.profile_statuses[field_index.subscript],
        p.profile_qualities[field_index.subscript],
        p.profile_reasons[field_index.subscript], count(*)::bigint
-FROM stock.source_symbol_price_profiles p
+FROM source_symbol_price_profiles p
 CROSS JOIN LATERAL generate_subscripts(p.profile_field_ids, 1)
   AS field_index(subscript)
-WHERE p.namespace_id=%s::uuid
-  AND p.target_session=%s AND p.package_sha256=%s AND p.profile_revision=%s
+WHERE p.target_session=%s AND p.source_package_id=%s AND p.profile_revision=%s
   AND p.profile_field_ids[field_index.subscript]=%s
 GROUP BY 1, 2, 3
 ORDER BY 1, 2, 3""",
                 (
-                    namespace_id,
                     target_session,
-                    package_sha256,
+                    source_package_id,
                     profile_revision,
                     profile_field_id,
                 ),
@@ -4796,10 +4640,9 @@ ORDER BY 1, 2, 3""",
                     "Profile11状态值不在该精确快照的已存状态中",
                 )
         cursor.execute(
-            f"""SELECT count(*)::bigint FROM stock.source_symbol_price_profiles p
-LEFT JOIN stock.source_raw_daily r ON r.namespace_id=p.namespace_id
-  AND r.source_symbol=p.source_symbol AND r.session_date=p.target_session
-  AND r.package_sha256=p.package_sha256
+            f"""SELECT count(*)::bigint FROM source_symbol_price_profiles p
+LEFT JOIN source_raw_daily r ON r.source_symbol=p.source_symbol AND r.session_date=p.target_session
+  AND r.source_package_id=p.source_package_id
   AND r.source_capture_id=p.source_capture_id
 WHERE {where_sql}""",
             parameters,
@@ -4834,10 +4677,9 @@ WHERE {where_sql}""",
        {_BIAS20_ATR_UNKNOWN_REASON_SQL} AS bias20_atr_unknown_reason,
        {position_projection},
        {selected_profile_projection}
-FROM stock.source_symbol_price_profiles p
-LEFT JOIN stock.source_raw_daily r ON r.namespace_id=p.namespace_id
-  AND r.source_symbol=p.source_symbol AND r.session_date=p.target_session
-  AND r.package_sha256=p.package_sha256
+FROM source_symbol_price_profiles p
+LEFT JOIN source_raw_daily r ON r.source_symbol=p.source_symbol AND r.session_date=p.target_session
+  AND r.source_package_id=p.source_package_id
   AND r.source_capture_id=p.source_capture_id
 WHERE {where_sql}
 ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
@@ -4851,9 +4693,8 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
                 "同一只读快照中的筛选总数与分页行数不一致",
             )
         for row in rows:
-            for column in ("namespace_id", "source_capture_id"):
-                if isinstance(row.get(column), UUID):
-                    row[column] = str(row[column])
+            if row.get("source_capture_id") is not None:
+                row["source_capture_id"] = int(row["source_capture_id"])
             slope_columns = (
                 "ma_slope20_atr",
                 "ma_slope20_atr_exact_numerator",
@@ -4950,9 +4791,8 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
         else "EMPTY_PAGE_OUT_OF_RANGE"
         if total > 0
         else "NO_MATCH",
-        "namespace_id": namespace_id,
         "target_session": target_session.isoformat(),
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "profile_revision": profile_revision,
         "source_pool_total": snapshot_total,
         "ratio_metadata": {
@@ -4999,9 +4839,9 @@ ORDER BY p.source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
             "ratio_filter": "POSTGRES_EXACT_FRACTION_CROSS_MULTIPLICATION",
             "price_position_filter": "POSTGRES_NUMERIC",
             "bias20_atr_filter": "POSTGRES_EXACT_NUMERIC_CROSS_MULTIPLICATION",
-            "bias20_atr_filter_scope": "COMPLETE_SOURCE_PROFILE_SET",
+            "bias20_atr_filter_scope": "COMPLETE_TARGET_PROFILE_SCOPE",
             "profile_field_filter": "POSTGRES_ARRAY_FIELD_ID_INDEX",
-            "profile_field_summary": "POSTGRES_FULL_SOURCE_SET",
+            "profile_field_summary": "POSTGRES_ALL_ROWS_IN_SCOPE",
             "all_candidates_recomputed": False,
             "source_zip_opened": False,
             "database_write": False,

@@ -10,24 +10,20 @@ async function loadProfileSnapshots() {
     const data = await api("/api/source-symbol-price-profiles/snapshots");
     $("dataBoundary").textContent =
       `研究冻结于${data.research_cutoff}。当前页面读取PG已存行情和后验研究结果，不代表官方上市总体、稳定证券身份、交易状态或选股结论。`;
-    state.profileSnapshots = (data.snapshots || []).map((item) => ({
-      ...item,
-      namespace_id:
-        item.namespace_id || data.namespace_id || state.namespace_id,
-    }));
+    state.profileSnapshots = data.snapshots || [];
     populateChangeSnapshots(state.profileSnapshots);
     $("profileSnapshotSelect").replaceChildren(
-      new Option("— 请选择精确画像日期 / 来源包SHA / 画像修订 —", ""),
+      new Option("— 请选择精确画像日期 / 来源包ID / 画像修订 —", ""),
     );
     for (const item of state.profileSnapshots) {
       const key = profileSnapshotKey(item);
       const option = new Option(
-        `${item.target_session} · SHA ${item.package_sha256.slice(0, 8)} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话 · rev ${item.profile_revision.slice(0, 10)}`,
+        `${item.target_session} · 包ID ${item.source_package_id} · ${item.source_symbol_count}/${item.expected_source_symbol_count} · ${item.history_session_count}会话 · rev ${item.profile_revision}`,
         key,
       );
       option.title =
-        `${item.target_session} · namespace ${item.namespace_id || "未提供"} · ` +
-        `目标日 ${item.target_session} · package SHA ${item.package_sha256} · ` +
+        `${item.target_session} · ` +
+        `目标日 ${item.target_session} · 来源包ID ${item.source_package_id} · ` +
         `profile_revision ${item.profile_revision}`;
       option.disabled = !item.complete;
       $("profileSnapshotSelect").append(option);
@@ -37,7 +33,7 @@ async function loadProfileSnapshots() {
       ? `${state.profileSnapshots.length}个真实PG画像版本`
       : "没有已保存画像";
     $("profileMessage").textContent = state.profileSnapshots.length
-      ? "请选择精确日期、来源包SHA和画像修订。搜索仅读取PG持久画像，不回退latest。"
+      ? "请选择精确日期、来源包ID和画像修订。搜索仅读取PG持久画像，不回退latest。"
       : "PG画像表中没有已保存记录。";
   } catch (error) {
     $("dataBoundary").textContent =
@@ -297,7 +293,7 @@ async function loadProfilePage() {
   }
   const params = new URLSearchParams({
     target_session: snapshot.target_session,
-    package_sha256: snapshot.package_sha256,
+    source_package_id: snapshot.source_package_id,
     profile_revision: snapshot.profile_revision,
     offset: String(state.profileOffset),
     limit: String(state.profileLimit),
@@ -355,8 +351,7 @@ async function loadProfilePage() {
       );
     if (
       data.target_session !== snapshot.target_session ||
-      data.namespace_id !== snapshot.namespace_id ||
-      data.package_sha256 !== snapshot.package_sha256 ||
+      data.source_package_id !== snapshot.source_package_id ||
       data.profile_revision !== snapshot.profile_revision ||
       data.bias20_atr_band !== bias20AtrBand ||
       !data.bias20_atr_band_definition ||
@@ -403,8 +398,7 @@ async function loadProfilePage() {
       profileCondition,
     );
     const binding =
-      `${snapshot.target_session} · namespace ${data.namespace_id || snapshot.namespace_id || "未提供"} · ` +
-      `包SHA ${data.package_sha256} · ` +
+      `${snapshot.target_session} · 来源包ID ${data.source_package_id} · ` +
       `profile_revision ${data.profile_revision}`;
     state.profileTotal = page.total;
     $("profileCount").textContent =
@@ -521,8 +515,7 @@ async function loadProfilePage() {
         makeComparisonAddButton({
           source_symbol: item.source_symbol,
           target_session: item.target_session,
-          namespace_id: item.namespace_id,
-          package_sha256: item.package_sha256,
+          source_package_id: item.source_package_id,
           profile_revision: item.profile_revision,
           origin_label: "完整PG价格画像",
         }),

@@ -3,7 +3,6 @@
 from dataclasses import dataclass
 from fractions import Fraction
 
-from stock_a.canonical.identity import semantic_digest
 from stock_a.domain import ContractError, FieldValue, unknown
 from stock_a.research.admission import Event
 from stock_a.research.breakout import breakout_clv_passes, breakout_price_passes
@@ -226,11 +225,9 @@ def generate(
     event_id = (
         source_event.event_id
         if source_event
-        else semantic_digest((CONTRACT, kind, entity_id, ordinal, window_ref, bounds))
+        else repr((CONTRACT, kind, entity_id, ordinal, window_ref, bounds))
     )
-    anchor_id = semantic_digest(
-        (CONTRACT, kind, entity_id, event_id, coordinate_id, bounds)
-    )
+    anchor_id = repr((CONTRACT, kind, entity_id, event_id, coordinate_id, bounds))
     return FieldValue(
         Anchor(
             anchor_id,

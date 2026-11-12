@@ -355,7 +355,7 @@ def _run_source_market_observation(args) -> int:
                 config,
                 target_session=end,
                 research_cutoff=cutoff,
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 d1_history_session_count=args.d1_history_session_count,
                 industry_snapshot_id=args.industry_snapshot_id,
                 concept_snapshot_id=args.concept_snapshot_id,
@@ -378,7 +378,7 @@ def _run_source_market_observation(args) -> int:
                     before=_parse_session_date(args.before_session),
                     after=end,
                     research_cutoff=cutoff,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     profile_revision=args.profile_revision,
                     history_session_count=args.history_session_count,
                     d1_history_session_count=args.d1_history_session_count,
@@ -401,7 +401,7 @@ def _run_source_market_observation(args) -> int:
                     config,
                     target=start,
                     research_cutoff=cutoff,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     profile_revision=args.profile_revision,
                     history_session_count=args.history_session_count,
                     d1_history_session_count=args.d1_history_session_count,
@@ -420,7 +420,7 @@ def _run_source_market_observation(args) -> int:
             config,
             sessions=sessions,
             research_cutoff=cutoff,
-            package_sha256=args.package_sha256,
+            source_package_id=args.source_package_id,
             profile_revision=args.profile_revision,
             profile_contract=contract,
             history_session_count=args.history_session_count,
@@ -431,7 +431,7 @@ def _run_source_market_observation(args) -> int:
             str(config_path),
             sessions=sessions,
             research_cutoff=cutoff,
-            package_sha256=args.package_sha256,
+            source_package_id=args.source_package_id,
             event_window_start=event_start,
             history_session_count=args.d1_history_session_count,
         )
@@ -449,8 +449,6 @@ def _run_source_market_observation(args) -> int:
                 )
                 if args.board_id not in snapshot["boards"]:
                     raise ValueError("所选板块不存在于精确成员快照")
-                if any(day["namespace_id"] != snapshot["namespace_id"] for day in days):
-                    raise ValueError("板块快照与来源池namespace不一致")
             rules = (
                 (args.rule_id,) if args.rule_id else ("LAUNCH_CONFIRM", "RECOVERY_TURN")
             )
@@ -485,7 +483,7 @@ def _run_source_market_observation(args) -> int:
                     day,
                     d1[day["session"]],
                     research_cutoff=cutoff,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     horizons=tuple(horizons),
                     d1_history_count=args.d1_history_session_count,
                     facts_observer=consume_facts,
@@ -549,7 +547,7 @@ def _run_source_market_observation(args) -> int:
                     raise ValueError("即时画像修订缺失，拒绝持久化")
                 rules, paths = prepare_research_rows(
                     **facts,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     profile_revision=revision,
                     history_session_count=args.history_session_count,
                     d1_history_session_count=args.d1_history_session_count,
@@ -560,10 +558,9 @@ def _run_source_market_observation(args) -> int:
                     events = prepare_source_events(
                         target=facts["target"],
                         source=facts["source"],
-                        namespace_id=facts["namespace_id"],
                         calendar_revision=facts["calendar_revision"],
                         frozen=facts["frozen"],
-                        package_sha256=args.package_sha256,
+                        source_package_id=args.source_package_id,
                         d1_history_session_count=args.d1_history_session_count,
                     )
                 result = write_research_rows(
@@ -584,7 +581,7 @@ def _run_source_market_observation(args) -> int:
                     day,
                     d1[target],
                     research_cutoff=cutoff,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     horizons=tuple(horizons),
                     d1_history_count=args.d1_history_session_count,
                     symbol=args.symbol,
@@ -599,7 +596,6 @@ def _run_source_market_observation(args) -> int:
                         if row["source_symbol"] == args.symbol
                     )
                     diagnostic = {
-                        "namespace_id": day["namespace_id"],
                         "scenario": "LAUNCH_CONFIRM",
                         "results": [deepcopy(launch)],
                     }
@@ -608,7 +604,7 @@ def _run_source_market_observation(args) -> int:
                         diagnostic,
                         target=target,
                         cutoff=cutoff,
-                        package_sha256=args.package_sha256,
+                        source_package_id=args.source_package_id,
                         rps_read=day["seed"].get("rps_read"),
                     )
                     output["results"][0]["risk_priority_readiness"] = diagnostic[
@@ -642,7 +638,7 @@ def _run_source_market_observation(args) -> int:
             industry_snapshot_id=args.industry_snapshot_id,
             concept_snapshot_id=args.concept_snapshot_id,
             research_cutoff=cutoff,
-            package_sha256=args.package_sha256,
+            source_package_id=args.source_package_id,
             profile_revision=args.profile_revision,
         )
         _, _, _, cutoff_calendar = _load_calendar(cutoff)
@@ -655,7 +651,7 @@ def _run_source_market_observation(args) -> int:
                 config,
                 sessions=followup_sessions,
                 research_cutoff=cutoff,
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 profile_revision=args.profile_revision,
                 profile_contract=contract,
                 history_session_count=args.history_session_count,
@@ -664,9 +660,8 @@ def _run_source_market_observation(args) -> int:
                 before = days[-1]["scenarios"][scenario]
                 after = followup_days[0]["scenarios"][scenario]
                 if (
-                    before["namespace_id"] != after["namespace_id"]
-                    or before["source_version"]["source_content_id"]
-                    != after["source_version"]["source_content_id"]
+                    before["source_version"]["source_package_id"]
+                    != after["source_version"]["source_package_id"]
                     or before["official_calendar"] != after["official_calendar"]
                     or before["algorithm_contract"] != after["algorithm_contract"]
                     or before["producer_version"] != after["producer_version"]
@@ -678,7 +673,7 @@ def _run_source_market_observation(args) -> int:
                     str(config_path),
                     sessions=followup_sessions,
                     research_cutoff=cutoff,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     event_window_start=event_start,
                     history_session_count=args.d1_history_session_count,
                 )
@@ -709,7 +704,7 @@ def _run_source_market_observation(args) -> int:
                 days,
                 result,
                 research_cutoff=cutoff,
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 horizon=horizon,
                 history_cache=history_cache,
                 read_metrics=read_metrics,
@@ -721,7 +716,7 @@ def _run_source_market_observation(args) -> int:
                 days,
                 result,
                 research_cutoff=cutoff,
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 horizon=max(horizons),
                 history_cache=history_cache,
                 read_metrics=read_metrics,
@@ -750,12 +745,8 @@ def _run_source_market_observation(args) -> int:
                                     "transition": "TRUE_TO_FALSE",
                                     "change_scope": "SUMMARY_TRANSITION_NOT_AUTOMATIC_EVENT",
                                     "source_binding": {
-                                        "namespace_id": day["namespace_id"],
-                                        "package_sha256": scenario["source_version"][
-                                            "package_sha256"
-                                        ],
-                                        "source_content_id": scenario["source_version"][
-                                            "source_content_id"
+                                        "source_package_id": scenario["source_version"][
+                                            "source_package_id"
                                         ],
                                         "profile_revision": day["seed"].get(
                                             "profile_revision"
@@ -869,7 +860,6 @@ def _run_source_market_observation(args) -> int:
                     )
                 )
                 diagnostic = {
-                    "namespace_id": day["namespace_id"],
                     "scenario": "LAUNCH_CONFIRM",
                     "results": [item],
                 }
@@ -880,15 +870,14 @@ def _run_source_market_observation(args) -> int:
                         config,
                         target_session=key[0],
                         research_cutoff=cutoff,
-                        package_sha256=args.package_sha256,
-                        expected_namespace_id=day["namespace_id"],
+                        source_package_id=args.source_package_id,
                     )
                 attach_stock_risk_readiness(
                     config,
                     diagnostic,
                     target=key[0],
                     cutoff=cutoff,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                     rps_read=rps_by_session[key[0]],
                 )
                 detail_cache[key] = {
@@ -1009,7 +998,7 @@ def _run_source_market_observation(args) -> int:
                 ),
                 board_kind=args.board_kind,
                 board_native_id=args.board_id,
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 profile_revision=args.profile_revision,
                 research_cutoff=cutoff,
                 rotation_start=_parse_session_date(args.rotation_start),
@@ -1075,16 +1064,13 @@ def _run_source_market_observation(args) -> int:
                     "session": day["session"],
                     "source_pool_count": len(day["states"]),
                     "source_version": {
-                        "namespace_id": day["namespace_id"],
                         **{
                             key: day["scenarios"]["LAUNCH_CONFIRM"]["source_version"][
                                 key
                             ]
                             for key in (
-                                "package_sha256",
-                                "source_content_id",
+                                "source_package_id",
                                 "source_capture_id",
-                                "source_raw_digest",
                             )
                         },
                     },
@@ -1228,8 +1214,7 @@ def _run_source_market_observation(args) -> int:
             "qualification_scope": "SOURCE_ONLY_NON_PIT_NOT_FORMAL_D2_OR_TRADING_SIGNAL",
             "qualification_contract": "UNIVERSE_ELIGIBILITY_R1+ALG-19/20",
             "configuration_path": str(config_path),
-            "namespace_id": days[0]["namespace_id"],
-            "package_sha256": args.package_sha256,
+            "source_package_id": args.source_package_id,
             "profile_revision": args.profile_revision,
             "research_cutoff": cutoff,
             "sessions": day_summaries,

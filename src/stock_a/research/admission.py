@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 
-from stock_a.canonical.identity import semantic_digest
 from stock_a.domain import FieldValue
 from stock_a.research.facts import boolean, number, capability
 
@@ -126,7 +125,7 @@ def admit(
     if p <= line:
         return unknown("BIRTH_NOT_ABOVE_FAILURE_LINE")
     frozen = FrozenLine(line, coordinate_id, source, window_ref, next_ordinal)
-    identity = semantic_digest(
+    event_id = repr(
         (
             CONTRACT,
             entity_id,
@@ -142,7 +141,7 @@ def admit(
         )
     )
     event = Event(
-        identity,
+        event_id,
         entity_id,
         ordinal,
         scenario,

@@ -23,7 +23,7 @@ class ResearchSymbolNotFound(ValueError):
     """所选来源代码不在指定的冻结来源池中。"""
 
 
-def read_persisted_cohort_keys(config, *, target, research_cutoff, package_sha256):
+def read_persisted_cohort_keys(config, *, target, research_cutoff, source_package_id):
     """目录和结果使用同一个截止日所绑定的规则与日历修订。"""
     if target > research_cutoff:
         raise ValueError("目标日不得晚于研究截止日")
@@ -31,7 +31,10 @@ def read_persisted_cohort_keys(config, *, target, research_cutoff, package_sha25
     if target not in calendar:
         raise ResearchEntryError("TARGET_NOT_TRADING_SESSION", "目标日不在官方日历中")
     return read_research_keys(
-        config, target=target, package_sha256=package_sha256, calendar_revision=revision
+        config,
+        target=target,
+        source_package_id=source_package_id,
+        calendar_revision=revision,
     )
 
 
@@ -40,7 +43,7 @@ def read_persisted_cohort(
     *,
     target,
     research_cutoff,
-    package_sha256,
+    source_package_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -64,7 +67,7 @@ def read_persisted_cohort(
     rows = read_research_rows(
         config,
         target=target,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         profile_revision=profile_revision,
         history_session_count=history_session_count,
         d1_history_session_count=d1_history_session_count,
@@ -145,14 +148,13 @@ def read_persisted_cohort(
             source_symbols=(symbol,),
             sessions=days,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
-            expected_namespace_id=selected[21],
+            source_package_id=source_package_id,
         )
         source_rows = raw["rows_by_symbol"][symbol]
         birth = next(
             (row for row in source_rows if row["session_date"] == target), None
         )
-        if birth is None or str(birth["source_capture_id"]) != selected[22]:
+        if birth is None or int(birth["source_capture_id"]) != selected[21]:
             raise ValueError("后继Raw与冻结来源捕获不一致")
         path = exploratory_raw_path(
             days,
@@ -178,9 +180,8 @@ def read_persisted_cohort(
                 symbol=symbol,
                 target=target,
                 cutoff=research_cutoff,
-                package_sha256=package_sha256,
-                namespace_id=selected[21],
-                target_capture_id=selected[22],
+                source_package_id=source_package_id,
+                target_capture_id=selected[21],
                 calendar=calendar,
                 horizon=horizon,
                 scenario=rule,
@@ -191,7 +192,7 @@ def read_persisted_cohort(
             else read_research_rows(
                 config,
                 target=target,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 profile_revision=profile_revision,
                 history_session_count=history_session_count,
                 d1_history_session_count=d1_history_session_count,
@@ -206,7 +207,7 @@ def read_persisted_cohort(
         events = read_source_events(
             config,
             target=target,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             symbol=symbol,
             d1_history_session_count=d1_history_session_count,
             calendar_revision=revision,
@@ -214,35 +215,34 @@ def read_persisted_cohort(
         )
         if (
             d1 is None
-            or d1[21:23] != selected[21:23]
+            or d1[21] != selected[21]
             or len(events) != d1[3]
-            or any(event[15] != selected[22] for event in events)
+            or any(event[14] != selected[21] for event in events)
         ):
             raise ValueError("逐锚事实与冻结D1事件数或来源捕获不一致")
         anchor_events = []
         for event in events:
             lower = (
-                {"numerator": str(event[4]), "denominator": str(event[5])}
-                if event[4] is not None
+                {"numerator": str(event[3]), "denominator": str(event[4])}
+                if event[3] is not None
                 else None
             )
             anchor_events.append(
                 {
                     "anchor_session": event[0].isoformat(),
                     "anchor_capture_id": event[1],
-                    "anchor_entry_sha256": event[2],
-                    "generation_status": event[3],
+                    "generation_status": event[2],
                     "lower": lower,
-                    "upper": {"numerator": str(event[6]), "denominator": str(event[7])}
-                    if event[6] is not None
+                    "upper": {"numerator": str(event[5]), "denominator": str(event[6])}
+                    if event[5] is not None
                     else None,
-                    "previous_session": event[8].isoformat(),
-                    "previous_state": event[9],
-                    "previous_quality": event[10],
-                    "target_state": event[11],
-                    "target_quality": event[12],
-                    "change_classification": event[13],
-                    "reason": event[14],
+                    "previous_session": event[7].isoformat(),
+                    "previous_state": event[8],
+                    "previous_quality": event[9],
+                    "target_state": event[10],
+                    "target_quality": event[11],
+                    "change_classification": event[12],
+                    "reason": event[13],
                     "lower_touch_followup": _frozen_line_followup(
                         {
                             "failure_line_candidate": {
@@ -261,7 +261,7 @@ def read_persisted_cohort(
                 else read_research_rows(
                     config,
                     target=target,
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     profile_revision=profile_revision,
                     history_session_count=history_session_count,
                     d1_history_session_count=d1_history_session_count,
@@ -273,18 +273,16 @@ def read_persisted_cohort(
                 )
             )
             launch = next((row for row in launch_rows if row[0] == symbol), None)
-            if launch is None or launch[21:23] != selected[21:23]:
+            if launch is None or launch[21] != selected[21]:
                 raise ValueError("启动规则与选中来源捕获不一致")
             diagnostic = {
-                "namespace_id": selected[21],
                 "scenario": "LAUNCH_CONFIRM",
                 "results": [{"source_symbol": symbol, "scenario_raw": launch[1]}],
             }
             rps_unavailable = {
-                "namespace_id": selected[21],
                 "target_session": target,
                 "research_cutoff": research_cutoff,
-                "package_sha256": package_sha256,
+                "source_package_id": source_package_id,
                 "facts": {},
             }
             attach_stock_risk_readiness(
@@ -292,7 +290,7 @@ def read_persisted_cohort(
                 diagnostic,
                 target=target,
                 cutoff=research_cutoff,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 rps_read=rps_unavailable,
             )
             risk_readiness = diagnostic["results"][0]["risk_priority_readiness"]
@@ -340,7 +338,7 @@ def compare_persisted_cohorts(
     before,
     after,
     research_cutoff,
-    package_sha256,
+    source_package_id,
     profile_revision,
     history_session_count,
     d1_history_session_count,
@@ -366,7 +364,7 @@ def compare_persisted_cohorts(
         raise ValueError("跨日对照必须是官方会话")
     common = dict(
         config=config,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         profile_revision=profile_revision,
         history_session_count=history_session_count,
         d1_history_session_count=d1_history_session_count,

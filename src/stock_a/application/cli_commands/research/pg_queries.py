@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from datetime import date, datetime
 from pathlib import Path
-import re
 import sys
 from typing import Any
 from stock_a.contracts import (
@@ -65,25 +64,22 @@ from stock_a.application.cli_commands.research.research_output import _summary_f
 
 def _validate_pg_raw_query_args(
     args: argparse.Namespace, *, universe: bool
-) -> tuple[dict[str, Any], Path, date, str]:
+) -> tuple[dict[str, Any], Path, date, int]:
     if not getattr(args, "pg_source_raw", False):
-        if getattr(args, "pg_source_sha256", None) is not None:
+        if getattr(args, "pg_source_package_id", None) is not None:
             raise DiagnosticError(
                 "PG_SOURCE_FLAG_REQUIRED",
-                "提供来源SHA时必须同时显式启用--pg-source-raw",
+                "提供来源包ID时必须同时显式启用--pg-source-raw",
                 _EXIT_ARGUMENT,
             )
         raise DiagnosticError(
             "PG_SOURCE_FLAG_REQUIRED", "缺少显式PG Raw查询选项", _EXIT_ARGUMENT
         )
-    source_sha = getattr(args, "pg_source_sha256", None)
-    if (
-        not isinstance(source_sha, str)
-        or re.fullmatch(r"[0-9a-f]{64}", source_sha) is None
-    ):
+    source_package_id = getattr(args, "pg_source_package_id", None)
+    if type(source_package_id) is not int or source_package_id <= 0:
         raise DiagnosticError(
             "PG_SOURCE_REVISION_REQUIRED",
-            "PG Raw读取必须提供64位小写来源包SHA-256",
+            "PG Raw读取必须提供正数来源包ID",
             _EXIT_ARGUMENT,
         )
     if getattr(args, "vipdata_package", None) is not None:
@@ -126,11 +122,11 @@ def _validate_pg_raw_query_args(
         target = _parse_target(args.target_session)
     except ResearchEntryError as error:
         raise DiagnosticError(error.code, str(error), _EXIT_ARGUMENT) from error
-    return config, config_path, target, source_sha
+    return config, config_path, target, source_package_id
 
 
 def _run_pg_raw_stock(args: argparse.Namespace) -> int:
-    config, config_path, target, source_sha = _validate_pg_raw_query_args(
+    config, config_path, target, source_package_id = _validate_pg_raw_query_args(
         args, universe=False
     )
     try:
@@ -138,13 +134,12 @@ def _run_pg_raw_stock(args: argparse.Namespace) -> int:
             config,
             source_symbol=args.symbol,
             target_session=target,
-            package_sha256=source_sha,
+            source_package_id=source_package_id,
         )
         source_context = read_source_version_context(
             config,
             target_session=target,
-            package_sha256=source_sha,
-            namespace_id=str(row["namespace_id"]) if row is not None else None,
+            source_package_id=source_package_id,
             target_raw_rows=(row,) if row is not None else (),
         )
     except RawSourcePgError as error:
@@ -184,7 +179,7 @@ def _run_pg_raw_stock(args: argparse.Namespace) -> int:
         "status": "AVAILABLE" if row is not None else "NO_MATCH",
         "requested_symbol": args.symbol,
         "target_session": target.isoformat(),
-        "package_sha256": source_sha,
+        "source_package_id": source_package_id,
         "analysis_scope": "TDX_SOURCE_SYMBOL_RAW_DAILY_FROM_POSTGRESQL",
         "row": row,
         "source_version": source_context,
@@ -207,7 +202,7 @@ def _run_pg_raw_stock(args: argparse.Namespace) -> int:
 
 
 def _run_pg_raw_universe(args: argparse.Namespace) -> int:
-    config, config_path, target, source_sha = _validate_pg_raw_query_args(
+    config, config_path, target, source_package_id = _validate_pg_raw_query_args(
         args, universe=True
     )
     if (
@@ -224,7 +219,7 @@ def _run_pg_raw_universe(args: argparse.Namespace) -> int:
         result = read_raw_daily_page(
             config,
             target_session=target,
-            package_sha256=source_sha,
+            source_package_id=source_package_id,
             offset=args.offset,
             limit=args.limit,
             market=args.market,
@@ -233,8 +228,7 @@ def _run_pg_raw_universe(args: argparse.Namespace) -> int:
         source_context = read_source_version_context(
             config,
             target_session=target,
-            package_sha256=source_sha,
-            namespace_id=result["namespace_id"],
+            source_package_id=source_package_id,
             target_raw_rows=result["rows"],
             expected_raw_row_count=result["version_row_count"],
         )
@@ -288,7 +282,7 @@ def _run_pg_raw_universe(args: argparse.Namespace) -> int:
 
 def _validate_pg_history_args(
     args: argparse.Namespace,
-) -> tuple[dict[str, Any], Path, date, tuple[date, ...], str]:
+) -> tuple[dict[str, Any], Path, date, tuple[date, ...], int]:
     if getattr(args, "pg_source_raw", False):
         raise DiagnosticError(
             "PG_SOURCE_MODES_EXCLUSIVE",
@@ -297,7 +291,7 @@ def _validate_pg_history_args(
         )
     if (
         getattr(args, "vipdata_package", None) is not None
-        or getattr(args, "vipdata_package_sha256", None) is not None
+        or getattr(args, "vipdata_source_package_id", None) is not None
     ):
         raise DiagnosticError(
             "PG_HISTORY_ZIP_CONFLICT",
@@ -330,14 +324,11 @@ def _validate_pg_history_args(
             "PG历史查询是本地只读模式，不触发BaoStock网络请求",
             _EXIT_ARGUMENT,
         )
-    source_sha = getattr(args, "pg_source_sha256", None)
-    if (
-        not isinstance(source_sha, str)
-        or re.fullmatch(r"[0-9a-f]{64}", source_sha) is None
-    ):
+    source_package_id = getattr(args, "pg_source_package_id", None)
+    if type(source_package_id) is not int or source_package_id <= 0:
         raise DiagnosticError(
-            "PG_HISTORY_PACKAGE_SHA_REQUIRED",
-            "PG历史查询必须显式提供64位小写package SHA-256",
+            "PG_HISTORY_PACKAGE_ID_REQUIRED",
+            "PG历史查询必须显式提供正数来源包ID",
             _EXIT_ARGUMENT,
         )
     target, sessions, _revision = _pg_history_window(
@@ -345,37 +336,37 @@ def _validate_pg_history_args(
         getattr(args, "pg_history_session_count", 75),
     )
     config, config_path = _load_runtime_config()
-    return config, config_path, target, sessions, source_sha
+    return config, config_path, target, sessions, source_package_id
 
 
 def _run_pg_history_stock(args: argparse.Namespace) -> int:
-    config, config_path, target, sessions, source_sha = _validate_pg_history_args(args)
+    config, config_path, target, sessions, source_package_id = (
+        _validate_pg_history_args(args)
+    )
     try:
         history = read_raw_daily_history_stock(
             config,
             source_symbol=args.symbol,
             target_session=target,
-            package_sha256=source_sha,
+            source_package_id=source_package_id,
             sessions=sessions,
         )
         source_context = read_source_version_context(
             config,
             target_session=target,
-            package_sha256=source_sha,
-            namespace_id=history["namespace_id"],
+            source_package_id=source_package_id,
             target_raw_rows=history["history_rows"],
         )
         profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
         result = research_stock_pg_history_preview(
             symbol=args.symbol,
             target_session=target.isoformat(),
-            package_sha256=source_sha,
+            source_package_id=source_package_id,
             session_dates=sessions,
             history_rows=history["history_rows"],
             missing_history_sessions=tuple(
                 date.fromisoformat(item) for item in history["missing_history_sessions"]
             ),
-            namespace_id=history["namespace_id"],
             profile_contract=profile_contract,
         )
     except RawSourcePgError as error:
@@ -444,7 +435,7 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             f"PG历史研究预览 {result.get('symbol')} {target.isoformat()} "
             f"窗口={result.get('window', {}).get('start_session')}..{result.get('window', {}).get('end_session')} "
             f"有效Bar={result.get('window', {}).get('real_bar_count')}/{result.get('window', {}).get('requested_sessions')} "
-            f"包SHA={source_sha[:12]}",
+            f"包ID={source_package_id}",
         ]
         line.extend(
             f"{name}={_summary_field(fields.get(name))}" for name in core_labels
@@ -467,7 +458,9 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             "PG历史模式只读取已入库Raw，不运行ZIP扫描模式",
             _EXIT_ARGUMENT,
         )
-    config, config_path, target, sessions, source_sha = _validate_pg_history_args(args)
+    config, config_path, target, sessions, source_package_id = (
+        _validate_pg_history_args(args)
+    )
     if (
         type(args.offset) is not int
         or args.offset < 0
@@ -481,7 +474,7 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
         page = read_raw_daily_history_page(
             config,
             target_session=target,
-            package_sha256=source_sha,
+            source_package_id=source_package_id,
             sessions=sessions,
             offset=args.offset,
             limit=args.limit,
@@ -497,15 +490,14 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
         source_context = read_source_version_context(
             config,
             target_session=target,
-            package_sha256=source_sha,
-            namespace_id=page["namespace_id"],
+            source_package_id=source_package_id,
             target_raw_rows=target_rows,
             expected_raw_row_count=page["version_row_count"],
         )
         profile_contract = load_price_profile_contract(_CONFIG_ROOT).document
         result = research_universe_pg_history_preview(
             target_session=target.isoformat(),
-            package_sha256=source_sha,
+            source_package_id=source_package_id,
             session_dates=sessions,
             page=page,
             profile_contract=profile_contract,
@@ -566,7 +558,7 @@ def _run_pg_history_universe(args: argparse.Namespace) -> int:
             f"PG历史候选页 offset={page_info['offset']} limit={page_info['limit']} "
             f"rows={page_info['page_count']} filtered_total={page_info['total_source_candidates']} "
             f"next={page_info['next_offset']} window={result['session_start']}..{result['session_end']} "
-            f"来源版本={result['source_version_status']} 包SHA={source_sha[:12]} "
+            f"来源版本={result['source_version_status']} 包ID={source_package_id} "
             f"实际/期望={result['source_version_row_count']}/{result['source_version_expected_row_count']}",
         ]
         for item in result["results"]:

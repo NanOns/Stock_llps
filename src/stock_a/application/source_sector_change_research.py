@@ -6,7 +6,6 @@ from dataclasses import dataclass
 from datetime import date
 from fractions import Fraction
 import re
-import uuid
 from typing import Any, Mapping
 
 from stock_a.application.research_window import resolve_pg_history_window
@@ -58,7 +57,7 @@ from stock_a.storage.postgres.source_raw import (
 )
 from stock_a.storage.postgres.tdx_sector_members import read_rotation_snapshot_members
 
-_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
+_PROFILE_REVISION = re.compile(r"PROFILE_R[0-9]{2}\Z")
 
 
 @dataclass(frozen=True)
@@ -67,10 +66,10 @@ class SourceSectorChangeInputs:
 
     target_session: date
     research_cutoff: date
-    package_sha256: str
+    source_package_id: int
     profile_revision: str | None
-    industry_snapshot_id: str
-    concept_snapshot_id: str
+    industry_snapshot_id: int
+    concept_snapshot_id: int
     event_window_start: date
     pg_history_session_count: int
     config_path: str
@@ -85,7 +84,7 @@ def validate_source_d1_discovery_fact(
     source_version_context: Mapping[str, Any],
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     sessions: tuple[date, ...],
     calendar_revision: str,
     event_window_start: date,
@@ -149,16 +148,12 @@ def validate_source_d1_discovery_fact(
         )
         or source.get("status") != "AVAILABLE"
         or source.get("version_status") != "COMPLETE"
-        or source.get("namespace_id") != source_version_context.get("namespace_id")
         or source.get("target_session") != target_session.isoformat()
-        or source.get("package_sha256") != package_sha256
-        or source.get("source_content_id")
-        != source_version_context.get("source_content_id")
-        or str(source.get("source_capture_id"))
-        != str(source_version_context.get("source_capture_id"))
-        or source.get("source_raw_digest")
-        != source_version_context.get("source_raw_digest")
-        or source.get("capture_digest") != source_version_context.get("capture_digest")
+        or source.get("source_package_id") != source_package_id
+        or source.get("source_package_id")
+        != source_version_context.get("source_package_id")
+        or source.get("source_capture_id")
+        != source_version_context.get("source_capture_id")
         or source.get("raw_row_count") != row_count
         or source.get("capture_expected_row_count") != row_count
         or execution.get("database_write_attempted") is not False
@@ -177,9 +172,9 @@ def prepare_source_sector_change_inputs(
     *,
     target_session: date,
     research_cutoff: date,
-    industry_snapshot_id: str,
-    concept_snapshot_id: str,
-    package_sha256: str,
+    industry_snapshot_id: int,
+    concept_snapshot_id: int,
+    source_package_id: int,
     profile_revision: str | None,
     event_window_start: date,
     pg_history_session_count: int,
@@ -196,12 +191,12 @@ def prepare_source_sector_change_inputs(
         or target_session > research_cutoff
         or not isinstance(config_path, str)
         or not config_path
-        or not isinstance(package_sha256, str)
-        or _SHA256.fullmatch(package_sha256) is None
+        or type(source_package_id) is not int
+        or source_package_id <= 0
         or profile_revision is not None
         and (
             not isinstance(profile_revision, str)
-            or _SHA256.fullmatch(profile_revision) is None
+            or _PROFILE_REVISION.fullmatch(profile_revision) is None
         )
         or type(pg_history_session_count) is not int
         or not 1 <= pg_history_session_count <= 75
@@ -210,21 +205,16 @@ def prepare_source_sector_change_inputs(
         raise TdxSectorMembersApplicationError(
             "SECTOR_CHANGE_IDENTITY_INVALID", "行业/GN联动请求身份或历史窗口无效"
         )
-    try:
-        industry_uuid = str(uuid.UUID(industry_snapshot_id))
-        concept_uuid = str(uuid.UUID(concept_snapshot_id))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise TdxSectorMembersApplicationError(
-            "SECTOR_CHANGE_SOURCE_ID_INVALID", "行业与GN快照编号必须为规范UUID"
-        ) from error
     if (
-        industry_uuid != industry_snapshot_id
-        or concept_uuid != concept_snapshot_id
-        or industry_uuid == concept_uuid
+        type(industry_snapshot_id) is not int
+        or industry_snapshot_id <= 0
+        or type(concept_snapshot_id) is not int
+        or concept_snapshot_id <= 0
+        or industry_snapshot_id == concept_snapshot_id
     ):
         raise TdxSectorMembersApplicationError(
             "SECTOR_CHANGE_SOURCE_ID_INVALID",
-            "行业与GN快照编号必须规范且互不相同",
+            "行业与GN快照必须是不同的正数BIGINT数字ID",
         )
     if include_d0_launch_new:
         if (
@@ -265,10 +255,10 @@ def prepare_source_sector_change_inputs(
             scenario="LAUNCH_CONFIRM",
             action="changes",
             before_session=d0_before_session,
-            before_package_sha256=package_sha256,
+            before_source_package_id=source_package_id,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             transition="ALL",
             offset=0,
             limit=5000,
@@ -277,8 +267,8 @@ def prepare_source_sector_change_inputs(
     strength_results = []
     with tdx_sector_strength_read_context(config) as strength_read_context:
         for board_kind, snapshot_id in (
-            ("INDUSTRY", industry_uuid),
-            ("CONCEPT", concept_uuid),
+            ("INDUSTRY", industry_snapshot_id),
+            ("CONCEPT", concept_snapshot_id),
         ):
             strength_results.append(
                 read_tdx_sector_strength(
@@ -288,7 +278,7 @@ def prepare_source_sector_change_inputs(
                     board_native_id=None,
                     target_session=target_session,
                     research_cutoff=research_cutoff,
-                    package_sha256=package_sha256,
+                    source_package_id=source_package_id,
                     profile_revision=profile_revision,
                     changed_only=False,
                     sort_by="delta20",
@@ -312,7 +302,7 @@ def prepare_source_sector_change_inputs(
             research_cutoff,
             sessions,
             calendar_revision,
-            package_sha256,
+            source_package_id,
             event_window_start,
             0,
             1,
@@ -327,7 +317,7 @@ def prepare_source_sector_change_inputs(
             source_version_context=source_version_context,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             sessions=sessions,
             calendar_revision=calendar_revision,
             event_window_start=event_window_start,
@@ -335,10 +325,10 @@ def prepare_source_sector_change_inputs(
     return SourceSectorChangeInputs(
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         profile_revision=profile_revision,
-        industry_snapshot_id=industry_uuid,
-        concept_snapshot_id=concept_uuid,
+        industry_snapshot_id=industry_snapshot_id,
+        concept_snapshot_id=concept_snapshot_id,
         event_window_start=event_window_start,
         pg_history_session_count=pg_history_session_count,
         config_path=config_path,
@@ -403,7 +393,7 @@ def build_source_sector_change_view(
                 config,
                 target_session=inputs.target_session,
                 research_cutoff=inputs.research_cutoff,
-                package_sha256=inputs.package_sha256,
+                source_package_id=inputs.source_package_id,
             )
         except SourceMarketContextError as error:
             if error.category != "NOT_EVALUABLE":
@@ -509,7 +499,7 @@ def read_retrospective_rotation(
     start_session: date,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str | None = None,
     profile_contract: dict[str, Any] | None = None,
     profile_history_session_count: int = 75,
@@ -582,11 +572,6 @@ def read_retrospective_rotation(
             )
         }
     )
-    namespace_ids = {item["namespace_id"] for item in snapshots_by_kind.values()}
-    if len(namespace_ids) != 1:
-        raise TdxSectorMembersPgError(
-            "ROTATION_PEER_NAMESPACE_MISMATCH", "同类板块快照不属于同一来源namespace"
-        )
     snapshot = snapshots_by_kind[board_kind]
     boards = snapshot["boards"]
     if board_native_id not in boards or not boards[board_native_id]["members"]:
@@ -599,6 +584,10 @@ def read_retrospective_rotation(
     }
     board_names_by_kind = {
         kind: {key: row["name"] for key, row in item["boards"].items()}
+        for kind, item in snapshots_by_kind.items()
+    }
+    catalog_ids_by_kind = {
+        kind: {key: row["catalog_id"] for key, row in item["boards"].items()}
         for kind, item in snapshots_by_kind.items()
     }
     wanted = {
@@ -614,16 +603,16 @@ def read_retrospective_rotation(
         page = read_raw_daily_history_page(
             config,
             target_session=target_session,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             sessions=sessions,
             offset=offset,
             limit=100,
             market="ALL",
             board="ALL",
+            include_parser_contract=True,
         )
         if (
-            page["namespace_id"] != snapshot["namespace_id"]
-            or page["version_status"] != "CLOSED"
+            page["version_status"] != "CLOSED"
             or page["total_count"] != page["version_expected_row_count"]
         ):
             raise TdxSectorMembersPgError(
@@ -693,10 +682,19 @@ def read_retrospective_rotation(
             return None
         return close
 
-    def matching_entries(symbol, indexes):
+    def matching_source_versions(symbol, indexes):
         raw = raw_by_symbol.get(symbol, {})
-        entries = [raw.get(sessions[i], {}).get("source_entry_sha256") for i in indexes]
-        return all(entries) and len(set(entries)) == 1
+        versions = [
+            (
+                raw.get(sessions[i], {}).get("source_package_id"),
+                raw.get(sessions[i], {}).get("parser_contract"),
+            )
+            for i in indexes
+        ]
+        return (
+            all(package and parser for package, parser in versions)
+            and len(set(versions)) == 1
+        )
 
     endpoints = {}
     endpoint_indices = (
@@ -713,7 +711,7 @@ def read_retrospective_rotation(
                 current / previous - 1
                 if current is not None
                 and previous is not None
-                and matching_entries(symbol, (i - 1, i))
+                and matching_source_versions(symbol, (i - 1, i))
                 else None
             )
             ret5 = None
@@ -721,7 +719,7 @@ def read_retrospective_rotation(
             if (
                 history is not None
                 and current is not None
-                and matching_entries(symbol, range(i - 5, i + 1))
+                and matching_source_versions(symbol, range(i - 5, i + 1))
             ):
                 window = sessions[i - 5 : i + 1]
                 result = calculate_core_return(
@@ -735,21 +733,11 @@ def read_retrospective_rotation(
                     ret5 = result.value
             ret20 = None
             above_ma20 = None
-            entry_versions = (
-                {
-                    row.get("source_entry_sha256")
-                    for row in raw_by_symbol.get(symbol, {}).values()
-                    if row.get("source_entry_sha256")
-                }
-                if peer_target_only
-                else set()
-            )
             if (
                 peer_target_only
                 and history is not None
                 and current is not None
-                and len(entry_versions) <= 1
-                and matching_entries(symbol, range(i - 20, i + 1))
+                and matching_source_versions(symbol, range(i - 20, i + 1))
             ):
                 history_window = history[i - 20 : i + 1]
                 history_calendar = MarketSessionCalendar(
@@ -788,8 +776,7 @@ def read_retrospective_rotation(
                         config,
                         target_session=sessions[index],
                         research_cutoff=research_cutoff,
-                        package_sha256=package_sha256,
-                        expected_namespace_id=snapshot["namespace_id"],
+                        source_package_id=source_package_id,
                     )["facts"],
                     None,
                 )
@@ -814,8 +801,7 @@ def read_retrospective_rotation(
                     config,
                     target_session=sessions[index],
                     research_cutoff=research_cutoff,
-                    package_sha256=package_sha256,
-                    namespace_id=snapshot["namespace_id"],
+                    source_package_id=source_package_id,
                     profile_revision=profile_revision,
                     profile_contract=profile_contract,
                     history_session_count=profile_history_session_count,
@@ -854,19 +840,19 @@ def read_retrospective_rotation(
         if peer_target_only:
             all_rotations = all_rotations_by_kind[board_kind]
             return {
-                "namespace_id": snapshot["namespace_id"],
                 "snapshot": snapshot["snapshot"],
                 "snapshots_by_kind": {
                     kind: item["snapshot"] for kind, item in snapshots_by_kind.items()
                 },
                 "board_names_by_kind": board_names_by_kind,
+                "catalog_ids_by_kind": catalog_ids_by_kind,
                 "target_session": target_session.isoformat(),
                 "comparison_sessions": {
                     "prior_ret5": sessions[-4],
                     "prior_breadth": sessions[-2],
                 },
                 "board_kind": board_kind,
-                "package_sha256": package_sha256,
+                "source_package_id": source_package_id,
                 "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
                 "peer_target": all_rotations,
                 "peer_target_by_kind": all_rotations_by_kind,
@@ -916,14 +902,14 @@ def read_retrospective_rotation(
                         close / base - 1
                         if close is not None
                         and base is not None
-                        and matching_entries(symbol, (i - 1, i, j))
+                        and matching_source_versions(symbol, (i - 1, i, j))
                         else None
                     )
                     post.append(
                         close / t0 - 1
                         if close is not None
                         and t0 is not None
-                        and matching_entries(symbol, (i, j))
+                        and matching_source_versions(symbol, (i, j))
                         else None
                     )
                 n = len(members)
@@ -1095,7 +1081,7 @@ def read_retrospective_rotation(
                                 "close": str(quote(row["source_symbol"], j))
                                 if quote(row["source_symbol"], j) is not None
                                 else None,
-                                "same_entry_as_t0": matching_entries(
+                                "same_entry_as_t0": matching_source_versions(
                                     row["source_symbol"], (i, j)
                                 ),
                             }
@@ -1113,10 +1099,9 @@ def read_retrospective_rotation(
     return {
         "contract": "SOURCE_ROTATION_RETROSPECTIVE_FIXED_BASKET_R1",
         "snapshot": snapshot["snapshot"],
-        "namespace_id": snapshot["namespace_id"],
         "board_kind": board_kind,
         "board_native_id": board_native_id,
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "research_cutoff": research_cutoff.isoformat(),
         "later_session_status": "NOT_AVAILABLE_AFTER_RESEARCH_CUTOFF"
         if target_session == research_cutoff

@@ -62,10 +62,10 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
             "目标交易会话不得晚于显式研究截止日",
             _EXIT_ARGUMENT,
         )
-    if re.fullmatch(r"[0-9a-f]{64}", args.package_sha256) is None:
+    if type(args.source_package_id) is not int or args.source_package_id <= 0:
         raise DiagnosticError(
-            "MARKET_BREADTH_PACKAGE_SHA_INVALID",
-            "完整TDX来源包SHA必须是64位小写十六进制值",
+            "MARKET_BREADTH_PACKAGE_ID_INVALID",
+            "必须提供正数TDX来源包BIGINT数字ID",
             _EXIT_ARGUMENT,
         )
 
@@ -93,7 +93,7 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
                             _parse_session_date(args.start_session),
                             target_session,
                             research_cutoff,
-                            args.package_sha256,
+                            args.source_package_id,
                         )
                     ]
                 except ValueError as error:
@@ -105,7 +105,7 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
                     config,
                     target_session=day,
                     research_cutoff=research_cutoff,
-                    package_sha256=args.package_sha256,
+                    source_package_id=args.source_package_id,
                 )
                 _emit({"ok": True, **persist_market_breadth(config, calculated)})
             return _EXIT_OK
@@ -113,7 +113,7 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
             config,
             target_session=target_session,
             research_cutoff=research_cutoff,
-            package_sha256=args.package_sha256,
+            source_package_id=args.source_package_id,
             include_symbols=True,
         )
     except SourceMarketContextError as error:
@@ -248,22 +248,22 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 change_type=args.change_type,
                 price_damage_transition=args.price_damage_transition,
                 ma_slope20_transition=args.ma_slope20_transition,
-                before_package_sha256=args.before_package_sha256,
+                before_source_package_id=args.before_source_package_id,
                 before_profile_revision=args.before_profile_revision,
-                after_package_sha256=args.after_package_sha256,
+                after_source_package_id=args.after_source_package_id,
                 after_profile_revision=args.after_profile_revision,
             )
         elif args.action == "query":
             if not all(
                 (
                     args.target_session,
-                    args.package_sha256,
+                    args.source_package_id,
                     args.profile_revision,
                 )
             ):
                 raise DiagnosticError(
                     "PROFILE_QUERY_KEY_REQUIRED",
-                    "画像查询必须显式指定目标日期、包SHA和profile_revision",
+                    "画像查询必须显式指定目标日期、来源包数字ID和profile_revision",
                     _EXIT_ARGUMENT,
                 )
             if args.core_field is None and args.core_quality is not None:
@@ -276,7 +276,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                 config,
                 target_session=_parse_session_date(args.target_session),
                 max_target_session=max_target_session,
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 profile_revision=args.profile_revision,
                 offset=args.offset,
                 limit=args.limit,
@@ -298,19 +298,19 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
             if not all(
                 (
                     args.target_session,
-                    args.package_sha256,
+                    args.source_package_id,
                     args.scope,
                 )
             ):
                 raise DiagnosticError(
                     "PROFILE_COMPUTE_KEY_REQUIRED",
-                    "画像计算必须显式指定目标日期、Raw来源包SHA与计算scope",
+                    "画像计算必须显式指定目标日期、Raw来源包数字ID与计算scope",
                     _EXIT_ARGUMENT,
                 )
-            if re.fullmatch(r"[0-9a-f]{64}", args.package_sha256) is None:
+            if type(args.source_package_id) is not int or args.source_package_id <= 0:
                 raise DiagnosticError(
-                    "PROFILE_PACKAGE_SHA_INVALID",
-                    "完整TDX包SHA必须是64位小写十六进制值",
+                    "PROFILE_PACKAGE_ID_INVALID",
+                    "必须提供正数TDX来源包BIGINT数字ID",
                     _EXIT_ARGUMENT,
                 )
             target_session = _parse_session_date(args.target_session)
@@ -330,7 +330,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                         _parse_session_date(args.start_session),
                         target_session,
                         max_target_session,
-                        args.package_sha256,
+                        args.source_package_id,
                     )
                 except ValueError as error:
                     raise PgPriceProfileError(
@@ -340,7 +340,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
                     item = run_source_symbol_price_profile(
                         config,
                         target_session=day,
-                        package_sha256=args.package_sha256,
+                        source_package_id=args.source_package_id,
                         scope=args.scope,
                         session_count=args.session_count,
                         page_size=args.page_size,
@@ -351,7 +351,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
             result = run_source_symbol_price_profile(
                 config,
                 target_session=target_session,
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 scope=args.scope,
                 session_count=args.session_count,
                 page_size=args.page_size,
@@ -389,7 +389,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
             page = result.get("page", {})
             sys.stdout.write(
                 f"PG画像查询 target={result.get('target_session')} "
-                f"package={result.get('package_sha256')} offset={page.get('offset')} "
+                f"package={result.get('source_package_id')} offset={page.get('offset')} "
                 f"limit={page.get('limit')} rows={page.get('count')} total={page.get('total')} "
                 f"next={page.get('next_offset')} status={result.get('status')}\n"
             )
@@ -406,7 +406,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
         elif args.action == "compute":
             sys.stdout.write(
                 f"PG画像批次 target={result.get('target_session')} "
-                f"package={result.get('package_sha256')} "
+                f"package={result.get('source_package_id')} "
                 f"scope={result.get('scope')} candidates={result.get('source_candidate_count')} "
                 f"inserted={result.get('inserted_count')} "
                 f"existing_same_content={result.get('existing_same_content_count')} "
@@ -416,7 +416,7 @@ def _run_source_symbol_price_profile(args: argparse.Namespace) -> int:
         else:
             for item in result.get("snapshots", ()):
                 sys.stdout.write(
-                    f"target={item['target_session']} package={item['package_sha256']} "
+                    f"target={item['target_session']} package={item['source_package_id']} "
                     f"revision={item['profile_revision']} "
                     f"rows={item['source_symbol_count']}/{item['expected_source_symbol_count']} "
                     f"complete={item['complete']}\n"

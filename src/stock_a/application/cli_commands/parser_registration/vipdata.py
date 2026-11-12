@@ -12,13 +12,10 @@ def register_commands(commands):
         "--vipdata-package", required=True, help="G盘已下载且不修改的官网ZIP绝对路径"
     )
     target_quality.add_argument(
-        "--vipdata-package-sha256", required=True, help="已知的64位ZIP SHA-256"
-    )
-    target_quality.add_argument(
         "--max-vipdata-validation-seconds",
         type=float,
         default=300.0,
-        help="一次ZIP SHA/CRC重验的耗时上限秒数，默认300",
+        help="一次ZIP原件与CRC重验的耗时上限秒数，默认300",
     )
     target_quality.add_argument(
         "--target-session",
@@ -86,13 +83,7 @@ def register_commands(commands):
         "--old-package", required=True, help="G盘现存旧版官方VIPDATA ZIP绝对路径"
     )
     revision_compare.add_argument(
-        "--old-package-sha256", required=True, help="旧包已知SHA-256"
-    )
-    revision_compare.add_argument(
         "--new-package", required=True, help="G盘现存新版官方VIPDATA ZIP绝对路径"
-    )
-    revision_compare.add_argument(
-        "--new-package-sha256", required=True, help="新版已知SHA-256"
     )
     revision_compare.add_argument(
         "--target-session", required=True, help="两包共同对照的目标交易会话，YYYY-MM-DD"
@@ -101,7 +92,7 @@ def register_commands(commands):
         "--max-validation-seconds",
         type=float,
         default=300.0,
-        help="每包SHA/CRC复验秒数上限，默认300",
+        help="每包原件与CRC复验秒数上限，默认300",
     )
     revision_compare.add_argument(
         "--max-total-bytes",

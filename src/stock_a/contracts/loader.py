@@ -6,7 +6,6 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from decimal import Decimal
-from hashlib import sha256
 import json
 import math
 from pathlib import Path
@@ -33,11 +32,9 @@ class PriceProfileContractError(ValueError):
 
 @dataclass(frozen=True)
 class LoadedPriceProfileContract:
-    """已核验摘要和字段依赖的价格画像合同。"""
+    """已核验字段依赖和算法版本的价格画像合同。"""
 
     document: dict[str, Any]
-    assembled_sha256: str
-    declared_sha256: str
     module_paths: tuple[str, ...]
 
 
@@ -223,7 +220,6 @@ def load_price_profile_contract(
         "contract_id",
         "version",
         "modules",
-        "assembled_sha256",
     }:
         raise PriceProfileContractError(
             "PROFILE_CONTRACT_MANIFEST_INVALID", "画像合同清单字段不完整或多余"
@@ -245,7 +241,7 @@ def load_price_profile_contract(
     loaded_paths: list[str] = []
     for expected, item in zip(PROFILE_SEMANTIC_MODULES, modules, strict=True):
         module_id, relative_path = expected
-        if not isinstance(item, dict) or set(item) != {"id", "path", "sha256"}:
+        if not isinstance(item, dict) or set(item) != {"id", "path"}:
             raise PriceProfileContractError(
                 "PROFILE_CONTRACT_MODULE_INVALID", "画像合同模块登记字段无效"
             )
@@ -254,12 +250,6 @@ def load_price_profile_contract(
                 "PROFILE_CONTRACT_MODULE_SET_INVALID", "画像合同模块顺序或路径不匹配"
             )
         module = _read_json(contracts_root, relative_path)
-        digest = sha256(canonical_contract_bytes(module)).hexdigest()
-        if item.get("sha256") != digest:
-            raise PriceProfileContractError(
-                "PROFILE_CONTRACT_MODULE_DIGEST_MISMATCH",
-                f"画像字段模块摘要不匹配：{relative_path}",
-            )
         module_documents[module_id] = module
         loaded_paths.append(relative_path)
 
@@ -313,24 +303,7 @@ def load_price_profile_contract(
         **deepcopy(profile_scope),
     }
     _validate_field_contract(document)
-    assembled_sha = sha256(canonical_contract_bytes(document)).hexdigest()
-    declared_sha = manifest.get("assembled_sha256")
-    if (
-        not isinstance(declared_sha, str)
-        or len(declared_sha) != 64
-        or any(character not in "0123456789abcdef" for character in declared_sha)
-    ):
-        raise PriceProfileContractError(
-            "PROFILE_CONTRACT_DIGEST_INVALID", "画像合同声明摘要必须是小写SHA-256"
-        )
-    if declared_sha != assembled_sha:
-        raise PriceProfileContractError(
-            "PROFILE_CONTRACT_DIGEST_MISMATCH",
-            f"画像合同摘要不匹配：声明{declared_sha}，实算{assembled_sha}",
-        )
     return LoadedPriceProfileContract(
         document=document,
-        assembled_sha256=assembled_sha,
-        declared_sha256=declared_sha,
         module_paths=tuple(loaded_paths),
     )

@@ -106,17 +106,13 @@ def _add_research_arguments(
     if include_vipdata:
         command.add_argument(
             "--vipdata-package",
-            help="显式选择G:/codex_tmp内已下载的VIPDATA ZIP；只读并逐次核验SHA/CRC",
-        )
-        command.add_argument(
-            "--vipdata-package-sha256",
-            help="显式VIPDATA包的预期SHA-256；与--vipdata-package配套必填",
+            help="显式选择G:/codex_tmp内已下载的VIPDATA ZIP；只读并逐次核验原件完整性",
         )
         command.add_argument(
             "--max-vipdata-validation-seconds",
             type=float,
             default=300.0,
-            help="本次ZIP SHA/CRC完整校验总秒数上限，默认300",
+            help="本次ZIP原件及目录校验总秒数上限，默认300",
         )
         command.add_argument(
             "--max-vipdata-extract-bytes",

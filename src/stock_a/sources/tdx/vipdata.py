@@ -149,7 +149,6 @@ class VipdataPageObservation:
     metadata_url: str | None = None
     metadata_observed_at: datetime | None = None
     official_update_at: datetime | None = None
-    metadata_sha256: str | None = None
     page_html_status: str | None = None
     page_html_reason: str | None = None
     download_url_source: str | None = None
@@ -185,12 +184,11 @@ class VipdataPackage:
 
 @dataclass(frozen=True)
 class VerifiedVipdataPackage:
-    """一次本地重验产生的短期包句柄；不代表来源封口、PIT或PG接受。"""
+    """一次本地重验产生的短期包句柄；不携带包摘要或下游身份。"""
 
     file_path: Path
     file_name: str
     file_size: int
-    sha256: str
     zip_entry_count: int
     zip_crc: str
     total_uncompressed_bytes: int
@@ -213,8 +211,6 @@ class VipdataCandidatePool:
 class VipdataRevisionComparison:
     """两个只读包的代码条目修订对照；不生成来源封口或PIT结论。"""
 
-    old_package_sha256: str
-    new_package_sha256: str
     target_session: date
     old_candidate_total: int
     new_candidate_total: int
@@ -241,7 +237,6 @@ class VipdataDayScan:
     byte_count: int
     first_date: date
     last_date: date
-    raw_byte_sha256: str
     target_session: date
     target_bar_present: bool
     parser_version: str
@@ -323,11 +318,8 @@ class VipdataCandidateQuality:
     record_count: int
     first_date: date | None
     last_date: date | None
-    package_id: str
-    package_sha256: str
     zip_entry_path: str
     target_session: date
-    entry_sha256: str | None
     bytes_read: int
     future_rows_excluded: int
     observed_started_at: datetime | None
@@ -360,8 +352,6 @@ class VipdataTargetQualityPage:
 @dataclass(frozen=True)
 class VipdataTargetQualityReport:
     target_session: date
-    package_id: str
-    package_sha256: str
     package_verified_at: datetime
     candidate_total: int
     evaluated: int
@@ -978,7 +968,6 @@ def inspect_vipdata_page(
         "metadata_url": source_config.metadata_url,
         "metadata_observed_at": metadata_observed_at,
         "official_update_at": official_update_at,
-        "metadata_sha256": hashlib.sha256(metadata_body or b"").hexdigest(),
         "page_html_status": page_observation.status,
         "page_html_reason": page_observation.reason,
         "download_url_source": "CONFIGURED_OFFICIAL_ENDPOINT",
@@ -1240,45 +1229,21 @@ def validate_vipdata_zip(
 def verify_existing_vipdata_package(
     zip_path: str | Path,
     *,
-    expected_sha256: str,
     budgets: VipdataBudgets = VipdataBudgets(),
 ) -> VerifiedVipdataPackage:
-    """重验G盘现存包的字节身份、完整目录与CRC，不联网也不改包。"""
-    if (
-        not isinstance(expected_sha256, str)
-        or re.fullmatch(r"[0-9a-fA-F]{64}", expected_sha256) is None
-    ):
-        raise VipdataError(
-            "PACKAGE_SHA_INVALID", "显式VIPDATA包必须提供64位十六进制SHA-256"
-        )
+    """只读核验已接收的TDX原始包、完整目录与CRC，并计算入口包字节校验值。"""
     path = _safe_temp_file(zip_path)
     before = path.stat()
     if before.st_size <= 0 or before.st_size > budgets.max_package_bytes:
         raise VipdataError("PACKAGE_SIZE_INVALID", "本地ZIP为空或超过最大包字节数")
     started = time.monotonic()
-    digest = hashlib.sha256()
     try:
-        with path.open("rb") as source:
-            while True:
-                if time.monotonic() - started > budgets.max_total_seconds:
-                    raise VipdataError(
-                        "PACKAGE_VERIFY_TIMEOUT", "本地ZIP SHA校验超过总耗时预算"
-                    )
-                chunk = source.read(1024 * 1024)
-                if not chunk:
-                    break
-                digest.update(chunk)
-        actual_sha256 = digest.hexdigest()
-        if actual_sha256 != expected_sha256.lower():
-            raise VipdataError(
-                "PACKAGE_SHA_MISMATCH", "本地ZIP SHA-256与显式绑定值不一致"
-            )
         entry_count, total_uncompressed, entries, by_market = validate_vipdata_zip(
             path, budgets=budgets
         )
         if time.monotonic() - started > budgets.max_total_seconds:
             raise VipdataError(
-                "PACKAGE_VERIFY_TIMEOUT", "本地ZIP SHA及CRC校验超过总耗时预算"
+                "PACKAGE_VERIFY_TIMEOUT", "本地ZIP目录及CRC校验超过总耗时预算"
             )
         after = path.stat()
         identity_before = (
@@ -1300,7 +1265,6 @@ def verify_existing_vipdata_package(
         file_path=path,
         file_name=path.name,
         file_size=after.st_size,
-        sha256=actual_sha256,
         zip_entry_count=entry_count,
         zip_crc="PASS",
         total_uncompressed_bytes=total_uncompressed,
@@ -1395,6 +1359,9 @@ def vipdata_research_candidate_pool(
     catalog = {
         "contract": "TDX_SOURCE_CANDIDATES_NON_PIT",
         "complete": True,
+        "package_verified_at": package.verified_at,
+        "package_file_size": package.file_size,
+        "zip_entry_count": package.zip_entry_count,
         "configured_root_count": 1,
         "directories": [
             {
@@ -1415,8 +1382,6 @@ def vipdata_research_candidate_pool(
         "candidate_counts_by_market": by_market,
         "candidate_counts_by_board": by_board,
         "elapsed_seconds": round(time.monotonic() - started, 6),
-        "source_package_id": f"TDX-HSJDAY-SHA256:{package.sha256}",
-        "source_package_sha256": package.sha256,
         "entry_classification_counts": dict(sorted(classifications.items())),
         "empty_placeholder_count": sum(
             entry.uncompressed_bytes == 0 for entry in package.day_entries
@@ -1530,13 +1495,13 @@ def compare_vipdata_package_revisions(
             )
         if expected_size == 0:
             return {
-                "entry_sha256": hashlib.sha256(b"").hexdigest(),
+                "entry_bytes": b"",
                 "record_count": 0,
                 "target_bar": None,
                 "invalid_record_reason": None,
                 "future_rows": 0,
             }
-        digest = hashlib.sha256()
+        entry_content = bytearray()
         target_record: bytes | None = None
         target_decoded = None
         record_count = 0
@@ -1552,7 +1517,7 @@ def compare_vipdata_package_revisions(
                 if not block:
                     break
                 bytes_read += len(block)
-                digest.update(block)
+                entry_content.extend(block)
                 buffer += block
                 complete_bytes = len(buffer) - (len(buffer) % DAY_STRUCT.size)
                 position = 0
@@ -1611,7 +1576,7 @@ def compare_vipdata_package_revisions(
                 "reserved": target_decoded.reserved,
             }
         return {
-            "entry_sha256": digest.hexdigest(),
+            "entry_bytes": bytes(entry_content),
             "record_count": record_count,
             "target_bar": rendered_target,
             "invalid_record_reason": invalid_record_reason,
@@ -1675,7 +1640,7 @@ def compare_vipdata_package_revisions(
                 old_result = scan_entry(old_archive, old_candidate)
                 new_result = scan_entry(new_archive, new_candidate)
                 target_changes["comparable_entries"] += 1
-                changed = old_result["entry_sha256"] != new_result["entry_sha256"]
+                changed = old_result["entry_bytes"] != new_result["entry_bytes"]
                 if changed:
                     content_changed += 1
                     bucket["content_changed"] += 1
@@ -1721,8 +1686,8 @@ def compare_vipdata_package_revisions(
                             "board": old_candidate["board"],
                             "old_entry_path": old_candidate["zip_entry_path"],
                             "new_entry_path": new_candidate["zip_entry_path"],
-                            "old_entry_sha256": old_result["entry_sha256"],
-                            "new_entry_sha256": new_result["entry_sha256"],
+                            "old_entry_bytes": len(old_result["entry_bytes"]),
+                            "new_entry_bytes": len(new_result["entry_bytes"]),
                             "old_record_count": old_result["record_count"],
                             "new_record_count": new_result["record_count"],
                             "old_target_bar": old_bar,
@@ -1779,8 +1744,6 @@ def compare_vipdata_package_revisions(
             "REVISION_PARTITION_INCOMPLETE", "来源修订候选分母未能互斥闭合"
         )
     return VipdataRevisionComparison(
-        old_package_sha256=old_package.sha256,
-        new_package_sha256=new_package.sha256,
         target_session=target_session,
         old_candidate_total=len(old_by_symbol),
         new_candidate_total=len(new_by_symbol),
@@ -1958,8 +1921,6 @@ def _read_vipdata_candidate(
         raise VipdataError("PACKAGE_CHANGED", "读取VIPDATA条目期间ZIP文件身份发生变化")
 
     source_reference = TdxPackageEntryReference(
-        package_id=f"TDX-HSJDAY-SHA256:{package.sha256}",
-        package_sha256=package.sha256,
         official_package_url=OFFICIAL_PACKAGE_URL,
         package_verified_at=package.verified_at,
         package_file_size=package.file_size,
@@ -1967,14 +1928,12 @@ def _read_vipdata_candidate(
         zip_crc=package.zip_crc,
         source_symbol=str(candidate["symbol"]),
         zip_entry_path=entry.path,
-        entry_sha256=summary.raw_byte_sha256,
         entry_byte_count=summary.byte_count,
         target_session=target_session,
         observed_started_at=summary.read_started_at,
         observed_completed_at=summary.read_completed_at,
     )
     request = TdxCaptureRequest(
-        capture_id=str(uuid4()),
         dataset_id="TDX_DAILY_BARS",
         dataset_version="TDX_HSJDAY_ZIP_ENTRY_32B_R1",
         query_scope={
@@ -2069,8 +2028,6 @@ def build_vipdata_entry_capture_for_target(
     )
 
     source_reference = TdxPackageEntryReference(
-        package_id=f"TDX-HSJDAY-SHA256:{package.sha256}",
-        package_sha256=package.sha256,
         official_package_url=OFFICIAL_PACKAGE_URL,
         package_verified_at=package.verified_at,
         package_file_size=package.file_size,
@@ -2078,14 +2035,12 @@ def build_vipdata_entry_capture_for_target(
         zip_crc=package.zip_crc,
         source_symbol=str(candidate["symbol"]),
         zip_entry_path=entry.path,
-        entry_sha256=scan_summary.raw_byte_sha256,
         entry_byte_count=scan_summary.byte_count,
         target_session=target_session,
         observed_started_at=scan_summary.read_started_at,
         observed_completed_at=scan_summary.read_completed_at,
     )
     request = TdxCaptureRequest(
-        capture_id=str(uuid.uuid4()),
         dataset_id="TDX_DAILY_BARS",
         dataset_version="TDX_HSJDAY_ZIP_ENTRY_32B_R1",
         query_scope={
@@ -2137,7 +2092,6 @@ def _quality_bucket(field_value: Any) -> tuple[str, str | None]:
 def _target_quality_row(
     candidate: Mapping[str, Any],
     *,
-    package_sha256: str,
     target_session: date,
     source_index: int,
     page_offset: int,
@@ -2168,13 +2122,8 @@ def _target_quality_row(
         record_count=summary.record_count if summary is not None else record_count,
         first_date=summary.first_date if summary is not None else None,
         last_date=summary.last_date if summary is not None else None,
-        package_id=f"TDX-HSJDAY-SHA256:{package_sha256}",
-        package_sha256=package_sha256,
         zip_entry_path=str(candidate["zip_entry_path"]),
         target_session=target_session,
-        entry_sha256=capture.capture.source_package_entry.entry_sha256
-        if capture is not None
-        else None,
         bytes_read=summary.byte_count if summary is not None else bytes_read,
         future_rows_excluded=capture.future_source_rows_excluded
         if capture is not None
@@ -2351,7 +2300,6 @@ def scan_vipdata_target_quality(
                     ):
                         row = _target_quality_row(
                             candidate,
-                            package_sha256=package.sha256,
                             target_session=target_session,
                             source_index=global_index,
                             page_offset=global_index,
@@ -2381,7 +2329,6 @@ def scan_vipdata_target_quality(
                     elif budget_exhausted_reason is not None:
                         row = _target_quality_row(
                             candidate,
-                            package_sha256=package.sha256,
                             target_session=target_session,
                             source_index=global_index,
                             page_offset=global_index,
@@ -2393,7 +2340,6 @@ def scan_vipdata_target_quality(
                     elif bool(candidate.get("empty_placeholder")):
                         row = _target_quality_row(
                             candidate,
-                            package_sha256=package.sha256,
                             target_session=target_session,
                             source_index=global_index,
                             page_offset=global_index,
@@ -2435,7 +2381,6 @@ def scan_vipdata_target_quality(
                             if error.code in {"READ_LIMIT_EXCEEDED", "READ_TIMEOUT"}:
                                 row = _target_quality_row(
                                     candidate,
-                                    package_sha256=package.sha256,
                                     target_session=target_session,
                                     source_index=global_index,
                                     page_offset=global_index,
@@ -2449,7 +2394,6 @@ def scan_vipdata_target_quality(
                             else:
                                 row = _target_quality_row(
                                     candidate,
-                                    package_sha256=package.sha256,
                                     target_session=target_session,
                                     source_index=global_index,
                                     page_offset=global_index,
@@ -2480,7 +2424,6 @@ def scan_vipdata_target_quality(
                             }
                             row = _target_quality_row(
                                 candidate,
-                                package_sha256=package.sha256,
                                 target_session=target_session,
                                 source_index=global_index,
                                 page_offset=global_index,
@@ -2498,7 +2441,6 @@ def scan_vipdata_target_quality(
                                 consumer_captures[candidate["symbol"]] = capture
                             row = _target_quality_row(
                                 candidate,
-                                package_sha256=package.sha256,
                                 target_session=target_session,
                                 source_index=global_index,
                                 page_offset=global_index,
@@ -2597,8 +2539,6 @@ def scan_vipdata_target_quality(
         )
     return VipdataTargetQualityReport(
         target_session=target_session,
-        package_id=f"TDX-HSJDAY-SHA256:{package.sha256}",
-        package_sha256=package.sha256,
         package_verified_at=package.verified_at,
         candidate_total=total,
         evaluated=evaluated,
@@ -2896,10 +2836,11 @@ def _download_vipdata_package_impl(
                 "CONTENT_LENGTH_MISMATCH", "数据包实际字节数与Content-Length不一致"
             )
         sha256 = digest.hexdigest()
-        final = root / f"vipdata-{sha256}.zip"
+        package_token = partial.name.removesuffix(".zip.partial")
+        final = root / f"{package_token}.zip"
         if final.exists():
             raise VipdataError(
-                "PACKAGE_ALREADY_EXISTS", "同SHA数据包已存在；拒绝覆盖或复用旧临时文件"
+                "PACKAGE_ALREADY_EXISTS", "本次数据包临时名称已存在；拒绝覆盖"
             )
         os.rename(partial, final)
         try:
@@ -2907,15 +2848,15 @@ def _download_vipdata_package_impl(
                 final, budgets=budgets
             )
         except VipdataError as error:
-            rejected = root / f"rejected-vipdata-{sha256}.zip"
+            rejected = root / f"rejected-{package_token}.zip"
             if rejected.exists():
                 raise VipdataError(
-                    "PACKAGE_ALREADY_EXISTS", "同SHA拒绝包已存在；拒绝覆盖"
+                    "PACKAGE_ALREADY_EXISTS", "本次拒绝包临时名称已存在；拒绝覆盖"
                 ) from error
             os.rename(final, rejected)
             raise VipdataError(
                 error.code,
-                f"{error}；ZIP的SHA-256为{sha256}，调用结束时清理本次临时文件",
+                f"{error}；调用结束时清理本次临时文件",
             ) from error
         return VipdataPackage(
             file_path=final,
@@ -3049,7 +2990,6 @@ def scan_vipdata_day_entry(
         byte_count=summary.byte_count,
         first_date=summary.first_date,
         last_date=summary.last_date,
-        raw_byte_sha256=summary.raw_byte_sha256,
         target_session=target,
         target_bar_present=found_target,
         parser_version="stock_a.sources.tdx.day.decode_day_record",
@@ -3152,7 +3092,6 @@ def observation_dict(observation: VipdataPageObservation) -> dict[str, Any]:
         "official_update_at": observation.official_update_at.isoformat()
         if observation.official_update_at
         else None,
-        "metadata_sha256": observation.metadata_sha256,
         "page_html_status": observation.page_html_status,
         "page_html_reason": observation.page_html_reason,
         "status": observation.status,
@@ -3165,7 +3104,6 @@ def package_dict(package: VipdataPackage) -> dict[str, Any]:
     return {
         "file_name": package.file_name,
         "file_size": package.file_size,
-        "sha256": package.sha256,
         "zip_entry_count": package.zip_entry_count,
         "zip_crc": package.zip_crc,
         "total_uncompressed_bytes": package.total_uncompressed_bytes,

@@ -7,7 +7,6 @@ from datetime import date, timedelta
 from pathlib import Path
 import time
 from typing import Any, Iterable, Mapping, Sequence
-from uuid import uuid4
 from stock_a.canonical.selection import CanonicalReadSelection, build_tdx_read_selection
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
 from stock_a.research.core import (
@@ -216,7 +215,6 @@ def research_stock(
     session_slice = tuple(day for day in calendar_sessions if day <= target)
     if vipdata_capture is None:
         capture_request = TdxCaptureRequest(
-            capture_id=str(uuid4()),
             dataset_id="TDX_DAILY_BARS",
             dataset_version="TDX_DAY_RECORD_32B_CANDIDATE",
             query_scope={
@@ -373,13 +371,10 @@ def research_stock(
                 "final_path": None,
                 "format_contract": "TDX_HSJDAY_ZIP_ENTRY_32_BYTE_LAYOUT_R1",
                 "source_contract_status": "OFFICIAL_PACKAGE_BYTES_REVALIDATED; MEMBERSHIP_PIT_AND_UNIT_AUTHORITY_UNBOUND",
-                "package_id": vipdata_capture.capture.source_package_entry.package_id,
-                "package_sha256": vipdata_capture.capture.source_package_entry.package_sha256,
+                "package_id": None,
                 "official_package_url": vipdata_capture.capture.source_package_entry.official_package_url,
                 "package_verified_at": vipdata_capture.capture.source_package_entry.package_verified_at.isoformat(),
                 "zip_entry_path": vipdata_capture.capture.source_package_entry.zip_entry_path,
-                "zip_entry_sha256": vipdata_capture.capture.source_package_entry.entry_sha256,
-                "raw_byte_sha256": scan_summary.raw_byte_sha256,
                 "record_count": scan_summary.record_count,
                 "byte_count": scan_summary.byte_count,
                 "read_started_at": scan_summary.read_started_at.isoformat(),
@@ -401,7 +396,6 @@ def research_stock(
                 "final_path": file_summary.source.handle_path,
                 "format_contract": "TDX_LOCAL_LDAY_32_BYTE_LAYOUT_R00",
                 "source_contract_status": "RESEARCH_LAYOUT_ONLY_AUTHORITY_AND_CAPTURE_CLOCK_UNRESOLVED",
-                "raw_byte_sha256": scan_summary.raw_byte_sha256,
                 "record_count": scan_summary.record_count,
                 "byte_count": scan_summary.byte_count,
                 "read_started_at": scan_summary.read_started_at.isoformat(),
@@ -506,7 +500,7 @@ def research_stock(
             symbol=normalized,
             target_session=target,
             source_last_session=scan_summary.last_date,
-            source_sha256=scan_summary.raw_byte_sha256,
+            source_cutoff=scan_summary.last_date.isoformat(),
             target_bar=target_bar,
             history=history,
             core=core,
@@ -516,15 +510,13 @@ def research_stock(
     if vipdata_capture is not None:
         source_ref = vipdata_capture.capture.source_package_entry
         result["source_package"] = {
-            "package_id": source_ref.package_id,
-            "sha256": source_ref.package_sha256,
+            "package_id": None,
             "official_package_url": source_ref.official_package_url,
             "file_size": source_ref.package_file_size,
             "zip_entry_count": source_ref.zip_entry_count,
             "zip_crc": source_ref.zip_crc,
             "verified_at": source_ref.package_verified_at.isoformat(),
             "zip_entry_path": source_ref.zip_entry_path,
-            "zip_entry_sha256": source_ref.entry_sha256,
             "zip_entry_bytes": source_ref.entry_byte_count,
             "target_session": source_ref.target_session.isoformat(),
             "entry_observed_started_at": source_ref.observed_started_at.isoformat(),

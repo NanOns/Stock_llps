@@ -25,8 +25,6 @@ from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
     SOURCE_SYMBOL_PROFILE_SCOPE,
     _profile_revision,
-    _profile_semantics_sha256,
-    _history_window_sha256,
     query_source_symbol_price_profiles,
 )
 from stock_a.application.research_window import resolve_pg_history_window
@@ -474,7 +472,9 @@ def _stored_seed_core(candidate: Mapping[str, Any], saved: Mapping[str, Any]):
         or saved.get("price_coordinate") != "RAW_UNADJUSTED"
         or not rows
         or str(saved.get("source_capture_id")) != str(rows[-1].get("source_capture_id"))
-        or saved.get("history_window_sha256") != _history_window_sha256(rows)
+        or saved.get("history_window_start") != rows[0].get("session_date")
+        or saved.get("history_window_end") != rows[-1].get("session_date")
+        or saved.get("history_stored_session_count") != len(rows)
     ):
         return None
     names = (
@@ -528,15 +528,14 @@ def _seed_preview_init(context: tuple[Any, ...]) -> None:
 
 
 def _seed_preview(candidate: Mapping[str, Any], context: tuple[Any, ...]):
-    target_session, package_sha256, sessions, namespace_id, profile_contract = context
+    target_session, source_package_id, sessions, profile_contract = context
     try:
         preview = research_stock_pg_history_preview(
             symbol=candidate["source_symbol"],
             target_session=target_session.isoformat(),
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             session_dates=sessions,
             history_rows=candidate["history_rows"],
-            namespace_id=namespace_id,
             profile_contract=profile_contract,
             selected_profile_fields=frozenset(
                 {"profile.compression", "profile.extension", "profile.ma_structure"}
@@ -546,7 +545,7 @@ def _seed_preview(candidate: Mapping[str, Any], context: tuple[Any, ...]):
             ),
         )
     except ResearchEntryError as error:
-        if error.code != "PG_HISTORY_ENTRY_SHA_CONFLICT":
+        if error.code != "PG_HISTORY_INPUT_CONFLICT":
             raise
         return None, error.code
     return {
@@ -580,8 +579,7 @@ def compute_source_pool_seed(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
-    namespace_id: str,
+    source_package_id: int,
     profile_revision: str,
     profile_contract: dict[str, Any],
     history_session_count: int,
@@ -601,8 +599,7 @@ def compute_source_pool_seed(
         config,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
-        expected_namespace_id=namespace_id,
+        source_package_id=source_package_id,
     )
     _, sessions, revision = resolve_pg_history_window(
         target_session.isoformat(), history_session_count
@@ -616,7 +613,7 @@ def compute_source_pool_seed(
                 config,
                 target_session=target_session,
                 max_target_session=research_cutoff,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 profile_revision=profile_revision,
                 offset=profile_offset,
                 limit=100,
@@ -632,8 +629,7 @@ def compute_source_pool_seed(
             profiles = {symbol: {} for symbol in rps["facts"]}
             break
         if (
-            profile_page["namespace_id"] != namespace_id
-            or profile_page["source_pool_total"] != len(rps["facts"])
+            profile_page["source_pool_total"] != len(rps["facts"])
             or profile_page["history_window"]["requested_session_count"]
             != history_session_count
         ):
@@ -654,14 +650,13 @@ def compute_source_pool_seed(
     )
     runtime_revision = _profile_revision(
         scope=SOURCE_SYMBOL_PROFILE_SCOPE,
-        semantics_sha256=_profile_semantics_sha256(profile_contract),
         calendar_id=calendar_id,
         calendar_revision=revision,
         history_session_count=history_session_count,
     )
     seed_facts = {}
     offset = 0
-    context = (target_session, package_sha256, sessions, namespace_id, profile_contract)
+    context = (target_session, source_package_id, sessions, profile_contract)
     with ExitStack() as stack:
         pool = (
             stack.enter_context(
@@ -679,7 +674,7 @@ def compute_source_pool_seed(
             page = read_raw_daily_history_page(
                 config,
                 target_session=target_session,
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 sessions=sessions,
                 offset=offset,
                 limit=100,
@@ -687,8 +682,7 @@ def compute_source_pool_seed(
                 board="ALL",
             )
             if (
-                page["namespace_id"] != namespace_id
-                or page["total_count"] != len(profiles)
+                page["total_count"] != len(profiles)
                 or page["version_status"] != "CLOSED"
             ):
                 raise ValueError("来源池与画像身份不一致")
@@ -866,8 +860,7 @@ def compute_source_pool_seed(
     result = {
         "target_session": target_session,
         "research_cutoff": research_cutoff,
-        "namespace_id": namespace_id,
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "profile_revision": profile_revision,
         "runtime_profile_revision": runtime_revision,
         "profile_revision_matches_runtime": runtime_revision == profile_revision,
@@ -917,8 +910,7 @@ def read_source_pool_seed(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
-    namespace_id: str,
+    source_package_id: int,
     profile_revision: str,
     profile_contract: dict[str, Any],
     history_session_count: int,
@@ -937,15 +929,13 @@ def read_source_pool_seed(
     rows = read_source_pool_seed_facts(
         config,
         target_session=target_session,
-        package_sha256=package_sha256,
-        namespace_id=namespace_id,
+        source_package_id=source_package_id,
         profile_revision=profile_revision,
     )
     d0 = read_source_d0_scenario_day(
         config,
         target_session=target_session,
-        package_sha256=package_sha256,
-        namespace_id=namespace_id,
+        source_package_id=source_package_id,
         scenario="LAUNCH_CONFIRM",
     )
     d0_by_symbol = {item["source_symbol"]: item for item in d0["results"]}
@@ -955,7 +945,7 @@ def read_source_pool_seed(
         or any(
             str(item["source_capture_id"])
             != str(d0["source_version"]["source_capture_id"])
-            or item["source_content_id"] != d0["source_version"]["source_content_id"]
+            or item["source_package_id"] != d0["source_version"]["source_package_id"]
             for item in rows
         )
     ):
@@ -972,7 +962,6 @@ def read_source_pool_seed(
     )
     runtime_revision = _profile_revision(
         scope=SOURCE_SYMBOL_PROFILE_SCOPE,
-        semantics_sha256=_profile_semantics_sha256(profile_contract),
         calendar_id=rows[0]["calendar_id"],
         calendar_revision=calendar_revision,
         history_session_count=history_session_count,
@@ -995,8 +984,7 @@ def read_source_pool_seed(
         read_seed_profile_returns(
             config,
             target_session=target_session,
-            package_sha256=package_sha256,
-            namespace_id=namespace_id,
+            source_package_id=source_package_id,
             profile_revision=profile_revision,
         )
         if legacy_returns
@@ -1217,7 +1205,6 @@ def read_source_pool_seed(
             )
             prior_revision = _profile_revision(
                 scope=SOURCE_SYMBOL_PROFILE_SCOPE,
-                semantics_sha256=_profile_semantics_sha256(profile_contract),
                 calendar_id=rows[0]["calendar_id"],
                 calendar_revision=prior_calendar_revision,
                 history_session_count=history_session_count,
@@ -1225,15 +1212,13 @@ def read_source_pool_seed(
             prior_rows = read_source_pool_seed_facts(
                 config,
                 target_session=previous_rps_session,
-                package_sha256=package_sha256,
-                namespace_id=namespace_id,
+                source_package_id=source_package_id,
                 profile_revision=prior_revision,
             )
             prior_d0 = read_source_d0_scenario_day(
                 config,
                 target_session=previous_rps_session,
-                package_sha256=package_sha256,
-                namespace_id=namespace_id,
+                source_package_id=source_package_id,
                 scenario="LAUNCH_CONFIRM",
             )
             if (
@@ -1243,8 +1228,8 @@ def read_source_pool_seed(
                 or any(
                     str(item["source_capture_id"])
                     != str(prior_d0["source_version"]["source_capture_id"])
-                    or item["source_content_id"]
-                    != prior_d0["source_version"]["source_content_id"]
+                    or item["source_package_id"]
+                    != prior_d0["source_version"]["source_package_id"]
                     for item in prior_rows
                 )
             ):
@@ -1290,8 +1275,7 @@ def read_source_pool_seed(
         "status": "SAVED",
         "target_session": target_session,
         "research_cutoff": research_cutoff,
-        "namespace_id": namespace_id,
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "profile_revision": profile_revision,
         "runtime_profile_revision": runtime_revision,
         "profile_revision_matches_runtime": True,
@@ -1324,8 +1308,7 @@ def read_source_pool_seed(
         result["rps_read"] = {
             "target_session": target_session,
             "research_cutoff": research_cutoff,
-            "namespace_id": namespace_id,
-            "package_sha256": package_sha256,
+            "source_package_id": source_package_id,
             "scope": "SOURCE_POOL_NON_PIT_EXPLORATORY",
             "coordinate": "RAW_UNADJUSTED",
             "corporate_action_continuity": "UNKNOWN",
@@ -1687,13 +1670,11 @@ def read_board_seed_facts(
             board_native_id=board_native_id,
             target_session=pool["target_session"],
             research_cutoff=pool["research_cutoff"],
-            package_sha256=pool["package_sha256"],
+            source_package_id=pool["source_package_id"],
             profile_revision=pool["profile_revision"],
             offset=offset,
             limit=100,
         )
-        if page["namespace_id"] != pool["namespace_id"]:
-            raise ValueError("板块与股票来源namespace不一致")
         symbols.extend(row["source_symbol"] for row in page["rows"])
         offset += len(page["rows"])
         if offset >= page["source_member_count"]:

@@ -49,10 +49,8 @@ def calculate_d0_first_day_damage(
     official_sessions: Sequence[date],
     history_rows_by_session: Mapping[date, Mapping[str, object]],
     source_symbol: str,
-    package_sha256: str,
-    namespace_id: str,
-    source_content_id: str,
-    target_capture_id: str,
+    source_package_id: int,
+    target_capture_id: int,
 ) -> D0FirstDayDamage:
     """按目标日及其前19个紧邻官方会话计算C/MA20<97/100。"""
     sessions = tuple(official_sessions)
@@ -79,13 +77,10 @@ def calculate_d0_first_day_damage(
         if (
             row.get("session_date") != session
             or row.get("source_symbol") != source_symbol
-            or row.get("namespace_id") != namespace_id
         ):
             return _unknown("RAW_SOURCE_IDENTITY_MISMATCH", sessions=window)
-        if row.get("package_sha256") != package_sha256:
-            return _unknown("RAW_PACKAGE_REVISION_MISMATCH", sessions=window)
-        if row.get("source_content_id") != source_content_id:
-            return _unknown("RAW_SOURCE_CONTENT_MISMATCH", sessions=window)
+        if row.get("source_package_id") != source_package_id:
+            return _unknown("RAW_SOURCE_PACKAGE_MISMATCH", sessions=window)
         if (
             session == target_session
             and row.get("source_capture_id") != target_capture_id
@@ -155,9 +150,8 @@ def calculate_d0_first_day_damage(
 _REASONS = {
     "OFFICIAL_WINDOW_INVALID": "官方会话窗口缺少目标日或顺序不唯一。",
     "OFFICIAL_WINDOW_LEFT_TRUNCATED": "目标日前不足20个连续官方会话。",
-    "RAW_SOURCE_IDENTITY_MISMATCH": "历史行与目标来源代码、命名空间或日期不一致。",
-    "RAW_PACKAGE_REVISION_MISMATCH": "官方会话窗口内的RAW包修订不一致。",
-    "RAW_SOURCE_CONTENT_MISMATCH": "官方会话窗口内的RAW来源内容摘要不一致。",
+    "RAW_SOURCE_IDENTITY_MISMATCH": "历史行与目标来源代码或日期不一致。",
+    "RAW_SOURCE_PACKAGE_MISMATCH": "官方会话窗口内的RAW数字来源包不一致。",
     "RAW_TARGET_CAPTURE_MISMATCH": "目标RAW行与来源捕获身份不一致。",
     "PRICE_COORDINATE_MISMATCH": "官方会话窗口内的价格坐标不是RAW_UNADJUSTED。",
     "OFFICIAL_SESSION_BAR_MISSING": "严格官方窗口至少一个会话缺少有效RAW日线。",

@@ -30,7 +30,7 @@ def _run_source_sector_pulse_followup_day(args: argparse.Namespace) -> int:
             config,
             target_session=_parse_session_date(args.target_session),
             research_cutoff=_parse_session_date(args.research_cutoff),
-            package_sha256=args.package_sha256,
+            source_package_id=args.source_package_id,
         )
         report["configuration_path"] = str(config_path)
     except (SectorPulseFollowupPgError, SourceSectorPulseFollowupError) as error:

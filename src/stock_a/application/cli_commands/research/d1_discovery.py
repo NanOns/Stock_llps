@@ -54,12 +54,10 @@ from stock_a.application.runtime_config import (
 
 def _official_calendar(target: date) -> dict[str, Any]:
     payload, metadata, revision_chain, sessions = _load_calendar(target)
-    target_metadata = next(item for item in metadata if item["year"] == target.year)
     return {
         "calendar_id": payload["calendar_id"],
         "calendar_revision": payload["revision"],
         "calendar_revision_chain": revision_chain,
-        "calendar_sha256": target_metadata["resource_sha256"],
         "sessions": sessions,
     }
 
@@ -71,7 +69,7 @@ def _discover_source_d1_true(
     cutoff,
     sessions,
     calendar_revision,
-    package_sha256,
+    source_package_id,
     offset,
     limit,
     previous_state=None,
@@ -107,7 +105,7 @@ def _discover_source_d1_true(
         page = read_raw_daily_history_page(
             config,
             target_session=target,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             sessions=sessions,
             offset=source_offset,
             limit=100,
@@ -141,8 +139,7 @@ def _discover_source_d1_true(
         context = read_source_version_context(
             config,
             target_session=target,
-            package_sha256=package_sha256,
-            namespace_id=page["namespace_id"],
+            source_package_id=source_package_id,
             target_raw_rows=target_rows,
             expected_raw_row_count=page["version_row_count"],
         )
@@ -152,12 +149,7 @@ def _discover_source_d1_true(
             any(
                 context[key] != source_context[key]
                 for key in (
-                    "namespace_id",
-                    "source_content_id",
-                    "source_capture_id",
-                    "package_sha256",
-                    "source_digest",
-                    "source_raw_digest",
+                    "source_package_id",
                     "source_capture_id",
                     "raw_row_count",
                 )
@@ -168,7 +160,7 @@ def _discover_source_d1_true(
             or page["version_expected_row_count"]
             != context["capture_expected_row_count"]
             or page["target_session"] != target.isoformat()
-            or page["package_sha256"] != package_sha256
+            or page["source_package_id"] != source_package_id
             or page["session_start"] != sessions[0].isoformat()
             or page["session_end"] != target.isoformat()
             or page["session_count"] != len(sessions)
@@ -181,7 +173,7 @@ def _discover_source_d1_true(
             )
         preview = research_universe_pg_history_preview(
             target_session=target.isoformat(),
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             session_dates=sessions,
             page=page,
             profile_contract=contract,
@@ -224,10 +216,8 @@ def _discover_source_d1_true(
                     "history_records_complete": item.get("history_records_complete"),
                     "price_window_status": item.get("price_window_status"),
                     "source_revision": {
-                        "source_entry_sha256": row.get("source_entry_sha256"),
                         "source_capture_id": str(row["source_capture_id"]),
-                        "source_content_id": row.get("source_content_id"),
-                        "package_sha256": row["package_sha256"].strip(),
+                        "source_package_id": row.get("source_package_id"),
                         "source_clock_role": row.get("source_clock_role"),
                         "source_time_quality": context["source_time_quality"],
                         "source_available_at": row.get("source_available_at"),
@@ -253,8 +243,7 @@ def _discover_source_d1_true(
                     }
                     if any(
                         history_row.get("source_symbol") != candidate["source_symbol"]
-                        or history_row.get("package_sha256") != package_sha256
-                        or history_row.get("namespace_id") != page["namespace_id"]
+                        or history_row.get("source_package_id") != source_package_id
                         or history_row["session_date"] > previous_session
                         for history_row in previous_rows
                     ):
@@ -265,13 +254,12 @@ def _discover_source_d1_true(
                     previous_preview = research_stock_pg_history_preview(
                         symbol=candidate["source_symbol"],
                         target_session=previous_session.isoformat(),
-                        package_sha256=package_sha256,
+                        source_package_id=source_package_id,
                         session_dates=previous_window,
                         history_rows=previous_rows,
                         missing_history_sessions=tuple(
                             day for day in previous_window if day not in previous_dates
                         ),
-                        namespace_id=page["namespace_id"],
                         profile_contract=contract,
                         include_profile_preview=False,
                         include_raw_breakout=True,
@@ -320,18 +308,12 @@ def _discover_source_d1_true(
                             "price_window_reason"
                         ),
                         "previous_source_revision": {
-                            "source_entry_sha256": previous_row.get(
-                                "source_entry_sha256"
-                            )
-                            if previous_row
-                            else None,
                             "source_capture_id": str(previous_row["source_capture_id"])
                             if previous_row
                             else None,
-                            "source_content_id": previous_row.get("source_content_id")
+                            "source_package_id": previous_row.get("source_package_id")
                             if previous_row
                             else None,
-                            "package_sha256": package_sha256,
                             "source_available_at": previous_row.get(
                                 "source_available_at"
                             )
@@ -400,7 +382,7 @@ def _discover_source_d1_true(
         "day_chain_contract": {
             "contract_id": contract["contract_id"],
             "version": contract["version"],
-            "assembled_sha256": loaded_contract.assembled_sha256,
+            "contract_version": loaded_contract.document["version"],
         },
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "identity_status": "SOURCE_SYMBOL_ONLY",
@@ -449,7 +431,6 @@ def _discover_source_d1_true(
         result["official_calendar"] = {
             "calendar_id": official_calendar["calendar_id"],
             "calendar_revision": official_calendar["calendar_revision"],
-            "calendar_sha256": official_calendar["calendar_sha256"],
             "adjacency_verified_from_session_window": True,
         }
         result["current_true_total"] = counts["TRUE"]
@@ -469,7 +450,7 @@ def _discover_source_d1_support_cohort(
     cutoff,
     sessions,
     calendar_revision,
-    package_sha256,
+    source_package_id,
     support_anchor,
     offset,
     limit,
@@ -515,7 +496,7 @@ def _discover_source_d1_support_cohort(
         page = read_raw_daily_history_page(
             config,
             target_session=target,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             sessions=sessions,
             offset=source_offset,
             limit=100,
@@ -535,14 +516,13 @@ def _discover_source_d1_support_cohort(
                 or any(day not in sessions or day > target for day in dates)
                 or any(
                     row.get("source_symbol") != symbol
-                    or row.get("package_sha256") != package_sha256
-                    or row.get("namespace_id") != page["namespace_id"]
+                    or row.get("source_package_id") != source_package_id
                     for row in rows
                 )
             ):
                 raise PgResearchBindingError(
                     "D1_SUPPORT_COHORT_HISTORY_INVALID",
-                    "来源代码重复、顺序错误或历史行跨代码、跨包、跨namespace、越过目标日",
+                    "来源代码重复、顺序错误或历史行跨代码、来源包、越过目标日",
                 )
             matches = [row for row in rows if row["session_date"] == target]
             if len(matches) != 1:
@@ -557,20 +537,15 @@ def _discover_source_d1_support_cohort(
         context = read_source_version_context(
             config,
             target_session=target,
-            package_sha256=package_sha256,
-            namespace_id=page["namespace_id"],
+            source_package_id=source_package_id,
             target_raw_rows=target_rows,
             expected_raw_row_count=page["version_row_count"],
         )
         if source_context is None:
             source_context = context
         context_keys = (
-            "namespace_id",
             "target_session",
-            "package_sha256",
-            "source_content_id",
-            "source_digest",
-            "source_raw_digest",
+            "source_package_id",
             "source_capture_id",
             "raw_row_count",
             "capture_expected_row_count",
@@ -585,7 +560,7 @@ def _discover_source_d1_support_cohort(
             or page["version_expected_row_count"]
             != context["capture_expected_row_count"]
             or page["target_session"] != target.isoformat()
-            or page["package_sha256"] != package_sha256
+            or page["source_package_id"] != source_package_id
             or page["session_start"] != sessions[0].isoformat()
             or page["session_end"] != target.isoformat()
             or page["session_count"] != len(sessions)
@@ -608,13 +583,12 @@ def _discover_source_d1_support_cohort(
             preview = research_stock_pg_history_preview(
                 symbol=symbol,
                 target_session=support_anchor.isoformat(),
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 session_dates=anchor_sessions,
                 history_rows=prefix_rows,
                 missing_history_sessions=tuple(
                     day for day in anchor_sessions if day not in prefix_dates
                 ),
-                namespace_id=page["namespace_id"],
                 profile_contract=profile_contract,
                 include_profile_preview=False,
                 include_raw_breakout=True,
@@ -713,7 +687,7 @@ def _discover_source_d1_support_cohort(
             preview = research_stock_pg_history_preview(
                 symbol=symbol,
                 target_session=day.isoformat(),
-                package_sha256=package_sha256,
+                source_package_id=source_package_id,
                 session_dates=tuple(session for session in sessions if session <= day),
                 history_rows=bounded_rows,
                 missing_history_sessions=tuple(
@@ -721,7 +695,6 @@ def _discover_source_d1_support_cohort(
                     for session in sessions
                     if session <= day and session not in present
                 ),
-                namespace_id=source_context["namespace_id"],
                 profile_contract=profile_contract,
                 include_profile_preview=False,
                 include_raw_breakout=True,
@@ -774,11 +747,11 @@ def _discover_source_d1_support_cohort(
             official_sessions=sessions,
             requested_sessions=requested_sessions,
             history_points=support_points,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
             source_context=source_context,
             official_calendar={
                 key: official_calendar[key]
-                for key in ("calendar_id", "calendar_revision", "calendar_sha256")
+                for key in ("calendar_id", "calendar_revision")
             },
         )
         comparison = classify_source_support_change(
@@ -811,12 +784,10 @@ def _discover_source_d1_support_cohort(
                 "support_observation_before": comparison.get("previous_observation"),
                 "support_observation_after": comparison.get("current_observation"),
                 "source": {
-                    "namespace_id": source_context["namespace_id"],
-                    "package_sha256": package_sha256,
+                    "source_package_id": source_package_id,
                     "price_coordinate": "RAW_UNADJUSTED",
                     "coordinate_id": f"RAW:TDX_SOURCE_SYMBOL:{symbol}",
                     "anchor_capture_id": str(anchor_row["source_capture_id"]),
-                    "anchor_entry_sha256": anchor_row.get("source_entry_sha256"),
                     "anchor_clock_role": anchor_row.get("source_clock_role"),
                     "anchor_source_available_at": anchor_row.get("source_available_at"),
                     "anchor_observed_started_at": anchor_row.get("observed_started_at"),
@@ -824,7 +795,6 @@ def _discover_source_d1_support_cohort(
                         "observed_completed_at"
                     ),
                     "target_capture_id": str(target_row["source_capture_id"]),
-                    "target_entry_sha256": target_row.get("source_entry_sha256"),
                     "target_clock_role": target_row.get("source_clock_role"),
                     "target_source_available_at": target_row.get("source_available_at"),
                     "target_observed_started_at": target_row.get("observed_started_at"),
@@ -859,7 +829,6 @@ def _discover_source_d1_support_cohort(
         "official_calendar": {
             "calendar_id": official_calendar["calendar_id"],
             "calendar_revision": official_calendar["calendar_revision"],
-            "calendar_sha256": official_calendar["calendar_sha256"],
             "anchor_and_target_same_versioned_calendar": True,
             "previous_target_sessions_adjacent": True,
         },

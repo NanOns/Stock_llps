@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, timedelta
-from pathlib import Path
-import re
 from statistics import mean
 from typing import Any, Iterable, Mapping, Sequence
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
@@ -35,7 +33,6 @@ from stock_a.research.entry_core.fields import (
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_core.profile_preview import (
     _build_profile_preview,
-    _profile_preview_source_digest,
 )
 from stock_a.research.entry_context.sessions import _load_calendar, _parse_target
 from stock_a.research.entry_context.source_discovery import _normalize_symbol
@@ -53,8 +50,8 @@ class _SourceD1PreviewContext:
             tuple[date, ...],
         ],
     ]
-    core_source_sha256: str
-    execution_adapter_source_sha256: str
+    core_algorithm_version: str
+    execution_adapter_version: str
     target_windows: dict[date, _SourceD1TargetWindow] = field(
         default_factory=dict,
         compare=False,
@@ -281,7 +278,7 @@ def _calculate_core_d1_inputs(
 def prepare_source_d1_preview_context(
     target_sessions: Sequence[date],
 ) -> _SourceD1PreviewContext:
-    """为一次D1请求准备精确日历和Core来源身份，不跨请求缓存。"""
+    """为一次D1请求准备精确日历和显式算法版本，不跨请求缓存。"""
     targets = tuple(target_sessions)
     if (
         not targets
@@ -295,15 +292,10 @@ def prepare_source_d1_preview_context(
         year: _load_calendar(next(day for day in targets if day.year == year))
         for year in sorted({day.year for day in targets})
     }
-    core_source_sha256 = _profile_preview_source_digest(
-        Path(__file__).resolve().parents[1] / "core.py", "calculate_core"
-    )
     return _SourceD1PreviewContext(
         calendars_by_year=calendars_by_year,
-        core_source_sha256=core_source_sha256,
-        execution_adapter_source_sha256=_profile_preview_source_digest(
-            Path(__file__).resolve(), "_calculate_core_d1_inputs"
-        ),
+        core_algorithm_version="STOCK_A_CORE_R1",
+        execution_adapter_version="SOURCE_D1_PREVIEW_R1",
     )
 
 
@@ -430,15 +422,13 @@ def _source_d1_preview_for_target(
             "price_coordinate": "RAW_UNADJUSTED",
             "coordinate_id": coordinate_id,
             "core_producer_symbol": "stock_a.research.core:calculate_core",
-            "core_producer_source_sha256": context.core_source_sha256,
+            "core_producer_algorithm_version": context.core_algorithm_version,
             "core_producer_role": "SEMANTIC_CORE_CONTRACT_SOURCE",
             "execution_adapter_symbol": (
                 "stock_a.research.entry_history.history_preview:"
                 "_calculate_core_d1_inputs"
             ),
-            "execution_adapter_source_sha256": (
-                context.execution_adapter_source_sha256
-            ),
+            "execution_adapter_version": context.execution_adapter_version,
             "execution_adapter_role": "ACTUAL_D1_FAST_CALCULATION_ADAPTER",
             "core_field_ids": [
                 "core.prior_high20",
@@ -474,9 +464,8 @@ def research_stock_pg_d1_history_previews(
     event_sessions: Sequence[date],
     followup_session: date,
     session_dates: Sequence[date],
-    package_sha256: str,
+    source_package_id: int,
     history_rows: Sequence[Mapping[str, Any]],
-    namespace_id: str,
     context: _SourceD1PreviewContext,
     _decoded_by_session: Mapping[date, Any] | None = None,
 ) -> dict[date, dict[str, Any]]:
@@ -484,14 +473,9 @@ def research_stock_pg_d1_history_previews(
     events = tuple(event_sessions)
     sessions = tuple(session_dates)
     normalized = _normalize_symbol(symbol)[0]
-    if (
-        not isinstance(package_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
-        or not isinstance(namespace_id, str)
-        or not namespace_id
-    ):
+    if type(source_package_id) is not int or source_package_id <= 0:
         raise ResearchEntryError(
-            "PG_HISTORY_BINDING_INVALID", "PG历史预览缺少包SHA或namespace身份"
+            "PG_HISTORY_BINDING_INVALID", "PG历史预览缺少数字来源包ID"
         )
     if (
         not events
@@ -521,13 +505,12 @@ def research_stock_pg_d1_history_previews(
         )
     if any(
         row.get("source_symbol") != normalized
-        or row.get("package_sha256") != package_sha256
-        or row.get("namespace_id") != namespace_id
+        or row.get("source_package_id") != source_package_id
         for row in rows
     ):
         raise ResearchEntryError(
             "PG_HISTORY_REVISION_MISMATCH",
-            "PG历史行混入不同来源代码、包SHA或namespace",
+            "PG历史行混入不同来源代码或来源包ID",
         )
 
     rows_by_session = {row["session_date"]: row for row in rows}
@@ -645,11 +628,10 @@ def research_stock_pg_history_preview(
     *,
     symbol: str,
     target_session: str,
-    package_sha256: str,
+    source_package_id: int,
     session_dates: Sequence[date],
     history_rows: Sequence[Mapping[str, Any]],
     missing_history_sessions: Sequence[date] | None = None,
-    namespace_id: str,
     profile_contract: dict[str, Any],
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
     include_profile_preview: bool = True,
@@ -661,14 +643,9 @@ def research_stock_pg_history_preview(
     """把明确PG Raw窗口适配至现役Core和Profile11研究预览。"""
     target = _parse_target(target_session)
     normalized = _normalize_symbol(symbol)[0]
-    if (
-        not isinstance(package_sha256, str)
-        or re.fullmatch(r"[0-9a-f]{64}", package_sha256) is None
-        or not isinstance(namespace_id, str)
-        or not namespace_id
-    ):
+    if type(source_package_id) is not int or source_package_id <= 0:
         raise ResearchEntryError(
-            "PG_HISTORY_BINDING_INVALID", "PG历史预览缺少包SHA或namespace身份"
+            "PG_HISTORY_BINDING_INVALID", "PG历史预览缺少数字来源包ID"
         )
     calendar_payload, calendar_metadata, calendar_revision, all_calendar_sessions = (
         _load_calendar(target)
@@ -719,12 +696,11 @@ def research_stock_pg_history_preview(
         )
     if any(
         row.get("source_symbol") != normalized
-        or row.get("package_sha256") != package_sha256
-        or row.get("namespace_id") != namespace_id
+        or row.get("source_package_id") != source_package_id
         for row in rows
     ):
         raise ResearchEntryError(
-            "PG_HISTORY_REVISION_MISMATCH", "PG历史行混入不同来源代码、包SHA或namespace"
+            "PG_HISTORY_REVISION_MISMATCH", "PG历史行混入不同来源代码或来源包ID"
         )
     rows_by_session = {row["session_date"]: row for row in rows}
     target_row = rows_by_session.get(target)
@@ -848,34 +824,19 @@ def research_stock_pg_history_preview(
             "PG_CORE_FIELD_COUNT_INVALID", f"Core现役字段数异常：{len(core)}"
         )
 
-    entry_shas = sorted(
-        {
-            row.get("source_entry_sha256")
-            for row in rows
-            if row.get("source_entry_sha256")
-        }
-    )
-    if len(entry_shas) > 1:
-        raise ResearchEntryError(
-            "PG_HISTORY_ENTRY_SHA_CONFLICT", "同包同来源代码的跨日条目SHA不一致"
-        )
     captures_by_session = []
     for row in rows:
         captures_by_session.append(
             {
                 "session_date": row["session_date"].isoformat(),
                 "source_capture_id": row["source_capture_id"],
-                "capture_digest": row["capture_digest"],
                 "capture_read_started_at": row["capture_read_started_at"].isoformat(),
                 "capture_validated_at": row["capture_validated_at"].isoformat(),
                 "capture_normalized_count": row["capture_normalized_count"],
-                "source_entry_sha256": row.get("source_entry_sha256"),
             }
         )
 
-    source_snapshot_id = (
-        f"STOCK_A_PG_RAW_HISTORY:{namespace_id}:{package_sha256}:{target.isoformat()}"
-    )
+    source_cutoff = f"TDX_PACKAGE:{source_package_id}:THROUGH:{target.isoformat()}"
     profile_preview = None
     if include_profile_preview:
         profile_preview = _build_profile_preview(
@@ -883,14 +844,13 @@ def research_stock_pg_history_preview(
             symbol=normalized,
             target_session=target,
             source_last_session=target,
-            source_sha256=package_sha256,
+            source_cutoff=source_cutoff,
             target_bar=target_bar,
             history=tuple(history),
             core=core,
             calendar_revision=calendar_revision,
             contract=profile_contract,
             closed_period_bars=closed_period_bars,
-            source_snapshot_id=source_snapshot_id,
             source_snapshot_role="PG_CAPTURE_HISTORY_ID_NOT_CAPTURED_AVAILABLE_AT",
         )
         profile_components = profile_preview.get("components", [])
@@ -1004,11 +964,8 @@ def research_stock_pg_history_preview(
         "missing_history_sessions": [day.isoformat() for day in missing_dates],
         "source": {
             "storage": "POSTGRESQL_TYPED_SOURCE_RAW",
-            "namespace_id": namespace_id,
-            "package_sha256": package_sha256,
             "dataset_id": target_row.get("dataset_id"),
-            "source_content_id": target_row.get("source_content_id"),
-            "source_entry_sha256": entry_shas[0] if entry_shas else None,
+            "source_package_id": source_package_id,
             "target_source_capture_id": target_row.get("source_capture_id"),
             "source_clock_role": target_row.get("capture_clock_role"),
             "source_time_quality": target_row.get("capture_time_quality"),
@@ -1113,17 +1070,13 @@ def research_stock_pg_history_preview(
             "price_coordinate": "RAW_UNADJUSTED",
             "coordinate_id": coordinate_id,
             "core_producer_symbol": "stock_a.research.core:calculate_core",
-            "core_producer_source_sha256": _profile_preview_source_digest(
-                Path(__file__).resolve().parents[1] / "core.py", "calculate_core"
-            ),
+            "core_producer_algorithm_version": "STOCK_A_CORE_R1",
             "core_producer_role": "SEMANTIC_CORE_CONTRACT_SOURCE",
             "execution_adapter_symbol": (
                 "stock_a.research.entry_history.history_preview:"
                 "_calculate_core_d1_inputs"
             ),
-            "execution_adapter_source_sha256": _profile_preview_source_digest(
-                Path(__file__).resolve(), "_calculate_core_d1_inputs"
-            ),
+            "execution_adapter_version": "SOURCE_D1_PREVIEW_R1",
             "execution_adapter_role": "ACTUAL_D1_FAST_CALCULATION_ADAPTER",
             "core_field_ids": [
                 "core.prior_high20",

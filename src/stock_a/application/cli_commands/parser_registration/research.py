@@ -14,16 +14,17 @@ def register_commands(commands):
     stock.add_argument(
         "--pg-source-raw",
         action="store_true",
-        help="按显式目标日和来源SHA从stock_a.stock查询Raw事实；不打开ZIP、不重算、不执行DDL",
+        help="按显式目标日和来源包数字ID从stock_a.stock查询Raw事实；不打开ZIP、不重算、不执行DDL",
     )
     stock.add_argument(
         "--pg-source-history",
         action="store_true",
-        help="显式从PG读取同包官方会话历史，计算现役Core43/Profile11研究预览；只读、NON_PIT",
+        help="显式从PG读取指定来源包的官方会话历史，计算现役Core43/Profile11研究预览；只读、NON_PIT",
     )
     stock.add_argument(
-        "--pg-source-sha256",
-        help="PG Raw查询必填：64位小写VIPDATA包SHA-256，不回退latest或跨日",
+        "--pg-source-package-id",
+        type=int,
+        help="PG Raw查询必填：正数来源包ID，不回退latest或跨日",
     )
     stock.add_argument(
         "--pg-history-session-count",
@@ -98,7 +99,7 @@ def register_commands(commands):
     universe.add_argument(
         "--pg-source-raw",
         action="store_true",
-        help="从stock_a.stock按显式目标日和来源SHA真实SQL分页读取Raw候选",
+        help="从stock_a.stock按显式目标日和来源包数字ID真实SQL分页读取Raw候选",
     )
     universe.add_argument(
         "--pg-source-history",
@@ -106,7 +107,7 @@ def register_commands(commands):
         help="显式从PG批量读取来源候选历史并分页展示Core/Profile研究摘要；只读、NON_PIT",
     )
     universe.add_argument(
-        "--pg-source-sha256", help="PG Raw分页查询必填：64位小写VIPDATA包SHA-256"
+        "--pg-source-package-id", type=int, help="PG Raw分页查询必填：正数来源包ID"
     )
     universe.add_argument(
         "--pg-history-session-count",

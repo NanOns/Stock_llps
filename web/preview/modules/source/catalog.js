@@ -6,25 +6,26 @@ async function loadCatalog() {
   state.pageRequest++;
   state.stockRequest++;
   clearResult();
-  state.namespace_id = null;
   $("versionSelect").disabled = true;
   $("versionSelect").replaceChildren(new Option("正在读取PG目录…", ""));
   $("population").textContent = "正在从PostgreSQL只读读取来源日期与版本目录。";
   try {
     const data = await api("/api/preview/catalog?offset=0&limit=100");
     if (catalogRequest !== state.catalogRequest) return;
-    state.namespace_id = data.namespace_id;
     state.versions = data.versions;
     $("versionSelect").replaceChildren(
       new Option("— 请选择目标日期与来源包版本 —", ""),
     );
     for (const v of data.versions) {
       const title = [
-        `${v.session_date} · ${v.package_sha256.slice(0, 12)}… · ${v.version_status} · `,
+        `${v.session_date} · 包ID ${v.source_package_id} · ${v.version_status} · `,
         `Raw ${v.row_count}/${v.expected_row_count}（有Bar `,
         `${v.bar_status_counts.TARGET_PRESENT || 0} / 缺Bar ${v.bar_status_counts.TARGET_MISSING || 0}）`,
       ].join("");
-      const option = new Option(title, `${v.session_date}|${v.package_sha256}`);
+      const option = new Option(
+        title,
+        `${v.session_date}|${v.source_package_id}`,
+      );
       $("versionSelect").append(option);
     }
     $("versionSelect").disabled = state.versions.length === 0;
@@ -55,7 +56,7 @@ function describePopulation(page) {
     version.status === "CLOSED"
       ? `来源包Raw记录闭合：${version.stored_raw_rows}/${version.capture_expected_rows}`
       : `来源包Raw部分入库：${version.stored_raw_rows}/${version.capture_expected_rows}；不得按全市场完成解释`;
-  return `${page.target_session} · 包SHA ${page.package_sha256} · ${versionText}。当前筛选来源候选=${page.filtered_total}；有效上市总体=UNKNOWN（NOT_CONNECTED）。这只是该来源包的候选分母。`;
+  return `${page.target_session} · 来源包ID ${page.source_package_id} · ${versionText}。当前筛选来源候选=${page.filtered_total}；有效上市总体=UNKNOWN（NOT_CONNECTED）。这只是该来源包的候选分母。`;
 }
 async function loadPage() {
   const v = selectedVersion();
@@ -76,14 +77,14 @@ async function loadPage() {
   }
   const requestId = ++state.pageRequest;
   state.stockRequest++;
-  const key = `${v.target_session}|${v.package_sha256}`;
+  const key = `${v.target_session}|${v.source_package_id}`;
   state.version = v;
   clearResult();
   $("candidateRows").replaceChildren();
   $("pageStatus").textContent = "正在读取PG分页…";
   const query = new URLSearchParams({
     target_session: v.target_session,
-    package_sha256: v.package_sha256,
+    source_package_id: v.source_package_id,
     offset: String(state.offset),
     limit: String(state.limit),
     market: $("marketSelect").value,
@@ -94,7 +95,7 @@ async function loadPage() {
     if (
       requestId !== state.pageRequest ||
       key !==
-        `${selectedVersion()?.target_session}|${selectedVersion()?.package_sha256}`
+        `${selectedVersion()?.target_session}|${selectedVersion()?.source_package_id}`
     )
       return;
     const p = data.page;

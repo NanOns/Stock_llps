@@ -9,7 +9,6 @@ import random
 import re
 import time
 from typing import Any, Mapping, Sequence
-from uuid import UUID
 
 from stock_a.storage.postgres import source_raw
 from stock_a.storage.postgres.research_day_facts import _insert_rows, _row_matches
@@ -60,24 +59,20 @@ _CORE_MEASURES = (
     "vol_ratio",
 )
 _SEED_COLUMNS = (
-    "namespace_id",
     "target_session",
     "source_symbol",
     "market",
     "board",
-    "package_sha256",
-    "source_content_id",
+    "source_package_id",
     "source_capture_id",
     "profile_revision",
     "producer_contract",
     "producer_version",
-    "producer_semantics_sha256",
     "history_window_start",
     "history_window_end",
     "history_session_count",
     "calendar_id",
     "calendar_revision",
-    "calendar_sha256",
     "source_time_quality",
     "source_clock_role",
     "source_available_at",
@@ -127,14 +122,11 @@ _SEED_COLUMNS = (
     "raw_prewatch_reasons",
 )
 _D0_COLUMNS = (
-    "namespace_id",
     "target_session",
     "source_symbol",
-    "package_sha256",
+    "source_package_id",
     "source_capture_id",
-    "source_raw_digest",
     "parser_contract",
-    "source_content_id",
     "scenario",
     "producer_version",
     "algorithm_contract",
@@ -155,33 +147,28 @@ _D0_COLUMNS = (
     "source_available_at",
     "calendar_id",
     "calendar_revision",
-    "calendar_sha256",
     "research_mode",
     "price_coordinate",
 )
 _D0_KEY = (
-    "namespace_id",
     "target_session",
     "source_symbol",
-    "package_sha256",
+    "source_package_id",
     "source_capture_id",
     "scenario",
     "producer_version",
     "calendar_revision",
-    "calendar_sha256",
 )
 _SEED_KEY = (
-    "namespace_id",
     "target_session",
     "source_symbol",
-    "package_sha256",
+    "source_package_id",
     "source_capture_id",
     "profile_revision",
     "producer_version",
 )
-_D0_TABLE = "stock.source_d0_scenario_day_facts"
-_SEED_TABLE = "stock.source_pool_seed_day_facts"
-_SHA = re.compile(r"^[0-9a-f]{64}$")
+_D0_TABLE = "source_d0_scenario_day_facts"
+_SEED_TABLE = "source_pool_seed_day_facts"
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 
 
@@ -284,14 +271,11 @@ def _d0_rows(scenarios: Mapping[str, Mapping[str, Any]]) -> list[tuple[Any, ...]
                 )
             rows.append(
                 (
-                    page["namespace_id"],
                     date.fromisoformat(page["target_session"]),
                     symbol,
-                    source["package_sha256"],
+                    source["source_package_id"],
                     source["source_capture_id"],
-                    source["source_raw_digest"],
                     source["parser_contract"],
-                    source["source_content_id"],
                     scenario,
                     page["producer_version"],
                     page["algorithm_contract"],
@@ -312,7 +296,6 @@ def _d0_rows(scenarios: Mapping[str, Mapping[str, Any]]) -> list[tuple[Any, ...]
                     source["source_available_at"],
                     expected_calendar["calendar_id"],
                     expected_calendar["calendar_revision"],
-                    expected_calendar["calendar_sha256"],
                     "NON_PIT_RETROSPECTIVE",
                     "RAW_UNADJUSTED",
                 )
@@ -340,7 +323,6 @@ def _seed_rows(
     scenarios: Mapping[str, Mapping[str, Any]],
     history_window: Sequence[date],
     profile_revision: str,
-    producer_semantics_sha256: str,
 ) -> list[tuple[Any, ...]]:
     launch = scenarios["LAUNCH_CONFIRM"]
     source = launch["source_version"]
@@ -352,8 +334,8 @@ def _seed_rows(
         or set(seed_facts) != set(market_by_symbol)
         or seed.get("source_pool_total") != len(market_by_symbol)
         or seed.get("stored_profile_status") != "AVAILABLE"
-        or not _SHA.fullmatch(profile_revision)
-        or not _SHA.fullmatch(producer_semantics_sha256)
+        or not isinstance(profile_revision, str)
+        or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_PARTITION_OPEN", "Seed或精确R6画像未覆盖完整来源池"
@@ -367,24 +349,20 @@ def _seed_rows(
         profile = fact.get("profile", {})
         predicates = fact.get("predicates", {})
         values: dict[str, Any] = {
-            "namespace_id": launch["namespace_id"],
             "target_session": date.fromisoformat(launch["target_session"]),
             "source_symbol": symbol,
             "market": raw["market"],
             "board": raw["board"],
-            "package_sha256": source["package_sha256"],
-            "source_content_id": source["source_content_id"],
+            "source_package_id": source["source_package_id"],
             "source_capture_id": source["source_capture_id"],
             "profile_revision": profile_revision,
             "producer_contract": "UNIVERSE_ELIGIBILITY_R1+ALG-19/20",
             "producer_version": "SOURCE_POOL_SEED_CORE_PROFILE_R1",
-            "producer_semantics_sha256": producer_semantics_sha256,
             "history_window_start": history_window[0],
             "history_window_end": history_window[-1],
             "history_session_count": len(history_window),
             "calendar_id": calendar["calendar_id"],
             "calendar_revision": calendar["calendar_revision"],
-            "calendar_sha256": calendar["calendar_sha256"],
             "source_time_quality": source["source_time_quality"],
             "source_clock_role": source["source_clock_role"],
             "source_available_at": source["source_available_at"],
@@ -525,17 +503,14 @@ def _scope_predicate(
     names = dict(zip(columns, row, strict=True))
     scope = (
         (
-            "namespace_id",
             "target_session",
-            "package_sha256",
+            "source_package_id",
             "source_capture_id",
-            "source_content_id",
         )
         if table == _D0_TABLE
         else (
-            "namespace_id",
             "target_session",
-            "package_sha256",
+            "source_package_id",
             "source_capture_id",
             "profile_revision",
             "producer_version",
@@ -553,7 +528,6 @@ def persist_static_research_day(
     seed: Mapping[str, Any],
     history_window: Sequence[date],
     profile_revision: str,
-    producer_semantics_sha256: str,
 ) -> dict[str, Any]:
     """以一个可重试串行化事务保存两类全池事实；相同键异内容回滚。"""
     d0_rows = _d0_rows(scenarios)
@@ -562,7 +536,6 @@ def persist_static_research_day(
         scenarios=scenarios,
         history_window=history_window,
         profile_revision=profile_revision,
-        producer_semantics_sha256=producer_semantics_sha256,
     )
     groups = (
         (_D0_TABLE, _D0_COLUMNS, _D0_KEY, d0_rows),
@@ -584,13 +557,8 @@ def _persist_once(config, scenarios, groups) -> dict[str, Any]:
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _,
         cursor,
-        namespace_id,
     ):
         first = scenarios["LAUNCH_CONFIRM"]
-        if namespace_id != first["namespace_id"]:
-            raise StaticResearchPgError(
-                "STATIC_RESEARCH_NAMESPACE_MISMATCH", "静态事实namespace与PG不一致"
-            )
         cursor.execute(
             "SELECT to_regclass(%s) IS NOT NULL, to_regclass(%s) IS NOT NULL",
             (_D0_TABLE, _SEED_TABLE),
@@ -676,8 +644,7 @@ def read_source_d0_scenario_day(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    namespace_id: str | None,
+    source_package_id: int,
     scenario: str,
 ) -> dict[str, Any]:
     """以完整单日分母读取已保存D0场景，不回退Raw重算。"""
@@ -686,16 +653,10 @@ def read_source_d0_scenario_day(
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
-        actual_namespace,
     ):
-        if namespace_id is not None and namespace_id != actual_namespace:
-            raise StaticResearchPgError(
-                "STATIC_D0_NAMESPACE_MISMATCH", "D0读取namespace不匹配"
-            )
-        namespace_id = actual_namespace
         cursor.execute(
-            f"SELECT {', '.join(_D0_COLUMNS)} FROM {_D0_TABLE} WHERE namespace_id=%s AND target_session=%s AND package_sha256=%s AND scenario=%s ORDER BY source_symbol, producer_version, calendar_revision",
-            (namespace_id, target_session, package_sha256, scenario),
+            f"SELECT {', '.join(_D0_COLUMNS)} FROM {_D0_TABLE} WHERE target_session=%s AND source_package_id=%s AND scenario=%s ORDER BY source_symbol, producer_version, calendar_revision",
+            (target_session, source_package_id, scenario),
         )
         rows = cursor.fetchall()
     if not rows:
@@ -709,17 +670,13 @@ def read_source_d0_scenario_day(
                 tuple(
                     dict(zip(_D0_COLUMNS, row, strict=True))[name]
                     for name in (
-                        "namespace_id",
-                        "package_sha256",
+                        "source_package_id",
                         "source_capture_id",
-                        "source_raw_digest",
                         "parser_contract",
-                        "source_content_id",
                         "producer_version",
                         "algorithm_contract",
                         "session_contract",
                         "calendar_revision",
-                        "calendar_sha256",
                     )
                 )
                 for row in rows
@@ -791,12 +748,10 @@ def read_source_d0_scenario_day(
     calendar = {
         "calendar_id": first["calendar_id"],
         "calendar_revision": first["calendar_revision"],
-        "calendar_sha256": first["calendar_sha256"],
     }
     return {
         "scenario": scenario,
         "target_session": target_session.isoformat(),
-        "namespace_id": namespace_id,
         "history_window_start": first["history_window_start"],
         "history_session_count": first["history_session_count"],
         "producer_version": first["producer_version"],
@@ -804,10 +759,8 @@ def read_source_d0_scenario_day(
         "session_contract": first["session_contract"],
         "official_calendar": calendar,
         "source_version": {
-            "package_sha256": first["package_sha256"],
-            "source_content_id": first["source_content_id"],
-            "source_capture_id": str(first["source_capture_id"]),
-            "source_raw_digest": first["source_raw_digest"],
+            "source_package_id": first["source_package_id"],
+            "source_capture_id": first["source_capture_id"],
             "parser_contract": first["parser_contract"],
             "source_time_quality": first["source_time_quality"],
             "source_clock_role": first["source_clock_role"],
@@ -826,8 +779,8 @@ def read_source_pool_seed_facts(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    namespace_id: str,
+    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
     producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R1",
 ) -> list[dict[str, Any]]:
@@ -835,18 +788,13 @@ def read_source_pool_seed_facts(
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
-        actual_namespace,
     ):
-        if namespace_id != actual_namespace:
-            raise StaticResearchPgError(
-                "STATIC_SEED_NAMESPACE_MISMATCH", "Seed读取namespace不匹配"
-            )
         cursor.execute(
-            f"SELECT {', '.join(_SEED_COLUMNS)} FROM {_SEED_TABLE} WHERE namespace_id=%s AND target_session=%s AND package_sha256=%s AND profile_revision=%s AND producer_version=%s ORDER BY source_symbol",
+            f"SELECT {', '.join(_SEED_COLUMNS)} FROM {_SEED_TABLE} WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s AND profile_revision=%s AND producer_version=%s ORDER BY source_symbol",
             (
-                namespace_id,
                 target_session,
-                package_sha256,
+                source_package_id,
+                source_capture_id,
                 profile_revision,
                 producer_version,
             ),
@@ -868,10 +816,8 @@ def read_source_stock_seed_fact(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    namespace_id: str,
-    source_capture_id: str,
-    source_content_id: str,
+    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
     source_symbol: str,
     expected_source_count: int,
@@ -880,14 +826,12 @@ def read_source_stock_seed_fact(
     """按完整来源身份核验分区后，只读取单股行；分母须来自已闭合的Raw版本目录。"""
     if (
         type(target_session) is not date
-        or not isinstance(package_sha256, str)
-        or _SHA.fullmatch(package_sha256) is None
-        or not isinstance(namespace_id, str)
-        or not isinstance(source_capture_id, str)
-        or not isinstance(source_content_id, str)
-        or _SHA.fullmatch(source_content_id) is None
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
         or not isinstance(profile_revision, str)
-        or _SHA.fullmatch(profile_revision) is None
+        or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
         or not isinstance(source_symbol, str)
         or _SYMBOL.fullmatch(source_symbol) is None
         or type(expected_source_count) is not int
@@ -898,39 +842,22 @@ def read_source_stock_seed_fact(
             "STATIC_SEED_SINGLE_KEY_INVALID", "单股Seed读取必须绑定合法完整业务键"
         )
 
-    try:
-        canonical_capture_id = str(UUID(source_capture_id))
-    except (ValueError, TypeError, AttributeError) as error:
-        raise StaticResearchPgError(
-            "STATIC_SEED_SINGLE_CAPTURE_INVALID", "Seed捕获UUID无效"
-        ) from error
-    if canonical_capture_id != source_capture_id:
-        raise StaticResearchPgError(
-            "STATIC_SEED_SINGLE_CAPTURE_INVALID", "Seed捕获UUID必须为规范小写格式"
-        )
-
     with source_raw._transaction(config, write=False, statement_timeout_ms=10000) as (
         _,
         cursor,
-        actual_namespace,
     ):
-        if namespace_id != actual_namespace:
-            raise StaticResearchPgError(
-                "STATIC_SEED_NAMESPACE_MISMATCH", "单股Seed读取namespace不匹配"
-            )
         cursor.execute(
             f"""SELECT count(*)::bigint AS stored_rows,
-       count(DISTINCT source_content_id)::bigint AS content_count,
-       min(source_content_id) AS source_content_id
+       count(DISTINCT source_package_id)::bigint AS content_count,
+       min(source_package_id) AS source_package_id
 FROM {_SEED_TABLE}
-WHERE namespace_id=%s::uuid AND target_session=%s::date
-  AND package_sha256=%s AND source_capture_id=%s::uuid
+WHERE target_session=%s::date
+  AND source_package_id=%s AND source_capture_id=%s
   AND profile_revision=%s AND producer_version=%s""",
             (
-                namespace_id,
                 target_session,
-                package_sha256,
-                canonical_capture_id,
+                source_package_id,
+                source_capture_id,
                 profile_revision,
                 producer_version,
             ),
@@ -941,16 +868,15 @@ WHERE namespace_id=%s::uuid AND target_session=%s::date
             cursor.execute(
                 f"""SELECT EXISTS (
     SELECT 1 FROM {_SEED_TABLE}
-    WHERE namespace_id=%s::uuid AND target_session=%s::date
-      AND package_sha256=%s AND source_capture_id=%s::uuid
+    WHERE target_session=%s::date
+      AND source_package_id=%s AND source_capture_id=%s
       AND profile_revision<>%s AND producer_version=%s
     LIMIT 1
 )""",
                 (
-                    namespace_id,
                     target_session,
-                    package_sha256,
-                    canonical_capture_id,
+                    source_package_id,
+                    source_capture_id,
                     profile_revision,
                     producer_version,
                 ),
@@ -980,7 +906,7 @@ WHERE namespace_id=%s::uuid AND target_session=%s::date
         if (
             selected_rows != expected_source_count
             or selected_contents != 1
-            or str(selected_content).strip() != source_content_id
+            or int(selected_content) != source_package_id
         ):
             return {
                 "status": "INCOMPLETE",
@@ -996,9 +922,9 @@ WHERE namespace_id=%s::uuid AND target_session=%s::date
         cursor.execute(
             f"""SELECT {", ".join("s." + name for name in _SEED_COLUMNS)}
 FROM {_SEED_TABLE} s
-JOIN stock.source_symbol_price_profiles p
-  ON p.namespace_id=s.namespace_id AND p.target_session=s.target_session
- AND p.source_symbol=s.source_symbol AND p.package_sha256=s.package_sha256
+JOIN source_symbol_price_profiles p
+  ON p.target_session=s.target_session
+ AND p.source_symbol=s.source_symbol AND p.source_package_id=s.source_package_id
  AND p.source_capture_id=s.source_capture_id
  AND p.profile_revision=s.profile_revision
  AND p.history_window_start=s.history_window_start
@@ -1011,17 +937,16 @@ JOIN stock.source_symbol_price_profiles p
               '+' || to_char(s.target_session, 'YYYY') || ':' || s.calendar_revision || '+') > 0
  )
  AND p.price_coordinate=s.price_coordinate
-WHERE s.namespace_id=%s::uuid AND s.target_session=%s::date
-  AND s.source_symbol=%s AND s.package_sha256=%s
-  AND s.source_capture_id=%s::uuid AND s.profile_revision=%s
+WHERE s.target_session=%s::date
+  AND s.source_symbol=%s AND s.source_package_id=%s
+  AND s.source_capture_id=%s AND s.profile_revision=%s
   AND s.producer_version=%s
 LIMIT 2""",
             (
-                namespace_id,
                 target_session,
                 source_symbol,
-                package_sha256,
-                canonical_capture_id,
+                source_package_id,
+                source_capture_id,
                 profile_revision,
                 producer_version,
             ),
@@ -1084,8 +1009,8 @@ LIMIT 2""",
         )
         or row["research_mode"] != "NON_PIT_RETROSPECTIVE"
         or row["price_coordinate"] != "RAW_UNADJUSTED"
-        or row["source_capture_id"] != UUID(canonical_capture_id)
-        or row["source_content_id"].strip() != source_content_id
+        or row["source_capture_id"] != source_capture_id
+        or row["source_package_id"] != source_package_id
         or row["history_window_end"] != target_session
         or not row["history_window_start"] <= target_session
         or not 1 <= row["history_session_count"] <= 75
@@ -1116,8 +1041,8 @@ def read_seed_profile_returns(
     config: Mapping[str, Any],
     *,
     target_session: date,
-    package_sha256: str,
-    namespace_id: str,
+    source_package_id: int,
+    source_capture_id: int,
     profile_revision: str,
     producer_version: str = "SOURCE_POOL_SEED_CORE_PROFILE_R1",
 ) -> dict[str, dict[str, Any]]:
@@ -1130,29 +1055,24 @@ def read_seed_profile_returns(
     with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
-        actual_namespace,
     ):
-        if namespace_id != actual_namespace:
-            raise StaticResearchPgError(
-                "STATIC_SEED_NAMESPACE_MISMATCH", "Seed读取namespace不匹配"
-            )
         cursor.execute(
             f"""SELECT s.source_symbol, {", ".join("p." + name for name in columns)}
 FROM {_SEED_TABLE} s
-JOIN stock.source_symbol_price_profiles p
-  ON p.namespace_id=s.namespace_id AND p.target_session=s.target_session
- AND p.source_symbol=s.source_symbol AND p.package_sha256=s.package_sha256
+JOIN source_symbol_price_profiles p
+  ON p.target_session=s.target_session
+ AND p.source_symbol=s.source_symbol AND p.source_package_id=s.source_package_id
  AND p.profile_revision=s.profile_revision AND p.source_capture_id=s.source_capture_id
  AND p.history_window_start=s.history_window_start AND p.history_window_end=s.history_window_end
  AND p.history_requested_session_count=s.history_session_count
  AND p.history_calendar_id=s.calendar_id
  AND p.price_coordinate=s.price_coordinate
-WHERE s.namespace_id=%s AND s.target_session=%s AND s.package_sha256=%s
+WHERE s.target_session=%s AND s.source_package_id=%s AND s.source_capture_id=%s
   AND s.profile_revision=%s AND s.producer_version=%s ORDER BY s.source_symbol""",
             (
-                namespace_id,
                 target_session,
-                package_sha256,
+                source_package_id,
+                source_capture_id,
                 profile_revision,
                 producer_version,
             ),

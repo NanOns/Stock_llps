@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
-import hashlib
 from pathlib import Path
 import re
 from typing import Mapping
@@ -33,12 +32,11 @@ class SourceFileEvidence:
     relative_path: str
     absolute_path: str
     raw: bytes
-    sha256: str
     size_bytes: int
-    last_write_time_utc: str
+    last_write_time_utc: str | None
     source_label: str | None = None
     source_protocol: str | None = None
-    source_archive_sha256: str | None = None
+    source_archive_size_bytes: int | None = None
 
 
 @dataclass(frozen=True)
@@ -59,9 +57,7 @@ class SectorMemberRow:
 
 @dataclass(frozen=True)
 class SectorSourceSnapshot:
-    snapshot_id: str
     source_kind: str
-    source_file_sha256: str
     source_path_role: str
     source_file_size: int
     observed_at: datetime
@@ -88,10 +84,6 @@ class SectorSourceInputs:
 class RemoteSectorParseOutcome:
     snapshots: tuple[SectorSourceSnapshot, ...]
     rejected_sources: tuple[dict[str, str], ...]
-
-
-def _sha256(raw: bytes) -> str:
-    return hashlib.sha256(raw).hexdigest()
 
 
 def _source_label(item: SourceFileEvidence) -> str:
@@ -147,7 +139,6 @@ def _file_evidence(root: Path, relative_path: str) -> SourceFileEvidence:
         relative_path=relative_path,
         absolute_path=str(resolved),
         raw=first,
-        sha256=_sha256(first),
         size_bytes=len(first),
         last_write_time_utc=datetime.fromtimestamp(
             stat_after.st_mtime, timezone.utc
@@ -313,20 +304,13 @@ def _industry_snapshot(
         )
     source_role = (
         f"PRIMARY={_source_label(assignment_file)};"
-        f"INDUSTRY_NAME_AND_NATIVE_ID_DIRECTORY={_source_label(directory_file)};"
-        f"DIRECTORY_SHA256={directory_file.sha256}"
+        f"INDUSTRY_NAME_AND_NATIVE_ID_DIRECTORY={_source_label(directory_file)}"
     )
     if directory_file.source_protocol is not None:
         source_role += f";DIRECTORY_PROTOCOL={directory_file.source_protocol}"
-    if directory_file.source_archive_sha256 is not None:
-        source_role += f";ARCHIVE_SHA256={directory_file.source_archive_sha256}"
     source_role += ";TYPE_FILTER=2"
     return SectorSourceSnapshot(
-        snapshot_id=_snapshot_uuid(
-            "TDX_TDXHY_CFG", assignment_file.sha256, "TDX_INDUSTRY_MEMBERSHIP_R1"
-        ),
         source_kind="TDX_TDXHY_CFG",
-        source_file_sha256=assignment_file.sha256,
         source_path_role=source_role,
         source_file_size=assignment_file.size_bytes,
         observed_at=observed_at,
@@ -465,13 +449,7 @@ def _concept_snapshot(
         f"INDEX_GROUP_MEMBERS_EXCLUDED={index_member_count}"
     )
     return SectorSourceSnapshot(
-        snapshot_id=_snapshot_uuid(
-            "TDX_INFOHARBOR_BLOCK_DAT",
-            concept_file.sha256,
-            "TDX_GN_CONCEPT_MEMBERSHIP_R1",
-        ),
         source_kind="TDX_INFOHARBOR_BLOCK_DAT",
-        source_file_sha256=concept_file.sha256,
         source_path_role=(
             f"PRIMARY={_source_label(concept_file)};"
             "INCLUDED_PREFIX=GN;EXCLUDED_PREFIX=FG,ZS"
@@ -505,13 +483,6 @@ def _concept_snapshot(
         ),
         unresolved_rows=tuple(sorted(unresolved.items())),
     )
-
-
-def _snapshot_uuid(source_kind: str, source_sha256: str, contract: str) -> str:
-    import uuid
-
-    key = f"STOCK_A_TDX_SECTOR|{source_kind}|{source_sha256}|{contract}"
-    return str(uuid.uuid5(uuid.NAMESPACE_URL, key))
 
 
 def _require_observed_at(value: datetime) -> datetime:

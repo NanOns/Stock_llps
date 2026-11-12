@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from hashlib import sha256
-import json
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
@@ -206,12 +204,6 @@ def _profile_window(
     count, exclude_current = spec
     end = len(history) - (1 if exclude_current else 0)
     selected = history[max(0, end - count) : end] if end > 0 else ()
-    payload = [_profile_row_payload(row) for row in selected]
-    digest = sha256(
-        json.dumps(
-            payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")
-        ).encode("utf-8")
-    ).hexdigest()
     if selected:
         first_endpoint: date | None = selected[0].session
         last_endpoint: date | None = selected[-1].session
@@ -221,7 +213,7 @@ def _profile_window(
         contract=window_contract,
         first_endpoint=first_endpoint,
         last_endpoint=last_endpoint,
-        selected_rows_digest=digest,
+        selected_sessions=tuple(row.session for row in selected),
         calendar_revision=calendar_revision,
         status_revision="TDX_NO_BAR_UNKNOWN_STATUS_R1",
     )
@@ -230,27 +222,17 @@ def _profile_window(
         "first_endpoint": first_endpoint.isoformat() if first_endpoint else None,
         "last_endpoint": last_endpoint.isoformat() if last_endpoint else None,
         "requested_sessions": count,
-        "selected_sessions": len(selected),
+        "selected_session_count": len(selected),
         "window_complete": len(selected) == count
         and all(row.state == "ACTUAL" for row in selected),
         "unknown_session_dates": [
             row.session.isoformat() for row in selected if row.state == "UNKNOWN"
         ],
-        "selected_rows_digest": digest,
+        "selected_sessions": [row.session.isoformat() for row in selected],
         "calendar_revision": calendar_revision,
         "status_revision": "TDX_NO_BAR_UNKNOWN_STATUS_R1",
         "input_quality": quality,
     }
-
-
-def _profile_preview_source_digest(path: Path, label: str) -> str:
-    try:
-        return sha256(path.read_bytes()).hexdigest()
-    except OSError as error:
-        raise ResearchEntryError(
-            "PROFILE_PREVIEW_PROVENANCE_UNAVAILABLE",
-            f"无法读取Profile预览生产者源码身份：{label}",
-        ) from error
 
 
 def _build_profile_preview(
@@ -258,14 +240,13 @@ def _build_profile_preview(
     symbol: str,
     target_session: date,
     source_last_session: date,
-    source_sha256: str,
+    source_cutoff: str,
     target_bar: DecodedDay | None,
     history: tuple[CoreObservation, ...],
     core: dict[str, FieldValue],
     calendar_revision: str,
     contract: dict[str, Any],
     closed_period_bars: Mapping[str, Sequence[object]] | None = None,
-    source_snapshot_id: str | None = None,
     source_snapshot_role: str = "LOCAL_FILE_SNAPSHOT_ID_NOT_CAPTURED_AVAILABLE_AT",
     selected_fields: frozenset[str] | None = None,
 ) -> dict[str, Any]:
@@ -275,11 +256,13 @@ def _build_profile_preview(
             "PROFILE_PREVIEW_CONTRACT_REQUIRED",
             "Profile预览必须使用固定配置槽位装配的day-chain合同",
         )
-    if len(source_sha256) != 64 or any(
-        ch not in "0123456789abcdef" for ch in source_sha256
+    if (
+        not isinstance(source_cutoff, str)
+        or not source_cutoff
+        or source_cutoff.casefold() == "latest"
     ):
         raise ResearchEntryError(
-            "PROFILE_PREVIEW_SOURCE_ID_INVALID", "Profile预览缺少本次完整TDX字节摘要"
+            "PROFILE_PREVIEW_SOURCE_CUTOFF_INVALID", "Profile预览缺少明确来源截止"
         )
     try:
         rules = contract["profile_expression_registry"]
@@ -309,20 +292,9 @@ def _build_profile_preview(
             "PROFILE_PREVIEW_CONTRACT_INVALID", "Profile字段登记存在重复或非法field_id"
         )
 
-    research_root = Path(__file__).resolve().parents[1]
-    package_root = Path(__file__).resolve().parents[2]
-    core_sha = _profile_preview_source_digest(
-        research_root / "core.py", "calculate_core"
-    )
-    decoder_sha = _profile_preview_source_digest(
-        package_root / "sources" / "tdx" / "day.py", "decode_day_record"
-    )
-    entry_sha = _profile_preview_source_digest(Path(__file__), "_build_profile_preview")
     normalized = _normalize_symbol(symbol)[0]
     coordinate_id = f"RAW:TDX_SOURCE_SYMBOL:{normalized}"
-    snapshot_id = (
-        source_snapshot_id or "TDX_LOCAL_FILE_SNAPSHOT_SHA256:" + source_sha256
-    )
+    snapshot_id = source_cutoff
     target_close = (
         target_bar.raw_close
         if target_bar is not None
@@ -348,17 +320,12 @@ def _build_profile_preview(
             )
             if supplied_period_bars:
                 try:
-                    period_source_sha = _profile_preview_source_digest(
-                        package_root / "canonical" / "adjustment_periods.py",
-                        "build_closed_period_bars",
-                    )
                     period_result = evaluate_closed_period_trend(
                         field_id,
                         supplied_period_bars,
                         target_session=target_session,
                         coordinate_id=coordinate_id,
                         coordinate_contract_version="RAW_UNADJUSTED",
-                        producer_source_sha256=period_source_sha,
                         rules=rules,
                         field_registry=canonical_registry,
                     )
@@ -436,9 +403,8 @@ def _build_profile_preview(
                     {
                         "unit": "CNY",
                         "producer_symbol": "stock_a.research.entry:_build_profile_preview",
-                        "producer_source_sha256": entry_sha,
                         "expression_ref": "TDX_RAW_CLOSE_PREVIEW_ALIAS_R1",
-                        "algorithm_version": None,
+                        "algorithm_version": "TDX_RAW_UNADJUSTED_PREVIEW_R1",
                         "parameter_version": "TDX_RAW_UNADJUSTED_PREVIEW_R1",
                         "context_dependencies": [
                             "context.target_session",
@@ -450,7 +416,6 @@ def _build_profile_preview(
                 )
                 source_field_id = "raw.close"
                 source_producer = "stock_a.sources.tdx.day:decode_day_record"
-                source_code_sha = decoder_sha
                 input_value = target_close
                 input_window = {
                     "contract": "TARGET_SESSION_R1",
@@ -461,22 +426,14 @@ def _build_profile_preview(
                     if target_bar is not None
                     else None,
                     "requested_sessions": 1,
-                    "selected_sessions": 1 if target_bar is not None else 0,
-                    "selected_rows_digest": sha256(
-                        json.dumps(
-                            [_profile_row_payload(history[-1])]
-                            if target_bar is not None
-                            else [],
-                            ensure_ascii=False,
-                            sort_keys=True,
-                            separators=(",", ":"),
-                        ).encode("utf-8")
-                    ).hexdigest(),
+                    "selected_session_count": 1 if target_bar is not None else 0,
+                    "selected_sessions": (
+                        [target_session.isoformat()] if target_bar is not None else []
+                    ),
                 }
             else:
                 source_field_id = input_id
                 source_producer = "stock_a.research.core:calculate_core"
-                source_code_sha = core_sha
                 if input_id not in core:
                     raise ResearchEntryError(
                         "PROFILE_PREVIEW_CORE_FIELD_MISSING",
@@ -516,7 +473,6 @@ def _build_profile_preview(
                         f"画像输入缺少有效的{key}合同：{input_id}",
                     )
                 required_contract_text[key] = value
-            field_registry["producer_source_sha256"] = source_code_sha
             used_registry.append(field_registry)
 
             contexts: dict[str, Any] = {}
@@ -535,7 +491,6 @@ def _build_profile_preview(
             expected_context[input_id] = dict(contexts)
             producer = RuntimeProducerBinding(
                 symbol=producer_symbol,
-                source_sha256=source_code_sha,
                 algorithm_version=field_registry.get("algorithm_version"),
             )
             runtime_producers[producer_symbol] = producer
@@ -545,7 +500,6 @@ def _build_profile_preview(
                 field=input_value,
                 unit=required_contract_text["unit"],
                 producer_symbol=producer_symbol,
-                producer_source_sha256=source_code_sha,
                 expression_ref=required_contract_text["expression_ref"],
                 algorithm_version=field_registry.get("algorithm_version"),
                 parameter_version=required_contract_text["parameter_version"],
@@ -562,7 +516,6 @@ def _build_profile_preview(
                     "unit": field_registry.get("unit"),
                     "producer_symbol": producer_symbol,
                     "source_producer": source_producer,
-                    "producer_source_sha256": source_code_sha,
                     "expression_ref": field_registry.get("expression_ref"),
                     "parameter_version": field_registry.get("parameter_version"),
                     "window": input_window,
@@ -621,8 +574,7 @@ def _build_profile_preview(
         "research_mode": "NON_PIT_RETROSPECTIVE",
         "price_coordinate": "RAW_UNADJUSTED",
         "source": {
-            "raw_byte_sha256": source_sha256,
-            "source_cutoff_id": snapshot_id,
+            "source_cutoff": snapshot_id,
             "source_cutoff_role": source_snapshot_role,
             "local_read_clock_is_historical_availability": False,
         },

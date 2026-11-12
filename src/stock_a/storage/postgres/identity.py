@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-import hashlib
 import ipaddress
 import json
 import math
@@ -102,20 +101,17 @@ def _is_fixed_server_address(value: Any) -> bool:
     )
 
 
-def _configuration_identity(config: dict[str, Any]) -> str:
-    config_bytes = json.dumps(
+def _configuration_snapshot(config: dict[str, Any]) -> str:
+    return json.dumps(
         config,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(config_bytes).hexdigest()
+    )
 
 
-def _deployment_fingerprint(
-    physical: dict[str, Any], checks: list[dict[str, Any]]
-) -> str:
+def _deployment_snapshot(physical: dict[str, Any], checks: list[dict[str, Any]]) -> str:
     deployment_checks = [
         item
         for item in checks
@@ -133,14 +129,13 @@ def _deployment_fingerprint(
         )
     ]
     value = {"proof": physical.get("deployment_proof"), "checks": deployment_checks}
-    encoded = json.dumps(
+    return json.dumps(
         value,
         sort_keys=True,
         separators=(",", ":"),
         ensure_ascii=False,
         allow_nan=False,
-    ).encode("utf-8")
-    return hashlib.sha256(encoded).hexdigest()
+    )
 
 
 def evaluate_identity(
@@ -208,37 +203,29 @@ def evaluate_identity(
             actual.get("migration_lineage"), expected_lineage, "migration_lineage"
         )
     )
-    migration_digest = actual.get("migration_digest")
-    expected_migration_digest = expected_app.get("migration_digest")
-    migration_digest_matches = (
-        isinstance(migration_digest, str)
-        and migration_digest == expected_migration_digest
+    migration_version = actual.get("migration_version")
+    expected_migration_version = expected_app.get("migration_version")
+    migration_version_valid = (
+        type(expected_migration_version) is int and expected_migration_version > 0
     )
-    migration_digest_expected = (
-        isinstance(expected_migration_digest, str)
-        and re.fullmatch(r"[0-9a-f]{64}", expected_migration_digest) is not None
-    )
-    migration_digest_status = (
+    migration_version_status = (
         "BLOCKED"
         if not deployment_applied
         else "PASS"
-        if migration_digest_expected and migration_digest_matches
+        if migration_version_valid and migration_version == expected_migration_version
         else "REJECT"
-        if migration_digest_expected
+        if migration_version_valid
         else "BLOCKED"
     )
     checks.append(
         IdentityCheck(
-            "migration_digest",
-            migration_digest_status,
-            expected=expected_migration_digest if migration_digest_expected else None,
-            actual=migration_digest
-            if isinstance(migration_digest, str)
-            and re.fullmatch(r"[0-9a-f]{64}", migration_digest)
-            else None,
+            "migration_version",
+            migration_version_status,
+            expected=expected_migration_version if migration_version_valid else None,
+            actual=migration_version if type(migration_version) is int else None,
             reason=None
-            if migration_digest_status == "PASS"
-            else "部署身份未绑定，或runtime.defaults迁移账本摘要与实际迁移不匹配",
+            if migration_version_status == "PASS"
+            else "部署身份未绑定，或runtime.defaults迁移版本与实际账本不匹配",
         )
     )
     role = actual.get("session_user")
@@ -372,21 +359,24 @@ def _fetch_business_identity(cursor: Any, *, deadline: float) -> dict[str, Any]:
                     vals,
                 )
             )
-    migration_digest = None
+    migration_version = None
     if migration_table:
         _check_deadline(deadline)
         cursor.execute(
-            "SELECT migration_id, source_sha, lineage FROM stock.migration_ledger ORDER BY migration_id LIMIT %s",
+            "SELECT migration_id, lineage FROM stock.migration_ledger ORDER BY migration_id LIMIT %s",
             (_MAX_MIGRATIONS + 1,),
         )
         rows = _bounded_rows(cursor, _MAX_MIGRATIONS, "迁移账本行数超过核验预算")
         if rows:
-            migration_digest, lineages = _migration_ledger_digest(rows)
-            if identity and (
-                len(lineages) != 1
-                or next(iter(lineages)) != identity["migration_lineage"]
+            ids = [row[0] for row in rows]
+            lineages = {row[1] for row in rows}
+            if (
+                ids == list(range(1, len(rows) + 1))
+                and len(lineages) == 1
+                and identity
+                and next(iter(lineages)) == identity["migration_lineage"]
             ):
-                migration_digest = None
+                migration_version = len(rows)
     return {
         "database": database,
         "database_owner": database_owner,
@@ -403,7 +393,7 @@ def _fetch_business_identity(cursor: Any, *, deadline: float) -> dict[str, Any]:
         "identity_table_exists": bool(identity_table),
         "migration_table_exists": bool(migration_table),
         "identity": identity,
-        "migration_digest": migration_digest,
+        "migration_version": migration_version,
         "role_attributes": role_attributes,
     }
 
@@ -679,18 +669,6 @@ def _bounded_rows(cursor: Any, maximum: int, message: str) -> list[Any]:
     if len(rows) > maximum:
         raise OverflowError(message)
     return rows
-
-
-def _migration_ledger_digest(rows: list[tuple[Any, Any, Any]]) -> tuple[str, set[Any]]:
-    """按migration_id/source_sha/lineage流式摘要，保留既有LF分隔语义。"""
-    digest = hashlib.sha256()
-    lineages: set[Any] = set()
-    for index, (migration_id, source_sha, lineage) in enumerate(rows):
-        if index:
-            digest.update(b"\n")
-        digest.update(f"{migration_id}:{source_sha}:{lineage}".encode("utf-8"))
-        lineages.add(lineage)
-    return digest.hexdigest(), lineages
 
 
 def classify_inspection_error(error: Exception) -> str:
@@ -1223,7 +1201,7 @@ def inspect_postgres(
                         "cluster_system_identifier": None,
                         "session_user": physical["session_user"],
                         "role_attributes": physical["role_attributes"],
-                        "migration_digest": physical["migration_digest"],
+                        "migration_version": physical["migration_version"],
                     },
                 )
                 checks.extend(
@@ -1264,7 +1242,7 @@ def inspect_postgres(
                     "schema": physical["schema"],
                     "session_user": physical["session_user"],
                     "role_attributes": physical["role_attributes"],
-                    "migration_digest": physical["migration_digest"],
+                    "migration_version": physical["migration_version"],
                 }
                 checks.extend(evaluate_identity(config, actual))
             deployment_checks, deployment_proof = _deployment_storage_checks(
@@ -1345,7 +1323,7 @@ def inspect_postgres(
             }
             if overall == "READY":
                 context = str(uuid.uuid4())
-                config_identity = _configuration_identity(config)
+                config_identity = _configuration_snapshot(config)
                 proof_expiry = time.monotonic() + _DEPLOYMENT_PROOF_MAX_AGE_SECONDS
                 result.update(
                     {
@@ -1360,7 +1338,7 @@ def inspect_postgres(
                     _DEPLOYMENT_PROOFS[context] = (
                         config_identity,
                         proof_expiry,
-                        _deployment_fingerprint(physical_summary, result["checks"]),
+                        _deployment_snapshot(physical_summary, result["checks"]),
                     )
                     now = time.monotonic()
                     for stale_context in [
@@ -1442,19 +1420,19 @@ def write_admission(
     ):
         return False, "写入请求未绑定本次核验上下文、配置或允许动作"
     try:
-        requested_digest = (
-            _configuration_identity(requested_configuration)
+        requested_snapshot = (
+            _configuration_snapshot(requested_configuration)
             if isinstance(requested_configuration, dict)
             else None
         )
     except (TypeError, ValueError):
-        requested_digest = None
-    if requested_digest != inspection.get("configuration_identity"):
+        requested_snapshot = None
+    if requested_snapshot != inspection.get("configuration_identity"):
         return False, "写入请求配置与实际核验配置不一致"
     proof_binding = _DEPLOYMENT_PROOFS.pop(context, None)
     if (
         proof_binding is None
-        or proof_binding[0] != requested_digest
+        or proof_binding[0] != requested_snapshot
         or time.monotonic() > proof_binding[1]
         or physical.get("deployment_storage_checks") != "PASS"
         or not isinstance(physical.get("deployment_proof"), dict)
@@ -1462,7 +1440,7 @@ def write_admission(
         != requested_configuration.get("application_identity", {}).get(
             "cluster_system_identifier"
         )
-        or _deployment_fingerprint(physical, checks) != proof_binding[2]
+        or _deployment_snapshot(physical, checks) != proof_binding[2]
     ):
         return (
             False,
@@ -1484,7 +1462,7 @@ def write_admission(
                 "schema": current["schema"],
                 "session_user": current["session_user"],
                 "role_attributes": current["role_attributes"],
-                "migration_digest": current["migration_digest"],
+                "migration_version": current["migration_version"],
             },
         )
         current_checks.extend(

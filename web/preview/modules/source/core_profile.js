@@ -41,13 +41,13 @@ async function queryStock(event) {
   }
   const symbol = $("symbolInput").value.trim();
   const count = Number($("windowInput").value);
-  const key = `${v.target_session}|${v.package_sha256}|${symbol}|${count}`;
+  const key = `${v.target_session}|${v.source_package_id}|${symbol}|${count}`;
   const requestIsCurrent = () => {
     const selected = selectedVersion();
     return (
       requestId === state.stockRequest &&
       key ===
-        `${selected?.target_session}|${selected?.package_sha256}|${$("symbolInput").value.trim()}|${Number($("windowInput").value)}`
+        `${selected?.target_session}|${selected?.source_package_id}|${$("symbolInput").value.trim()}|${Number($("windowInput").value)}`
     );
   };
   if (!symbol || !Number.isInteger(count) || count < 1 || count > 75) {
@@ -57,7 +57,7 @@ async function queryStock(event) {
   }
   clearResult();
   $("queryStock").disabled = true;
-  setMessage("正在按显式日期、包SHA和窗口只读读取PG并计算现役Core/Profile…");
+  setMessage("正在按显式日期、来源包ID和窗口只读读取PG并计算现役Core/Profile…");
   try {
     const raw = await api(
       `/api/preview/raw?${new URLSearchParams({ ...v, symbol })}`,
@@ -69,7 +69,7 @@ async function queryStock(event) {
       body: JSON.stringify({
         symbol,
         target_session: v.target_session,
-        package_sha256: v.package_sha256,
+        source_package_id: v.source_package_id,
         session_count: count,
       }),
     });
@@ -77,30 +77,20 @@ async function queryStock(event) {
     const a = raw.snapshot_identity,
       b = result.snapshot_identity;
     if (
-      a.namespace_id !== b.namespace_id ||
       a.target_session !== b.target_session ||
-      a.package_sha256 !== b.package_sha256 ||
+      a.source_package_id !== b.source_package_id ||
       b.target_session !== v.target_session ||
-      b.package_sha256 !== v.package_sha256
+      b.source_package_id !== v.source_package_id ||
+      raw.symbol !== result.symbol
     )
       throw new Error("RAW与Core/Profile预览身份不一致，已拒绝合并展示。");
-    if (
-      keepTimeline &&
-      state.chartPeriodContext?.target_session === v.target_session &&
-      state.chartPeriodContext?.package_sha256 === v.package_sha256 &&
-      state.chartPeriodContext?.symbol === symbol
-    )
-      state.chartPeriodContext = {
-        ...state.chartPeriodContext,
-        namespace_id: b.namespace_id,
-      };
     $("stockResult").hidden = false;
     setMessage("研究预览已返回；数值为RAW_UNADJUSTED / NON_PIT。", true);
     $("resultTitle").textContent = `${symbol} · ${v.target_session}`;
     $("resultMode").textContent =
       `${result.status} · ${result.source_object_status} · ${result.target_bar_status} · ${result.price_coordinate} · ${result.identity_status}`;
     $("snapshotId").textContent =
-      `预览身份SHA256：${result.snapshot_identity.identity_sha256}（非正式context token） · 来源包SHA：${v.package_sha256}`;
+      `TDX来源包ID ${v.source_package_id} · 目标会话 ${v.target_session} · RAW_UNADJUSTED`;
     $("windowText").textContent =
       `窗口 ${result.window.start_session} 至 ${result.window.end_session}：` +
       `实际Bar ${result.window.real_bar_count}/${result.window.requested_sessions}，` +
@@ -111,7 +101,6 @@ async function queryStock(event) {
       `(${result.window.ma20_window_valid_bar_count}/${result.window.ma20_window_expected_bar_count}; ` +
       `${result.window.price_window_valid_bar_count}/${result.window.price_window_expected_bar_count})，` +
       `未使用未来会话。缺Bar不证明停牌、退市或上市前。`;
-    $("resultMode").dataset.namespace = result.snapshot_identity.namespace_id;
     rawItems(raw.raw, raw.source_version);
     renderFields($("coreRows"), result.core.fields, coreNames);
     renderFields(
@@ -130,7 +119,7 @@ async function queryStock(event) {
       ]);
     }
     try {
-      await loadRawPeriods(v, symbol, b, requestIsCurrent);
+      await loadRawPeriods(v, symbol, requestIsCurrent);
     } catch (error) {
       if (!requestIsCurrent()) return;
       renderRawPeriods(null, error.message);
@@ -139,11 +128,10 @@ async function queryStock(event) {
     if (
       keepTimeline &&
       state.chartPeriodContext?.target_session === v.target_session &&
-      state.chartPeriodContext?.package_sha256 === v.package_sha256 &&
+      state.chartPeriodContext?.source_package_id === v.source_package_id &&
       state.chartPeriodContext?.symbol === symbol
     ) {
       await queryTimeline({
-        namespace_id: b.namespace_id,
         origin: previousTimelineContext?.origin || "manual",
         returnSelection: previousTimelineContext?.returnSelection || null,
         returnBinding: previousTimelineContext?.returnBinding || null,

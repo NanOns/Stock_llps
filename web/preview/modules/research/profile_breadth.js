@@ -230,13 +230,13 @@ function renderProfileBreadth(data) {
     appendText(
       identity,
       "p",
-      `${title} ${snapshot.target_session} · package SHA ${snapshot.package_sha256} · profile revision ${snapshot.profile_revision} · 日历 ${snapshot.history_calendar_id}/${snapshot.history_calendar_revision} · 窗口 ${snapshot.window_start} 至 ${snapshot.window_end} · ${snapshot.history_session_count}个官方会话`,
+      `${title} ${snapshot.target_session} · 来源包ID ${snapshot.source_package_id} · profile revision ${snapshot.profile_revision} · 日历 ${snapshot.history_calendar_id}/${snapshot.history_calendar_revision} · 窗口 ${snapshot.window_start} 至 ${snapshot.window_end} · ${snapshot.history_session_count}个官方会话`,
     );
   }
   appendText(
     identity,
     "p",
-    `namespace ${data.namespace_id} · ${data.research_scope} · ${data.price_coordinate} · ${data.pit_status} · 正式上市总体 ${text(data.formal_listing_universe)}。本查询只读PG，不打开来源包、不重算Core。`,
+    `${data.research_scope} · ${data.price_coordinate} · ${data.pit_status} · 正式上市总体 ${text(data.formal_listing_universe)}。本查询只读PG，不打开来源包、不重算Core。`,
   );
   root.append(identity);
   $("profileBreadthCount").textContent =
@@ -277,9 +277,9 @@ async function loadProfileBreadth(before, after) {
   const params = new URLSearchParams({
     before_session: before.target_session,
     after_session: after.target_session,
-    before_package_sha256: before.package_sha256,
+    before_source_package_id: before.source_package_id,
     before_profile_revision: before.profile_revision,
-    after_package_sha256: after.package_sha256,
+    after_source_package_id: after.source_package_id,
     after_profile_revision: after.profile_revision,
   });
   try {
@@ -431,9 +431,9 @@ async function loadProfileBreadthMembers(query, offset) {
   const params = new URLSearchParams({
     before_session: breadth.before_snapshot.target_session,
     after_session: breadth.after_snapshot.target_session,
-    before_package_sha256: breadth.before_snapshot.package_sha256,
+    before_source_package_id: breadth.before_snapshot.source_package_id,
     before_profile_revision: breadth.before_snapshot.profile_revision,
-    after_package_sha256: breadth.after_snapshot.package_sha256,
+    after_source_package_id: breadth.after_snapshot.source_package_id,
     after_profile_revision: breadth.after_snapshot.profile_revision,
     mode: query.mode,
     offset: String(offset),
@@ -453,12 +453,12 @@ async function loadProfileBreadthMembers(query, offset) {
     if (
       requestId !== state.profileBreadthMemberRequest ||
       binding !== state.profileBreadthBinding ||
-      data.before_snapshot.package_sha256 !==
-        breadth.before_snapshot.package_sha256 ||
+      data.before_snapshot.source_package_id !==
+        breadth.before_snapshot.source_package_id ||
       data.before_snapshot.profile_revision !==
         breadth.before_snapshot.profile_revision ||
-      data.after_snapshot.package_sha256 !==
-        breadth.after_snapshot.package_sha256 ||
+      data.after_snapshot.source_package_id !==
+        breadth.after_snapshot.source_package_id ||
       data.after_snapshot.profile_revision !==
         breadth.after_snapshot.profile_revision
     )
@@ -491,9 +491,9 @@ async function openBreadthMemberPair(item) {
     before_session: breadth.before_snapshot.target_session,
     after_session: breadth.after_snapshot.target_session,
     symbol: item.source_symbol,
-    before_package_sha256: breadth.before_snapshot.package_sha256,
+    before_source_package_id: breadth.before_snapshot.source_package_id,
     before_profile_revision: breadth.before_snapshot.profile_revision,
-    after_package_sha256: breadth.after_snapshot.package_sha256,
+    after_source_package_id: breadth.after_snapshot.source_package_id,
     after_profile_revision: breadth.after_snapshot.profile_revision,
   });
   resetChangeDetail();
@@ -507,14 +507,13 @@ async function openBreadthMemberPair(item) {
       requestId !== state.pairRequest ||
       memberBinding !== state.profileBreadthBinding ||
       data.source_symbol !== item.source_symbol ||
-      data.before_snapshot.package_sha256 !==
-        breadth.before_snapshot.package_sha256 ||
-      data.after_snapshot.package_sha256 !==
-        breadth.after_snapshot.package_sha256
+      data.before_snapshot.source_package_id !==
+        breadth.before_snapshot.source_package_id ||
+      data.after_snapshot.source_package_id !==
+        breadth.after_snapshot.source_package_id
     )
       return;
     state.changeBinding = {
-      namespace_id: data.namespace_id,
       before_snapshot: data.before_snapshot,
       after_snapshot: data.after_snapshot,
       session_relation: data.session_relation,

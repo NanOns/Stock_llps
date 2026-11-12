@@ -33,10 +33,10 @@ def run_source_sector_pulse_day(
     *,
     target_session: date,
     research_cutoff: date,
-    package_sha256: str,
+    source_package_id: int,
     profile_revision: str,
-    industry_snapshot_id: str,
-    concept_snapshot_id: str,
+    industry_snapshot_id: int,
+    concept_snapshot_id: int,
 ) -> dict[str, Any]:
     """读取精确已存Raw，单次扫描全池并原子保存行业与GN概念全集。"""
     if (
@@ -44,9 +44,11 @@ def run_source_sector_pulse_day(
         or type(research_cutoff) is not date
         or target_session > research_cutoff
         or not isinstance(profile_revision, str)
-        or len(profile_revision) != 64
-        or not isinstance(industry_snapshot_id, str)
-        or not isinstance(concept_snapshot_id, str)
+        or profile_revision not in {f"PROFILE_R{i:02d}" for i in range(1, 100)}
+        or type(industry_snapshot_id) is not int
+        or industry_snapshot_id <= 0
+        or type(concept_snapshot_id) is not int
+        or concept_snapshot_id <= 0
         or industry_snapshot_id == concept_snapshot_id
     ):
         raise SourceSectorPulseError(
@@ -55,7 +57,7 @@ def run_source_sector_pulse_day(
     source_version = read_source_version_context(
         config,
         target_session=target_session,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
     )
     if source_version.get("status") != "AVAILABLE":
         raise SourceSectorPulseError(
@@ -67,15 +69,10 @@ def run_source_sector_pulse_day(
     concept = read_rotation_snapshot_members(
         config, snapshot_id=concept_snapshot_id, board_kind="CONCEPT"
     )
-    if (
-        industry.get("namespace_id") != source_version.get("namespace_id")
-        or concept.get("namespace_id") != source_version.get("namespace_id")
-        or not industry.get("boards")
-        or not concept.get("boards")
-    ):
+    if not industry.get("boards") or not concept.get("boards"):
         raise SourceSectorPulseError(
             "SECTOR_PULSE_SNAPSHOT_BINDING_INVALID",
-            "行业与GN概念必须绑定同一Raw命名空间且目录均非空",
+            "行业与GN概念目录必须均非空",
         )
     industry_board_id = sorted(industry["boards"])[0]
     calculated = read_retrospective_rotation(
@@ -86,7 +83,7 @@ def run_source_sector_pulse_day(
         start_session=target_session,
         target_session=target_session,
         research_cutoff=research_cutoff,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         peer_target_only=True,
         peer_snapshot_ids={
             "INDUSTRY": industry_snapshot_id,
@@ -96,7 +93,7 @@ def run_source_sector_pulse_day(
     persisted = persist_source_sector_pulse_day(
         config,
         target_session=target_session,
-        package_sha256=package_sha256,
+        source_package_id=source_package_id,
         source_version=source_version,
         profile_revision=profile_revision,
         target_result=calculated,
@@ -112,11 +109,8 @@ def run_source_sector_pulse_day(
     return {
         "status": persisted["status"],
         "target_session": target_session.isoformat(),
-        "namespace_id": source_version["namespace_id"],
-        "package_sha256": package_sha256,
+        "source_package_id": source_package_id,
         "source_capture_id": source_version["source_capture_id"],
-        "source_content_id": source_version["source_content_id"],
-        "source_raw_digest": source_version["capture_digest"],
         "source_pool_count": source_version["raw_row_count"],
         "profile_revision": profile_revision,
         "snapshot_ids": {
@@ -141,12 +135,12 @@ def run_source_sector_pulse_transition_day(
     previous_session: date,
     target_session: date,
     research_cutoff: date,
-    previous_package_sha256: str,
-    target_package_sha256: str,
+    previous_source_package_id: int,
+    target_source_package_id: int,
     previous_profile_revision: str,
     target_profile_revision: str,
-    industry_snapshot_id: str,
-    concept_snapshot_id: str,
+    industry_snapshot_id: int,
+    concept_snapshot_id: int,
 ) -> dict[str, Any]:
     """补齐必要的缺失日PULSE，并原子保存严格相邻的板块变化。"""
     from stock_a.application.source_d0_raw import _official_calendar
@@ -160,20 +154,16 @@ def run_source_sector_pulse_transition_day(
         any(type(item) is not date for item in inputs)
         or previous_session >= target_session
         or target_session > research_cutoff
-        or not isinstance(previous_package_sha256, str)
-        or len(previous_package_sha256) != 64
-        or any(char not in "0123456789abcdef" for char in previous_package_sha256)
-        or not isinstance(target_package_sha256, str)
-        or len(target_package_sha256) != 64
-        or any(char not in "0123456789abcdef" for char in target_package_sha256)
-        or not isinstance(previous_profile_revision, str)
-        or len(previous_profile_revision) != 64
-        or any(char not in "0123456789abcdef" for char in previous_profile_revision)
-        or not isinstance(target_profile_revision, str)
-        or len(target_profile_revision) != 64
-        or any(char not in "0123456789abcdef" for char in target_profile_revision)
-        or not isinstance(industry_snapshot_id, str)
-        or not isinstance(concept_snapshot_id, str)
+        or type(previous_source_package_id) is not int
+        or previous_source_package_id <= 0
+        or type(target_source_package_id) is not int
+        or target_source_package_id <= 0
+        or previous_profile_revision not in {f"PROFILE_R{i:02d}" for i in range(1, 100)}
+        or target_profile_revision not in {f"PROFILE_R{i:02d}" for i in range(1, 100)}
+        or type(industry_snapshot_id) is not int
+        or industry_snapshot_id <= 0
+        or type(concept_snapshot_id) is not int
+        or concept_snapshot_id <= 0
         or industry_snapshot_id == concept_snapshot_id
     ):
         raise SourceSectorPulseError(
@@ -194,8 +184,7 @@ def run_source_sector_pulse_transition_day(
         )
     previous_calendar = _official_calendar(previous_session)
     calendar_identity = {
-        key: calendar[key]
-        for key in ("calendar_id", "calendar_revision", "calendar_sha256")
+        key: calendar[key] for key in ("calendar_id", "calendar_revision")
     }
     if any(
         previous_calendar.get(key) != calendar_identity[key]
@@ -213,12 +202,12 @@ def run_source_sector_pulse_transition_day(
     generated_pulses: dict[str, Any] = {}
 
     def load_exact_day(
-        session: date, package_sha256: str, expected_profile_revision: str
+        session: date, source_package_id: int, expected_profile_revision: str
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         source_version = read_source_version_context(
             config,
             target_session=session,
-            package_sha256=package_sha256,
+            source_package_id=source_package_id,
         )
         if (
             source_version.get("status") != "AVAILABLE"
@@ -233,11 +222,8 @@ def run_source_sector_pulse_transition_day(
         pulse = read_source_sector_pulse_day(
             config,
             target_session=session,
-            package_sha256=package_sha256,
-            namespace_id=source_version["namespace_id"],
+            source_package_id=source_package_id,
             source_capture_id=source_version["source_capture_id"],
-            source_content_id=source_version["source_content_id"],
-            source_raw_digest=source_version["capture_digest"],
             source_pool_count=source_version["raw_row_count"],
             snapshot_ids=snapshots,
         )
@@ -252,19 +238,14 @@ def run_source_sector_pulse_transition_day(
 
     previous_source, previous_pulse = load_exact_day(
         previous_session,
-        previous_package_sha256,
+        previous_source_package_id,
         previous_profile_revision,
     )
     target_source, target_pulse = load_exact_day(
         target_session,
-        target_package_sha256,
+        target_source_package_id,
         target_profile_revision,
     )
-    if previous_source.get("namespace_id") != target_source.get("namespace_id"):
-        raise SourceSectorPulseError(
-            "SECTOR_PULSE_TRANSITION_NAMESPACE_MISMATCH",
-            "两端Raw来源命名空间不一致",
-        )
     for session, source_version, pulse, profile_revision in (
         (
             previous_session,
@@ -293,13 +274,13 @@ def run_source_sector_pulse_transition_day(
             config,
             target_session=session,
             research_cutoff=session,
-            package_sha256=source_version["package_sha256"],
+            source_package_id=source_version["source_package_id"],
             profile_revision=profile_revision,
             industry_snapshot_id=industry_snapshot_id,
             concept_snapshot_id=concept_snapshot_id,
         )
         _, refreshed = load_exact_day(
-            session, source_version["package_sha256"], profile_revision
+            session, source_version["source_package_id"], profile_revision
         )
         if refreshed.get("status") != "AVAILABLE":
             raise SourceSectorPulseError(
@@ -342,22 +323,16 @@ def run_source_sector_pulse_transition_day(
             "previous": {
                 key: previous_source[key]
                 for key in (
-                    "namespace_id",
-                    "package_sha256",
+                    "source_package_id",
                     "source_capture_id",
-                    "source_content_id",
-                    "capture_digest",
                     "raw_row_count",
                 )
             },
             "target": {
                 key: target_source[key]
                 for key in (
-                    "namespace_id",
-                    "package_sha256",
+                    "source_package_id",
                     "source_capture_id",
-                    "source_content_id",
-                    "capture_digest",
                     "raw_row_count",
                 )
             },

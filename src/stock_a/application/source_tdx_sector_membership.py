@@ -28,9 +28,8 @@ def read_tdx_sector_symbol_membership(
     *,
     source_symbol: str,
     target_session: date,
-    industry_snapshot_id: str,
-    concept_snapshot_id: str,
-    expected_namespace_id: str,
+    industry_snapshot_id: int,
+    concept_snapshot_id: int,
 ) -> dict[str, Any]:
     """读取精确来源股票在显式行业和概念快照中的当前成员归属。"""
     if not isinstance(source_symbol, str):
@@ -50,7 +49,6 @@ def read_tdx_sector_symbol_membership(
             target_session=target_session,
             industry_snapshot_id=industry_snapshot_id,
             concept_snapshot_id=concept_snapshot_id,
-            expected_namespace_id=expected_namespace_id,
         )
     except TdxSectorMembersPgError as error:
         raise SourceTdxSectorMembershipError(error.code, str(error)) from error

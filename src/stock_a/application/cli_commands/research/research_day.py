@@ -51,7 +51,7 @@ def _range_sessions(config, start: date, end: date, cutoff: date, package: str):
             raise ValueError(f"{day}不是唯一官方会话来源版本")
         version = items[0]
         if (
-            version["package_sha256"] != package
+            version["source_package_id"] != package
             or version["version_status"] != "CLOSED"
         ):
             raise ValueError(f"{day}来源包不匹配或来源分区未闭合")
@@ -90,7 +90,7 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 config,
                 target_session=_parse_session_date(args.target_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 persist=args.persist,
                 history_session_count=args.history_session_count,
                 worker_count=args.workers,
@@ -105,7 +105,9 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
             start = _parse_session_date(args.start_session)
             end = _parse_session_date(args.target_session)
             cutoff = _parse_session_date(args.research_cutoff)
-            sessions = _range_sessions(config, start, end, cutoff, args.package_sha256)
+            sessions = _range_sessions(
+                config, start, end, cutoff, args.source_package_id
+            )
             skipped = False
             for target, has_before in sessions:
                 if not has_before and not args.static_only:
@@ -124,7 +126,7 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                         config,
                         target_session=target,
                         research_cutoff=cutoff,
-                        package_sha256=args.package_sha256,
+                        source_package_id=args.source_package_id,
                         persist=args.persist,
                         history_session_count=args.history_session_count,
                         worker_count=args.workers,
@@ -135,7 +137,7 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                         config,
                         target_session=target,
                         research_cutoff=cutoff,
-                        package_sha256=args.package_sha256,
+                        source_package_id=args.source_package_id,
                         d1_history_session_count=args.d1_history_session_count,
                         persist=args.persist,
                         history_session_count=args.history_session_count,
@@ -150,7 +152,7 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 config,
                 target_session=_parse_session_date(args.target_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 persist=args.persist,
                 history_session_count=args.history_session_count,
                 worker_count=args.workers,
@@ -162,7 +164,7 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 config,
                 target_session=_parse_session_date(args.target_session),
                 research_cutoff=_parse_session_date(args.research_cutoff),
-                package_sha256=args.package_sha256,
+                source_package_id=args.source_package_id,
                 d1_history_session_count=args.d1_history_session_count,
                 persist=args.persist,
                 history_session_count=args.history_session_count,
