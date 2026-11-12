@@ -461,7 +461,6 @@ def apply_stock_migration(
                 )
                 _validate_business_role(business)
                 actual_identity = business.get("identity")
-                _validate_application_identity(actual_identity, expected_identity)
                 cursor.execute(
                     "SELECT to_regclass('stock.installation_identity') IS NOT NULL, to_regclass('stock.migration_ledger') IS NOT NULL"
                 )
@@ -474,6 +473,82 @@ def apply_stock_migration(
                 )
                 existing = cursor.fetchall()
                 applied_count = _validate_migration_history(existing, expected_rows)
+                recovering_numeric = (
+                    migration_id == 26
+                    and applied_count == 26
+                    and expected_identity.get("migration_version") == 25
+                    and "project_id" not in expected_identity
+                )
+                if recovering_numeric:
+                    # 旧UUID已由0026删除，只能在独立确认实际簇及同一业务连接后对账。
+                    checks, proof = identity._deployment_storage_checks(
+                        config, business, timeout_seconds=float(timeout_seconds)
+                    )
+                    required = {
+                        "deployment_admin_role",
+                        "deployment_database",
+                        "actual_cluster_system_identifier",
+                        "business_backend_binding",
+                    }
+                    if not proof or not required.issubset(
+                        {check.check for check in checks if check.status == "PASS"}
+                    ):
+                        raise BindingRefused("数字身份恢复需要独立核验实际簇及业务连接")
+                    if (
+                        not isinstance(actual_identity, dict)
+                        or any(
+                            actual_identity.get(key) != expected_identity.get(key)
+                            for key in (
+                                "cluster_system_identifier",
+                                "migration_lineage",
+                            )
+                        )
+                        or actual_identity.get("application_id") != "STOCK_A"
+                    ):
+                        raise BindingRefused("数字身份恢复的应用、簇或lineage不匹配")
+                    numeric_identity = (
+                        actual_identity.get("project_id"),
+                        actual_identity.get("instance_id"),
+                    )
+                    if not all(identity._valid_numeric_id(v) for v in numeric_identity):
+                        raise BindingRefused("数字安装身份无效")
+                    cursor.execute("""SELECT column_name, is_identity, identity_generation
+                        FROM information_schema.columns
+                        WHERE table_schema='stock' AND table_name='installation_identity'
+                        AND column_name IN ('project_id','instance_id','project_uuid','instance_uuid')
+                        ORDER BY column_name""")
+                    if cursor.fetchall() != [
+                        ("instance_id", "YES", "ALWAYS"),
+                        ("project_id", "YES", "ALWAYS"),
+                    ]:
+                        raise BindingRefused("数字身份列结构不符合0026")
+                    cursor.execute("""SELECT count(*), count(*) FILTER (WHERE singleton IS TRUE)
+                        FROM stock.installation_identity""")
+                    if cursor.fetchone() != (1, 1):
+                        raise BindingRefused("数字安装身份不是唯一单例")
+                    cursor.execute("""SELECT conname, pg_get_constraintdef(oid)
+                        FROM pg_constraint WHERE conrelid='stock.installation_identity'::regclass
+                        AND conname IN ('installation_identity_pkey',
+                            'installation_identity_singleton_check',
+                            'installation_identity_instance_id_key') ORDER BY conname""")
+                    if cursor.fetchall() != [
+                        (
+                            "installation_identity_instance_id_key",
+                            "UNIQUE (instance_id)",
+                        ),
+                        ("installation_identity_pkey", "PRIMARY KEY (singleton)"),
+                        (
+                            "installation_identity_singleton_check",
+                            "CHECK ((singleton IS TRUE))",
+                        ),
+                    ]:
+                        raise BindingRefused("数字安装身份的单例或唯一约束不符合0026")
+                    expected_identity = dict(expected_identity)
+                    (
+                        expected_identity["project_id"],
+                        expected_identity["deployment_instance_id"],
+                    ) = numeric_identity
+                _validate_application_identity(actual_identity, expected_identity)
                 if business.get("migration_version") != applied_count:
                     raise BindingRefused(
                         "数据库业务身份读取到的迁移版本与精确账本前缀不匹配"
@@ -576,7 +651,10 @@ def apply_stock_migration(
                 if cursor.fetchone() != ("stock_a", "stock_a", 1):
                     raise BindingRefused("身份单例或实际业务登录读回不匹配")
         transaction_committed = True
-        if config["application_identity"].get("migration_version") != migration_id:
+        if (
+            config["application_identity"].get("migration_version") != migration_id
+            or numeric_identity is not None
+        ):
             try:
                 _update_runtime_config(
                     config_path, config, migration_id, numeric_identity
