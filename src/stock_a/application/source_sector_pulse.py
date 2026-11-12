@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from datetime import date
+import re
 from typing import Any, Mapping
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.application.source_sector_change_research import (
     read_retrospective_rotation,
 )
@@ -28,6 +30,13 @@ class SourceSectorPulseError(ValueError):
         super().__init__(message)
 
 
+def _valid_profile_revision(value: Any) -> bool:
+    return (
+        isinstance(value, str)
+        and re.fullmatch(PROFILE_REVISION_PATTERN, value) is not None
+    )
+
+
 def run_source_sector_pulse_day(
     config: Mapping[str, Any],
     *,
@@ -43,8 +52,7 @@ def run_source_sector_pulse_day(
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
-        or not isinstance(profile_revision, str)
-        or profile_revision not in {f"PROFILE_R{i:02d}" for i in range(1, 100)}
+        or not _valid_profile_revision(profile_revision)
         or type(industry_snapshot_id) is not int
         or industry_snapshot_id <= 0
         or type(concept_snapshot_id) is not int
@@ -158,8 +166,8 @@ def run_source_sector_pulse_transition_day(
         or previous_source_package_id <= 0
         or type(target_source_package_id) is not int
         or target_source_package_id <= 0
-        or previous_profile_revision not in {f"PROFILE_R{i:02d}" for i in range(1, 100)}
-        or target_profile_revision not in {f"PROFILE_R{i:02d}" for i in range(1, 100)}
+        or not _valid_profile_revision(previous_profile_revision)
+        or not _valid_profile_revision(target_profile_revision)
         or type(industry_snapshot_id) is not int
         or industry_snapshot_id <= 0
         or type(concept_snapshot_id) is not int

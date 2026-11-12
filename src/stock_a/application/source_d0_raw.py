@@ -1407,10 +1407,11 @@ def _classify_transition(before_state: str | None, after_state: str | None) -> s
 
 
 def _official_calendar(target: date) -> dict[str, Any]:
-    payload, _metadata, _revision_chain, sessions = _load_calendar(target)
+    payload, _metadata, revision_chain, sessions = _load_calendar(target)
     return {
         "calendar_id": payload["calendar_id"],
         "calendar_revision": payload["revision"],
+        "calendar_revision_chain": revision_chain,
         "sessions": sessions,
     }
 
@@ -1717,7 +1718,7 @@ def query_source_d0_raw_launch(
                     rows=shape_rows,
                     symbol=item["source_symbol"],
                     source_package_id=source_package_id,
-                    parser=source_version["parser_contract"],
+                    parser_contract=source_version["parser_contract"],
                 )
                 historical_rps = {}
                 rps_errors = {}
@@ -1757,7 +1758,7 @@ def query_source_d0_raw_launch(
                         rows=shape_rows,
                         symbol=item["source_symbol"],
                         source_package_id=source_package_id,
-                        parser=source_version["parser_contract"],
+                        parser_contract=source_version["parser_contract"],
                         historical_rps=historical_rps,
                     )
                 item["prior_shape_observation"]["historical_rps_errors"] = rps_errors

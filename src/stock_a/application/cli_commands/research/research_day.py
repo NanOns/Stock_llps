@@ -16,6 +16,7 @@ from stock_a.application.runtime_config import (
 )
 from stock_a.application.source_research_day import (
     SourceResearchDayError,
+    run_source_d0_launch_reference_day,
     run_source_research_day,
     run_source_static_research_day,
 )
@@ -85,6 +86,28 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
             raise ValueError("板块数字快照ID只能与 --include-sector-pulse 同时使用")
         sector_snapshot_ids = snapshot_ids if args.include_sector_pulse else None
         config, config_path = load_runtime_config()
+        if args.d0_launch_reference_only:
+            if (
+                not args.persist
+                or args.static_only
+                or args.start_session
+                or args.include_sector_pulse
+                or snapshot_ids_supplied
+            ):
+                raise ValueError(
+                    "--d0-launch-reference-only须单日指定--persist，且不能合并Seed、D1或PULSE生产"
+                )
+            report = run_source_d0_launch_reference_day(
+                config,
+                target_session=_parse_session_date(args.target_session),
+                research_cutoff=_parse_session_date(args.research_cutoff),
+                source_package_id=args.source_package_id,
+                persist=args.persist,
+            )
+            report["configuration_path"] = str(config_path)
+            report["ok"] = True
+            _emit(report)
+            return _EXIT_OK
         if args.static_only and not args.start_session:
             report = run_source_static_research_day(
                 config,

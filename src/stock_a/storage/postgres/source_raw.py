@@ -1235,7 +1235,6 @@ def import_verified_vipdata_history(
                 )
                 quality = _target_quality_row(
                     candidate,
-                    source_package_id=source_package_id,
                     target_session=session,
                     source_index=source_index,
                     page_offset=source_index,
@@ -1986,7 +1985,7 @@ WHERE source_package_id=%s""",
         "source_capture_id": int(capture_id),
         "source_dataset_id": dataset_id,
         "source_byte_count": int(byte_count),
-        "parser_contract": capture.parser_contract,
+        "parser_contract": capture["parser_contract"],
         "source_time_quality": capture["source_time_quality"],
         "source_available_at": _db_scalar(capture["source_available_at"]),
         "capture_read_started_at": _db_scalar(capture["read_started_at"]),

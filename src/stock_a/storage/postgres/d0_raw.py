@@ -214,7 +214,7 @@ ORDER BY p.source_symbol COLLATE "C", d.session_date""",
         present_rows += 1
         row["reference_quality"] = (
             int(row["source_package_id"]) == source_package_id
-            and int(row["source_capture_id"]) == source_version["source_capture_id"]
+            and type(row["source_capture_id"]) is int
             and row["joined_capture_id"] == row["source_capture_id"]
             and row["capture_package_id"] == row["source_package_id"]
             and row["capture_target_session"] == session
@@ -305,6 +305,9 @@ def read_source_d0_raw_window(
             for status in ("TARGET_PRESENT", "TARGET_MISSING", "READ_FAILED")
         }
         source_version["bar_status_counts"] = target_status_counts
+        source_version["target_present_count"] = target_status_counts["TARGET_PRESENT"]
+        source_version["target_missing_count"] = target_status_counts["TARGET_MISSING"]
+        source_version["read_failed_count"] = target_status_counts["READ_FAILED"]
         target_scan_seconds = time.perf_counter() - target_scan_started
 
         history_scan_started = time.perf_counter()

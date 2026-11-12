@@ -114,7 +114,7 @@ def read_source_version_context(
             if (
                 row.get("source_package_id") != source_package_id
                 or row.get("source_package_id") != source.get("source_package_id")
-                or str(row.get("source_capture_id")) != source.get("source_capture_id")
+                or row.get("source_capture_id") != source.get("source_capture_id")
             ):
                 raise PgResearchBindingError(
                     "PG_RESEARCH_RAW_REFERENCE_MISMATCH",

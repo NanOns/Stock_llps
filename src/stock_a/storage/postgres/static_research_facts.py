@@ -216,7 +216,9 @@ def _reasons(value: Any) -> list[str]:
     return []
 
 
-def _d0_rows(scenarios: Mapping[str, Mapping[str, Any]]) -> list[tuple[Any, ...]]:
+def _d0_rows(
+    scenarios: Mapping[str, Mapping[str, Any]], *, require_complete: bool = True
+) -> list[tuple[Any, ...]]:
     rows = []
     for scenario, page in scenarios.items():
         ids = _D0_PREDICATES.get(scenario)
@@ -304,11 +306,93 @@ def _d0_rows(scenarios: Mapping[str, Mapping[str, Any]]) -> list[tuple[Any, ...]
                     "RAW_UNADJUSTED",
                 )
             )
-    if set(scenarios) != set(_D0_PREDICATES):
+    if not scenarios or (require_complete and set(scenarios) != set(_D0_PREDICATES)):
         raise StaticResearchPgError(
             "STATIC_D0_SCENARIO_SET_INCOMPLETE", "D0需同时闭合启动与恢复场景"
         )
     return rows
+
+
+def persist_static_d0_reference_scenario(
+    config: Mapping[str, Any], *, scenario: str, page: Mapping[str, Any]
+) -> dict[str, Any]:
+    """只保存跨日消费者明确需要的一类完整D0参考事实。"""
+    if scenario not in _D0_PREDICATES or page.get("scenario") != scenario:
+        raise StaticResearchPgError(
+            "STATIC_D0_SCENARIO_INVALID", "D0参考事实场景与计算结果不一致"
+        )
+    rows = _d0_rows({scenario: page}, require_complete=False)
+    first = rows[0]
+    predicate, params = _scope_predicate(_D0_TABLE, _D0_COLUMNS, first)
+    for attempt in range(5):
+        try:
+            inserted = {}
+            with source_raw._transaction(
+                config, write=True, statement_timeout_ms=30000
+            ) as (_, cursor, _connection_identity):
+                cursor.execute("SELECT to_regclass(%s) IS NOT NULL", (_D0_TABLE,))
+                if cursor.fetchone() != (True,):
+                    raise StaticResearchPgError(
+                        "STATIC_RESEARCH_MIGRATION_MISSING",
+                        "0018静态研究D0表未完成迁移",
+                    )
+                scoped = f"{predicate} AND scenario=%s"
+                scoped_params = (*params, scenario)
+                cursor.execute(
+                    f"SELECT {', '.join(_D0_COLUMNS)} FROM {_D0_TABLE} "
+                    f"WHERE {scoped} ORDER BY source_symbol, producer_version, calendar_revision",
+                    scoped_params,
+                )
+                existing = cursor.fetchall()
+                if existing and (
+                    len(existing) != len(rows)
+                    or any(
+                        not _row_matches(expected, actual)
+                        for expected, actual in zip(rows, existing, strict=True)
+                    )
+                ):
+                    raise StaticResearchPgError(
+                        "STATIC_D0_REFERENCE_CONTENT_CONFLICT",
+                        "相同D0参考事实业务键已有不同或不完整内容",
+                    )
+                if not existing:
+                    inserted[_D0_TABLE] = _insert_rows(
+                        cursor, _D0_TABLE, _D0_COLUMNS, _D0_KEY, rows
+                    )
+                cursor.execute(
+                    f"SELECT {', '.join(_D0_COLUMNS)} FROM {_D0_TABLE} "
+                    f"WHERE {scoped} ORDER BY source_symbol, producer_version, calendar_revision",
+                    scoped_params,
+                )
+                actual = cursor.fetchall()
+                if len(actual) != len(rows) or any(
+                    not _row_matches(expected, persisted)
+                    for expected, persisted in zip(rows, actual, strict=True)
+                ):
+                    raise StaticResearchPgError(
+                        "STATIC_D0_REFERENCE_READBACK_MISMATCH",
+                        "D0参考事实事务内独立读回不一致",
+                    )
+            return {
+                "status": "IDEMPOTENT_ALREADY_PRESENT"
+                if existing
+                else "WRITTEN_AND_TYPED_READBACK_VERIFIED",
+                "scenario": scenario,
+                "rows_expected": len(rows),
+                "rows_inserted": inserted,
+                "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED"
+                if existing
+                else None,
+                "transaction": "SERIALIZABLE_ATOMIC_SINGLE_D0_REFERENCE_SCENARIO",
+                "database_write_attempted": not bool(existing),
+                "ddl_executed": False,
+                "dml_executed": not bool(existing),
+            }
+        except source_raw.RawSourcePgError as error:
+            if getattr(error.__cause__, "sqlstate", None) != "40001" or attempt == 4:
+                raise
+            time.sleep(random.uniform(0.1, 0.3) * (2**attempt))
+    raise AssertionError("不可达的D0参考事实事务重试状态")
 
 
 def _field(facts: Mapping[str, Any], name: str) -> Mapping[str, Any]:

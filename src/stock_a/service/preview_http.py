@@ -45,6 +45,7 @@ from stock_a.storage.postgres.research_facts import (
 from stock_a.storage.postgres.research_day_facts import (
     ResearchDayPgError,
     read_source_research_day,
+    read_source_research_day_scope,
 )
 from stock_a.contracts import PriceProfileContractError, load_price_profile_contract
 from stock_a.application.runtime_config import (
@@ -1568,12 +1569,24 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             )
             previous_sector_pulse["target_session"] = before_session.isoformat()
             previous_sector_pulse["source_version"] = before_source
-            sector_pulse_transition = read_source_sector_pulse_transitions(
-                self.preview_server.state.config,
-                previous_result=previous_sector_pulse,
-                target_result=sector_pulse,
-                calendar_identity=calendar_identity,
-            )
+            if previous_sector_pulse.get("status") != "AVAILABLE":
+                sector_pulse_transition = {
+                    "status": "NOT_COMPUTED",
+                    "reason_codes": [
+                        "PULSE_TRANSITION_PREVIOUS_DAY_FACTS_NOT_COMPUTED"
+                    ],
+                    "by_kind": {},
+                    "database_write_attempted": False,
+                    "ddl_executed": False,
+                    "dml_executed": False,
+                }
+            else:
+                sector_pulse_transition = read_source_sector_pulse_transitions(
+                    self.preview_server.state.config,
+                    previous_result=previous_sector_pulse,
+                    target_result=sector_pulse,
+                    calendar_identity=calendar_identity,
+                )
             followup_calendar = _official_calendar(research_cutoff)
             followup_sessions = tuple(followup_calendar["sessions"])
             try:
@@ -1831,6 +1844,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "sector_pulse_status": sector_pulse.get("status", "NOT_COMPUTED"),
             "sector_pulse_transition_status": sector_pulse_transition.get(
                 "status", "NOT_COMPUTED"
+            ),
+            "sector_pulse_transition_reason_codes": sector_pulse_transition.get(
+                "reason_codes", []
             ),
             "sector_pulse_followup_status": sector_pulse_followup.get(
                 "status", "NOT_COMPUTED"
@@ -2961,16 +2977,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 _require_research_cutoff(
                     target, self.preview_server.state.research_cutoff
                 )
-                try:
-                    _resolved_target, sessions, calendar_revision = (
-                        resolve_pg_history_window(target.isoformat(), 75)
-                    )
-                except ResearchEntryError as error:
-                    raise PreviewHttpError(409, error.code, str(error)) from error
                 catalog = read_tdx_sector_source_snapshot_catalog(
                     self.preview_server.state.config
                 )
                 profile_observation = None
+                history_session_count = 75
+                d1_history_session_count = None
                 if "source_package_id" in values:
                     source_package_id = _package_id(values["source_package_id"])
                     source_context = read_source_version_context(
@@ -2994,6 +3006,59 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "reason_code": error.code,
                             "reason": str(error),
                         }
+                    selection_value = (
+                        profile_observation.get("profile_revision_selection")
+                        if isinstance(profile_observation, Mapping)
+                        else None
+                    )
+                    selection = (
+                        selection_value if isinstance(selection_value, Mapping) else {}
+                    )
+                    selected_revision_value = (
+                        profile_observation.get("selected_revision")
+                        if isinstance(profile_observation, Mapping)
+                        else None
+                    )
+                    selected_revision = (
+                        selected_revision_value
+                        if isinstance(selected_revision_value, Mapping)
+                        else {}
+                    )
+                    requested_min = selected_revision.get(
+                        "min_history_requested_sessions"
+                    )
+                    requested_max = selected_revision.get(
+                        "max_history_requested_sessions"
+                    )
+                    stored_min = selected_revision.get("min_history_stored_sessions")
+                    stored_max = selected_revision.get("max_history_stored_sessions")
+                    if (
+                        selection.get("candidate_revision_count") == 1
+                        and selection.get("current_version_match_count") == 1
+                        and selection.get("selected_version_match") is True
+                        and type(requested_min) is int
+                        and requested_min == requested_max == stored_min == stored_max
+                        and 1 <= requested_min <= 75
+                    ):
+                        history_session_count = requested_min
+                    try:
+                        d1_scope = read_source_research_day_scope(
+                            self.preview_server.state.config,
+                            target_session=target,
+                            source_package_id=source_package_id,
+                        )
+                    except ResearchDayPgError as error:
+                        raise PreviewHttpError(409, error.code, str(error)) from error
+                    if d1_scope.get("status") == "SAVED_SCOPE_UNIQUE":
+                        d1_history_session_count = d1_scope["d1_history_session_count"]
+                try:
+                    _resolved_target, sessions, calendar_revision = (
+                        resolve_pg_history_window(
+                            target.isoformat(), history_session_count
+                        )
+                    )
+                except ResearchEntryError as error:
+                    raise PreviewHttpError(409, error.code, str(error)) from error
                 snapshots = []
                 for snapshot in catalog["snapshots"]:
                     observed = datetime.fromisoformat(snapshot["observed_at"])
@@ -3021,7 +3086,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             ].isoformat(),
                             "target_session": target.isoformat(),
                             "pg_history_session_count": min(
-                                75, event_session_count + 23
+                                history_session_count, event_session_count + 23
                             ),
                         }
                     )
@@ -3035,6 +3100,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "previous_session": sessions[-2].isoformat(),
                         "source_history_start": sessions[0].isoformat(),
                         "source_history_session_count": len(sessions),
+                        "d1_history_session_count": d1_history_session_count,
                         "profile_observation": profile_observation,
                         "last_service_error": self.preview_server.state.last_service_error,
                         "window_options": window_options,
@@ -3674,7 +3740,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/source-symbol/raw-periods":
                 values = _query(
                     self.path,
-                    {"target_session", "source_package_id", "symbol"},
+                    {"target_session", "source_package_id", "symbol", "session_count"},
                 )
                 self._raw_period_request_context = {
                     "target_session": values.get("target_session"),
@@ -3685,7 +3751,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "identity_status": "REQUEST_NOT_RESOLVED",
                 }
                 required = {"target_session", "source_package_id", "symbol"}
-                if set(values) != required:
+                if not required.issubset(values) or set(values) - required - {
+                    "session_count"
+                }:
                     raise PreviewHttpError(
                         400,
                         "RAW_PERIOD_QUERY_REQUIRED",
@@ -3697,8 +3765,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 source_package_id = _package_id(values["source_package_id"])
                 symbol = _symbol(values["symbol"])
+                session_count = _positive_int(
+                    _nonnegative_int(
+                        values.get("session_count", "75"), "session_count", 75
+                    )
+                    or 0,
+                    "session_count",
+                    75,
+                )
                 resolved_target, sessions, calendar_revision = (
-                    resolve_pg_history_window(target.isoformat(), 75)
+                    resolve_pg_history_window(target.isoformat(), session_count)
                 )
                 if resolved_target != target:
                     raise PreviewHttpError(

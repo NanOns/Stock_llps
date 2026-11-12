@@ -127,6 +127,11 @@ def register_commands(commands):
         help="只检查官网元数据，或下载并验证完整ZIP，默认inspect",
     )
     vipdata.add_argument(
+        "--retain-package",
+        action="store_true",
+        help="下载校验后保留在G盘临时目录，供source-vipdata-persist显式消费；用后清理",
+    )
+    vipdata.add_argument(
         "--target-session", required=True, help="必填目标正式交易会话，格式YYYY-MM-DD"
     )
     vipdata.add_argument(

@@ -550,7 +550,7 @@ def evaluate_raw_period_trend(
     handoff = ProfileHandoff(
         inputs={diagnostic_input_id: supplied},
         target_session=target_session,
-        source_cutoff=target_session.isoformat(),
+        source_cutoff=source_cutoff,
         target_coordinate_id=coordinate_id,
         expected_windows={diagnostic_input_id: window},
         expected_context={diagnostic_input_id: context},

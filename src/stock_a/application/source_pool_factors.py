@@ -135,7 +135,7 @@ def read_source_pool_rps(
                 histories[symbol] = observations
                 members.append(symbol)
                 all_coordinates[symbol] = PriceCoordinate(
-                    symbol, target_session, "RAW_UNADJUSTED", source_package_id
+                    symbol, target_session, "RAW_UNADJUSTED", str(source_package_id)
                 )
             if page["next_offset"] is None:
                 break
@@ -175,7 +175,7 @@ def read_source_pool_rps(
                 return_start_date=window[-1 - period],
                 universe_date=end,
                 universe_id="SOURCE_POOL_NON_PIT_EXPLORATORY",
-                universe_revision=source_package_id,
+                universe_revision=str(source_package_id),
                 producer_version="CORE_RAW_SOURCE_RPS_R1",
                 universe_members=members,
                 returns=returns,

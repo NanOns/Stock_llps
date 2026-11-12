@@ -422,7 +422,7 @@ async function selectDate(target_session) {
     void loadExtra(activePage);
   try {
     const c = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session })}`,
+      `/api/preview/sector-change-context?${new URLSearchParams({ target_session, source_package_id })}`,
       undefined,
       controller.signal,
     );
@@ -443,6 +443,7 @@ async function selectDate(target_session) {
       event_window_start: c.source_history_start,
       pg_history_session_count: c.source_history_session_count,
       stock_history_session_count: c.source_history_session_count,
+      d1_history_session_count: c.d1_history_session_count,
       research_cutoff: c.research_cutoff,
       contextReady: true,
     });
@@ -486,8 +487,8 @@ async function resolveProfileForDate(c, token, snapshotText, signal) {
     const observation = detail.profile_observation;
     const selection = observation?.profile_revision_selection;
     const revision =
-      selection?.selected_semantics_match &&
-      selection?.current_semantics_match_count === 1
+      selection?.selected_version_match === true &&
+      selection?.current_version_match_count === 1
         ? selection.selected_profile_revision
         : null;
     const matches = state.profiles.filter(
@@ -1862,6 +1863,7 @@ async function openStock(symbol, row = {}) {
       target_session: c.target_session,
       source_package_id: c.source_package_id,
       symbol,
+      session_count: c.stock_history_session_count,
     });
     const profileQuery = new URLSearchParams({
       target_session: c.target_session,

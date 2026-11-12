@@ -38,8 +38,14 @@ from stock_a.domain.research_day_facts import (
 from stock_a.storage.postgres.research_day_facts import (
     persist_source_research_day,
 )
-from stock_a.storage.postgres.static_research_facts import persist_static_research_day
-from stock_a.storage.postgres.source_raw import read_raw_daily_catalog
+from stock_a.storage.postgres.static_research_facts import (
+    persist_static_d0_reference_scenario,
+    persist_static_research_day,
+)
+from stock_a.storage.postgres.source_raw import (
+    read_raw_daily_catalog,
+    read_source_version_context,
+)
 
 
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
@@ -67,6 +73,121 @@ class SourceResearchDayError(ValueError):
     def __init__(self, code: str, message: str):
         self.code = code
         super().__init__(message)
+
+
+def run_source_d0_launch_reference_day(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    source_package_id: int,
+    persist: bool,
+) -> dict[str, Any]:
+    """只为相邻会话消费者生产所需的LAUNCH_CONFIRM前日D0事实。"""
+    if persist is not True:
+        raise SourceResearchDayError(
+            "D0_REFERENCE_PERSIST_REQUIRED", "D0参考事实写入必须显式指定持久化"
+        )
+    if (
+        target_session > research_cutoff
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+    ):
+        raise SourceResearchDayError(
+            "D0_REFERENCE_SCOPE_INVALID", "D0参考事实日期或来源包编号无效"
+        )
+    calendar = _official_calendar(target_session)
+    sessions = calendar["sessions"]
+    if target_session not in sessions or sessions.index(target_session) == 0:
+        raise SourceResearchDayError(
+            "D0_REFERENCE_SESSION_INVALID", "D0参考日必须是有前序官方会话的交易日"
+        )
+    versions = []
+    offset = 0
+    while True:
+        catalog = read_raw_daily_catalog(
+            config,
+            max_target_session=research_cutoff,
+            offset=offset,
+            limit=200,
+        )
+        versions.extend(catalog["versions"])
+        if catalog["next_offset"] is None:
+            break
+        offset = catalog["next_offset"]
+    target_versions = [
+        item for item in versions if item["session_date"] == target_session.isoformat()
+    ]
+    if (
+        len(target_versions) != 1
+        or target_versions[0]["source_package_id"] != source_package_id
+        or target_versions[0]["version_status"] != "CLOSED"
+        or target_versions[0]["row_count"] != target_versions[0]["expected_row_count"]
+    ):
+        raise SourceResearchDayError(
+            "D0_REFERENCE_RAW_VERSION_UNAVAILABLE",
+            "D0参考日没有唯一、同包且闭合的已存PG Raw来源版本",
+        )
+    source = read_source_version_context(
+        config,
+        target_session=target_session,
+        source_package_id=source_package_id,
+    )
+    page = query_source_d0_raw_launch(
+        config,
+        scenario="LAUNCH_CONFIRM",
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        source_package_id=source_package_id,
+        offset=0,
+        limit=5000,
+    )
+    source_version = page.get("source_version", {})
+    expected_count = target_versions[0]["row_count"]
+    if (
+        source.get("status") != "AVAILABLE"
+        or source_version.get("source_capture_id") != source.get("source_capture_id")
+        or source_version.get("source_package_id") != source_package_id
+        or page.get("target_session") != target_session.isoformat()
+        or page.get("source_pool", {}).get("source_count") != expected_count
+        or page.get("source_pool", {}).get("scenario_state_partition_closed")
+        is not True
+        or page.get("selection", {}).get("matched_count") != expected_count
+        or page.get("selection", {}).get("next_offset") is not None
+        or len(page.get("results", [])) != expected_count
+    ):
+        raise SourceResearchDayError(
+            "D0_REFERENCE_PARTITION_OPEN",
+            "D0参考事实未与闭合的同包Raw来源捕获及完整分母一致",
+        )
+    persistence = persist_static_d0_reference_scenario(
+        config, scenario="LAUNCH_CONFIRM", page=page
+    )
+    return {
+        "status": persistence["status"],
+        "target_session": target_session.isoformat(),
+        "previous_session": sessions[sessions.index(target_session) - 1].isoformat(),
+        "research_cutoff": research_cutoff.isoformat(),
+        "source_package_id": source_package_id,
+        "source_capture_id": source.get("source_capture_id"),
+        "scenario": "LAUNCH_CONFIRM",
+        "rows_expected": persistence["rows_expected"],
+        "rows_inserted": persistence["rows_inserted"],
+        "persistence": persistence,
+        "execution": {
+            "database_target": "127.0.0.1:5432/stock_a",
+            "database_schema": "stock",
+            "database_role": "stock_a",
+            "transaction": persistence["transaction"],
+            "only_requested_d0_scenario_written": True,
+            "seed_written": False,
+            "d1_written": False,
+            "source_after_target_read": False,
+            "database_write_attempted": persistence["database_write_attempted"],
+            "ddl_executed": False,
+            "dml_executed": persistence["dml_executed"],
+        },
+    }
 
 
 def _validate_static_history_count(count: int | None) -> None:
@@ -376,7 +497,7 @@ def run_source_static_research_day(
     history_session_count: int | None = None,
     worker_count: int = 1,
     include_sector_pulse: bool = False,
-    sector_snapshot_ids: Mapping[str, str] | None = None,
+    sector_snapshot_ids: Mapping[str, int] | None = None,
 ) -> dict[str, Any]:
     """由现役单日生产链写入静态事实，可附加双快照板块跨日脉冲。"""
     if persist is not True:
@@ -391,7 +512,7 @@ def run_source_static_research_day(
                 not isinstance(sector_snapshot_ids, Mapping)
                 or set(sector_snapshot_ids) != {"INDUSTRY", "CONCEPT"}
                 or not all(
-                    isinstance(value, str) and value
+                    type(value) is int and value > 0
                     for value in sector_snapshot_ids.values()
                 )
                 or sector_snapshot_ids["INDUSTRY"] == sector_snapshot_ids["CONCEPT"]

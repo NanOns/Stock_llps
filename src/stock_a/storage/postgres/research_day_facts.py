@@ -1552,8 +1552,81 @@ def read_source_research_day(
         }
 
 
+def read_source_research_day_scope(
+    config: Mapping[str, Any], *, target_session: date, source_package_id: int
+) -> dict[str, Any]:
+    """读取单日D1 typed事实的唯一已保存窗口键，不计算或修改事实。"""
+    if (
+        type(target_session) is not date
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+    ):
+        raise ResearchDayPgError("RESEARCH_DAY_QUERY_INVALID", "PG研究事实范围键无效")
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _connection_identity,
+    ):
+        cursor.execute(
+            "SELECT to_regclass('source_d1_structure_day_facts') IS NOT NULL"
+        )
+        if cursor.fetchone() != (True,):
+            return {
+                "status": "NOT_COMPUTED",
+                "target_session": target_session.isoformat(),
+                "source_package_id": source_package_id,
+                "d1_history_session_count": None,
+                "scope_count": 0,
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "dml_executed": False,
+            }
+        cursor.execute(
+            "SELECT DISTINCT d1_history_session_count, target_capture_id, "
+            "calendar_revision, producer_contract, producer_version, "
+            "material_change_contract FROM source_d1_structure_day_facts "
+            "WHERE target_session=%s AND source_package_id=%s "
+            "ORDER BY d1_history_session_count, target_capture_id, calendar_revision, "
+            "producer_contract, producer_version, material_change_contract",
+            (target_session, source_package_id),
+        )
+        scopes = cursor.fetchall()
+    if not scopes:
+        return {
+            "status": "NOT_COMPUTED",
+            "target_session": target_session.isoformat(),
+            "source_package_id": source_package_id,
+            "d1_history_session_count": None,
+            "scope_count": 0,
+            "database_write_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+        }
+    if len(scopes) != 1:
+        raise ResearchDayPgError(
+            "RESEARCH_DAY_SCOPE_AMBIGUOUS",
+            "同一目标日和来源包对应多个D1静态事实读取键",
+        )
+    return {
+        "status": "SAVED_SCOPE_UNIQUE",
+        "target_session": target_session.isoformat(),
+        "source_package_id": source_package_id,
+        "d1_history_session_count": scopes[0][0],
+        "target_capture_id": scopes[0][1],
+        "calendar_revision": scopes[0][2],
+        "producer_contract": scopes[0][3],
+        "producer_version": scopes[0][4],
+        "material_change_contract": scopes[0][5],
+        "scope_count": 1,
+        "database_write_attempted": False,
+        "ddl_executed": False,
+        "dml_executed": False,
+    }
+
+
 __all__ = [
     "ResearchDayPgError",
     "persist_source_research_day",
     "read_source_research_day",
+    "read_source_research_day_scope",
 ]

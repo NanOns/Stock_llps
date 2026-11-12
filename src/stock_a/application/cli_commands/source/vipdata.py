@@ -535,6 +535,19 @@ def _run_vipdata_revision_compare(args: argparse.Namespace) -> int:
 
 
 def _run_source_vipdata(args: argparse.Namespace) -> int:
+    if getattr(args, "retain_package", False) and args.mode != "download-verify":
+        _emit(
+            {
+                "ok": False,
+                "code": "PACKAGE_RETENTION_MODE_INVALID",
+                "message": "仅download-verify模式可保留已校验来源包",
+                "network_action": "NOT_STARTED",
+                "database_io_attempted": False,
+                "database_write_attempted": False,
+            },
+            error=True,
+        )
+        return _EXIT_ARGUMENT
     runtime_config, _config_path = _load_runtime_config()
     try:
         source_policy = runtime_config["source_policy"]
@@ -614,7 +627,8 @@ def _consume_source_vipdata(
     try:
         return _consume_source_vipdata_inner(args, package, result)
     finally:
-        cleanup_vipdata_package(package)
+        if not getattr(args, "retain_package", False):
+            cleanup_vipdata_package(package)
 
 
 def _consume_source_vipdata_inner(
@@ -622,7 +636,10 @@ def _consume_source_vipdata_inner(
     package: Any,
     result: dict[str, Any],
 ) -> int:
-    result["package"] = package_dict(package)
+    package_details = package_dict(package)
+    if getattr(args, "retain_package", False):
+        package_details["retained_package_path"] = str(package.file_path)
+    result["package"] = package_details
     result["validated_day_entry_count"] = len(package.day_entries)
     result["entry_count_by_market"] = dict(package.entry_count_by_market)
     result["core_consumer"] = {
