@@ -2773,8 +2773,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             50,
                         ),
                         symbol=symbol,
-                        industry_snapshot_id=values.get("industry_snapshot_id"),
-                        concept_snapshot_id=values.get("concept_snapshot_id"),
+                        industry_snapshot_id=(
+                            _snapshot_id(values["industry_snapshot_id"])
+                            if "industry_snapshot_id" in values
+                            else None
+                        ),
+                        concept_snapshot_id=(
+                            _snapshot_id(values["concept_snapshot_id"])
+                            if "concept_snapshot_id" in values
+                            else None
+                        ),
                         board_kind=values.get("board_kind"),
                         board_native_id=values.get("board_native_id"),
                         structure_type=values.get("structure_type"),

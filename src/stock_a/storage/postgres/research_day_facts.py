@@ -783,6 +783,25 @@ def _persist_source_research_day_once(
     ):
         _ensure_tables(cursor)
         _verify_raw_source(cursor, facts)
+        # 在本事务写入之前读取范围，避免把刚插入的行误认作历史半批。
+        preexisting = []
+        for (table, columns, _key), rows in zip(
+            _TABLES[:2], (d0_rows, d1_rows), strict=True
+        ):
+            predicate, params = _scope_predicate(table, facts)
+            existing = _select_rows(cursor, table, columns, predicate, params)
+            if existing and (
+                len(existing) != len(rows)
+                or any(
+                    not _row_matches(expected, actual)
+                    for expected, actual in zip(rows, existing, strict=True)
+                )
+            ):
+                raise ResearchDayPgError(
+                    "RESEARCH_DAY_CONTENT_CONFLICT",
+                    "相同D0/D1业务键已有不同或不完整事实",
+                )
+            preexisting.append(existing)
         inserted["source_d0_launch_day_facts"] = _insert_rows(
             cursor,
             "source_d0_launch_day_facts",
@@ -823,18 +842,15 @@ def _persist_source_research_day_once(
             _anchor_rows(facts, structure_ids), _ANCHOR_COLUMNS, _ANCHOR_KEY
         )
         expected_rows = (d0_rows, d1_rows, anchor_rows)
+        predicate, params = _scope_predicate(
+            _TABLES[2][0], facts, tuple(structure_ids.values())
+        )
+        preexisting.append(
+            _select_rows(cursor, _TABLES[2][0], _ANCHOR_COLUMNS, predicate, params)
+        )
         existing_scopes = []
-        any_existing = False
-        for index, ((table, columns, _key), rows) in enumerate(
-            zip(_TABLES, expected_rows, strict=True)
-        ):
-            predicate, params = (
-                _scope_predicate(table, facts, tuple(structure_ids.values()))
-                if index == 2
-                else _scope_predicate(table, facts)
-            )
-            existing = _select_rows(cursor, table, columns, predicate, params)
-            any_existing = any_existing or bool(existing)
+        any_existing = any(preexisting)
+        for existing, rows in zip(preexisting, expected_rows, strict=True):
             if existing and len(existing) != len(rows):
                 raise ResearchDayPgError(
                     "RESEARCH_DAY_PARTIAL_EXISTING_SCOPE",
@@ -884,7 +900,7 @@ def _persist_source_research_day_once(
         if all(existing_scopes)
         else "WRITTEN_AND_TYPED_READBACK_VERIFIED",
         "rows_expected": {
-            table.rsplit(".", 1)[1]: len(rows)
+            table.rsplit(".", 1)[-1]: len(rows)
             for (table, _columns, _key), rows in zip(
                 _TABLES, expected_rows, strict=True
             )

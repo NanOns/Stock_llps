@@ -23,7 +23,7 @@ from stock_a.application.source_d0_raw import _official_calendar
 from stock_a.storage.postgres.source_raw import read_raw_daily_catalog
 
 
-def _range_sessions(config, start: date, end: date, cutoff: date, package: str):
+def _range_sessions(config, start: date, end: date, cutoff: date, package: int):
     """按已存目录与官方日历构造范围；不猜测同日多来源版本。"""
     if start > end or end > cutoff:
         raise ValueError("日期范围必须满足起始日不晚于目标日及研究截止日")
@@ -79,10 +79,10 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
             or snapshot_ids["INDUSTRY"] == snapshot_ids["CONCEPT"]
         ):
             raise ValueError(
-                "--include-sector-pulse 仅用于单日--static-only，并须提供不同的行业与GN快照UUID"
+                "--include-sector-pulse 仅用于单日--static-only，并须提供不同的行业与GN数字快照ID"
             )
         if snapshot_ids_supplied and not args.include_sector_pulse:
-            raise ValueError("板块快照UUID只能与 --include-sector-pulse 同时使用")
+            raise ValueError("板块数字快照ID只能与 --include-sector-pulse 同时使用")
         sector_snapshot_ids = snapshot_ids if args.include_sector_pulse else None
         config, config_path = load_runtime_config()
         if args.static_only and not args.start_session:
