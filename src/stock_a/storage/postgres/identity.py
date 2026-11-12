@@ -68,6 +68,10 @@ def _valid_uuid(value: Any) -> bool:
         return False
 
 
+def _valid_numeric_id(value: Any) -> bool:
+    return type(value) is int and 0 < value <= 9223372036854775807
+
+
 def _safe_compare(actual: Any, expected: Any, check: str) -> IdentityCheck:
     if check == "server_address" and expected == "127.0.0.1":
         if _is_fixed_server_address(actual):
@@ -152,17 +156,27 @@ def evaluate_identity(
     checks.append(
         _safe_compare(actual.get("application_id"), "STOCK_A", "application_id")
     )
+    numeric = "project_id" in expected_app
+    project_key = "project_id" if numeric else "project_uuid"
+    instance_key = "instance_id" if numeric else "instance_uuid"
+    config_instance_key = (
+        "deployment_instance_id" if numeric else "deployment_instance_uuid"
+    )
     checks.append(
         _safe_compare(
-            actual.get("project_uuid"), expected_app.get("project_uuid"), "project_uuid"
+            actual.get(project_key), expected_app.get(project_key), project_key
         )
     )
-    expected_instance = expected_app.get("deployment_instance_uuid")
+    expected_instance = expected_app.get(config_instance_key)
     deployment_applied = expected_app.get("deployment_applied") is True
-    if not deployment_applied or not _valid_uuid(expected_instance):
+    if not deployment_applied or not (
+        _valid_numeric_id(expected_instance)
+        if numeric
+        else _valid_uuid(expected_instance)
+    ):
         checks.append(
             IdentityCheck(
-                "deployment_instance_uuid",
+                config_instance_key,
                 "BLOCKED",
                 reason="配置仍为未绑定占位，须经显式启用任务绑定",
             )
@@ -170,9 +184,9 @@ def evaluate_identity(
     else:
         checks.append(
             _safe_compare(
-                actual.get("instance_uuid"),
+                actual.get(instance_key),
                 expected_instance,
-                "deployment_instance_uuid",
+                config_instance_key,
             )
         )
     expected_cluster = expected_app.get("cluster_system_identifier")
@@ -342,9 +356,10 @@ def _fetch_business_identity(cursor: Any, *, deadline: float) -> dict[str, Any]:
     identity_table, migration_table = cursor.fetchone()
     identity = None
     if identity_table:
-        cursor.execute("""SELECT application_id, project_uuid::text, instance_uuid::text,
-           cluster_system_identifier, migration_lineage
-           FROM stock.installation_identity WHERE singleton IS TRUE""")
+        cursor.execute("""SELECT application_id, to_jsonb(i)->>'project_uuid',
+           to_jsonb(i)->>'instance_uuid', to_jsonb(i)->>'project_id',
+           to_jsonb(i)->>'instance_id', cluster_system_identifier, migration_lineage
+           FROM stock.installation_identity i WHERE singleton IS TRUE""")
         vals = cursor.fetchone()
         if vals:
             identity = dict(
@@ -353,12 +368,26 @@ def _fetch_business_identity(cursor: Any, *, deadline: float) -> dict[str, Any]:
                         "application_id",
                         "project_uuid",
                         "instance_uuid",
+                        "project_id",
+                        "instance_id",
                         "cluster_system_identifier",
                         "migration_lineage",
                     ),
                     vals,
                 )
             )
+            for key in ("project_id", "instance_id"):
+                if identity[key] is not None:
+                    identity[key] = int(identity[key])
+            if (
+                identity["project_id"] is not None
+                and identity["instance_id"] is not None
+            ):
+                identity.pop("project_uuid")
+                identity.pop("instance_uuid")
+            else:
+                identity.pop("project_id")
+                identity.pop("instance_id")
     migration_version = None
     if migration_table:
         _check_deadline(deadline)
@@ -1223,6 +1252,8 @@ def inspect_postgres(
                         "application_id",
                         "project_uuid",
                         "deployment_instance_uuid",
+                        "project_id",
+                        "deployment_instance_id",
                         "installation_cluster_system_identifier",
                     }
                     else item

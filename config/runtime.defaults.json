@@ -163,12 +163,12 @@
   },
   "application_identity": {
     "application_id": "STOCK_A",
-    "project_uuid": "bb03f819-ad77-4912-a4c1-d8fb015c03c0",
     "migration_lineage": "STOCK_A_INITIAL_R1",
-    "deployment_instance_uuid": "ff29a9f9-074e-4e37-b64f-e04db9ec933c",
     "cluster_system_identifier": "7688198230782699460",
     "deployment_applied": true,
     "business_login": "stock_a",
-    "migration_version": 25
+    "migration_version": 26,
+    "project_id": 1,
+    "deployment_instance_id": 1
   }
 }

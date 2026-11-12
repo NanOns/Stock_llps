@@ -83,9 +83,13 @@ def _configuration_snapshot(
         str(Path(item).resolve())
         for item in config["source_policy"]["configured_tdx_source_roots"]
     ]
+    numeric_identity = "project_id" in app
+    instance_key = (
+        "deployment_instance_id" if numeric_identity else "deployment_instance_uuid"
+    )
     bound = (
         app["deployment_applied"] is True
-        and app["deployment_instance_uuid"] != "BIND_DURING_EXPLICIT_ENABLEMENT"
+        and app[instance_key] != "BIND_DURING_EXPLICIT_ENABLEMENT"
         and app["cluster_system_identifier"] != "BIND_DURING_EXPLICIT_ENABLEMENT"
     )
     return {
@@ -100,11 +104,13 @@ def _configuration_snapshot(
         "source_status": "NOT_CONFIGURED" if not roots else "DECLARED_NOT_VERIFIED",
         "database": {
             "application_id": app["application_id"],
-            "project_uuid": app["project_uuid"],
+            "project_id" if numeric_identity else "project_uuid": app[
+                "project_id" if numeric_identity else "project_uuid"
+            ],
             "database": config["postgresql"]["database"],
             "schema": config["postgresql"]["business_schema"],
             "deployment_applied": app["deployment_applied"],
-            "instance_uuid": app["deployment_instance_uuid"],
+            "instance_id" if numeric_identity else "instance_uuid": app[instance_key],
             "cluster_system_identifier": app["cluster_system_identifier"],
             "identity_status": "DECLARED_BOUND_NOT_CONNECTED"
             if bound

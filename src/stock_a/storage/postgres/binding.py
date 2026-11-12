@@ -37,6 +37,7 @@ _MIGRATION_FILES = (
     "0023_r06_pulse_remove_legacy_content_ids.sql",
     "0024_r06_profile_window_revision.sql",
     "0025_r06_profile_revision_encoding.sql",
+    "0026_numeric_installation_identity.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -61,6 +62,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R06_STOCK_A_PG_ID_SHA_KEY_SIMPLIFICATION_R1": frozenset({22}),
     "R06_PG_EMPTY_SCHEMA_CODE_CHAIN_REPAIR_R1": frozenset({23, 24}),
     "R06_PROFILE_REVISION_LENGTH_CHAIN_R1": frozenset({25}),
+    "R06_NUMERIC_INSTALLATION_IDENTITY_R1": frozenset({26}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -179,6 +181,7 @@ _RELATIONS_BY_MIGRATION_COUNT[22] = (
 _RELATIONS_BY_MIGRATION_COUNT[23] = _RELATIONS_BY_MIGRATION_COUNT[22]
 _RELATIONS_BY_MIGRATION_COUNT[24] = _RELATIONS_BY_MIGRATION_COUNT[23]
 _RELATIONS_BY_MIGRATION_COUNT[25] = _RELATIONS_BY_MIGRATION_COUNT[24]
+_RELATIONS_BY_MIGRATION_COUNT[26] = _RELATIONS_BY_MIGRATION_COUNT[25]
 
 
 class BindingRefused(Exception):
@@ -274,10 +277,19 @@ def _validate_application_identity(
 ) -> None:
     if not isinstance(actual, dict):
         raise BindingRefused("迁移前缺少可核对的安装身份单例")
+    numeric = "project_id" in expected
     for field, expected_value in (
         ("application_id", "STOCK_A"),
-        ("project_uuid", expected.get("project_uuid")),
-        ("instance_uuid", expected.get("deployment_instance_uuid")),
+        (
+            "project_id" if numeric else "project_uuid",
+            expected.get("project_id" if numeric else "project_uuid"),
+        ),
+        (
+            "instance_id" if numeric else "instance_uuid",
+            expected.get(
+                "deployment_instance_id" if numeric else "deployment_instance_uuid"
+            ),
+        ),
         ("cluster_system_identifier", expected.get("cluster_system_identifier")),
         ("migration_lineage", expected.get("migration_lineage")),
     ):
@@ -318,10 +330,18 @@ def _connection_parameters() -> dict[str, Any]:
 
 
 def _update_runtime_config(
-    config_path: Path, config: dict[str, Any], migration_version: int
+    config_path: Path,
+    config: dict[str, Any],
+    migration_version: int,
+    numeric_identity: tuple[int, int] | None = None,
 ) -> None:
     updated = json.loads(json.dumps(config))
     updated["application_identity"]["migration_version"] = migration_version
+    if numeric_identity is not None:
+        app = updated["application_identity"]
+        app.pop("project_uuid", None)
+        app.pop("deployment_instance_uuid", None)
+        app["project_id"], app["deployment_instance_id"] = numeric_identity
     encoded = (
         json.dumps(updated, ensure_ascii=False, indent=2, allow_nan=False) + "\n"
     ).encode("utf-8")
@@ -366,8 +386,16 @@ def apply_stock_migration(
     if (
         not isinstance(expected_identity, dict)
         or expected_identity.get("deployment_applied") is not True
-        or not identity._valid_uuid(expected_identity.get("project_uuid"))
-        or not identity._valid_uuid(expected_identity.get("deployment_instance_uuid"))
+        or not (
+            identity._valid_numeric_id(expected_identity.get("project_id"))
+            if "project_id" in expected_identity
+            else identity._valid_uuid(expected_identity.get("project_uuid"))
+        )
+        or not (
+            identity._valid_numeric_id(expected_identity.get("deployment_instance_id"))
+            if "project_id" in expected_identity
+            else identity._valid_uuid(expected_identity.get("deployment_instance_uuid"))
+        )
         or not isinstance(expected_identity.get("cluster_system_identifier"), str)
         or not expected_identity["cluster_system_identifier"].isdecimal()
         or not isinstance(expected_identity.get("migration_lineage"), str)
@@ -401,6 +429,7 @@ def apply_stock_migration(
         ),
     )
     transaction_committed = False
+    numeric_identity = None
     active_migration_source: bytes | None = None
     try:
         with psycopg.connect(**parameters) as connection:
@@ -471,14 +500,24 @@ def apply_stock_migration(
                 cursor.execute(
                     "LOCK TABLE stock.installation_identity, stock.migration_ledger IN SHARE ROW EXCLUSIVE MODE"
                 )
-                cursor.execute("""SELECT application_id, project_uuid::text, instance_uuid::text,
+                numeric = "project_id" in expected_identity
+                identity_columns = (
+                    "project_id, instance_id"
+                    if numeric
+                    else "project_uuid::text, instance_uuid::text"
+                )
+                cursor.execute(f"""SELECT application_id, {identity_columns},
                    cluster_system_identifier, migration_lineage
                    FROM stock.installation_identity WHERE singleton IS TRUE FOR UPDATE""")
                 locked_identity = cursor.fetchone()
                 if locked_identity != (
                     "STOCK_A",
-                    expected_identity["project_uuid"],
-                    expected_identity["deployment_instance_uuid"],
+                    expected_identity["project_id" if numeric else "project_uuid"],
+                    expected_identity[
+                        "deployment_instance_id"
+                        if numeric
+                        else "deployment_instance_uuid"
+                    ],
                     expected_identity["cluster_system_identifier"],
                     expected_identity["migration_lineage"],
                 ):
@@ -494,6 +533,16 @@ def apply_stock_migration(
                     mid, lineage, raw = selected[0]
                     active_migration_source = raw
                     cursor.execute(raw.decode("utf-8"))
+                    if mid == 26:
+                        cursor.execute(
+                            "SELECT project_id, instance_id FROM stock.installation_identity WHERE singleton IS TRUE"
+                        )
+                        numeric_identity = cursor.fetchone()
+                        if not numeric_identity or not all(
+                            identity._valid_numeric_id(value)
+                            for value in numeric_identity
+                        ):
+                            raise BindingRefused("数字安装身份生成或读回无效")
                     if mid == 1:
                         cursor.execute(
                             "ALTER TABLE stock.migration_ledger DROP COLUMN IF EXISTS source_sha"
@@ -529,7 +578,9 @@ def apply_stock_migration(
         transaction_committed = True
         if config["application_identity"].get("migration_version") != migration_id:
             try:
-                _update_runtime_config(config_path, config, migration_id)
+                _update_runtime_config(
+                    config_path, config, migration_id, numeric_identity
+                )
             except Exception as error:
                 raise BindingCommittedConfigError(
                     "PG迁移已提交，但runtime.defaults.json迁移版本未同步；修复配置后重试幂等读回"

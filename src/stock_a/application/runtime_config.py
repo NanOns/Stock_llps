@@ -275,15 +275,46 @@ def _validate_config(config: Any) -> None:
             "CONFIG_INVALID", f"通达信官网端点配置无效：{error}"
         ) from error
     app = _require_mapping(root.get("application_identity"), "application_identity")
-    project_uuid = app.get("project_uuid")
-    try:
-        valid_project_uuid = (
-            isinstance(project_uuid, str)
-            and str(uuid.UUID(project_uuid)) == project_uuid.lower()
+    numeric_identity = "project_id" in app
+    if numeric_identity and (
+        "project_uuid" in app or "deployment_instance_uuid" in app
+    ):
+        raise DiagnosticError("CONFIG_INVALID", "数字与旧UUID安装身份不能混用")
+    if (
+        numeric_identity
+        and app.get("deployment_applied") is True
+        and (
+            type(app.get("migration_version")) is not int
+            or app["migration_version"] < 26
         )
-    except (ValueError, AttributeError):
-        valid_project_uuid = False
-    if app.get("application_id") != "STOCK_A" or not valid_project_uuid:
+    ):
+        raise DiagnosticError("CONFIG_INVALID", "数字安装身份要求已应用迁移26")
+    # 仅为已有安装的有序前向迁移读取旧配置；迁移26后使用数字身份。
+    if (
+        not numeric_identity
+        and not (
+            type(app.get("migration_version")) is int
+            and 1 <= app["migration_version"] <= 25
+        )
+        and not (
+            app.get("deployment_applied") is False
+            and app.get("migration_version") == "BIND_DURING_EXPLICIT_ENABLEMENT"
+        )
+    ):
+        raise DiagnosticError("CONFIG_INVALID", "旧安装身份仅供迁移26之前的安装使用")
+    if numeric_identity:
+        value = app.get("project_id")
+        valid_project = type(value) is int and 0 < value <= 9223372036854775807
+    else:
+        project_uuid = app.get("project_uuid")
+        try:
+            valid_project = (
+                isinstance(project_uuid, str)
+                and str(uuid.UUID(project_uuid)) == project_uuid.lower()
+            )
+        except (ValueError, AttributeError):
+            valid_project = False
+    if app.get("application_id") != "STOCK_A" or not valid_project:
         raise DiagnosticError("CONFIG_INVALID", "应用身份声明不完整")
     if type(app.get("deployment_applied")) is not bool:
         raise DiagnosticError("CONFIG_INVALID", "deployment_applied必须是布尔值")
@@ -292,7 +323,9 @@ def _validate_config(config: Any) -> None:
         or not app["migration_lineage"].strip()
     ):
         raise DiagnosticError("CONFIG_INVALID", "应用迁移谱系声明缺失")
-    instance_id = app.get("deployment_instance_uuid")
+    instance_id = app.get(
+        "deployment_instance_id" if numeric_identity else "deployment_instance_uuid"
+    )
     cluster_id = app.get("cluster_system_identifier")
     if app["deployment_applied"] is False:
         if (
@@ -304,13 +337,18 @@ def _validate_config(config: Any) -> None:
                 "CONFIG_INVALID", "未部署状态必须使用明确的实例与簇绑定占位值"
             )
     else:
-        try:
+        if numeric_identity:
             valid_instance = (
-                isinstance(instance_id, str)
-                and str(uuid.UUID(instance_id)) == instance_id.lower()
+                type(instance_id) is int and 0 < instance_id <= 9223372036854775807
             )
-        except (ValueError, AttributeError):
-            valid_instance = False
+        else:
+            try:
+                valid_instance = (
+                    isinstance(instance_id, str)
+                    and str(uuid.UUID(instance_id)) == instance_id.lower()
+                )
+            except (ValueError, AttributeError):
+                valid_instance = False
         if (
             not valid_instance
             or not isinstance(cluster_id, str)
