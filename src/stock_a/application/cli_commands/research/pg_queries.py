@@ -43,6 +43,8 @@ from stock_a.research.entry import (
     research_universe_preview,
     research_universe_pg_history_preview,
 )
+from stock_a.research.entry_core.fields import _render_field
+from stock_a.research.entry_history.support import _decoded_day_from_pg_raw
 from stock_a.application.runtime_config import (
     DiagnosticError,
     _CONFIG_ROOT,
@@ -316,12 +318,10 @@ def _validate_pg_history_args(
             "PG历史模式必须显式声明TDX原值单位未核实版本",
             _EXIT_ARGUMENT,
         )
-    if getattr(args, "include_baostock_evidence", False) or getattr(
-        args, "include_baostock_identity", False
-    ):
+    if getattr(args, "include_baostock_identity", False):
         raise DiagnosticError(
             "PG_HISTORY_EXTERNAL_SOURCE_REJECTED",
-            "PG历史查询是本地只读模式，不触发BaoStock网络请求",
+            "PG历史研究不执行BaoStock身份查询；身份观察须使用独立的有界入口",
             _EXIT_ARGUMENT,
         )
     source_package_id = getattr(args, "pg_source_package_id", None)
@@ -337,6 +337,46 @@ def _validate_pg_history_args(
     )
     config, config_path = _load_runtime_config()
     return config, config_path, target, sessions, source_package_id
+
+
+def _pg_baostock_tdx_target(
+    history_rows: list[dict[str, Any]], *, target: date, unit_version: str
+) -> dict[str, Any]:
+    """从已读PG目标行构造BaoStock单日对照所需的TDX字段。"""
+    row = next(
+        (item for item in history_rows if item.get("session_date") == target), None
+    )
+    decoded = _decoded_day_from_pg_raw(row) if row is not None else None
+    if decoded is None:
+        reason = (
+            (row or {}).get("bar_reason")
+            or (row or {}).get("price_reason")
+            or "PG目标日Raw行缺失"
+        )
+        fields = {
+            name: {"value": None, "quality": "UNKNOWN", "reason": reason}
+            for name in ("open", "high", "low", "close", "amount", "volume")
+        }
+    else:
+        fields = {
+            name: _render_field(value)
+            for name, value in (
+                ("open", decoded.raw_open),
+                ("high", decoded.raw_high),
+                ("low", decoded.raw_low),
+                ("close", decoded.raw_close),
+                ("amount", decoded.amount),
+                ("volume", decoded.volume),
+            )
+        }
+    return {
+        "target_raw_fields": fields,
+        "unit_contract": {
+            "version": unit_version,
+            "amount_to_cny": None,
+            "volume_to_shares": None,
+        },
+    }
 
 
 def _run_pg_history_stock(args: argparse.Namespace) -> int:
@@ -369,6 +409,22 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             ),
             profile_contract=profile_contract,
         )
+        if getattr(args, "include_baostock_evidence", False):
+            from stock_a.sources.baostock.client import query_daily_rows
+            from stock_a.sources.baostock.evidence import project_baostock_evidence
+
+            normalized_symbol = _normalize_symbol(args.symbol)[0]
+            query = query_daily_rows(normalized_symbol, target.isoformat())
+            result["baostock_evidence"] = project_baostock_evidence(
+                query=query,
+                requested_symbol=normalized_symbol,
+                target_session=target.isoformat(),
+                tdx_result=_pg_baostock_tdx_target(
+                    history["history_rows"],
+                    target=target,
+                    unit_version=args.unit_version,
+                ),
+            )
     except RawSourcePgError as error:
         _emit(
             {
@@ -419,6 +475,18 @@ def _run_pg_history_stock(args: argparse.Namespace) -> int:
             "dml_executed": False,
             "configuration_path": str(config_path),
             "source_version": source_context,
+            "source_access": {
+                "mode": "EXPLICIT_PG_HISTORY",
+                "source_package_id": source_package_id,
+                "requested_official_sessions": len(sessions),
+                "local_tdx_files_opened": False,
+                "source_zip_opened": False,
+                "baostock_target_sessions": (
+                    [target.isoformat()]
+                    if getattr(args, "include_baostock_evidence", False)
+                    else []
+                ),
+            },
         }
     )
     if getattr(args, "output_format", "json") == "summary":

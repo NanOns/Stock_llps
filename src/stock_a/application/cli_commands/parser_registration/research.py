@@ -33,6 +33,17 @@ def register_commands(commands):
         help="PG历史画像官方会话窗口，1至75，默认75",
     )
     stock.add_argument(
+        "--local-tdx-diagnostic",
+        action="store_true",
+        help="显式启用本地TDX单股诊断；不读取PG，且受本地记录上限约束",
+    )
+    stock.add_argument(
+        "--local-tdx-max-sessions",
+        type=int,
+        default=60,
+        help="本地TDX诊断最多解析的单日记录数，1至75，默认60；超限时拒绝继续扫描",
+    )
+    stock.add_argument(
         "--format",
         dest="output_format",
         choices=("summary", "json"),

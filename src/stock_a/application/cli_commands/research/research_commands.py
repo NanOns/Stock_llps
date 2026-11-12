@@ -89,6 +89,17 @@ from stock_a.application.cli_commands.source.vipdata import (
 
 
 def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
+    local_tdx_diagnostic = getattr(args, "local_tdx_diagnostic", False)
+    if local_tdx_diagnostic and (
+        getattr(args, "pg_source_history", False)
+        or getattr(args, "pg_source_raw", False)
+        or getattr(args, "vipdata_package", None) is not None
+    ):
+        raise DiagnosticError(
+            "LOCAL_TDX_MODE_CONFLICT",
+            "本地TDX诊断不能与PG来源或显式VIPDATA包模式混用",
+            _EXIT_ARGUMENT,
+        )
     if getattr(args, "pg_source_history", False):
         if compare:
             raise DiagnosticError(
@@ -111,6 +122,20 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
             "提供来源包ID时必须同时显式启用--pg-source-raw",
             _EXIT_ARGUMENT,
         )
+    if not compare and getattr(args, "vipdata_package", None) is None:
+        if not local_tdx_diagnostic:
+            raise DiagnosticError(
+                "LOCAL_TDX_MODE_REQUIRED",
+                "research-stock未选择来源；PG研究请显式指定--pg-source-history和--pg-source-package-id，本地TDX读取必须显式指定--local-tdx-diagnostic",
+                _EXIT_ARGUMENT,
+            )
+        local_limit = getattr(args, "local_tdx_max_sessions", 60)
+        if type(local_limit) is not int or not 1 <= local_limit <= 75:
+            raise DiagnosticError(
+                "LOCAL_TDX_SESSION_LIMIT_INVALID",
+                "本地TDX诊断记录上限必须为1至75",
+                _EXIT_ARGUMENT,
+            )
     cli_started = time.perf_counter()
     stage_timings: dict[str, Any] = {}
     config, config_path = _load_runtime_config()
@@ -136,9 +161,12 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
             Decimal(args.amount_to_cny) if args.amount_to_cny is not None else None,
             args.volume_to_shares,
         )
+        max_records = args.max_records
+        if not compare and package is None:
+            max_records = min(max_records, args.local_tdx_max_sessions)
         limits = ReadLimits(
             args.max_bytes,
-            args.max_records,
+            max_records,
             args.chunk_records,
             Decimal(args.max_seconds),
         )
@@ -507,6 +535,18 @@ def _run_research(args: argparse.Namespace, *, compare: bool) -> int:
         "Python perf_counter monotonic; process wall-clock independently recorded by caller"
     )
     result["diagnostic_timing"] = stage_timings
+    if not compare:
+        result["source_access"] = {
+            "mode": (
+                "EXPLICIT_LOCAL_TDX_DIAGNOSTIC"
+                if package is None
+                else "EXPLICIT_VIPDATA_SINGLE_ENTRY"
+            ),
+            "configured_tdx_root_count": len(roots),
+            "local_tdx_record_limit": (limits.max_records if package is None else None),
+            "pg_source_history": False,
+            "calculation_target_session": args.target_session,
+        }
     if (
         not compare
         and getattr(args, "output_format", "json") == "summary"
