@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
+
 from dataclasses import dataclass
 from datetime import date
 from fractions import Fraction
@@ -57,7 +59,7 @@ from stock_a.storage.postgres.source_raw import (
 )
 from stock_a.storage.postgres.tdx_sector_members import read_rotation_snapshot_members
 
-_PROFILE_REVISION = re.compile(r"PROFILE_R[0-9]{2}\Z")
+_PROFILE_REVISION = re.compile(PROFILE_REVISION_PATTERN)
 
 
 @dataclass(frozen=True)

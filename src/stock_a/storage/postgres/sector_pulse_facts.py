@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
+
 from datetime import date
 from decimal import Decimal, ROUND_HALF_UP, localcontext
 from fractions import Fraction
@@ -154,7 +156,7 @@ def _pulse_rows(
         type(capture_id) is not int
         or capture_id <= 0
         or not isinstance(profile_revision, str)
-        or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
+        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         or type(source_count) is not int
         or source_count < 1
         or source_version.get("source_package_id") != source_package_id
@@ -632,7 +634,7 @@ def persist_source_sector_pulse_day(
         or type(source_package_id) is not int
         or source_package_id <= 0
         or not isinstance(profile_revision, str)
-        or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
+        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         or not isinstance(source_version, Mapping)
         or not isinstance(target_result, Mapping)
     ):
@@ -819,7 +821,7 @@ def read_source_sector_pulse_day(
                 "cross_period_recalculated": False,
             }
         profile_revision = str(seed_versions[0][0]).strip()
-        if re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None:
+        if re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None:
             raise SectorPulsePgError(
                 "SECTOR_PULSE_PROFILE_REVISION_INVALID", "PG Seed修订不是显式业务版本"
             )

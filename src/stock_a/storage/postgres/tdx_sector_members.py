@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
+
 from collections import Counter
 from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass, field
@@ -637,11 +639,13 @@ RETURNING snapshot_id""",
     if snapshot.member_rows:
         cursor.executemany(
             """INSERT INTO tdx_sector_members (
-    catalog_id, source_symbol, membership_quality, source_record_ordinal
-) VALUES (%s, %s, %s, %s)""",
+    catalog_id, board_kind, board_native_id, source_symbol, membership_quality, source_record_ordinal
+) VALUES (%s, %s, %s, %s, %s, %s)""",
             [
                 (
                     catalog_ids[(row.board_kind, row.board_native_id)],
+                    row.board_kind,
+                    row.board_native_id,
                     row.source_symbol,
                     row.membership_quality,
                     row.source_record_ordinal,
@@ -889,9 +893,9 @@ LEFT JOIN LATERAL (
 ) c ON TRUE
 LEFT JOIN LATERAL (
     SELECT count(*)::bigint AS member_rows,
-           count(*) FILTER (WHERE board_kind='INDUSTRY')::bigint
+           count(*) FILTER (WHERE member.board_kind='INDUSTRY')::bigint
                AS industry_member_rows,
-           count(*) FILTER (WHERE board_kind='CONCEPT')::bigint
+           count(*) FILTER (WHERE member.board_kind='CONCEPT')::bigint
                AS concept_member_rows,
            count(DISTINCT source_symbol)::bigint AS distinct_member_symbols,
            count(*) FILTER (WHERE membership_quality<>'OBSERVED_SOURCE_RELATION')::bigint
@@ -998,9 +1002,9 @@ LEFT JOIN LATERAL (
 ) c ON TRUE
 LEFT JOIN LATERAL (
     SELECT count(*)::bigint AS member_rows,
-           count(*) FILTER (WHERE board_kind='INDUSTRY')::bigint
+           count(*) FILTER (WHERE member.board_kind='INDUSTRY')::bigint
                AS industry_member_rows,
-           count(*) FILTER (WHERE board_kind='CONCEPT')::bigint
+           count(*) FILTER (WHERE member.board_kind='CONCEPT')::bigint
                AS concept_member_rows,
            count(DISTINCT source_symbol)::bigint AS distinct_member_symbols,
            count(*) FILTER (WHERE membership_quality<>'OBSERVED_SOURCE_RELATION')::bigint
@@ -1795,10 +1799,10 @@ def query_sector_members(
         )
     if (
         profile_revision is not None
-        and re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
+        and re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
     ):
         raise TdxSectorMembersPgError(
-            "PROFILE_REVISION_INVALID", "画像修订必须是显式PROFILE_RNN版本标签"
+            "PROFILE_REVISION_INVALID", "画像修订必须是显式完整画像修订标签"
         )
 
     try:
@@ -2241,13 +2245,13 @@ def _validate_breadth_request(
         or identities[2] <= 0
         or any(
             not isinstance(value, str)
-            or re.fullmatch(r"PROFILE_R[0-9]{2}", value) is None
+            or re.fullmatch(PROFILE_REVISION_PATTERN, value) is None
             for value in (identities[1], identities[3])
         )
     ):
         raise TdxSectorMembersPgError(
             "BREADTH_PROFILE_IDENTITY_INVALID",
-            "两端必须提供正数来源包ID及显式PROFILE_RNN画像修订",
+            "两端必须提供正数来源包ID及显式完整画像修订",
         )
     if (
         type(offset) is not int
@@ -3210,10 +3214,10 @@ def query_sector_strength(
         )
     if (
         profile_revision is not None
-        and re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
+        and re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
     ):
         raise TdxSectorMembersPgError(
-            "PROFILE_REVISION_INVALID", "画像修订必须为显式PROFILE_RNN标签"
+            "PROFILE_REVISION_INVALID", "画像修订必须为显式完整画像修订标签"
         )
     if (
         not official_calendar_id

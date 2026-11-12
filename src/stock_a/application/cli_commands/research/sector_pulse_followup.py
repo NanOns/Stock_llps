@@ -26,11 +26,25 @@ def _run_source_sector_pulse_followup_day(args: argparse.Namespace) -> int:
         if args.persist is not True:
             raise ValueError("板块PULSE后继生产必须显式指定--persist")
         config, config_path = load_runtime_config()
+        target_package_ids = {}
+        for value in args.target_package:
+            parts = value.split("=")
+            if len(parts) != 2 or not all(part.isdecimal() for part in parts):
+                raise ValueError("终点来源包格式必须为期限=包ID")
+            horizon, package_id = map(int, parts)
+            if (
+                horizon not in (1, 3, 5)
+                or package_id <= 0
+                or horizon in target_package_ids
+            ):
+                raise ValueError("终点期限或包ID无效，或期限重复")
+            target_package_ids[horizon] = package_id
         report = run_source_sector_pulse_followup_day(
             config,
             target_session=_parse_session_date(args.target_session),
             research_cutoff=_parse_session_date(args.research_cutoff),
             source_package_id=args.source_package_id,
+            target_package_ids=target_package_ids,
         )
         report["configuration_path"] = str(config_path)
     except (SectorPulseFollowupPgError, SourceSectorPulseFollowupError) as error:

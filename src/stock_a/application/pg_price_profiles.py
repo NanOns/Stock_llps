@@ -7,6 +7,9 @@ from decimal import Decimal
 from fractions import Fraction
 from typing import Any, Mapping
 
+from stock_a.contracts.profile_revision import (
+    profile_revision as _window_profile_revision,
+)
 from stock_a.canonical.adjustment_periods import PERIOD_AGGREGATION_VERSION
 from stock_a.application.pg_research import (
     PgResearchBindingError,
@@ -148,7 +151,9 @@ def _profile_revision(
         or not 1 <= history_session_count <= PG_PROFILE_MAX_HISTORY_SESSIONS
     ):
         raise PgPriceProfileError("PROFILE_REVISION_INPUT_INVALID", "画像修订入参无效")
-    return _PROFILE_REVISION
+    return _window_profile_revision(
+        _PROFILE_REVISION, history_session_count, calendar_id, calendar_revision
+    )
 
 
 def _records_for_page(
@@ -648,7 +653,9 @@ def read_source_symbol_price_profile_observation(
             selected.get("producer_version")
         )
         observation["profile_revision_selection"]["selected_version_match"] = (
-            selected.get("profile_revision") == _PROFILE_REVISION
+            str(selected.get("profile_revision", "")).startswith(
+                _PROFILE_REVISION + "|"
+            )
             and selected.get("producer_version") == _PRODUCER_SEMANTICS_VERSION
         )
         observation["history_window"] = {

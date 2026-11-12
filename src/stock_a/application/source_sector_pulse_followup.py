@@ -115,6 +115,7 @@ def run_source_sector_pulse_followup_day(
     target_session: date,
     research_cutoff: date,
     source_package_id: int,
+    target_package_ids: Mapping[int, int] | None = None,
 ) -> dict[str, Any]:
     """只消费PG已存PULSE，批量读取固定篮子必要Raw并原子保存后继结果。"""
     if (
@@ -141,6 +142,7 @@ def run_source_sector_pulse_followup_day(
         research_cutoff=research_cutoff,
         source_package_id=source_package_id,
         due_targets=due_targets,
+        target_package_ids=target_package_ids,
     )
     pulse_states = Counter(row["pulse_state"] for row in context["pulse_rows"])
     outcomes: list[dict[str, Any]] = []
@@ -165,6 +167,13 @@ def run_source_sector_pulse_followup_day(
                 t0_session=target_session,
                 target_session=target,
                 source_package_id=source_package_id,
+                t0_source_capture_id=context["t0_source_version"]["source_capture_id"],
+                target_source_package_id=context["target_source_versions"][horizon][
+                    "source_package_id"
+                ],
+                target_source_capture_id=context["target_source_versions"][horizon][
+                    "source_capture_id"
+                ],
             )
             outcomes.append(
                 {
@@ -189,6 +198,10 @@ def run_source_sector_pulse_followup_day(
             research_cutoff=research_cutoff,
             horizon_targets=all_targets,
             calendar_identity=calendar_identity,
+            target_package_ids={
+                h: v["source_package_id"]
+                for h, v in context["target_source_versions"].items()
+            },
         )
         for item in outcomes:
             fact = (

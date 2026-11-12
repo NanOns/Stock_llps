@@ -14,6 +14,7 @@ def _usable_close(
     *,
     expected_session: date,
     source_package_id: int,
+    source_capture_id: int,
     label: str,
 ) -> tuple[Fraction | None, str | None]:
     if row is None:
@@ -28,9 +29,10 @@ def _usable_close(
         return None, f"{label}_PRICE_COORDINATE_UNKNOWN"
     capture_id = row.get("source_capture_id")
     if (
-        row.get("source_package_id") != source_package_id
+        type(row.get("source_package_id")) is not int
+        or row.get("source_package_id") != source_package_id
         or type(capture_id) is not int
-        or capture_id <= 0
+        or capture_id != source_capture_id
     ):
         return None, f"{label}_SOURCE_IDENTITY_MISMATCH"
     values = [row.get(f"raw_{field}") for field in ("open", "high", "low", "close")]
@@ -56,6 +58,9 @@ def source_sector_pulse_followup_outcome(
     t0_session: date,
     target_session: date,
     source_package_id: int,
+    t0_source_capture_id: int,
+    target_source_package_id: int,
+    target_source_capture_id: int,
 ) -> dict[str, Any]:
     """按现役post_R规则计算T0收盘至一个官方后继会话的固定等权篮子。"""
     if (
@@ -64,6 +69,14 @@ def source_sector_pulse_followup_outcome(
         or target_session <= t0_session
         or type(source_package_id) is not int
         or source_package_id <= 0
+        or any(
+            type(value) is not int or value <= 0
+            for value in (
+                t0_source_capture_id,
+                target_source_package_id,
+                target_source_capture_id,
+            )
+        )
         or len(set(member_symbols)) != len(member_symbols)
         or any(not isinstance(symbol, str) or not symbol for symbol in member_symbols)
     ):
@@ -82,12 +95,14 @@ def source_sector_pulse_followup_outcome(
             by_session.get(t0_session),
             expected_session=t0_session,
             source_package_id=source_package_id,
+            source_capture_id=t0_source_capture_id,
             label="T0",
         )
         target_close, target_reason = _usable_close(
             by_session.get(target_session),
             expected_session=target_session,
-            source_package_id=source_package_id,
+            source_package_id=target_source_package_id,
+            source_capture_id=target_source_capture_id,
             label="TARGET",
         )
         if t0_reason:

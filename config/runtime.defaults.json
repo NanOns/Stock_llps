@@ -169,6 +169,6 @@
     "cluster_system_identifier": "7688198230782699460",
     "deployment_applied": true,
     "business_login": "stock_a",
-    "migration_version": 22
+    "migration_version": 24
   }
 }

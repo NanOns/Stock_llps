@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
+
 from datetime import date
 from decimal import Decimal, InvalidOperation
 import random
@@ -503,10 +505,10 @@ def _normalize_record(record: Mapping[str, Any]) -> dict[str, Any]:
     revision = normalized.get("profile_revision")
     if (
         not isinstance(revision, str)
-        or re.fullmatch(r"PROFILE_R[0-9]{2}", revision) is None
+        or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
     ):
         raise PriceProfilePgError(
-            "PROFILE_BUSINESS_KEY_INVALID", "画像修订必须使用显式PROFILE_Rnn版本"
+            "PROFILE_BUSINESS_KEY_INVALID", "画像修订必须使用显式完整画像修订"
         )
     if (
         not isinstance(normalized.get("source_symbol"), str)
@@ -853,7 +855,7 @@ def read_source_profile_observability(
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or not isinstance(current_profile_revision, str)
-        or re.fullmatch(r"PROFILE_R[0-9]{2}", current_profile_revision) is None
+        or re.fullmatch(PROFILE_REVISION_PATTERN, current_profile_revision) is None
         or not isinstance(current_producer_version, str)
         or not current_producer_version
     ):
@@ -916,16 +918,18 @@ WHERE r.source_capture_id=%s AND r.session_date=%s
             """SELECT profile_revision::text, producer_contract, producer_version,
        count(*)::bigint AS stored_rows,
        count(DISTINCT source_symbol)::bigint AS distinct_source_symbols,
-       count(*) FILTER (WHERE history_records_complete)::bigint,
+       count(*) FILTER (WHERE history_records_complete)::bigint AS history_records_complete_rows,
        count(*) FILTER (WHERE history_stored_session_count>=24
-                         AND history_requested_session_count>=24)::bigint,
-       count(*) FILTER (WHERE history_requested_session_count>=24)::bigint,
-       min(history_requested_session_count), max(history_requested_session_count),
-       min(history_stored_session_count), max(history_stored_session_count),
-       count(*) FILTER (WHERE price_window_usable)::bigint,
-       array_agg(DISTINCT target_bar_status ORDER BY target_bar_status),
-       array_agg(DISTINCT target_price_quality ORDER BY target_price_quality),
-       array_agg(DISTINCT price_window_status ORDER BY price_window_status)
+                         AND history_requested_session_count>=24)::bigint AS history_24_session_eligible_rows,
+       count(*) FILTER (WHERE history_requested_session_count>=24)::bigint AS history_requested_24_plus_rows,
+       min(history_requested_session_count) AS min_history_requested_sessions,
+       max(history_requested_session_count) AS max_history_requested_sessions,
+       min(history_stored_session_count) AS min_history_stored_sessions,
+       max(history_stored_session_count) AS max_history_stored_sessions,
+       count(*) FILTER (WHERE price_window_usable)::bigint AS price_window_usable_rows,
+       array_agg(DISTINCT target_bar_status ORDER BY target_bar_status) AS target_bar_statuses,
+       array_agg(DISTINCT target_price_quality ORDER BY target_price_quality) AS target_price_qualities,
+       array_agg(DISTINCT price_window_status ORDER BY price_window_status) AS price_window_statuses
 FROM source_symbol_price_profiles
 WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
 GROUP BY profile_revision,producer_contract,producer_version
@@ -968,14 +972,14 @@ LIMIT %s""",
         matching_current = [
             item
             for item in revisions
-            if item["profile_revision"] == current_profile_revision
+            if item["profile_revision"].startswith(current_profile_revision + "|")
             and item["producer_version"] == current_producer_version
         ]
         selected = matching_current[0] if len(matching_current) == 1 else None
         if len(matching_current) == 1:
-            selection_rule = "EXACT_PROFILE_AND_PRODUCER_VERSION"
+            selection_rule = "UNIQUE_CURRENT_ALGORITHM_AND_INPUT_REVISION"
         elif len(matching_current) > 1:
-            selection_rule = "AMBIGUOUS_DUPLICATE_CURRENT_VERSION"
+            selection_rule = "AMBIGUOUS_CURRENT_INPUT_REVISIONS"
         elif revisions:
             selection_rule = "NO_MATCHING_CURRENT_VERSION"
         else:
@@ -1141,7 +1145,7 @@ def _snapshot_for_session(
             )
         if (
             not isinstance(profile_revision, str)
-            or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
+            or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         ):
             raise PriceProfilePgError(
                 "PROFILE_CHANGE_SNAPSHOT_IDENTITY_INVALID",
@@ -3388,12 +3392,12 @@ def read_profile_breadth(
         type(package_id) is not int
         or package_id <= 0
         or not isinstance(revision, str)
-        or re.fullmatch(r"PROFILE_R[0-9]{2}", revision) is None
+        or re.fullmatch(PROFILE_REVISION_PATTERN, revision) is None
         for package_id, revision in identities
     ):
         raise PriceProfilePgError(
             "PROFILE_BREADTH_SNAPSHOT_IDENTITY_INVALID",
-            "广度对照必须显式提供前后来源包数字ID和PROFILE_RNN修订",
+            "广度对照必须显式提供前后来源包数字ID和完整画像修订",
         )
 
     with _transaction(config, write=False) as (_connection, cursor, _unused):
@@ -4251,10 +4255,10 @@ def read_profile_page(
         raise PriceProfilePgError("PROFILE_PAGE_INVALID", "画像页大小必须为1至100")
     if (
         not isinstance(profile_revision, str)
-        or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
+        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
     ):
         raise PriceProfilePgError(
-            "PROFILE_REVISION_INVALID", "画像修订必须是显式PROFILE_RNN版本标签"
+            "PROFILE_REVISION_INVALID", "画像修订必须是显式完整画像修订标签"
         )
     if market not in {"ALL", "SH", "SZ"} or board not in {"ALL", "MAIN_BOARD", "GEM"}:
         raise PriceProfilePgError("PROFILE_FILTER_INVALID", "市场或板别筛选值无效")

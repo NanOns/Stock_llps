@@ -47,6 +47,7 @@ _KEY = (
     "source_capture_id",
 )
 _SYMBOL_COLUMNS = (
+    "breadth_day_id",
     *_KEY,
     "source_symbol",
     "ret_t_numerator",
@@ -206,23 +207,37 @@ def _persist_market_breadth_once(
                 "宽度事实与数字来源包/捕获、证券集合或完整分母不一致",
             )
         cursor.execute(
-            f"SELECT {', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE {_SCOPE}", key
+            f"SELECT id, {', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE {_SCOPE}",
+            key,
         )
         existing_day = cursor.fetchall()
+        day_existed = bool(existing_day)
+        if not existing_day:
+            _insert_rows(cursor, _DAY_TABLE, _DAY_COLUMNS, _KEY, [day])
+            cursor.execute(
+                f"SELECT id, {', '.join(_DAY_COLUMNS)} FROM {_DAY_TABLE} WHERE {_SCOPE}",
+                key,
+            )
+            existing_day = cursor.fetchall()
+        if len(existing_day) != 1 or not _row_matches(day, existing_day[0][1:]):
+            raise MarketBreadthPgError(
+                "MARKET_BREADTH_CONTENT_CONFLICT", "市场宽度父记录缺失或同键内容不一致"
+            )
+        parent_id = existing_day[0][0]
+        rows = [(parent_id, *row) for row in rows]
         cursor.execute(
             f"SELECT {', '.join(_SYMBOL_COLUMNS)} FROM {_SYMBOL_TABLE} WHERE {_SCOPE} ORDER BY source_symbol",
             key,
         )
         existing_rows = cursor.fetchall()
-        if existing_day or existing_rows:
-            if (
-                len(existing_day) != 1
-                or not _row_matches(day, existing_day[0])
-                or len(existing_rows) != len(rows)
-                or any(
-                    not _row_matches(expected, actual)
-                    for expected, actual in zip(rows, existing_rows, strict=True)
-                )
+        if day_existed and not existing_rows:
+            raise MarketBreadthPgError(
+                "MARKET_BREADTH_CONTENT_CONFLICT", "既存宽度父记录缺少逐股事实"
+            )
+        if existing_rows:
+            if len(existing_rows) != len(rows) or any(
+                not _row_matches(expected, actual)
+                for expected, actual in zip(rows, existing_rows, strict=True)
             ):
                 raise MarketBreadthPgError(
                     "MARKET_BREADTH_CONTENT_CONFLICT",
@@ -230,7 +245,6 @@ def _persist_market_breadth_once(
                 )
             inserted = 0
         else:
-            _insert_rows(cursor, _DAY_TABLE, _DAY_COLUMNS, _KEY, [day])
             inserted = _insert_rows(
                 cursor,
                 _SYMBOL_TABLE,

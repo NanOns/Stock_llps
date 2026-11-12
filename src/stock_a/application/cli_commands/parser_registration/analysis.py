@@ -207,12 +207,12 @@ def register_commands(commands):
     pulse_transition.add_argument(
         "--previous-profile-revision",
         required=True,
-        help="前一会话画像修订标签，例如PROFILE_R08",
+        help="前一会话画像修订标签，须使用快照返回的完整修订",
     )
     pulse_transition.add_argument(
         "--target-profile-revision",
         required=True,
-        help="目标会话画像修订标签，例如PROFILE_R08",
+        help="目标会话画像修订标签，须使用快照返回的完整修订",
     )
     pulse_transition.add_argument(
         "--industry-snapshot-id",
@@ -237,6 +237,13 @@ def register_commands(commands):
         "--research-cutoff", required=True, help="明确的Raw研究截止官方会话YYYY-MM-DD"
     )
     pulse_followup.add_argument("--source-package-id", type=int, required=True)
+    pulse_followup.add_argument(
+        "--target-package",
+        action="append",
+        default=[],
+        metavar="期限=包ID",
+        help="指定终点来源包，可重复传入，例如 1=数字ID；多修订时必须指定",
+    )
     pulse_followup.add_argument(
         "--persist",
         action="store_true",
@@ -472,13 +479,14 @@ def register_commands(commands):
     )
     price_profile.add_argument(
         "--before-profile-revision",
-        help="changes前态画像修订标签，例如PROFILE_R08",
+        help="changes前态画像修订标签，须使用快照返回的完整修订",
     )
     price_profile.add_argument(
         "--after-source-package-id", type=int, help="changes后态画像的精确来源包数字ID"
     )
     price_profile.add_argument(
-        "--after-profile-revision", help="changes后态画像修订标签，例如PROFILE_R08"
+        "--after-profile-revision",
+        help="changes后态画像修订标签，须使用快照返回的完整修订",
     )
     price_profile.add_argument(
         "--change-type",
@@ -534,7 +542,7 @@ def register_commands(commands):
         "--page-size", type=int, default=100, help="PG候选分页批大小，1至100，默认100"
     )
     price_profile.add_argument(
-        "--profile-revision", help="查询时必填的画像修订标签，例如PROFILE_R08"
+        "--profile-revision", help="查询时必填的画像修订标签，须使用快照返回的完整修订"
     )
     price_profile.add_argument("--symbol", help="可选精确来源代码，如SH.六位数字")
     price_profile.add_argument(

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
+
 from datetime import date, datetime, timezone
 import re
 from typing import Any, Mapping
@@ -17,7 +19,7 @@ from stock_a.storage.postgres.static_research_facts import (
 )
 
 
-_PROFILE_REVISION = re.compile(r"^PROFILE_R[0-9]{2}$")
+_PROFILE_REVISION = re.compile(PROFILE_REVISION_PATTERN)
 
 _SEED_QUALITY_FIELDS = (
     ("core.bias20_atr", "core_bias20_atr"),

@@ -697,7 +697,48 @@ def _insert_rows(
     if not rows:
         return 0
     placeholders = ", ".join(["%s"] * len(columns))
-    conflict = ", ".join(key)
+    # 0022以捕获父键收窄唯一约束；调用方可保留更严格的范围比较。
+    current_keys = {
+        "source_d0_launch_day_facts": (
+            "target_capture_id",
+            "source_symbol",
+            "before_capture_id",
+            "producer_version",
+            "algorithm_contract",
+            "session_contract",
+            "calendar_revision",
+        ),
+        "source_d1_structure_day_facts": (
+            "target_capture_id",
+            "source_symbol",
+            "structure_type",
+            "d1_history_session_count",
+            "calendar_revision",
+            "producer_contract",
+            "producer_version",
+            "material_change_contract",
+        ),
+        "source_d0_scenario_day_facts": (
+            "source_capture_id",
+            "source_symbol",
+            "scenario",
+            "producer_version",
+            "calendar_revision",
+        ),
+        "source_pool_seed_day_facts": (
+            "source_capture_id",
+            "source_symbol",
+            "profile_revision",
+            "producer_version",
+        ),
+        "source_market_breadth_days": (
+            "source_capture_id",
+            "contract_version",
+            "calendar_revision",
+        ),
+        "source_market_breadth_symbols": ("breadth_day_id", "source_symbol"),
+    }
+    conflict = ", ".join(current_keys.get(table.rsplit(".", 1)[-1], key))
     inserted = 0
     # 参数数量有界；每一批仍属于同一个单日事务，完整读回后才提交。
     batch_size = min(100, 60000 // len(columns))
@@ -1062,7 +1103,7 @@ def read_source_research_day(
         source_package_id = d1_context[12]
         if d1_context[13] != 1:
             return incomplete_result(
-                "D1逐股事实绑定多个来源内容摘要",
+                "D1逐股事实绑定多个来源数据包",
                 distinct_source_package_count=d1_context[13],
             )
         d1_source_count = d1_context[-2]

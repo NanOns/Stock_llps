@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
+
 from datetime import date
 import re
 from typing import Any, Mapping
@@ -17,7 +19,7 @@ from stock_a.application.source_d0_raw import (
 
 
 _SOURCE_SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
-_PROFILE_REVISION = re.compile(r"^PROFILE_R[0-9]{2}$")
+_PROFILE_REVISION = re.compile(PROFILE_REVISION_PATTERN)
 
 
 class SourceStockChangeContextError(ValueError):

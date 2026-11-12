@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
+
 from datetime import date
 from decimal import Decimal
 from fractions import Fraction
@@ -335,7 +337,7 @@ def _seed_rows(
         or seed.get("source_pool_total") != len(market_by_symbol)
         or seed.get("stored_profile_status") != "AVAILABLE"
         or not isinstance(profile_revision, str)
-        or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
+        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
     ):
         raise StaticResearchPgError(
             "STATIC_SEED_PARTITION_OPEN", "Seed或精确R6画像未覆盖完整来源池"
@@ -831,7 +833,7 @@ def read_source_stock_seed_fact(
         or type(source_capture_id) is not int
         or source_capture_id <= 0
         or not isinstance(profile_revision, str)
-        or re.fullmatch(r"PROFILE_R[0-9]{2}", profile_revision) is None
+        or re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None
         or not isinstance(source_symbol, str)
         or _SYMBOL.fullmatch(source_symbol) is None
         or type(expected_source_count) is not int

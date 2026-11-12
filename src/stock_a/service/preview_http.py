@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
+
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -253,9 +255,12 @@ def _package_id(value: Any) -> int:
 
 
 def _profile_revision(value: Any) -> str:
-    if not isinstance(value, str) or re.fullmatch(r"PROFILE_R[0-9]{2}", value) is None:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(PROFILE_REVISION_PATTERN, value) is None
+    ):
         raise PreviewHttpError(
-            400, "PREVIEW_PROFILE_REVISION_INVALID", "画像修订须为PROFILE_Rnn显式标签"
+            400, "PREVIEW_PROFILE_REVISION_INVALID", "画像修订须为完整画像修订标签"
         )
     return value
 
