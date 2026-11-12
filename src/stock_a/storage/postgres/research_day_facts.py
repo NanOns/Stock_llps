@@ -938,6 +938,422 @@ def _as_dict(columns: Sequence[str], row: Sequence[Any]) -> dict[str, Any]:
     }
 
 
+def _read_selected_board_observation(
+    cursor: Any,
+    *,
+    target_session: date,
+    source_package_id: int,
+    target_capture_id: int,
+    d1_history_session_count: int,
+    d1_predicate: str,
+    d1_params: tuple[Any, ...],
+    d0_predicate: str,
+    d0_params: tuple[Any, ...],
+    snapshot_specs: Sequence[tuple[int, str]],
+    board_kind: str,
+    board_native_id: str,
+    offset: int,
+    limit: int,
+) -> dict[str, Any]:
+    """同一只读快照读取一个当前板块的成员、重叠及已保存研究事实。"""
+    selected_snapshot = next(
+        (snapshot_id for snapshot_id, kind in snapshot_specs if kind == board_kind),
+        None,
+    )
+    if selected_snapshot is None:
+        return {"status": "NOT_COMPUTED", "reason": "所选板块成员快照不可用"}
+    cursor.execute(
+        "SELECT m.source_symbol, m.membership_quality "
+        "FROM tdx_sector_catalog c JOIN tdx_sector_members m "
+        "ON m.catalog_id=c.id AND m.board_kind=c.board_kind "
+        "AND m.board_native_id=c.board_native_id "
+        "WHERE c.snapshot_id=%s AND c.board_kind=%s AND c.board_native_id=%s "
+        "ORDER BY m.source_symbol",
+        (selected_snapshot, board_kind, board_native_id),
+    )
+    member_rows = cursor.fetchall()
+    symbols = [row[0] for row in member_rows]
+    if not symbols:
+        return {
+            "status": "AVAILABLE",
+            "board_kind": board_kind,
+            "board_native_id": board_native_id,
+            "membership_scope": "NON_PIT_CURRENT_SNAPSHOT",
+            "snapshot_member_count": 0,
+            "source_pool": {"inside": 0, "outside": 0},
+            "d0": {
+                "true": 0,
+                "false": 0,
+                "unknown": 0,
+                "missing": 0,
+                "transitions": {},
+            },
+            "seed": {
+                "scope_status": "NOT_COMPUTED",
+                "true": 0,
+                "false": 0,
+                "unknown": 0,
+                "missing": 0,
+            },
+            "d1": {
+                "scope_status": "AVAILABLE",
+                "material_change_members": 0,
+                "material_anchor_count": 0,
+                "target_price_observed": 0,
+                "target_price_unknown": 0,
+            },
+            "cross_kind_overlap": {"member_count": 0, "top_boards": []},
+            "pagination": {
+                "offset": 0,
+                "limit": limit,
+                "total_count": 0,
+                "next_offset": None,
+            },
+            "members": [],
+        }
+
+    cursor.execute(
+        "SELECT source_symbol, before_state, after_state, transition "
+        f"FROM source_d0_launch_day_facts WHERE {d0_predicate} "
+        "AND source_symbol=ANY(%s) ORDER BY source_symbol",
+        d0_params + (symbols,),
+    )
+    d0_by_symbol = {
+        row[0]: {"before_state": row[1], "after_state": row[2], "transition": row[3]}
+        for row in cursor.fetchall()
+    }
+
+    cursor.execute(
+        f"SELECT count(DISTINCT source_symbol) FROM source_d1_structure_day_facts WHERE {d1_predicate}",
+        d1_params,
+    )
+    d1_pool_count = int(cursor.fetchone()[0] or 0)
+
+    # Seed画像窗与D1结构窗各自有独立业务键，不能强制使用同一会话数。
+    cursor.execute(
+        "SELECT profile_revision, producer_contract, producer_version, "
+        "history_session_count, calendar_id, calendar_revision, research_mode, "
+        "price_coordinate, count(*)::bigint, count(DISTINCT source_symbol)::bigint "
+        "FROM source_pool_seed_day_facts "
+        "WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+        "GROUP BY profile_revision, producer_contract, producer_version, "
+        "history_session_count, calendar_id, calendar_revision, research_mode, price_coordinate "
+        "ORDER BY profile_revision, producer_contract, producer_version, history_session_count",
+        (target_session, source_package_id, target_capture_id),
+    )
+    seed_scopes = cursor.fetchall()
+    seed_scope = None
+    seed_scope_status = "NOT_COMPUTED"
+    if len(seed_scopes) == 1:
+        candidate = seed_scopes[0]
+        if candidate[6] == "NON_PIT_RETROSPECTIVE" and candidate[7] == "RAW_UNADJUSTED":
+            seed_scope = candidate
+            seed_scope_status = (
+                "AVAILABLE"
+                if int(candidate[9]) == int(candidate[8])
+                and int(candidate[9]) == d1_pool_count
+                else "INCOMPLETE"
+            )
+        else:
+            seed_scope_status = "UNKNOWN"
+    elif len(seed_scopes) > 1:
+        seed_scope_status = "AMBIGUOUS"
+
+    seed_by_symbol: dict[str, tuple[Any, ...]] = {}
+    if seed_scope is not None:
+        cursor.execute(
+            "SELECT source_symbol, s1_state, s1_reasons, s2_state, s2_reasons, "
+            "source_seed_state, source_seed_reasons, safety_state, safety_reasons, "
+            "target_close_quality, rps5_numerator, rps5_denominator, rps5_quality, "
+            "rps20_numerator, rps20_denominator, rps20_quality "
+            "FROM source_pool_seed_day_facts "
+            "WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+            "AND profile_revision=%s AND producer_contract=%s AND producer_version=%s "
+            "AND history_session_count=%s AND calendar_id=%s AND calendar_revision=%s "
+            "AND research_mode=%s AND price_coordinate=%s AND source_symbol=ANY(%s) "
+            "ORDER BY source_symbol",
+            (
+                target_session,
+                source_package_id,
+                target_capture_id,
+                *seed_scope[:8],
+                symbols,
+            ),
+        )
+        seed_by_symbol = {row[0]: row for row in cursor.fetchall()}
+
+    cursor.execute(
+        "SELECT source_symbol, count(*)::bigint, "
+        "count(*) FILTER (WHERE material_change_anchor_count>0)::bigint, "
+        "coalesce(sum(material_change_anchor_count),0)::bigint, "
+        "count(*) FILTER (WHERE target_price_quality='OBSERVED')::bigint, "
+        "count(*) FILTER (WHERE target_price_quality='UNKNOWN')::bigint, "
+        "array_agg(DISTINCT target_price_quality ORDER BY target_price_quality) "
+        f"FROM source_d1_structure_day_facts WHERE {d1_predicate} "
+        "AND source_symbol=ANY(%s) GROUP BY source_symbol ORDER BY source_symbol",
+        d1_params + (symbols,),
+    )
+    d1_by_symbol = {row[0]: row[1:] for row in cursor.fetchall()}
+
+    opposite_kind = "CONCEPT" if board_kind == "INDUSTRY" else "INDUSTRY"
+    opposite_snapshot = next(
+        (snapshot_id for snapshot_id, kind in snapshot_specs if kind == opposite_kind),
+        None,
+    )
+    overlap_count = 0
+    overlap_boards: list[dict[str, Any]] = []
+    if opposite_snapshot is not None:
+        cursor.execute(
+            "SELECT count(DISTINCT m.source_symbol) FROM tdx_sector_catalog c "
+            "JOIN tdx_sector_members m ON m.catalog_id=c.id "
+            "AND m.board_kind=c.board_kind AND m.board_native_id=c.board_native_id "
+            "WHERE c.snapshot_id=%s AND c.board_kind=%s AND m.source_symbol=ANY(%s)",
+            (opposite_snapshot, opposite_kind, symbols),
+        )
+        overlap_count = int(cursor.fetchone()[0] or 0)
+        cursor.execute(
+            "SELECT c.board_native_id, c.board_name, count(DISTINCT m.source_symbol)::bigint "
+            "FROM tdx_sector_catalog c JOIN tdx_sector_members m "
+            "ON m.catalog_id=c.id AND m.board_kind=c.board_kind "
+            "AND m.board_native_id=c.board_native_id "
+            "WHERE c.snapshot_id=%s AND c.board_kind=%s AND m.source_symbol=ANY(%s) "
+            "GROUP BY c.board_native_id,c.board_name "
+            "ORDER BY count(DISTINCT m.source_symbol) DESC,c.board_name,c.board_native_id LIMIT 5",
+            (opposite_snapshot, opposite_kind, symbols),
+        )
+        overlap_boards = [
+            {
+                "board_native_id": row[0],
+                "board_name": row[1],
+                "overlap_member_count": int(row[2]),
+            }
+            for row in cursor.fetchall()
+        ]
+
+    members: list[dict[str, Any]] = []
+    state_counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0, "NOT_COMPUTED": 0}
+    transition_counts: dict[str, int] = {}
+    seed_counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0, "NOT_COMPUTED": 0}
+    d1_anchor_members = 0
+    d1_anchor_count = 0
+    d1_price_observed = 0
+    d1_price_unknown = 0
+    d1_price_quality_counts: dict[str, int] = {}
+    rps5_values: dict[str, Fraction] = {}
+    rps20_values: dict[str, Fraction] = {}
+    for symbol, membership_quality in member_rows:
+        d1 = d1_by_symbol.get(symbol)
+        in_target_source_pool = d1 is not None
+        d0 = d0_by_symbol.get(symbol)
+        after_state = d0.get("after_state") if d0 else None
+        d0_state = (
+            after_state
+            if after_state in {"TRUE", "FALSE", "UNKNOWN"}
+            else "NOT_COMPUTED"
+        )
+        if in_target_source_pool:
+            state_counts[d0_state] += 1
+        transition = d0.get("transition") if d0 else None
+        if in_target_source_pool and isinstance(transition, str):
+            transition_counts[transition] = transition_counts.get(transition, 0) + 1
+        seed = seed_by_symbol.get(symbol)
+        if not in_target_source_pool:
+            seed_metric: dict[str, Any] = {"status": "NOT_APPLICABLE"}
+        else:
+            seed_state = (
+                seed[5]
+                if seed and seed[5] in {"TRUE", "FALSE", "UNKNOWN"}
+                else "NOT_COMPUTED"
+                if seed_scope_status == "NOT_COMPUTED"
+                else "UNKNOWN"
+            )
+            seed_counts[seed_state] += 1
+            seed_metric = {
+                "status": "NOT_COMPUTED"
+                if seed_scope_status == "NOT_COMPUTED"
+                else "UNKNOWN"
+            }
+        if seed and in_target_source_pool:
+            seed_metric = {
+                "status": "AVAILABLE"
+                if seed_scope_status == "AVAILABLE"
+                else "PARTIAL",
+                "s1": seed[1] or "UNKNOWN",
+                "s2": seed[3] or "UNKNOWN",
+                "source_seed": seed[5] or "UNKNOWN",
+                "safety": seed[7] or "UNKNOWN",
+                "target_close_quality": seed[9] or "UNKNOWN",
+                "rps5": None,
+                "rps5_quality": seed[12] or "UNKNOWN",
+                "rps5_board_rank": None,
+                "rps20": None,
+                "rps20_quality": seed[15] or "UNKNOWN",
+                "rps20_board_rank": None,
+            }
+            for name, numerator, denominator, quality, destination in (
+                ("rps5", seed[10], seed[11], seed[12], rps5_values),
+                ("rps20", seed[13], seed[14], seed[15], rps20_values),
+            ):
+                if (
+                    numerator is not None
+                    and denominator is not None
+                    and int(denominator) > 0
+                ):
+                    ratio = Fraction(int(numerator), int(denominator))
+                    seed_metric[name] = f"{ratio.numerator}/{ratio.denominator}"
+                    if in_target_source_pool and quality == "OBSERVED":
+                        destination[symbol] = ratio
+        if d1:
+            anchors_for_member = int(d1[2] or 0)
+            d1_anchor_count += anchors_for_member
+            d1_anchor_members += int(int(d1[1] or 0) > 0)
+            d1_price_observed += int(d1[3] or 0)
+            d1_price_unknown += int(d1[4] or 0)
+            quality_set = set(d1[5] or ())
+            price_quality = (
+                "OBSERVED"
+                if quality_set == {"OBSERVED"}
+                else "UNKNOWN"
+                if "UNKNOWN" in quality_set
+                else next(iter(quality_set))
+                if len(quality_set) == 1
+                else "PARTIAL"
+            )
+            d1_price_quality_counts[price_quality] = (
+                d1_price_quality_counts.get(price_quality, 0) + 1
+            )
+            d1_view = {
+                "status": "AVAILABLE"
+                if int(d1[0]) == len(_STRUCTURE_TYPES)
+                else "PARTIAL",
+                "structure_rows": int(d1[0]),
+                "expected_structure_rows": len(_STRUCTURE_TYPES),
+                "target_price_quality": price_quality,
+                "material_change_members": int(int(d1[1] or 0) > 0),
+                "material_anchor_count": anchors_for_member,
+            }
+        else:
+            d1_view = {
+                "status": "NOT_COMPUTED",
+                "structure_rows": 0,
+                "expected_structure_rows": len(_STRUCTURE_TYPES),
+                "target_price_quality": "UNKNOWN",
+                "material_change_members": 0,
+                "material_anchor_count": 0,
+            }
+        members.append(
+            {
+                "source_symbol": symbol,
+                "membership_quality": membership_quality,
+                "source_pool_status": "IN_TARGET_SOURCE_POOL"
+                if in_target_source_pool
+                else "OUTSIDE_TARGET_SOURCE_POOL",
+                "d0": {
+                    "before_state": d0.get("before_state") if d0 else None,
+                    "after_state": d0_state,
+                    "transition": transition or "NOT_COMPUTED",
+                },
+                "seed": seed_metric,
+                "d1": d1_view,
+            }
+        )
+    for metric_name, values in (("rps5", rps5_values), ("rps20", rps20_values)):
+        ordered_values = sorted(set(values.values()), reverse=True)
+        ranks = {value: index + 1 for index, value in enumerate(ordered_values)}
+        for member in members:
+            seed_metric = member["seed"]
+            if member["source_symbol"] in values:
+                seed_metric[f"{metric_name}_board_rank"] = ranks[
+                    values[member["source_symbol"]]
+                ]
+
+    state_order = {"TRUE": 0, "FALSE": 1, "UNKNOWN": 2, "NOT_COMPUTED": 3}
+    members.sort(
+        key=lambda member: (
+            member["source_pool_status"] != "IN_TARGET_SOURCE_POOL",
+            state_order.get(member["d0"]["after_state"], 3),
+            member["source_symbol"],
+        )
+    )
+    page = members[offset : offset + limit]
+    return {
+        "status": "AVAILABLE",
+        "board_kind": board_kind,
+        "board_native_id": board_native_id,
+        "membership_scope": "NON_PIT_CURRENT_SNAPSHOT",
+        "snapshot_member_count": len(member_rows),
+        "source_pool": {
+            "inside": sum(
+                member["source_pool_status"] == "IN_TARGET_SOURCE_POOL"
+                for member in members
+            ),
+            "outside": sum(
+                member["source_pool_status"] == "OUTSIDE_TARGET_SOURCE_POOL"
+                for member in members
+            ),
+        },
+        "d0": {
+            "true": state_counts["TRUE"],
+            "false": state_counts["FALSE"],
+            "unknown": state_counts["UNKNOWN"],
+            "missing": state_counts["NOT_COMPUTED"],
+            "target_source_pool_denominator": sum(
+                member["source_pool_status"] == "IN_TARGET_SOURCE_POOL"
+                for member in members
+            ),
+            "outside_target_source_pool": sum(
+                member["source_pool_status"] == "OUTSIDE_TARGET_SOURCE_POOL"
+                for member in members
+            ),
+            "transitions": transition_counts,
+        },
+        "seed": {
+            "scope_status": seed_scope_status,
+            "history_session_count": int(seed_scope[3])
+            if seed_scope is not None
+            else None,
+            "target_source_pool_denominator": sum(
+                member["source_pool_status"] == "IN_TARGET_SOURCE_POOL"
+                for member in members
+            ),
+            "true": seed_counts["TRUE"],
+            "false": seed_counts["FALSE"],
+            "unknown": seed_counts["UNKNOWN"],
+            "missing": seed_counts["NOT_COMPUTED"],
+        },
+        "d1": {
+            "scope_status": "AVAILABLE"
+            if len(d1_by_symbol)
+            == sum(
+                1
+                for member in members
+                if member["source_pool_status"] == "IN_TARGET_SOURCE_POOL"
+            )
+            and all(
+                int(item[0]) == len(_STRUCTURE_TYPES) for item in d1_by_symbol.values()
+            )
+            else "PARTIAL",
+            "material_change_members": d1_anchor_members,
+            "material_anchor_count": d1_anchor_count,
+            "target_price_observed": d1_price_observed,
+            "target_price_unknown": d1_price_unknown,
+            "target_price_quality_counts": d1_price_quality_counts,
+        },
+        "cross_kind_overlap": {
+            "kind": opposite_kind,
+            "member_count": overlap_count,
+            "top_boards": overlap_boards,
+        },
+        "pagination": {
+            "offset": offset,
+            "limit": limit,
+            "total_count": len(members),
+            "next_offset": offset + limit if offset + limit < len(members) else None,
+        },
+        "members": page,
+    }
+
+
 def read_source_research_day(
     config: Mapping[str, Any],
     *,
@@ -1489,6 +1905,24 @@ def read_source_research_day(
             by_symbol[item["source_symbol"]].setdefault("material_anchors", []).append(
                 item
             )
+        selected_board_observation = None
+        if board_kind is not None and board_native_id is not None:
+            selected_board_observation = _read_selected_board_observation(
+                cursor,
+                target_session=target_session,
+                source_package_id=source_package_id,
+                target_capture_id=target_capture_id,
+                d1_history_session_count=d1_history_session_count,
+                d1_predicate=d1_predicate,
+                d1_params=d1_params,
+                d0_predicate=d0_predicate,
+                d0_params=d0_params,
+                snapshot_specs=snapshot_specs,
+                board_kind=board_kind,
+                board_native_id=board_native_id,
+                offset=offset,
+                limit=limit,
+            )
         return {
             "storage_status": "SAVED",
             "target_session": target_session.isoformat(),
@@ -1543,6 +1977,7 @@ def read_source_research_day(
                 "next_offset": offset + limit if offset + limit < stock_total else None,
             },
             "results": [by_symbol[symbol] for symbol in page_symbols],
+            "selected_board_observation": selected_board_observation,
             "execution": {
                 "database_mode": "READ_ONLY",
                 "database_write_attempted": False,

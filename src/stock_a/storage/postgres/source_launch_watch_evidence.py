@@ -303,7 +303,8 @@ def read_source_launch_watch_evidence(
         rule_rows: list[tuple[Any, ...]] = []
         if rules_semantics_match and rule_scope is not None:
             cursor.execute(
-                """SELECT source_symbol, rule_id, state, reasons, event_count
+                """SELECT source_symbol, rule_id, state, reasons, event_count,
+                          frozen_line_numerator, frozen_line_denominator, frozen_line_source
                    FROM source_rule_evaluations
                    WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
                      AND rule_version=%s AND profile_revision=%s
@@ -362,14 +363,41 @@ def read_source_launch_watch_evidence(
 
     seed_by_symbol = {row[0]: row for row in seed_rows}
     rule_by_symbol: dict[str, dict[str, dict[str, Any]]] = defaultdict(dict)
-    for symbol, rule_id, state, reasons, event_count in rule_rows:
+    for (
+        symbol,
+        rule_id,
+        state,
+        reasons,
+        event_count,
+        frozen_line_numerator,
+        frozen_line_denominator,
+        frozen_line_source,
+    ) in rule_rows:
         if rule_id in _RULE_IDS:
-            rule_by_symbol[symbol][rule_id] = {
+            fact = {
                 "state": _state(state),
                 "reasons": _reasons(reasons),
                 "event_count": int(event_count or 0),
                 "scope": "NON_PIT_EXPLORATORY",
             }
+            if (
+                fact["state"] == "TRUE"
+                and frozen_line_numerator is not None
+                and frozen_line_denominator is not None
+                and int(frozen_line_denominator) > 0
+                and isinstance(frozen_line_source, str)
+                and frozen_line_source
+            ):
+                fact["failure_line_candidate"] = {
+                    "value": {
+                        "numerator": str(frozen_line_numerator),
+                        "denominator": str(frozen_line_denominator),
+                    },
+                    "source": frozen_line_source,
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "scope": "NON_PIT_EXPLORATORY",
+                }
+            rule_by_symbol[symbol][rule_id] = fact
 
     d1_by_symbol: dict[str, list[tuple[Any, ...]]] = defaultdict(list)
     for row in d1_rows:
