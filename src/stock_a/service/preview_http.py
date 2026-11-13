@@ -1493,6 +1493,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "status": "AVAILABLE"
                 if page_result["scope_status"]["rules_match_seed"]
                 else "UNKNOWN",
+                "d0": page_result["scope_status"]["d0"],
                 "seed": page_result["scope_status"]["seed"],
                 "d1": page_result["scope_status"]["d1"],
                 "rules": page_result["scope_status"]["rules"],
@@ -5565,6 +5566,92 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "execution"
                 ]
                 result["stored_research_evidence_status"] = saved_evidence["status"]
+                from stock_a.storage.postgres.research_enrollment import (
+                    read_enrollment_followups,
+                    read_enrollments_for_symbols,
+                )
+
+                config = self.preview_server.state.config
+                _, pair, _ = resolve_pg_history_window(target.isoformat(), 2)
+                before = pair[-2] if len(pair) == 2 else None
+                before_source = (
+                    read_source_version_context(
+                        config,
+                        target_session=before,
+                        source_package_id=source_package_id,
+                    )
+                    if before is not None
+                    else {}
+                )
+                entries = []
+                if before_source.get("status") == "AVAILABLE":
+                    entries = read_enrollments_for_symbols(
+                        config,
+                        target=target,
+                        package=source_package_id,
+                        capture=source_context["source_capture_id"],
+                        before=before,
+                        before_capture=before_source["source_capture_id"],
+                        include_d0=True,
+                        symbols=[symbol],
+                        rule_scope=(
+                            saved_evidence.get("rule_scope")
+                            if saved_evidence.get("rules_status") == "AVAILABLE"
+                            else None
+                        ),
+                    ).get(symbol, [])
+                calendar = _official_calendar(research_cutoff)["sessions"]
+                ids = [entry["id"] for entry in entries]
+                followups = (
+                    read_enrollment_followups(
+                        config,
+                        target=target,
+                        cutoff=research_cutoff,
+                        enrollment_ids=ids,
+                        successor_sessions=tuple(
+                            day for day in calendar if target < day <= research_cutoff
+                        ),
+                    )
+                    if target in calendar
+                    else {
+                        item: {
+                            "status": "UNKNOWN",
+                            "reason": "CALENDAR_WINDOW_UNAVAILABLE",
+                        }
+                        for item in ids
+                    }
+                )
+                for entry in entries:
+                    entry["followup"] = followups[entry["id"]]
+                followup_states = {entry["followup"]["status"] for entry in entries}
+                result["t0_observation"] = {
+                    "status": "AVAILABLE"
+                    if entries
+                    else "NO_STORED_FACT"
+                    if before_source.get("status") == "AVAILABLE"
+                    and saved_evidence.get("rules_status") == "AVAILABLE"
+                    else "UNKNOWN",
+                    "reason": None
+                    if entries
+                    else "NO_STORED_FACT"
+                    if saved_evidence.get("rules_status") == "AVAILABLE"
+                    and before_source.get("status") == "AVAILABLE"
+                    else "EXACT_SCOPE_UNAVAILABLE",
+                    "enrollments": entries,
+                    "followup_status": next(iter(followup_states))
+                    if len(followup_states) == 1
+                    else "MULTIPLE"
+                    if followup_states
+                    else "NOT_COMPUTED",
+                    "target_session": target.isoformat(),
+                    "source_package_id": source_package_id,
+                    "source_capture_id": source_context["source_capture_id"],
+                    "profile_revision": (saved_evidence.get("rule_scope") or {}).get(
+                        "profile_revision"
+                    ),
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "scope": "NON_PIT_EXPLORATORY",
+                }
             self._send_json(200, result)
         except Exception as error:
             self._handle_error(error)

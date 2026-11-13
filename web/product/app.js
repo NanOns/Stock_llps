@@ -496,6 +496,7 @@ document
   );
 function invalidateDate() {
   ++state.contextRequest;
+  ++state.focusAutoRequest;
   ++state.stockRequest;
   ++state.profileChangeRequest;
   ++state.d0Request;
@@ -711,8 +712,10 @@ async function selectDate(target_session) {
   );
   message("overviewBoards", "正在读取 D0 来源级新增启动。");
   message("overviewStocks", "正在读取 D0 来源级新增启动。");
-  if (["focus", "market", "diagnostics"].includes(activePage))
+  if (["market", "diagnostics"].includes(activePage))
     void loadExtra(activePage);
+  if (activePage === "focus")
+    message("focusAutoStatus", "正在读取交易日来源上下文…");
   try {
     const c = await api(
       `/api/preview/sector-change-context?${new URLSearchParams({ target_session, source_package_id })}`,
@@ -742,6 +745,7 @@ async function selectDate(target_session) {
       research_cutoff: c.research_cutoff,
       contextReady: true,
     });
+    if (activePage === "focus") void loadExtra("focus");
     const snapshotText = [industry, concept]
       .filter(Boolean)
       .map(
@@ -762,11 +766,14 @@ async function selectDate(target_session) {
     );
     void loadD0Overview(selected);
   } catch (error) {
-    if (token === state.contextRequest && error.name !== "AbortError")
+    if (token === state.contextRequest && error.name !== "AbortError") {
       message(
         "contextText",
         `${target_session} 行情可用；画像或成员目录读取失败：${error.message}`,
       );
+      if (activePage === "focus")
+        message("focusAutoStatus", `来源上下文不可用：${error.message}`);
+    }
   }
 }
 
@@ -1241,6 +1248,10 @@ async function loadFocusAuto(context, offset = 0) {
   root.replaceChildren();
   $("focusAutoPrev").disabled = $("focusAutoNext").disabled = true;
   message("focusAutoPage", "—");
+  if (!context?.contextReady) {
+    message("focusAutoStatus", "正在读取交易日来源上下文…");
+    return;
+  }
   if (state.focusAutoBoard?.target_session !== context?.target_session)
     state.focusAutoBoard = null;
   const boardFilter = $("focusAutoBoardFilter");
@@ -1302,6 +1313,19 @@ async function loadFocusAuto(context, offset = 0) {
       activePage !== "focus"
     )
       return;
+    const scope = result.stored_evidence_status || {};
+    if (
+      ["d0", "seed", "d1", "rules"].every(
+        (key) => scope[key] === "NOT_COMPUTED",
+      )
+    ) {
+      message(
+        "focusAutoStatus",
+        "NO_STORED_FACT / NOT_COMPUTED：该日期的精确来源研究范围尚未保存，不能解释为零变化。",
+      );
+      root.textContent = "尚无该范围的已存观察事实。";
+      return;
+    }
     const results = Array.isArray(result.results) ? result.results : [];
     for (const [index, item] of results.entries()) {
       const details = [
@@ -2725,6 +2749,16 @@ async function openStock(symbol, row = {}) {
       `D1 已存结构 ${evidenceStatusLabel(d1State)} · ${d1Scope.history_window_start || "UNKNOWN"} 至 ${d1Scope.history_window_end || "UNKNOWN"} · ${storedEvidence?.d1?.structure_fact_count ?? 0}/${storedEvidence?.d1?.expected_structure_fact_count ?? 5} 类；正式 D1 事件评估不在本次替代计算。`,
     );
     root.append(rules, d1Info);
+    root.append(node("h3", "已保存来源研究登记"));
+    root.append(
+      focusEvidenceDetails(
+        {
+          t0_observation: data.t0_observation,
+          research_evidence: storedEvidence,
+        },
+        c,
+      ),
+    );
     root.append(node("h3", "D1 材料变化"));
     const materialDetail = node(
       "div",
@@ -3198,6 +3232,10 @@ $("focusReadStock").addEventListener("click", async () => {
       target_session: c.target_session,
       source_package_id: c.source_package_id,
       session_count: sessionCount,
+      profile_revision: c.profile_revision,
+      d1_history_session_count: c.d1_history_session_count,
+      industry_snapshot_id: c.industry_snapshot_id,
+      concept_snapshot_id: c.concept_snapshot_id,
     });
     if (token !== focusStockRequest || activePage !== "focus") return;
     message(
@@ -3220,9 +3258,13 @@ $("focusReadStock").addEventListener("click", async () => {
       ]),
       [
         "T0来源观察",
-        state.focusAutoSelectedItem?.source_symbol === symbol
-          ? `${state.focusAutoSelectedItem.t0_observation?.status || "UNKNOWN"} · ${state.focusAutoSelectedItem.watch_group || "UNKNOWN"} · ${state.focusAutoSelectedItem.observation_reason || "无已存原因"} · ${state.focusAutoSelectedItem.t0_observation?.followup_status || "NOT_COMPUTED"} / ${state.focusAutoSelectedItem.t0_observation?.followup_reason || "NO_STORED_LANDMARK"} · NON_PIT`
-          : `${data.stored_research_evidence_status || "UNKNOWN"} · 该单股读取未绑定来源分组；未知不等于无信号。`,
+        (data.t0_observation?.enrollments || [])
+          .map(
+            (entry) =>
+              `#${entry.id} ${entry.rule_id || entry.fact_type} ${entry.kind} · ${entry.reason} · ${entry.followup?.status} / ${entry.followup?.reason}`,
+          )
+          .join("；") ||
+          `${data.t0_observation?.status || "UNKNOWN"} · ${data.t0_observation?.reason || "NO_STORED_FACT"}`,
       ],
       [
         "Seed / S1 / S2 / Safety",
@@ -3246,7 +3288,7 @@ $("focusReadStock").addEventListener("click", async () => {
       ),
       [
         "后续状态",
-        `${state.focusAutoSelectedItem?.source_symbol === symbol ? state.focusAutoSelectedItem.t0_observation?.followup_status || "NOT_COMPUTED" : "NOT_COMPUTED"}；正式 Focus Episode、D2、Risk 与 Priority 未计算。`,
+        `${data.t0_observation?.followup_status || "NOT_COMPUTED"}；正式 Focus Episode、D2、Risk 与 Priority 未计算。`,
       ],
     ]);
   } catch (error) {
