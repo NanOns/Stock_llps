@@ -736,6 +736,16 @@ ORDER BY source_symbol""",
             inserted = insert_profile_records_in_transaction(cursor, missing_records)
         else:
             inserted = []
+        if inserted:
+            cursor.execute(
+                """DELETE FROM source_market_participation_days
+WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s""",
+                (
+                    first["target_session"],
+                    first["source_package_id"],
+                    source_capture_id,
+                ),
+            )
         cursor.execute(
             """SELECT count(*)::bigint FROM source_symbol_price_profiles
 WHERE target_session=%s AND source_package_id=%s AND profile_revision=%s""",

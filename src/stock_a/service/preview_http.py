@@ -25,6 +25,9 @@ from stock_a.application.source_market_context import (
     read_source_market_context,
     source_market_context_payload,
 )
+from stock_a.application.source_market_participation import (
+    read_source_market_participation,
+)
 from stock_a.application.source_market_observation import (
     SourceObservationError,
     prepare_saved_d1_material_observation,
@@ -46,6 +49,7 @@ from stock_a.storage.postgres.research_facts import (
     ResearchFactConflict,
     ResearchFactNotFound,
 )
+from stock_a.storage.postgres.market_participation import MarketParticipationPgError
 from stock_a.storage.postgres.research_day_facts import (
     ResearchDayPgError,
     read_source_research_day,
@@ -3659,8 +3663,24 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         },
                     )
                     return
+                try:
+                    participation = read_source_market_participation(
+                        self.preview_server.state.config, market
+                    )
+                except (MarketParticipationPgError, RawSourcePgError) as error:
+                    raise PreviewHttpError(
+                        503,
+                        getattr(error, "code", "MARKET_PARTICIPATION_READ_FAILED"),
+                        str(error),
+                    ) from error
                 self._send_json(
-                    200, {"ok": True, **source_market_context_payload(market)}
+                    200,
+                    {
+                        "ok": True,
+                        **source_market_context_payload(
+                            market, market_participation=participation
+                        ),
+                    },
                 )
                 return
             if parsed.path == "/api/product/resolve-stock-code":

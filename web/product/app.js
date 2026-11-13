@@ -51,7 +51,7 @@ const names = {
   sectors: ["板块研究", "从行业与概念进入成员与个股。", "02"],
   stocks: ["个股研究", "查看来源画像、价格结构和规则解释。", "03"],
   focus: ["关注跟踪", "读取来源级冻结规则与后继观察。", "04"],
-  market: ["市场研究", "查看来源池宽度和覆盖。", "05"],
+  market: ["市场研究", "查看来源池宽度与成交参与。", "05"],
   diagnostics: ["数据与诊断", "查看所选来源与质量。", "06"],
 };
 function node(tag, text, cls) {
@@ -81,6 +81,66 @@ function format(value) {
         : JSON.stringify(value))
     );
   return String(value);
+}
+function marketClassText(value) {
+  return (
+    {
+      STRONG: "强（STRONG）",
+      NEUTRAL: "中性（NEUTRAL）",
+      WEAK: "弱（WEAK）",
+      EXPANDING: "成交扩张（EXPANDING）",
+      NORMAL: "成交常态（NORMAL）",
+      THIN: "成交偏薄（THIN）",
+      UNKNOWN: "未知（UNKNOWN）",
+    }[value] ||
+    value ||
+    "未知（UNKNOWN）"
+  );
+}
+function marketStatusText(value) {
+  return (
+    {
+      COMPLETE: "完整",
+      PARTIAL_WITH_UNKNOWN: "部分可评价，含 UNKNOWN",
+      UNKNOWN_ZERO_EVALUABLE: "无可评价比值",
+      NOT_COMPUTED: "未计算",
+      NOT_COMPARABLE: "版本不可比较",
+      INCOMPLETE: "事实不完整",
+      UNKNOWN: "未知",
+    }[value] ||
+    value ||
+    "未知"
+  );
+}
+function marketUnknownReasonText(reason) {
+  return (
+    {
+      CURRENT_SESSION_UNKNOWN: "目标日成交金额缺失或未知",
+      UNKNOWN_SESSION_GAP: "严格前20个actual窗口遇到未知会话缺口",
+      PROFILE_NOT_STORED: "来源池代码缺少同版本画像",
+    }[reason] || reason
+  );
+}
+function marketBreadthCountText(counts) {
+  const labels = {
+    COMPARABLE_GAIN: "宽度改善",
+    COMPARABLE_LOSS: "宽度转弱",
+    COMPARABLE_BOTH_POSITIVE: "两期均正",
+    COMPARABLE_BOTH_NONPOSITIVE: "两期均非正",
+    UNKNOWN: "不可比较",
+  };
+  return Object.entries(counts || {})
+    .map(([name, count]) => `${labels[name] || name} ${count}`)
+    .join(" · ");
+}
+function marketBreadthReasonText(reasons) {
+  const labels = {
+    "RET1_T:TARGET_BAR_MISSING": "目标日缺价或未知",
+    "RET1_T_MINUS_3:TARGET_BAR_MISSING": "t−3缺价或未知",
+  };
+  return Object.entries(reasons || {})
+    .map(([reason, count]) => `${labels[reason] || reason} ${count}`)
+    .join(" · ");
 }
 function boardKindLabel(kind) {
   return kind === "INDUSTRY" ? "行业" : kind === "CONCEPT" ? "概念" : "板块";
@@ -2970,6 +3030,10 @@ async function loadExtra(page) {
         ["价格坐标", data.price_coordinate],
         ["公式", data.metric.formula],
         ["精确值", data.metric.exact?.fraction],
+        [
+          "宽度分类",
+          `${marketClassText(data.market_axes?.breadth?.classification)} · B_fixed_source`,
+        ],
         ["来源分母", data.denominator.N_source],
         [
           "来源读取覆盖",
@@ -2978,8 +3042,55 @@ async function loadExtra(page) {
         ["可评价分母", data.denominator.N_eligible],
         ["UNKNOWN", data.denominator.UNKNOWN],
         ["覆盖", data.denominator.coverage?.fraction],
-        ["分类", data.denominator.counts],
-        ["未知原因", data.denominator.unknown_reason_counts],
+        ["宽度分类分母", marketBreadthCountText(data.denominator.counts)],
+        [
+          "宽度未知原因",
+          marketBreadthReasonText(data.denominator.unknown_reason_counts),
+        ],
+        [
+          "成交参与中位数",
+          data.market_axes?.participation?.metric?.exact
+            ? `${data.market_axes.participation.metric.exact.display_decimal_12dp} · ${marketClassText(data.market_axes.participation.metric.classification)}`
+            : `${marketStatusText(data.market_axes?.participation?.status)} · ${data.market_axes?.participation?.reason || "尚无同日保存事实。"}`,
+        ],
+        [
+          "成交参与分母",
+          data.market_axes?.participation?.denominator
+            ? `${marketStatusText(data.market_axes.participation.status)} · 画像 ${data.market_axes.participation.denominator.profile_count}/${data.market_axes.participation.denominator.source_pool_count} · 可评价 ${data.market_axes.participation.denominator.assessable_count} · UNKNOWN ${data.market_axes.participation.denominator.unknown_count}`
+            : "无已保存成交参与分母",
+        ],
+        [
+          "成交参与未知原因",
+          data.market_axes?.participation?.denominator?.unknown_reason_counts
+            ? Object.entries(
+                data.market_axes.participation.denominator
+                  .unknown_reason_counts,
+              )
+                .map(
+                  ([reason, count]) =>
+                    `${marketUnknownReasonText(reason)} ${count}`,
+                )
+                .join("；")
+            : "无",
+        ],
+        [
+          "成交参与口径",
+          data.market_axes?.participation?.metric?.exact
+            ? `amount_ratio20中位数 · ${data.market_axes.participation.price_coordinate} · ${data.market_axes.participation.pit_status} · 原生金额单位 ${data.market_axes.participation.profile?.amount_unit_status || "UNKNOWN"}（比值无量纲）`
+            : "RAW_UNADJUSTED · NON_PIT_RETROSPECTIVE",
+        ],
+        [
+          "趋势轴",
+          `${data.market_axes?.trend?.status || "NOT_COMPUTED"} · ${data.market_axes?.trend?.reason || "无合法PRIMARY_MARKET参考序列。"}`,
+        ],
+        [
+          "压力轴",
+          `${data.market_axes?.pressure?.status || "UNKNOWN"} · ${data.market_axes?.pressure?.reason || "缺少日期有效限价制度事实。"}`,
+        ],
+        [
+          "综合研究环境",
+          `${data.market_axes?.composite?.status || "UNKNOWN"}${data.market_axes?.composite?.label ? ` · ${data.market_axes.composite.label}` : ""} · 可能标签 ${data.market_axes?.composite?.possible_labels?.join("、") || "UNKNOWN"}`,
+        ],
         [
           "来源质量 / 可得时间",
           `${data.source_cohort.source_time_quality} / ${data.source_cohort.source_available_at}`,

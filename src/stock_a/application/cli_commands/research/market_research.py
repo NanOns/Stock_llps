@@ -22,6 +22,7 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_stock,
 )
 from stock_a.storage.postgres.market_breadth import MarketBreadthPgError
+from stock_a.storage.postgres.market_participation import MarketParticipationPgError
 from stock_a.application.pg_price_profiles import (
     PgPriceProfileError,
     SOURCE_SYMBOL_PROFILE_SCOPE,
@@ -36,6 +37,10 @@ from stock_a.application.source_market_context import (
     fraction_payload as _fraction_payload,
     read_source_market_context,
     source_market_context_payload,
+)
+from stock_a.application.source_market_participation import (
+    SourceMarketParticipationError,
+    produce_market_participation,
 )
 from stock_a.application.runtime_config import (
     DiagnosticError,
@@ -70,6 +75,23 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
         )
 
     try:
+        if getattr(args, "participation_from_saved_profiles", False):
+            if args.persist or args.start_session:
+                raise SourceMarketContextError(
+                    "MARKET_PARTICIPATION_MODE_CONFLICT",
+                    "成交参与生产仅允许读取一个已保存的精确来源范围，不能与宽度重算或日期范围混用。",
+                    category="ARGUMENT",
+                )
+            market = read_source_market_context(
+                config,
+                target_session=target_session,
+                research_cutoff=research_cutoff,
+                source_package_id=args.source_package_id,
+                include_symbols=True,
+            )
+            result = produce_market_participation(config, market)
+            _emit({"ok": True, **result})
+            return _EXIT_OK
         if args.start_session and not args.persist:
             raise SourceMarketContextError(
                 "MARKET_BREADTH_RANGE_REQUIRES_PERSIST",
@@ -143,7 +165,9 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
                 "code": error.code,
                 "message": str(error),
                 "configuration_path": str(config_path),
-                "database_write_attempted": False,
+                "database_write_attempted": getattr(
+                    error, "database_write_attempted", False
+                ),
                 "ddl_executed": False,
                 "dml_executed": False,
             },
@@ -157,6 +181,31 @@ def _run_source_market_breadth(args: argparse.Namespace) -> int:
                 "status": "REJECTED",
                 "code": error.code,
                 "message": str(error),
+            },
+            error=True,
+        )
+        return _EXIT_UNAVAILABLE
+    except SourceMarketParticipationError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": error.category,
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": error.database_write_attempted,
+                "ddl_executed": False,
+            },
+            error=True,
+        )
+        return _EXIT_ARGUMENT if error.category == "ARGUMENT" else _EXIT_UNAVAILABLE
+    except MarketParticipationPgError as error:
+        _emit(
+            {
+                "ok": False,
+                "status": "REJECTED",
+                "code": error.code,
+                "message": str(error),
+                "database_write_attempted": error.database_write_attempted,
             },
             error=True,
         )

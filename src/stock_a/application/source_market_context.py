@@ -9,6 +9,10 @@ from fractions import Fraction
 import re
 from typing import Any, Mapping, Sequence
 
+from stock_a.domain.market_presentation import (
+    classify_market_breadth,
+    market_environment_label,
+)
 from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.source_market_breadth import (
@@ -363,6 +367,8 @@ def read_source_market_context(
 
 def source_market_context_payload(
     market: SourceMarketContextRead,
+    *,
+    market_participation: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     """输出市场宽度摘要，不暴露逐来源代码计算明细。"""
     calculation = market.calculation
@@ -376,6 +382,43 @@ def source_market_context_payload(
         else "PARTIAL_WITH_UNKNOWN"
         if calculation.counts["UNKNOWN"]
         else "COMPLETE"
+    )
+    breadth_classification = classify_market_breadth(calculation.b_fixed_source)
+    participation_axis = dict(market_participation or {})
+    if not participation_axis:
+        participation_axis = {
+            "status": "NOT_COMPUTED",
+            "reason": "此精确日期和来源尚无已保存成交参与事实。",
+            "classification": "UNKNOWN",
+        }
+    participation_metric = participation_axis.get("metric") or {}
+    participation_classification = participation_metric.get(
+        "classification", participation_axis.get("classification", "UNKNOWN")
+    )
+    if participation_axis.get("status") in {
+        "NOT_COMPUTED",
+        "NOT_COMPARABLE",
+        "INCOMPLETE",
+    }:
+        participation_classification = None
+    trend_axis = {
+        "status": "NOT_COMPUTED",
+        "classification": "UNKNOWN",
+        "reason": "尚无与该来源范围绑定的合法PRIMARY_MARKET参考序列。",
+    }
+    pressure_axis = {
+        "status": "UNKNOWN",
+        "classification": "UNKNOWN",
+        "reason": "没有已验证的日期有效涨跌停制度事实，不能确定可判定分母和覆盖。",
+    }
+    composite = market_environment_label(
+        None,
+        breadth_classification,
+        participation_classification,
+        None,
+    )
+    composite["reason"] = (
+        "按冻结有序规则枚举未知轴的所有合法补全；仅当所有补全标签唯一时才报告综合标签。"
     )
     return {
         "status": status,
@@ -428,6 +471,23 @@ def source_market_context_payload(
             "range": ["-1", "1"],
             "sign_return_difference_is_main_value": False,
             "ma20_profile_breadth_is_main_value": False,
+        },
+        "market_axes": {
+            "breadth": {
+                "status": "OBSERVED"
+                if calculation.b_fixed_source is not None
+                else "UNKNOWN",
+                "classification": breadth_classification,
+                "metric_name": "B_fixed_source",
+                "exact": fraction_payload(calculation.b_fixed_source),
+                "source_pool_count": calculation.n_source,
+                "assessable_count": calculation.n_eligible,
+                "unknown_count": calculation.counts["UNKNOWN"],
+            },
+            "participation": participation_axis,
+            "trend": trend_axis,
+            "pressure": pressure_axis,
+            "composite": composite,
         },
         "denominator": {
             "N_source": calculation.n_source,

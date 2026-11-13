@@ -365,6 +365,11 @@ def register_commands(commands):
         "--persist", action="store_true", help="显式计算并原子保存市场宽度事实"
     )
     source_market_breadth.add_argument(
+        "--participation-from-saved-profiles",
+        action="store_true",
+        help="只从同日已存Profile生产并保存成交参与摘要；不采集行情或重算全池画像",
+    )
+    source_market_breadth.add_argument(
         "--start-session", help="配合--persist从已存日期起逐日计算至目标日"
     )
     source_d1_breakout = commands.add_parser(

@@ -43,6 +43,7 @@ _MIGRATION_FILES = (
     "0029_source_enrollment_d0_evidence.sql",
     "0030_source_rule_adjacent_index.sql",
     "0031_source_cohort_group_stats.sql",
+    "0032_source_market_participation.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -73,6 +74,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R07_T0_D0_EVIDENCE_R1": frozenset({29}),
     "R07_T0_ADJACENT_INDEX_R1": frozenset({30}),
     "R07_T0_COHORT_PG_CONSUMER_R1": frozenset({31}),
+    "R07_MARKET_PARTICIPATION_FACT_R1": frozenset({32}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -202,6 +204,10 @@ _RELATIONS_BY_MIGRATION_COUNT[29] = _RELATIONS_BY_MIGRATION_COUNT[28]
 _RELATIONS_BY_MIGRATION_COUNT[30] = _RELATIONS_BY_MIGRATION_COUNT[29]
 _RELATIONS_BY_MIGRATION_COUNT[31] = _RELATIONS_BY_MIGRATION_COUNT[30] | {
     "source_cohort_group_stats",
+}
+_RELATIONS_BY_MIGRATION_COUNT[32] = _RELATIONS_BY_MIGRATION_COUNT[31] | {
+    "source_market_participation_days",
+    "source_market_participation_unknown_reasons",
 }
 
 
