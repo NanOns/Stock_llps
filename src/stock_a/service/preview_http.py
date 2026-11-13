@@ -209,6 +209,81 @@ def _attach_t0_early_contexts(
         )
 
 
+def _bind_t0_followup_status(
+    summary: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    stored_status: str | None = None,
+    stored_reason: str | None = None,
+) -> dict[str, Any]:
+    """将已知后继状态绑定到当前请求截止，不读取截止之后的行情。"""
+    result = dict(summary)
+    if result.get("status") != "AVAILABLE":
+        return result
+    if stored_status and stored_status not in {"NOT_COMPUTED", "UNKNOWN"}:
+        status = stored_status
+        reason = stored_reason
+    elif target_session >= research_cutoff:
+        status = "NOT_DUE"
+        reason = "NO_SUCCESSOR_SESSION_WITHIN_RESEARCH_CUTOFF"
+    else:
+        status = "NOT_COMPUTED"
+        reason = stored_reason or "SUCCESSOR_FACT_NOT_STORED_FOR_EXACT_SCOPE"
+    result["followup_status"] = status
+    result["followup_reason"] = reason
+    driver = dict(result.get("t0_driver_and_earliness") or {})
+    driver["followup_status"] = status
+    driver["followup_reason"] = reason
+    result["t0_driver_and_earliness"] = driver
+    return result
+
+
+def _t0_list_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
+    """只向列表返回紧凑分型与已选类别样例；完整事实留给单股展开。"""
+    result = {
+        "status": summary.get("status", "NO_STORED_FACT"),
+        "triage_state": summary.get("triage_state", "NO_T0_FACT"),
+        "followup_status": summary.get("followup_status", "NOT_COMPUTED"),
+        "followup_reason": summary.get("followup_reason"),
+    }
+    driver = summary.get("t0_driver_and_earliness")
+    if not isinstance(driver, Mapping):
+        return result
+    result["t0_driver_and_earliness"] = {
+        key: driver[key]
+        for key in (
+            "version",
+            "registration_count",
+            "relation_count",
+            "same_direction_candidate_relation_count",
+            "same_direction_candidate_board_count",
+            "same_direction_candidate_examples",
+            "other_background_relation_count",
+            "other_background_board_count",
+            "background_pulse_false_relation_count",
+            "background_pulse_false_board_count",
+            "other_background_examples",
+            "named_conflict_relation_count",
+            "named_conflict_board_count",
+            "named_conflict_codes",
+            "named_conflict_examples",
+            "unknown_relation_count",
+            "unknown_board_count",
+            "unknown_reason_codes",
+            "pulse_transition_not_computed_relation_count",
+            "next_check_codes",
+            "price_at_t0",
+            "scope",
+            "price_coordinate",
+            "followup_status",
+            "followup_reason",
+        )
+        if key in driver
+    }
+    return result
+
+
 def _read_enrollment_followups_page(
     config: Mapping[str, Any],
     *,
@@ -1209,6 +1284,23 @@ class _PreviewHandler(BaseHTTPRequestHandler):
 
         page_rows = page_result["results"]
         page_symbols = [item["source_symbol"] for item in page_rows]
+        t0_summary_query_started = time.perf_counter()
+        from stock_a.storage.postgres.t0_early_observations import (
+            read_source_t0_early_triage_summaries_for_symbols,
+        )
+
+        t0_summaries = (
+            read_source_t0_early_triage_summaries_for_symbols(
+                config,
+                target_session=target_session,
+                source_package_id=source_package_id,
+                source_capture_id=after_source["source_capture_id"],
+                source_symbols=page_symbols,
+            )
+            if page_symbols
+            else {}
+        )
+        t0_summary_query_seconds = time.perf_counter() - t0_summary_query_started
         if page_symbols:
             evidence = read_source_launch_watch_evidence(
                 config,
@@ -1509,6 +1601,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 if followup_reasons
                 else "NO_STORED_FACT"
             )
+            t0_triage_summary = _t0_list_summary(
+                _bind_t0_followup_status(
+                    t0_summaries.get(symbol, row.get("t0_triage_summary") or {}),
+                    target_session=target_session,
+                    research_cutoff=research_cutoff,
+                    stored_status=followup_status,
+                    stored_reason=followup_reason,
+                )
+            )
             t0_status = (
                 "ENTRY"
                 if any(item["kind"] == "ENTRY" for item in enrollments)
@@ -1548,7 +1649,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "t0_observation": {
                         "status": t0_status,
                         "enrollments": enrollments,
-                        "triage_summary": row.get("t0_triage_summary"),
+                        "triage_summary": t0_triage_summary,
                         "reason": "NO_STORED_FACT"
                         if not enrollments and t0_status == "NOT_COMPUTED"
                         else None,
@@ -1701,6 +1802,10 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     item.get("t0_triage_summary", {}).get("status") == "AVAILABLE"
                     for item in page_rows
                 ),
+                "t0_driver_summary_rows_returned_to_python": sum(
+                    item.get("status") == "AVAILABLE" for item in t0_summaries.values()
+                ),
+                "t0_driver_summary_query_seconds": t0_summary_query_seconds,
                 "t0_early_full_context_rows_returned_to_python": 0,
                 "t0_early_full_contexts_loaded": False,
                 "page_selection_and_triage_order_executed_in_postgresql": True,
@@ -1763,13 +1868,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             source_capture_id=capture,
             source_symbols=[symbol],
         ).get(symbol, [])
-        triage_summary = read_source_t0_early_triage_summaries_for_symbols(
-            self.preview_server.state.config,
+        triage_summary = _bind_t0_followup_status(
+            read_source_t0_early_triage_summaries_for_symbols(
+                self.preview_server.state.config,
+                target_session=target,
+                source_package_id=package,
+                source_capture_id=capture,
+                source_symbols=[symbol],
+            )[symbol],
             target_session=target,
-            source_package_id=package,
-            source_capture_id=capture,
-            source_symbols=[symbol],
-        )[symbol]
+            research_cutoff=self.preview_server.state.research_cutoff,
+        )
         if any(
             context.get("target_session") != target
             or context.get("source_package_id") != package
@@ -3029,13 +3138,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                     if member["t0_early_observations"]
                                     else "NO_STORED_FACT"
                                 )
-                                member["t0_early_triage_summary"] = (
-                                    triage_by_symbol.get(
-                                        member.get("source_symbol"),
-                                        {
-                                            "status": "NO_STORED_FACT",
-                                            "triage_state": "NO_T0_FACT",
-                                        },
+                                member["t0_early_triage_summary"] = _t0_list_summary(
+                                    _bind_t0_followup_status(
+                                        triage_by_symbol.get(
+                                            member.get("source_symbol"),
+                                            {
+                                                "status": "NO_STORED_FACT",
+                                                "triage_state": "NO_T0_FACT",
+                                            },
+                                        ),
+                                        target_session=target,
+                                        research_cutoff=(
+                                            self.preview_server.state.research_cutoff
+                                        ),
                                     )
                                 )
                 self._send_json(200, {"ok": True, **result})
@@ -5078,6 +5193,28 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     source_symbols=[symbol],
                 )[symbol]
                 followup_states = {entry["followup"]["status"] for entry in entries}
+                followup_reasons = {entry["followup"]["reason"] for entry in entries}
+                followup_status = (
+                    next(iter(followup_states))
+                    if len(followup_states) == 1
+                    else "MULTIPLE"
+                    if followup_states
+                    else "NOT_COMPUTED"
+                )
+                followup_reason = (
+                    next(iter(followup_reasons))
+                    if len(followup_reasons) == 1
+                    else "SEE_RULE_DETAILS"
+                    if followup_reasons
+                    else "NO_STORED_LANDMARK"
+                )
+                triage_summary = _bind_t0_followup_status(
+                    triage_summary,
+                    target_session=target,
+                    research_cutoff=research_cutoff,
+                    stored_status=followup_status,
+                    stored_reason=followup_reason,
+                )
                 result["t0_observation"] = {
                     "status": "AVAILABLE"
                     if entries
@@ -5093,11 +5230,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     else "EXACT_SCOPE_UNAVAILABLE",
                     "enrollments": entries,
                     "triage_summary": triage_summary,
-                    "followup_status": next(iter(followup_states))
-                    if len(followup_states) == 1
-                    else "MULTIPLE"
-                    if followup_states
-                    else "NOT_COMPUTED",
+                    "followup_status": followup_status,
+                    "followup_reason": followup_reason,
                     "target_session": target.isoformat(),
                     "source_package_id": source_package_id,
                     "source_capture_id": source_context["source_capture_id"],

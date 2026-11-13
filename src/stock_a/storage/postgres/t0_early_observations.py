@@ -592,6 +592,65 @@ SELECT o.id,o.enrollment_id,e.enrollment_kind,e.reason_code AS enrollment_reason
        s.rps20_denominator::text AS rps20_denominator,
        o.relative_position,o.alignment_state,o.research_case,
        o.support_codes,o.counter_codes,o.unknown_codes,o.next_check_code,
+       (
+           o.research_case IN (
+               'D0_PULSE_TRUE_FRONT','D0_PULSE_APPEARED_FRONT'
+           )
+           OR (
+               o.pulse_status='AVAILABLE'
+               AND o.pulse_state='TRUE'
+               AND o.rps5_position='FRONT_HALF'
+               AND o.rps20_position='FRONT_HALF'
+           )
+       ) AS driver_same_direction_candidate,
+       CASE
+           WHEN o.research_case IN (
+               'D0_PULSE_TRUE_FRONT','D0_PULSE_APPEARED_FRONT'
+           ) THEN 'D0_PULSE_SAME_DIRECTION'
+           WHEN o.pulse_status='AVAILABLE'
+            AND o.pulse_state='TRUE'
+            AND o.rps5_position='FRONT_HALF'
+            AND o.rps20_position='FRONT_HALF'
+           THEN 'PULSE_TRUE_RPS5_RPS20_FRONT'
+       END AS driver_candidate_basis,
+       NOT (
+           o.research_case IN (
+               'D0_PULSE_TRUE_FRONT','D0_PULSE_APPEARED_FRONT'
+           )
+           OR (
+               o.pulse_status='AVAILABLE'
+               AND o.pulse_state='TRUE'
+               AND o.rps5_position='FRONT_HALF'
+               AND o.rps20_position='FRONT_HALF'
+           )
+       ) AS driver_other_board_background,
+       ARRAY(
+           SELECT DISTINCT code
+           FROM unnest(o.counter_codes) AS item(code)
+           WHERE code IN (
+               'RPS5_BACK_HALF','RPS20_BACK_HALF','RPS5_RPS20_MIXED'
+           )
+           ORDER BY code
+       ) || CASE
+           WHEN o.transition_status='AVAILABLE'
+            AND o.transition_state='PULSE_CEASED'
+           THEN ARRAY['PULSE_CEASED']::text[]
+           ELSE ARRAY[]::text[]
+       END AS driver_named_conflict_codes,
+       o.pulse_state='FALSE' AS driver_pulse_false_background,
+       (
+           o.membership_status IN ('UNKNOWN','NO_STORED_FACT')
+           OR o.pulse_status IN ('UNKNOWN','NOT_COMPUTED')
+           OR o.pulse_state IN ('UNKNOWN','NOT_COMPUTED')
+           OR o.rps5_position IN ('UNKNOWN','NOT_COMPUTED')
+           OR o.rps20_position IN ('UNKNOWN','NOT_COMPUTED')
+           OR cardinality(array_remove(
+               o.unknown_codes,'PULSE_TRANSITION_NOT_COMPUTED'
+           )) > 0
+       ) AS driver_has_unknown,
+       array_remove(
+           o.unknown_codes,'PULSE_TRANSITION_NOT_COMPUTED'
+       ) AS driver_unknown_reason_codes,
        o.hypothesis_version,o.evidence_revision_key,o.research_mode,
        o.price_coordinate,o.recorded_at
 FROM latest o
@@ -739,7 +798,7 @@ def read_source_t0_early_triage_summaries_for_symbols(
     source_capture_id: int,
     source_symbols: Sequence[str],
 ) -> dict[str, dict[str, Any]]:
-    """只读汇总指定证券的已存T0证据分型，不取回完整板内关系。"""
+    """有界汇总T0旧分型与独立板块驱动/早期性解释视角。"""
     symbols = tuple(sorted(set(source_symbols)))
     if (
         type(target_session) is not date
@@ -770,27 +829,68 @@ def read_source_t0_early_triage_summaries_for_symbols(
         cursor.execute(
             """WITH latest AS MATERIALIZED (
     SELECT DISTINCT ON (o.enrollment_id,o.board_context_key)
-           o.enrollment_id,o.source_symbol,o.membership_snapshot_id,
+           o.enrollment_id,o.source_symbol,o.seed_fact_id,
+           o.membership_snapshot_id,
            o.board_kind,o.board_native_id,o.board_context_key,
            o.membership_mode,o.hypothesis_version,o.research_mode,
            o.price_coordinate,o.research_case,o.pulse_status,o.pulse_state,
-           o.membership_status,o.rps5_position,o.rps20_position,
+           o.transition_status,o.transition_state,o.next_check_code,
+           o.membership_status,o.rps5_quality,o.rps5_position,
+           o.rps5_rank_first,o.rps5_rank_last,o.rps5_valid_member_count,
+           o.rps5_unknown_member_count,o.rps5_out_of_source_pool_member_count,
+           o.rps20_quality,o.rps20_position,
+           o.rps20_rank_first,o.rps20_rank_last,o.rps20_valid_member_count,
+           o.rps20_unknown_member_count,o.rps20_out_of_source_pool_member_count,
            o.counter_codes,o.unknown_codes
     FROM source_t0_early_observation_facts o
     WHERE o.target_session=%s AND o.source_package_id=%s
       AND o.source_capture_id=%s AND o.source_symbol=ANY(%s)
     ORDER BY o.enrollment_id,o.board_context_key,o.recorded_at DESC,o.id DESC
 ), evidence AS MATERIALIZED (
-    SELECT o.*,c.board_name,
+    SELECT o.*,COALESCE(c.board_name,o.board_native_id) AS board_name,
            o.research_case IN ('D0_PULSE_TRUE_FRONT','D0_PULSE_APPEARED_FRONT')
                AS has_support,
+           (
+               o.research_case IN (
+                   'D0_PULSE_TRUE_FRONT','D0_PULSE_APPEARED_FRONT'
+               )
+               OR (
+                   o.pulse_status='AVAILABLE'
+                   AND o.pulse_state='TRUE'
+                   AND o.rps5_position='FRONT_HALF'
+                   AND o.rps20_position='FRONT_HALF'
+               )
+           ) AS driver_same_direction_candidate,
            cardinality(o.counter_codes)>0 AS has_counter,
            (cardinality(o.unknown_codes)>0
             OR o.membership_status='UNKNOWN'
             OR o.pulse_status<>'AVAILABLE'
             OR o.pulse_state IN ('UNKNOWN','NOT_COMPUTED')
             OR o.rps5_position IN ('UNKNOWN','NOT_COMPUTED')
-            OR o.rps20_position IN ('UNKNOWN','NOT_COMPUTED')) AS has_unknown
+            OR o.rps20_position IN ('UNKNOWN','NOT_COMPUTED')) AS has_unknown,
+           ARRAY(
+               SELECT DISTINCT code
+               FROM unnest(o.counter_codes) AS item(code)
+               WHERE code IN (
+                   'RPS5_BACK_HALF','RPS20_BACK_HALF','RPS5_RPS20_MIXED'
+               )
+               ORDER BY code
+           ) || CASE
+               WHEN o.transition_status='AVAILABLE'
+                AND o.transition_state='PULSE_CEASED'
+               THEN ARRAY['PULSE_CEASED']::text[]
+               ELSE ARRAY[]::text[]
+           END AS driver_conflict_codes,
+           (
+               o.membership_status IN ('UNKNOWN','NO_STORED_FACT')
+               OR o.pulse_status IN ('UNKNOWN','NOT_COMPUTED')
+               OR o.pulse_state IN ('UNKNOWN','NOT_COMPUTED')
+               OR o.rps5_quality IN ('UNKNOWN','BAD_VALUE','NOT_APPLICABLE','NOT_COMPUTED')
+               OR o.rps20_quality IN ('UNKNOWN','BAD_VALUE','NOT_APPLICABLE','NOT_COMPUTED')
+               OR cardinality(array_remove(
+                   o.unknown_codes,'PULSE_TRANSITION_NOT_COMPUTED'
+               )) > 0
+           ) AS driver_unknown
     FROM latest o
     LEFT JOIN tdx_sector_catalog c
       ON c.snapshot_id=o.membership_snapshot_id
@@ -816,28 +916,132 @@ def read_source_t0_early_triage_summaries_for_symbols(
 ), evidence_counts AS (
     SELECT source_symbol,count(*)::integer AS relation_count,
            count(*) FILTER(WHERE has_support)::integer AS support_relation_count,
+           count(*) FILTER(WHERE driver_same_direction_candidate)::integer
+               AS driver_support_relation_count,
            count(*) FILTER(WHERE has_counter)::integer AS counter_relation_count,
            count(*) FILTER(WHERE has_unknown)::integer AS unknown_relation_count,
+           count(*) FILTER(WHERE NOT driver_same_direction_candidate)::integer
+               AS background_relation_count,
+           count(*) FILTER(WHERE pulse_state='FALSE')::integer
+               AS background_pulse_false_relation_count,
+           count(*) FILTER(WHERE cardinality(driver_conflict_codes)>0)::integer
+               AS direct_conflict_relation_count,
+           count(*) FILTER(WHERE driver_unknown)::integer
+               AS driver_unknown_relation_count,
+           count(*) FILTER(WHERE transition_status='NOT_COMPUTED')::integer
+               AS transition_not_computed_relation_count,
            array_agg(DISTINCT research_case ORDER BY research_case)
                AS research_cases,
+           array_agg(DISTINCT next_check_code ORDER BY next_check_code)
+               AS next_check_codes,
+           array(
+               SELECT DISTINCT code
+               FROM evidence e2
+               CROSS JOIN LATERAL unnest(e2.driver_conflict_codes) AS item(code)
+               WHERE e2.source_symbol=e.source_symbol
+               ORDER BY code
+           ) AS direct_conflict_codes,
            min(hypothesis_version) AS hypothesis_version,
            min(membership_mode) AS membership_mode,
            min(research_mode) AS research_mode,
            min(price_coordinate) AS price_coordinate
-    FROM evidence
+    FROM evidence e
     GROUP BY source_symbol
 ), symbol_boards AS (
-    SELECT source_symbol,board_kind,board_native_id,
-           max(COALESCE(board_name,board_native_id)) AS board_name,
+    SELECT source_symbol,board_context_key,
+           max(board_kind) AS board_kind,
+           max(board_native_id) AS board_native_id,
+           max(board_name) AS board_name,
            bool_or(has_support) AS has_support,
+           bool_or(driver_same_direction_candidate) AS has_driver_support,
+           bool_or(driver_same_direction_candidate AND NOT has_support)
+               AS has_board_only_support,
+           bool_or(NOT driver_same_direction_candidate) AS has_background,
+           bool_or(pulse_state='FALSE') AS has_pulse_false,
+           bool_or(cardinality(driver_conflict_codes)>0) AS has_direct_conflict,
+           bool_or(driver_unknown) AS has_driver_unknown,
            bool_or(has_counter) AS has_counter,
-           bool_or(has_unknown) AS has_unknown
-    FROM evidence
-    WHERE board_kind IS NOT NULL AND board_native_id IS NOT NULL
-    GROUP BY source_symbol,board_kind,board_native_id
+           bool_or(has_unknown) AS has_unknown,
+           array_remove(array_agg(DISTINCT pulse_state),NULL) AS pulse_states,
+           array_remove(array_agg(DISTINCT code),NULL) AS direct_conflict_codes,
+           CASE WHEN count(DISTINCT ROW(
+               rps5_position,rps5_rank_first,rps5_rank_last,
+               rps5_valid_member_count,rps5_unknown_member_count,
+               rps5_out_of_source_pool_member_count
+           ))=1 THEN min(rps5_position) END AS rps5_position,
+           CASE WHEN count(DISTINCT ROW(
+               rps5_position,rps5_rank_first,rps5_rank_last,
+               rps5_valid_member_count,rps5_unknown_member_count,
+               rps5_out_of_source_pool_member_count
+           ))=1 THEN min(rps5_rank_first) END AS rps5_rank_first,
+           CASE WHEN count(DISTINCT ROW(
+               rps5_position,rps5_rank_first,rps5_rank_last,
+               rps5_valid_member_count,rps5_unknown_member_count,
+               rps5_out_of_source_pool_member_count
+           ))=1 THEN min(rps5_rank_last) END AS rps5_rank_last,
+           CASE WHEN count(DISTINCT ROW(
+               rps5_position,rps5_rank_first,rps5_rank_last,
+               rps5_valid_member_count,rps5_unknown_member_count,
+               rps5_out_of_source_pool_member_count
+           ))=1 THEN min(rps5_valid_member_count) END AS rps5_valid_member_count,
+           CASE WHEN count(DISTINCT ROW(
+               rps5_position,rps5_rank_first,rps5_rank_last,
+               rps5_valid_member_count,rps5_unknown_member_count,
+               rps5_out_of_source_pool_member_count
+           ))=1 THEN min(rps5_unknown_member_count) END AS rps5_unknown_member_count,
+           CASE WHEN count(DISTINCT ROW(
+               rps5_position,rps5_rank_first,rps5_rank_last,
+               rps5_valid_member_count,rps5_unknown_member_count,
+               rps5_out_of_source_pool_member_count
+           ))=1 THEN min(rps5_out_of_source_pool_member_count)
+           END AS rps5_out_of_source_pool_member_count,
+           CASE WHEN count(DISTINCT ROW(
+               rps20_position,rps20_rank_first,rps20_rank_last,
+               rps20_valid_member_count,rps20_unknown_member_count,
+               rps20_out_of_source_pool_member_count
+           ))=1 THEN min(rps20_position) END AS rps20_position,
+           CASE WHEN count(DISTINCT ROW(
+               rps20_position,rps20_rank_first,rps20_rank_last,
+               rps20_valid_member_count,rps20_unknown_member_count,
+               rps20_out_of_source_pool_member_count
+           ))=1 THEN min(rps20_rank_first) END AS rps20_rank_first,
+           CASE WHEN count(DISTINCT ROW(
+               rps20_position,rps20_rank_first,rps20_rank_last,
+               rps20_valid_member_count,rps20_unknown_member_count,
+               rps20_out_of_source_pool_member_count
+           ))=1 THEN min(rps20_rank_last) END AS rps20_rank_last,
+           CASE WHEN count(DISTINCT ROW(
+               rps20_position,rps20_rank_first,rps20_rank_last,
+               rps20_valid_member_count,rps20_unknown_member_count,
+               rps20_out_of_source_pool_member_count
+           ))=1 THEN min(rps20_valid_member_count) END AS rps20_valid_member_count,
+           CASE WHEN count(DISTINCT ROW(
+               rps20_position,rps20_rank_first,rps20_rank_last,
+               rps20_valid_member_count,rps20_unknown_member_count,
+               rps20_out_of_source_pool_member_count
+           ))=1 THEN min(rps20_unknown_member_count) END AS rps20_unknown_member_count,
+           CASE WHEN count(DISTINCT ROW(
+               rps20_position,rps20_rank_first,rps20_rank_last,
+               rps20_valid_member_count,rps20_unknown_member_count,
+               rps20_out_of_source_pool_member_count
+           ))=1 THEN min(rps20_out_of_source_pool_member_count)
+           END AS rps20_out_of_source_pool_member_count
+    FROM evidence e
+    LEFT JOIN LATERAL unnest(e.driver_conflict_codes) AS conflict(code) ON TRUE
+    WHERE e.board_kind IS NOT NULL AND e.board_native_id IS NOT NULL
+    GROUP BY e.source_symbol,e.board_context_key
 ), board_summary AS (
     SELECT source_symbol,
            count(*) FILTER(WHERE has_support)::integer AS support_board_count,
+           count(*) FILTER(WHERE has_driver_support)::integer
+               AS driver_support_board_count,
+           count(*) FILTER(WHERE has_background)::integer AS background_board_count,
+           count(*) FILTER(WHERE has_pulse_false)::integer
+               AS background_pulse_false_board_count,
+           count(*) FILTER(WHERE has_direct_conflict)::integer
+               AS direct_conflict_board_count,
+           count(*) FILTER(WHERE has_driver_unknown)::integer
+               AS driver_unknown_board_count,
            count(*) FILTER(WHERE has_counter)::integer AS counter_board_count,
            count(*) FILTER(WHERE has_unknown)::integer AS unknown_board_count,
            (array_agg(board_name ORDER BY board_name COLLATE "C")
@@ -845,6 +1049,60 @@ def read_source_t0_early_triage_summaries_for_symbols(
            (array_agg(board_name ORDER BY board_name COLLATE "C")
                FILTER(WHERE has_counter))[1:2] AS counter_board_names
     FROM symbol_boards
+    GROUP BY source_symbol
+), categorized_boards AS (
+    SELECT b.*,category
+    FROM symbol_boards b
+    CROSS JOIN LATERAL (VALUES
+        ('SAME_DIRECTION_CANDIDATE',b.has_driver_support),
+        ('OTHER_BOARD_BACKGROUND',b.has_background),
+        ('NAMED_CONDITION_CONFLICT',b.has_direct_conflict),
+        ('CURRENT_EVIDENCE_UNKNOWN',b.has_driver_unknown)
+    ) AS category_rows(category,include_row)
+    WHERE include_row
+), ranked_board_examples AS (
+    SELECT b.*,row_number() OVER (
+        PARTITION BY source_symbol,category
+        ORDER BY board_name COLLATE "C",board_kind COLLATE "C",
+                 board_native_id COLLATE "C",board_context_key COLLATE "C"
+    ) AS example_rank
+    FROM categorized_boards b
+), board_examples AS (
+    SELECT source_symbol,
+           jsonb_agg(jsonb_build_object(
+               'board_name',board_name,'pulse_states',pulse_states,
+               'candidate_basis',CASE WHEN has_support
+                   THEN 'D0_PULSE_SAME_DIRECTION'
+                   ELSE 'PULSE_TRUE_RPS5_RPS20_FRONT' END,
+               'rps5_rank_first',rps5_rank_first,
+               'rps5_rank_last',rps5_rank_last,
+               'rps5_valid_member_count',rps5_valid_member_count,
+               'rps20_rank_first',rps20_rank_first,
+               'rps20_rank_last',rps20_rank_last,
+               'rps20_valid_member_count',rps20_valid_member_count
+           ) ORDER BY board_name COLLATE "C")
+               FILTER(WHERE category='SAME_DIRECTION_CANDIDATE')
+               AS same_direction_examples,
+           jsonb_agg(jsonb_build_object(
+               'board_name',board_name,'pulse_states',pulse_states,
+               'board_kind',board_kind,'board_native_id',board_native_id
+           ) ORDER BY board_name COLLATE "C")
+               FILTER(WHERE category='OTHER_BOARD_BACKGROUND')
+               AS background_examples,
+           jsonb_agg(jsonb_build_object(
+               'board_name',board_name,'board_kind',board_kind,
+               'pulse_states',pulse_states,
+               'direct_conflict_codes',direct_conflict_codes
+           ) ORDER BY board_name COLLATE "C")
+               FILTER(WHERE category='NAMED_CONDITION_CONFLICT')
+               AS conflict_examples,
+           jsonb_agg(jsonb_build_object(
+               'board_name',board_name,'pulse_states',pulse_states
+           ) ORDER BY board_name COLLATE "C")
+               FILTER(WHERE category='CURRENT_EVIDENCE_UNKNOWN')
+               AS unknown_examples
+    FROM ranked_board_examples
+    WHERE example_rank=1
     GROUP BY source_symbol
 ), reason_summary AS (
     SELECT source_symbol,
@@ -856,6 +1114,129 @@ def read_source_t0_early_triage_summaries_for_symbols(
         CROSS JOIN LATERAL unnest(e.unknown_codes) AS u(code)
     ) codes
     GROUP BY source_symbol
+), driver_reason_summary AS (
+    SELECT source_symbol,
+           (array_agg(code ORDER BY code COLLATE "C"))[1:4]
+               AS driver_unknown_reason_codes
+    FROM (
+        SELECT DISTINCT e.source_symbol,u.code
+        FROM evidence e
+        CROSS JOIN LATERAL unnest(e.unknown_codes) AS u(code)
+        WHERE u.code<>'PULSE_TRANSITION_NOT_COMPUTED'
+    ) codes
+    GROUP BY source_symbol
+), seed_inputs AS (
+    SELECT DISTINCT source_symbol,seed_fact_id FROM latest
+), seed_rows AS (
+    SELECT i.source_symbol,s.id,
+           s.core_ret5_numerator,s.core_ret5_denominator,
+           s.core_ret5_quality,s.core_ret5_reason,
+           s.core_ret20_numerator,s.core_ret20_denominator,
+           s.core_ret20_quality,s.core_ret20_reason,
+           s.profile_extension_value,s.profile_extension_quality,
+           s.profile_extension_reason,
+           s.core_bias20_atr_numerator,s.core_bias20_atr_denominator,
+           s.core_bias20_atr_quality,s.core_bias20_atr_reason,
+           s.core_price_damage,s.core_price_damage_quality,
+           s.core_price_damage_reason
+    FROM seed_inputs i
+    JOIN source_pool_seed_day_facts s ON s.id=i.seed_fact_id
+), seed_metrics AS (
+    SELECT source_symbol,count(DISTINCT id)::integer AS seed_fact_count,
+           count(DISTINCT ROW(
+               core_ret5_numerator,core_ret5_denominator,
+               core_ret5_quality,core_ret5_reason
+           ))::integer AS ret5_variants,
+           min(core_ret5_quality) AS ret5_quality,
+           min(core_ret5_reason) AS ret5_reason,
+           min(core_ret5_numerator)::text AS ret5_numerator,
+           min(core_ret5_denominator)::text AS ret5_denominator,
+           count(DISTINCT ROW(
+               core_ret20_numerator,core_ret20_denominator,
+               core_ret20_quality,core_ret20_reason
+           ))::integer AS ret20_variants,
+           min(core_ret20_quality) AS ret20_quality,
+           min(core_ret20_reason) AS ret20_reason,
+           min(core_ret20_numerator)::text AS ret20_numerator,
+           min(core_ret20_denominator)::text AS ret20_denominator,
+           count(DISTINCT ROW(
+               profile_extension_value,profile_extension_quality,
+               profile_extension_reason
+           ))::integer AS extension_variants,
+           min(profile_extension_quality) AS extension_quality,
+           min(profile_extension_reason) AS extension_reason,
+           min(profile_extension_value) AS extension_value,
+           count(DISTINCT ROW(
+               core_bias20_atr_numerator,core_bias20_atr_denominator,
+               core_bias20_atr_quality,core_bias20_atr_reason
+           ))::integer AS bias_variants,
+           min(core_bias20_atr_quality) AS bias_quality,
+           min(core_bias20_atr_reason) AS bias_reason,
+           min(core_bias20_atr_numerator)::text AS bias_numerator,
+           min(core_bias20_atr_denominator)::text AS bias_denominator,
+           count(DISTINCT ROW(
+               core_price_damage,core_price_damage_quality,
+               core_price_damage_reason
+           ))::integer AS damage_variants,
+           min(core_price_damage_quality) AS damage_quality,
+           min(core_price_damage_reason) AS damage_reason,
+           bool_and(core_price_damage) AS damage_value
+    FROM seed_rows
+    GROUP BY source_symbol
+), seed_summary AS (
+    SELECT source_symbol,jsonb_build_object(
+        'seed_fact_count',seed_fact_count,
+        'core_ret5',jsonb_build_object(
+            'quality',CASE WHEN ret5_variants=1 THEN ret5_quality
+                           ELSE 'CONFLICTING_STORED_VALUES' END,
+            'numerator',CASE WHEN ret5_variants=1 AND ret5_quality='OBSERVED'
+                             THEN ret5_numerator END,
+            'denominator',CASE WHEN ret5_variants=1 AND ret5_quality='OBSERVED'
+                               THEN ret5_denominator END,
+            'window_sessions',5,'includes_target_session',TRUE,
+            'reason',CASE WHEN ret5_variants=1 THEN ret5_reason
+                          ELSE 'SEED_VALUE_VARIANTS' END
+        ),
+        'core_ret20',jsonb_build_object(
+            'quality',CASE WHEN ret20_variants=1 THEN ret20_quality
+                           ELSE 'CONFLICTING_STORED_VALUES' END,
+            'numerator',CASE WHEN ret20_variants=1 AND ret20_quality='OBSERVED'
+                             THEN ret20_numerator END,
+            'denominator',CASE WHEN ret20_variants=1 AND ret20_quality='OBSERVED'
+                               THEN ret20_denominator END,
+            'window_sessions',20,'includes_target_session',TRUE,
+            'reason',CASE WHEN ret20_variants=1 THEN ret20_reason
+                          ELSE 'SEED_VALUE_VARIANTS' END
+        ),
+        'profile_extension',jsonb_build_object(
+            'quality',CASE WHEN extension_variants=1 THEN extension_quality
+                           ELSE 'CONFLICTING_STORED_VALUES' END,
+            'value',CASE WHEN extension_variants=1
+                              AND extension_quality='OBSERVED'
+                         THEN extension_value END,
+            'reason',CASE WHEN extension_variants=1 THEN extension_reason
+                          ELSE 'SEED_VALUE_VARIANTS' END
+        ),
+        'core_bias20_atr',jsonb_build_object(
+            'quality',CASE WHEN bias_variants=1 THEN bias_quality
+                           ELSE 'CONFLICTING_STORED_VALUES' END,
+            'numerator',CASE WHEN bias_variants=1 AND bias_quality='OBSERVED'
+                             THEN bias_numerator END,
+            'denominator',CASE WHEN bias_variants=1 AND bias_quality='OBSERVED'
+                               THEN bias_denominator END,
+            'reason',CASE WHEN bias_variants=1 THEN bias_reason
+                          ELSE 'SEED_VALUE_VARIANTS' END
+        ),
+        'core_price_damage',jsonb_build_object(
+            'quality',CASE WHEN damage_variants=1 THEN damage_quality
+                           ELSE 'CONFLICTING_STORED_VALUES' END,
+            'value',CASE WHEN damage_variants=1 AND damage_quality='OBSERVED'
+                         THEN damage_value END,
+            'reason',CASE WHEN damage_variants=1 THEN damage_reason
+                          ELSE 'SEED_VALUE_VARIANTS' END
+        )
+    ) AS price_at_t0
+    FROM seed_metrics
 )
 SELECT s.source_symbol,
        CASE WHEN s.has_support AND s.has_counter THEN 'MIXED'
@@ -871,11 +1252,30 @@ SELECT s.source_symbol,
        COALESCE(b.support_board_names,'{}'::text[]),
        COALESCE(b.counter_board_names,'{}'::text[]),
        COALESCE(r.unknown_reason_codes,'{}'::text[]),e.research_cases,
-       e.hypothesis_version,e.membership_mode,e.research_mode,e.price_coordinate
+       e.hypothesis_version,e.membership_mode,e.research_mode,e.price_coordinate,
+       e.background_relation_count,e.background_pulse_false_relation_count,
+       e.driver_support_relation_count,
+       e.direct_conflict_relation_count,e.driver_unknown_relation_count,
+       e.transition_not_computed_relation_count,e.next_check_codes,
+       e.direct_conflict_codes,
+       COALESCE(b.background_board_count,0),
+       COALESCE(b.driver_support_board_count,0),
+       COALESCE(b.background_pulse_false_board_count,0),
+       COALESCE(b.direct_conflict_board_count,0),
+       COALESCE(b.driver_unknown_board_count,0),
+       COALESCE(be.same_direction_examples,'[]'::jsonb),
+       COALESCE(be.background_examples,'[]'::jsonb),
+       COALESCE(be.conflict_examples,'[]'::jsonb),
+       COALESCE(be.unknown_examples,'[]'::jsonb),
+       COALESCE(dr.driver_unknown_reason_codes,'{}'::text[]),
+       COALESCE(sm.price_at_t0,'{}'::jsonb)
 FROM symbol_state s
 JOIN evidence_counts e USING (source_symbol)
 LEFT JOIN board_summary b USING (source_symbol)
 LEFT JOIN reason_summary r USING (source_symbol)
+LEFT JOIN driver_reason_summary dr USING (source_symbol)
+LEFT JOIN board_examples be USING (source_symbol)
+LEFT JOIN seed_summary sm USING (source_symbol)
 ORDER BY s.source_symbol COLLATE "C"
             """,
             (target_session, source_package_id, source_capture_id, list(symbols)),
@@ -905,6 +1305,41 @@ ORDER BY s.source_symbol COLLATE "C"
             "price_coordinate": price_coordinate,
             "source_package_id": source_package_id,
             "source_capture_id": source_capture_id,
+            "t0_driver_and_earliness": {
+                "version": "T0_DRIVER_AND_EARLINESS_R1",
+                "registration_count": int(registration_count),
+                "relation_count": int(relation_count),
+                "same_direction_candidate_relation_count": int(
+                    driver_support_relation_count
+                ),
+                "same_direction_candidate_board_count": int(driver_support_board_count),
+                "same_direction_candidate_examples": list(
+                    same_direction_examples or []
+                ),
+                "other_background_relation_count": int(background_relation_count),
+                "other_background_board_count": int(background_board_count),
+                "background_pulse_false_relation_count": int(
+                    background_pulse_false_relation_count
+                ),
+                "background_pulse_false_board_count": int(
+                    background_pulse_false_board_count
+                ),
+                "other_background_examples": list(background_examples or []),
+                "named_conflict_relation_count": int(direct_conflict_relation_count),
+                "named_conflict_board_count": int(direct_conflict_board_count),
+                "named_conflict_codes": list(direct_conflict_codes or []),
+                "named_conflict_examples": list(conflict_examples or []),
+                "unknown_relation_count": int(driver_unknown_relation_count),
+                "unknown_board_count": int(driver_unknown_board_count),
+                "unknown_reason_codes": list(driver_unknown_reason_codes or []),
+                "pulse_transition_not_computed_relation_count": int(
+                    transition_not_computed_relation_count
+                ),
+                "next_check_codes": list(next_check_codes or []),
+                "price_at_t0": price_at_t0 or {},
+                "scope": research_mode,
+                "price_coordinate": price_coordinate,
+            },
         }
         for (
             symbol,
@@ -926,6 +1361,25 @@ ORDER BY s.source_symbol COLLATE "C"
             membership_mode,
             research_mode,
             price_coordinate,
+            background_relation_count,
+            background_pulse_false_relation_count,
+            driver_support_relation_count,
+            direct_conflict_relation_count,
+            driver_unknown_relation_count,
+            transition_not_computed_relation_count,
+            next_check_codes,
+            direct_conflict_codes,
+            background_board_count,
+            driver_support_board_count,
+            background_pulse_false_board_count,
+            direct_conflict_board_count,
+            driver_unknown_board_count,
+            same_direction_examples,
+            background_examples,
+            conflict_examples,
+            unknown_examples,
+            driver_unknown_reason_codes,
+            price_at_t0,
         ) in rows
     }
     for symbol in symbols:

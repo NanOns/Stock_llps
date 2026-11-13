@@ -169,6 +169,84 @@ function exactRatioText(numerator, denominator, unit = "") {
   const decimal = Number.isFinite(value) ? value.toFixed(2) : "UNKNOWN";
   return `${decimal}${unit}（${numerator}/${denominator}）`;
 }
+function exactPercentMetric(metric) {
+  if (
+    metric?.quality !== "OBSERVED" ||
+    metric.numerator == null ||
+    metric.denominator == null ||
+    Number(metric.denominator) === 0
+  )
+    return `UNKNOWN（${metric?.quality || "NO_STORED_VALUE"}${metric?.reason ? ` · ${metric.reason}` : ""}）`;
+  const value = (Number(metric.numerator) / Number(metric.denominator)) * 100;
+  if (!Number.isFinite(value)) return `UNKNOWN（${metric.quality}）`;
+  return `${value > 0 ? "+" : ""}${value.toFixed(2)}%（${metric.numerator}/${metric.denominator}）`;
+}
+function t0BoardPositionText(board, prefix) {
+  const first = board[`${prefix}_rank_first`];
+  const last = board[`${prefix}_rank_last`];
+  const valid = board[`${prefix}_valid_member_count`];
+  if (!Number.isInteger(first) || !Number.isInteger(last))
+    return `${prefix.toUpperCase()} ${board[`${prefix}_position`] || "UNKNOWN"}`;
+  const rank = first === last ? `${first}` : `${first}–${last}并列`;
+  const unknown = board[`${prefix}_unknown_member_count`] ?? "UNKNOWN";
+  const outside =
+    board[`${prefix}_out_of_source_pool_member_count`] ?? "UNKNOWN";
+  const qualityDetails = [];
+  if (board[`${prefix}_unknown_member_count`] != null)
+    qualityDetails.push(`未知${unknown}`);
+  if (board[`${prefix}_out_of_source_pool_member_count`] != null)
+    qualityDetails.push(`来源池外${outside}`);
+  return `${prefix.toUpperCase()}第${rank}/${valid ?? "UNKNOWN"}位可评价${qualityDetails.length ? ` · ${qualityDetails.join(" · ")}` : ""}`;
+}
+function t0BoardExamplesText(examples, count) {
+  const rows = Array.isArray(examples) ? examples : [];
+  if (!Number(count)) return "无";
+  const shown = rows.map((board) => {
+    const pulse = Array.isArray(board.pulse_states)
+      ? board.pulse_states.join("/") || "UNKNOWN"
+      : "UNKNOWN";
+    const ranks = [];
+    if (Number.isInteger(board.rps5_rank_first))
+      ranks.push(t0BoardPositionText(board, "rps5"));
+    if (Number.isInteger(board.rps20_rank_first))
+      ranks.push(t0BoardPositionText(board, "rps20"));
+    const conflicts = Array.isArray(board.direct_conflict_codes)
+      ? board.direct_conflict_codes
+          .map((code) => earlyCodeLabels[code] || code)
+          .join("、")
+      : "";
+    const details = ranks.length ? ranks.join("；") : conflicts || "";
+    return `${board.board_name || board.board_native_id || "名称未知"}（PULSE ${pulse}${details ? `；${details}` : ""}）`;
+  });
+  if (Number(count) > rows.length)
+    shown.push(`其余${Number(count) - rows.length}板按需展开`);
+  return shown.join("；") || `${count}板（名称未知）`;
+}
+function t0PriceAtDiscoveryText(price) {
+  if (!price || typeof price !== "object") return "T0价格画像 UNKNOWN";
+  const ret5 = exactPercentMetric(price.core_ret5);
+  const ret20 = exactPercentMetric(price.core_ret20);
+  const extension = price.profile_extension || {};
+  const extensionText =
+    extension.quality === "OBSERVED" && extension.value
+      ? `${extension.value}（OBSERVED）`
+      : `UNKNOWN（${extension.quality || "NO_STORED_VALUE"}${extension.reason ? ` · ${extension.reason}` : ""}）`;
+  const bias = price.core_bias20_atr || {};
+  const biasText =
+    bias.quality === "OBSERVED"
+      ? `${exactRatioText(bias.numerator, bias.denominator, " ATR")}`
+      : `UNKNOWN（${bias.quality || "NO_STORED_VALUE"}${bias.reason ? ` · ${bias.reason}` : ""}）`;
+  const damage = price.core_price_damage || {};
+  const damageText =
+    damage.quality === "OBSERVED"
+      ? damage.value === true
+        ? "TRUE（现存价格损伤反证）"
+        : damage.value === false
+          ? "FALSE（未见现存损伤标记）"
+          : "UNKNOWN"
+      : `UNKNOWN（${damage.quality || "NO_STORED_VALUE"}${damage.reason ? ` · ${damage.reason}` : ""}）`;
+  return `截至T0 Core ret5 ${ret5}、ret20 ${ret20}（冻结窗口均含T0）；延伸 ${extensionText}；bias20 ${biasText}；价格损伤 ${damageText}`;
+}
 function rpsRankText(context, prefix) {
   const first = context[`${prefix}_rank_first`];
   const last = context[`${prefix}_rank_last`];
@@ -181,7 +259,8 @@ function rpsRankText(context, prefix) {
   return `${prefix.toUpperCase()} ${rank} / ${valid} 位可评价成员 · UNKNOWN ${unknown} · 来源池外 ${outside ?? "UNKNOWN"}`;
 }
 function t0EarlySummary(t0) {
-  if (t0?.triage_summary) return t0TriageSummaryText(t0.triage_summary);
+  if (t0?.triage_summary)
+    return t0TriageHeadlineText(t0.triage_summary, t0.followup_status);
   const contexts = t0EarlyContexts(t0);
   if (contexts.length) return t0ContextsSummary(contexts, t0);
   const registrations = Array.isArray(t0?.enrollments) ? t0.enrollments : [];
@@ -194,53 +273,130 @@ function t0EarlySummary(t0) {
   }
   return "T0板内观察 NO_STORED_FACT · 当前对象没有已存观察登记";
 }
-function t0TriageSummaryText(summary) {
+function t0BoardRankHeadline(board, prefix) {
+  const first = board[`${prefix}_rank_first`];
+  const last = board[`${prefix}_rank_last`];
+  const denominator = board[`${prefix}_valid_member_count`];
+  if (!Number.isInteger(first) || !Number.isInteger(last))
+    return `${prefix.toUpperCase()} ${board[`${prefix}_position`] || "UNKNOWN"}`;
+  const rank = first === last ? `${first}` : `${first}–${last}`;
+  return `${prefix.toUpperCase()} ${rank}/${denominator}`;
+}
+function t0BoardHeadlineList(examples, count) {
+  const rows = Array.isArray(examples) ? examples : [];
+  const text = rows.map((board) => {
+    const pulse = Array.isArray(board.pulse_states)
+      ? board.pulse_states.join("/") || "UNKNOWN"
+      : "UNKNOWN";
+    const basis = board.candidate_basis
+      ? board.candidate_basis === "PULSE_TRUE_RPS5_RPS20_FRONT"
+        ? "板级候选"
+        : "D0/PULSE候选"
+      : "";
+    const rankDetails = [];
+    if (Number.isInteger(board.rps5_rank_first))
+      rankDetails.push(t0BoardRankHeadline(board, "rps5"));
+    if (Number.isInteger(board.rps20_rank_first))
+      rankDetails.push(t0BoardRankHeadline(board, "rps20"));
+    const conflictDetails = Array.isArray(board.direct_conflict_codes)
+      ? board.direct_conflict_codes
+          .map((code) => earlyCodeLabels[code] || code)
+          .join("、")
+      : "";
+    const details = rankDetails.length
+      ? `（${rankDetails.join("，")}）`
+      : conflictDetails
+        ? `（${conflictDetails}）`
+        : "";
+    return `${board.board_name || board.board_native_id || "名称未知"}${basis ? ` ${basis}` : ""} ${pulse}${details}`;
+  });
+  if (Number(count) > rows.length)
+    text.push(`另${Number(count) - rows.length}板按需展开`);
+  return text.join("；") || "无";
+}
+function t0TriageHeadlineText(summary, followupStatus = null) {
+  if (summary?.status !== "AVAILABLE")
+    return t0TriageSummaryText(summary || { status: "NO_STORED_FACT" });
+  const driver = summary.t0_driver_and_earliness;
+  if (!driver) return t0TriageSummaryText(summary, followupStatus);
+  const falseBoards = Number(driver.background_pulse_false_board_count || 0);
+  const conflicts = Number(driver.named_conflict_board_count || 0);
+  const unknown = Number(driver.unknown_relation_count || 0);
+  const unknownReasons = (driver.unknown_reason_codes || []).map(
+    (code) => earlyCodeLabels[code] || code,
+  );
+  const price = driver.price_at_t0 || {};
+  const extension = price.profile_extension || {};
+  const bias = price.core_bias20_atr || {};
+  const damage = price.core_price_damage || {};
+  const biasText =
+    bias.quality === "OBSERVED"
+      ? exactRatioText(bias.numerator, bias.denominator, " ATR")
+      : `UNKNOWN/${bias.quality || "NO_STORED_VALUE"}`;
+  const damageText =
+    damage.quality === "OBSERVED"
+      ? damage.value === true
+        ? "TRUE"
+        : damage.value === false
+          ? "FALSE"
+          : "UNKNOWN"
+      : `UNKNOWN/${damage.quality || "NO_STORED_VALUE"}`;
+  const transitionCount = Number(
+    driver.pulse_transition_not_computed_relation_count || 0,
+  );
+  const legacy =
+    summary.triage_state === "CURRENT_COUNTER"
+      ? "CURRENT_COUNTER（旧分型）"
+      : summary.triage_state || "UNKNOWN";
+  return [
+    `T0 R1 · 登记${driver.registration_count ?? 0}/${driver.relation_count ?? 0}板关系 · 同向${driver.same_direction_candidate_board_count ?? 0}板：${t0BoardHeadlineList(driver.same_direction_candidate_examples, driver.same_direction_candidate_board_count)}`,
+    `其它背景${driver.other_background_board_count ?? 0}板（PULSE FALSE ${falseBoards}板/${driver.background_pulse_false_relation_count ?? 0}关系）：${t0BoardHeadlineList(driver.other_background_examples, driver.other_background_board_count)}`,
+    `具名冲突${conflicts}板${conflicts ? `：${t0BoardHeadlineList(driver.named_conflict_examples, conflicts)}` : ""} · UNKNOWN ${unknown}${unknownReasons.length ? `（${unknownReasons.join("、")}）` : ""}`,
+    `Core T0含入 ret5 ${exactPercentMetric(price.core_ret5)} / ret20 ${exactPercentMetric(price.core_ret20)} · 延伸 ${extension.quality === "OBSERVED" ? `${extension.value}/OBSERVED` : `UNKNOWN/${extension.quality || "NO_STORED_VALUE"}`} · bias20 ${biasText} · 损伤 ${damageText}`,
+    `相邻PULSE ${transitionCount ? `NOT_COMPUTED ${transitionCount}` : "按已存状态"} · 后继 ${followupStatus || summary.followup_status || "NOT_COMPUTED"} · 旧分型 ${legacy} · PULSE FALSE仅作板块背景`,
+  ].join(" · ");
+}
+function t0TriageSummaryText(summary, followupStatus = null) {
   const labels = {
     CURRENT_SAME_DIRECTION: "同日同向支持（静态协同）",
     MIXED: "支持与反证并存（MIXED）",
-    CURRENT_COUNTER: "已证反证",
+    CURRENT_COUNTER: "CURRENT_COUNTER（旧板关系归并）",
     UNKNOWN: "证据 UNKNOWN",
     NO_PROVED_CASE: "没有已证同向或反证",
     NO_T0_FACT: "没有已存T0登记",
   };
-  const boards = (names, count) => {
-    if (!count) return "无已证板块";
-    const selected = Array.isArray(names) ? names : [];
-    return `${selected.join("、") || "名称未知"}${count > selected.length ? `等${count}板` : ""}`;
-  };
   if (summary.status !== "AVAILABLE")
     return "T0研判 无已存登记；不能据此解释为无信号";
-  const support = Number(summary.support_relation_count || 0);
-  const counter = Number(summary.counter_relation_count || 0);
-  const unknown = Number(summary.unknown_relation_count || 0);
-  const unknownReasons = Array.isArray(summary.unknown_reason_codes)
-    ? summary.unknown_reason_codes.map((code) => earlyCodeLabels[code] || code)
+  const driver = summary.t0_driver_and_earliness || {};
+  const support = Number(driver.same_direction_candidate_board_count || 0);
+  const background = Number(driver.other_background_board_count || 0);
+  const falseRelations = Number(
+    driver.background_pulse_false_relation_count || 0,
+  );
+  const conflicts = Number(driver.named_conflict_board_count || 0);
+  const unknown = Number(driver.unknown_relation_count || 0);
+  const unknownReasons = Array.isArray(driver.unknown_reason_codes)
+    ? driver.unknown_reason_codes.map((code) => earlyCodeLabels[code] || code)
     : [];
-  const savedCases = Array.isArray(summary.research_cases)
-    ? summary.research_cases.map((code) => earlyCaseLabels[code] || code)
-    : [];
+  const transitionNotComputed = Number(
+    driver.pulse_transition_not_computed_relation_count || 0,
+  );
+  const price = t0PriceAtDiscoveryText(driver.price_at_t0);
+  const storedFollowup =
+    followupStatus || summary.followup_status || "NOT_COMPUTED";
   const parts = [
-    `T0研判 ${labels[summary.triage_state] || "证据 UNKNOWN"}`,
-    `登记 ${summary.registration_count ?? 0}`,
-    `板关系 ${summary.relation_count ?? 0}`,
+    `早期解释 ${driver.version || "T0_DRIVER_AND_EARLINESS_R1"}`,
+    `登记 ${driver.registration_count ?? summary.registration_count ?? 0} · 板关系 ${driver.relation_count ?? summary.relation_count ?? 0}`,
+    `有同向证据的板块候选 ${support}（${t0BoardExamplesText(driver.same_direction_candidate_examples, support)}）`,
+    `其它所属板块背景 ${background}板，其中PULSE FALSE ${driver.background_pulse_false_board_count ?? 0}板/${falseRelations}条关系（${t0BoardExamplesText(driver.other_background_examples, background)}）`,
+    `具名板内条件冲突 ${conflicts}板/${driver.named_conflict_relation_count ?? 0}条关系（${t0BoardExamplesText(driver.named_conflict_examples, conflicts)}）`,
+    `当前证据未知 ${unknown}条关系${unknownReasons.length ? `（${unknownReasons.join("、")}）` : ""}`,
+    price,
+    `相邻PULSE转移 ${transitionNotComputed ? `NOT_COMPUTED ${transitionNotComputed}条` : "按已存状态"} · 后继 ${storedFollowup}`,
   ];
-  if (support)
-    parts.push(
-      `支持 ${support}条/${summary.support_board_count ?? 0}板（${boards(summary.support_board_names, Number(summary.support_board_count || 0))}）`,
-    );
-  if (counter)
-    parts.push(
-      `反证 ${counter}条/${summary.counter_board_count ?? 0}板（${boards(summary.counter_board_names, Number(summary.counter_board_count || 0))}）`,
-    );
-  if (unknown)
-    parts.push(
-      `仍有 UNKNOWN ${unknown}/${summary.relation_count ?? 0} 条关系${unknownReasons.length ? `（${unknownReasons.join("、")}）` : ""}`,
-    );
-  if (savedCases.length)
-    parts.push(
-      `已存板案 ${savedCases.slice(0, 3).join("；")}${savedCases.length > 3 ? `等${savedCases.length}类` : ""}`,
-    );
-  parts.push("NON_PIT研究阅读");
+  parts.push(
+    `旧兼容分型 ${labels[summary.triage_state] || "证据 UNKNOWN"}；PULSE FALSE仅表示该板未满足PULSE，不单独证明个股启动失败 · NON_PIT`,
+  );
   return parts.join(" · ");
 }
 function t0ContextsSummary(contexts, fallback = {}) {
@@ -287,7 +443,8 @@ const earlyCaseLabels = {
   D0_PULSE_TRUE_FRONT: "D0 新增 + 当前 PULSE TRUE + RPS5/RPS20 同在板内前半",
   D0_PULSE_TRUE_BACK: "D0 新增 + 当前 PULSE TRUE，但 RPS5/RPS20 同在板内后半",
   D0_PULSE_TRUE_MIXED: "D0 新增 + 当前 PULSE TRUE，但 RPS5/RPS20 位置分化",
-  D0_PULSE_FALSE_CONFLICT: "D0 新增与当前 PULSE FALSE/相邻退场冲突",
+  D0_PULSE_FALSE_CONFLICT:
+    "D0 新增与本板 PULSE FALSE/相邻退场不一致（仅板块条件冲突）",
   PULSE_TRUE_BACK: "当前 PULSE TRUE，但个股 RPS5/RPS20 同在板内后半",
   PULSE_UNKNOWN: "板块 PULSE 当前状态未知",
   NO_BOARD_MAPPING: "T0 对象没有可证的板块映射",
@@ -318,10 +475,10 @@ function t0EarlyObservationDetails(
 ) {
   const panel = node("div", null, "rule t0-early-observations");
   panel.append(
-    node("strong", "T0 自动早期研究观察 · 假设 EARLY_BOARD_RELATIVE_T0_R1"),
+    node("strong", "T0 板块驱动与早期性观察 · T0_DRIVER_AND_EARLINESS_R1"),
     node(
       "p",
-      "每条T0登记分别保留所有当前行业/GN板块；当前成员关系为 NON_PIT 回看。板内名次只比较同板块、同来源版本的已存RPS值；PULSE转移缺事实时保持 NOT_COMPUTED。此解释层不改变D0/Seed/RPS/PULSE规则，也不是龙头、买入或收益预测证明。",
+      "解释视角并列保留旧分型及全部板内原始支持、反证、UNKNOWN。同向候选来自既存D0-PULSE同向案例，或当前PULSE TRUE且同板RPS5、RPS20均在前半；PULSE FALSE只表示所属板块未满足当前PULSE条件。Seed收益、延伸、bias与损伤沿用已存T0精确事实；成员回看为NON_PIT，不能证明首启、板块因果、龙头或未来收益。",
     ),
   );
   if (!registrations.length) {
@@ -423,6 +580,25 @@ function t0EarlyObservationDetails(
         context.transition_status === "AVAILABLE"
           ? `相邻变化 ${context.transition_state}（${context.previous_state || "UNKNOWN"}→${context.target_state || "UNKNOWN"}）${transitionReasonText}`
           : `相邻变化 ${context.transition_status || "NOT_COMPUTED"}（${(context.transition_reason_codes || []).join("、") || "PULSE_TRANSITION_FACTS_NOT_SAVED_FOR_EXACT_INPUT"}）`;
+      const driverRoles = [];
+      if (context.driver_same_direction_candidate) {
+        driverRoles.push(
+          context.driver_candidate_basis === "PULSE_TRUE_RPS5_RPS20_FRONT"
+            ? "板级同向候选（当前PULSE TRUE、RPS5/20同在前半；D0是否新增另列）"
+            : "D0与PULSE同日同向候选",
+        );
+      }
+      if (context.driver_other_board_background)
+        driverRoles.push("其它所属板块背景/不协同");
+      if (context.driver_pulse_false_background)
+        driverRoles.push("本板PULSE FALSE（仅为板块背景）");
+      const directConflicts = Array.isArray(context.driver_named_conflict_codes)
+        ? context.driver_named_conflict_codes
+            .map((code) => earlyCodeLabels[code] || code)
+            .join("、")
+        : "";
+      if (directConflicts) driverRoles.push(`具名冲突：${directConflicts}`);
+      if (context.driver_has_unknown) driverRoles.push("当前字段仍有UNKNOWN");
       const rps5Value = exactRatioText(
         context.rps5_numerator,
         context.rps5_denominator,
@@ -453,9 +629,19 @@ function t0EarlyObservationDetails(
           "p",
           `研究判断 ${earlyCaseLabels[context.research_case] || context.research_case || "UNKNOWN"} · 板内位置 ${context.relative_position || "UNKNOWN"} · 同向/冲突关系 ${context.alignment_state || "UNKNOWN"}`,
         ),
+        node(
+          "p",
+          `T0_DRIVER_AND_EARLINESS_R1：${driverRoles.join("；") || "其它板块背景/中性"}。只有明确的RPS后半/位置分化或已存PULSE退场列为具名冲突；不会把PULSE FALSE单独升格为个股失败。`,
+        ),
         node("p", `支持证据：${codeListText(context.support_codes)}`),
-        node("p", `反证：${codeListText(context.counter_codes)}`),
-        node("p", `未知原因：${codeListText(context.unknown_codes)}`),
+        node(
+          "p",
+          `原始反证代码（完整保留）：${codeListText(context.counter_codes)}`,
+        ),
+        node(
+          "p",
+          `当前未知原因：${codeListText(context.driver_unknown_reason_codes || context.unknown_codes)}`,
+        ),
         node(
           "p",
           `下一步：${context.next_check_code || "WAIT_FOR_NEXT_STORED_SESSION"} · NON_PIT_EXPLORATORY · RAW_UNADJUSTED；后继未到期时仍为 NOT_DUE。`,
@@ -2295,7 +2481,7 @@ async function openD0Board(board, offset = 0) {
             : displayStockName(item),
           `代码 ${displayStockCode(item)} · ${item.source_pool_status} · D0 ${evidenceStateLabel(item.d0.after_state)} ${item.d0.transition} · Seed ${evidenceStateLabel(item.seed.source_seed)} / S1 ${evidenceStateLabel(item.seed.s1)} / S2 ${evidenceStateLabel(item.seed.s2)} / Safety ${evidenceStateLabel(item.seed.safety)} · D1 ${item.d1.target_price_quality} · 材料锚 ${item.d1.material_anchor_count}`,
           `RPS5 ${item.seed.rps5_board_rank ? `${item.seed.rps5_board_rank}/${item.seed.rps5_board_rank_denominator}位（并列${item.seed.rps5_board_tie_count}只）` : "未排名"} · RPS20 ${item.seed.rps20_board_rank ? `${item.seed.rps20_board_rank}/${item.seed.rps20_board_rank_denominator}位（并列${item.seed.rps20_board_tie_count}只）` : "未排名"}`,
-          `RPS值 ${item.seed.rps5 || "UNKNOWN"} / ${item.seed.rps20 || "UNKNOWN"}（完整来源池）；板块排名分母为有OBSERVED值成员 · ${t0TriageSummaryText(item.t0_early_triage_summary || { status: item.t0_early_status || "NO_STORED_FACT" })} · 本板 ${t0ContextsSummary(item.t0_early_observations || [], { status: item.t0_early_status || "NO_STORED_FACT" })}`,
+          `RPS值 ${item.seed.rps5 || "UNKNOWN"} / ${item.seed.rps20 || "UNKNOWN"}（完整来源池）；板块排名分母为有OBSERVED值成员 · ${t0TriageHeadlineText(item.t0_early_triage_summary || { status: item.t0_early_status || "NO_STORED_FACT" })} · 本板 ${t0ContextsSummary(item.t0_early_observations || [], { status: item.t0_early_status || "NO_STORED_FACT" })}`,
           () => openStock(item.source_symbol, item),
           index,
         ),
