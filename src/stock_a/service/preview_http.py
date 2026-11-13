@@ -3801,7 +3801,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         404, "COHORT_SYMBOL_NOT_FOUND", str(error)
                     ) from error
-                except ResearchFactNotFound:
+                except ResearchFactNotFound as error:
                     self._send_json(
                         200,
                         {
@@ -3810,7 +3810,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "source_pool_count": None,
                             "groups": [],
                             "results": [],
-                            "reason": "精确研究键没有已保存的规则事实",
+                            "reason": str(error),
                         },
                     )
                     return

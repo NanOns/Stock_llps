@@ -1190,7 +1190,7 @@ function focusEvidenceDetails(item, context) {
       });
       boardLinks.append(button);
     }
-  } else {
+  } else if (Array.isArray(item.also_in_sectors)) {
     boardLinks.append(
       node("p", "当前成员关系 UNKNOWN 或没有映射记录；不能解释为无成员。"),
     );
@@ -1208,11 +1208,11 @@ function focusEvidenceDetails(item, context) {
         ),
       );
     }
-  } else if (state.focusAutoBoard) {
+  } else if (Array.isArray(item.also_in_sectors) && state.focusAutoBoard) {
     details.append(
       node("p", "所选板块没有可用的同版本RPS比较；缺价与未知值未按零排序。"),
     );
-  } else {
+  } else if (Array.isArray(item.also_in_sectors)) {
     details.append(
       node(
         "p",
@@ -3132,6 +3132,18 @@ async function readCohort() {
           ? `${displayStockTitle(d.frozen_candidate_followup)} · ${d.frozen_candidate_followup.maturity} · 路径 ${d.frozen_candidate_followup.path_quality} · 收盘变化 ${format(d.frozen_candidate_followup.endpoint?.raw_close_relative_change?.value)} · 首次触及 ${d.frozen_candidate_followup.first_touch_status}`
           : "未选择来源代码",
       ],
+      ...(d.selected_rules || []).map((fact) => [
+        `所选代码 · ${fact.rule_id}`,
+        `${{ TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[fact.state] || fact.state} · ${format(fact.reasons)} · ${fact.enrollment ? `登记 #${fact.enrollment.id} ${fact.enrollment.kind} / ${fact.enrollment.reason}` : "NO_STORED_FACT（无该规则登记）"} · 后继 ${d.frozen_candidate_followup?.maturity || "NOT_COMPUTED"}`,
+      ]),
+      ...(!d.due
+        ? [
+            [
+              "待验证",
+              "NOT_DUE：需要真实官方后继会话及同源价格；当前不代表收益或正式PIT验证。",
+            ],
+          ]
+        : []),
       ...(d.d1_anchor_events || []).map((a) => [
         `锚 ${a.anchor_session}`,
         `${a.generation_status} · ${a.previous_state} → ${a.target_state} · ${a.change_classification} · 原因 ${a.reason || "无"} · 下界 ${format(a.lower)} · 首次触及 ${a.lower_touch_followup?.first_proved_touch || a.lower_touch_followup?.first_touch_status}`,
@@ -3161,8 +3173,8 @@ async function readCohort() {
       "cohortPage",
       `从 ${cohortOffset + 1} 起 · 总分母 ${d.source_pool_count}`,
     );
-    $("cohortPrev").disabled = cohortOffset === 0;
-    $("cohortNext").disabled = cohortOffset + 30 >= d.source_pool_count;
+    $("cohortPrev").disabled = Boolean(symbol) || cohortOffset === 0;
+    $("cohortNext").disabled = Boolean(symbol) || d.page.next_offset === null;
   } catch (error) {
     if (token === cohortRequest && activePage === "focus")
       message("focusStatus", `读取失败：${error.message}`);

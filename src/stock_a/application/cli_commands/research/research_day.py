@@ -86,6 +86,29 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
             raise ValueError("板块数字快照ID只能与 --include-sector-pulse 同时使用")
         sector_snapshot_ids = snapshot_ids if args.include_sector_pulse else None
         config, config_path = load_runtime_config()
+        if args.cohort_stats_from_saved:
+            if (
+                not args.persist
+                or args.start_session
+                or args.static_only
+                or args.enrollment_from_saved
+                or args.d0_launch_reference_only
+                or args.include_sector_pulse
+                or snapshot_ids_supplied
+            ):
+                raise ValueError("Cohort统计仅支持单日并须显式指定--persist")
+            from stock_a.application.source_cohort_stats import persist_cohort_stats
+
+            report = persist_cohort_stats(
+                config,
+                target=_parse_session_date(args.target_session),
+                research_cutoff=_parse_session_date(args.research_cutoff),
+                source_package_id=args.source_package_id,
+            )
+            report["configuration_path"] = str(config_path)
+            report["ok"] = True
+            _emit(report)
+            return _EXIT_OK
         if args.enrollment_from_saved:
             if (
                 not args.persist

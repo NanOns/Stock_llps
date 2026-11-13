@@ -18,6 +18,8 @@ SCOPE = "NON_PIT_EXPLORATORY"
 class ResearchFactNotFound(ValueError):
     """精确研究键没有已保存的规则事实。"""
 
+    preserve_transaction_error = True
+
 
 class ResearchFactConflict(ValueError):
     """同一业务键对应不同冻结事实，事务必须完整回滚。"""
@@ -300,6 +302,20 @@ def write_research_rows(config, *, rules, paths, previous_session, events=None):
             "target_session=%s AND source_package_id=%s AND source_capture_id=%s",
             (target, package, capture),
         )
+        if count_rules:
+            # 新捕获也会改变同一规则键的歧义，旧捕获的摘要不能继续使用。
+            cursor.execute(
+                """DELETE FROM source_cohort_group_stats
+                   WHERE target_session=%s AND source_package_id=%s""",
+                (target, package),
+            )
+        elif count_paths:
+            cursor.execute(
+                """DELETE FROM source_cohort_group_stats
+                   WHERE target_session=%s AND source_package_id=%s
+                     AND source_capture_id=%s""",
+                (target, package, capture),
+            )
         event_result = None
         if events is not None:
             from stock_a.storage.postgres.research_events import insert_source_events
@@ -357,48 +373,91 @@ def read_research_rows(
     if horizon not in {1, 3, 5, 10, 20}:
         raise ValueError("后继期限必须为1、3、5、10或20")
     with _transaction(config, write=False) as (_, cursor, _):
-        cursor.execute(
-            """SELECT r.source_symbol, r.state, r.reasons, r.event_count,
-                      p.endpoint_session, p.maturity, p.endpoint_quality,
-                      p.endpoint_reason, p.endpoint_numerator, p.endpoint_denominator,
-                      p.path_quality, p.path_reasons,
-                      p.mfe_numerator, p.mfe_denominator, p.mae_numerator,
-                      p.mae_denominator, p.mdd_numerator, p.mdd_denominator,
-                      r.frozen_line_numerator, r.frozen_line_denominator,
-                      r.frozen_line_source, r.source_capture_id
-               FROM source_rule_evaluations r
-               LEFT JOIN source_forward_path_facts p
-                 ON p.target_session=r.target_session
-                AND p.source_symbol=r.source_symbol
-                AND p.source_package_id=r.source_package_id
-                AND p.source_capture_id=r.source_capture_id AND p.horizon=%s
-                AND p.path_rule_version=%s AND p.calendar_revision=r.calendar_revision
-                AND p.endpoint_session <= %s
-               WHERE r.target_session=%s AND r.source_package_id=%s
-                 AND r.rule_id=%s AND r.rule_version=%s AND r.profile_revision=%s
-                 AND r.history_session_count=%s AND r.d1_history_session_count=%s
-                 AND r.event_window_start=%s AND r.calendar_revision=%s
-               ORDER BY r.source_symbol""",
-            (
-                horizon,
-                PATH_VERSION,
-                research_cutoff,
-                target,
-                source_package_id,
-                rule,
-                RULE_VERSION,
-                profile_revision,
-                history_session_count,
-                d1_history_session_count,
-                event_window_start,
-                calendar_revision,
-            ),
+        return _read_research_rows_cursor(
+            cursor,
+            target=target,
+            source_package_id=source_package_id,
+            profile_revision=profile_revision,
+            history_session_count=history_session_count,
+            d1_history_session_count=d1_history_session_count,
+            event_window_start=event_window_start,
+            calendar_revision=calendar_revision,
+            rule=rule,
+            horizon=horizon,
+            research_cutoff=research_cutoff,
         )
-        rows = cursor.fetchall()
-    if not rows:
+
+
+def _read_research_rows_cursor(
+    cursor,
+    *,
+    target,
+    source_package_id,
+    profile_revision,
+    history_session_count,
+    d1_history_session_count,
+    event_window_start,
+    calendar_revision,
+    rule,
+    horizon,
+    research_cutoff,
+    symbol=None,
+    offset=0,
+    limit=None,
+):
+    """从已保存事实读取完整三态分母及共享路径，不扫描Raw。"""
+    if horizon not in {1, 3, 5, 10, 20}:
+        raise ValueError("后继期限必须为1、3、5、10或20")
+    if offset < 0 or (limit is not None and not 1 <= limit <= 100):
+        raise ValueError("规则读取分页参数无效")
+    cursor.execute(
+        """SELECT r.source_symbol, r.state, r.reasons, r.event_count,
+                  p.endpoint_session, p.maturity, p.endpoint_quality,
+                  p.endpoint_reason, p.endpoint_numerator, p.endpoint_denominator,
+                  p.path_quality, p.path_reasons,
+                  p.mfe_numerator, p.mfe_denominator, p.mae_numerator,
+                  p.mae_denominator, p.mdd_numerator, p.mdd_denominator,
+                  r.frozen_line_numerator, r.frozen_line_denominator,
+                  r.frozen_line_source, r.source_capture_id
+           FROM source_rule_evaluations r
+           LEFT JOIN source_forward_path_facts p
+             ON p.target_session=r.target_session
+            AND p.source_symbol=r.source_symbol
+            AND p.source_package_id=r.source_package_id
+            AND p.source_capture_id=r.source_capture_id AND p.horizon=%s
+            AND p.path_rule_version=%s AND p.calendar_revision=r.calendar_revision
+            AND p.endpoint_session <= %s
+           WHERE r.target_session=%s AND r.source_package_id=%s
+             AND r.rule_id=%s AND r.rule_version=%s AND r.profile_revision=%s
+             AND r.history_session_count=%s AND r.d1_history_session_count=%s
+             AND r.event_window_start=%s AND r.calendar_revision=%s
+             AND (%s::text IS NULL OR r.source_symbol=%s)
+           ORDER BY r.source_symbol LIMIT %s OFFSET %s""",
+        (
+            horizon,
+            PATH_VERSION,
+            research_cutoff,
+            target,
+            source_package_id,
+            rule,
+            RULE_VERSION,
+            profile_revision,
+            history_session_count,
+            d1_history_session_count,
+            event_window_start,
+            calendar_revision,
+            symbol,
+            symbol,
+            limit,
+            offset,
+        ),
+    )
+    rows = cursor.fetchall()
+    if not rows and symbol is None and limit is None:
         raise ResearchFactNotFound("未找到精确输入版本的持久规则事实")
-    if len({row[21] for row in rows}) != 1 or len({row[0] for row in rows}) != len(
-        rows
+    if rows and (
+        len({row[21] for row in rows}) != 1
+        or len({row[0] for row in rows}) != len(rows)
     ):
         raise ResearchFactConflict(
             "精确规则版本存在多个来源捕获或重复代码，必须先消除歧义"

@@ -42,6 +42,7 @@ _MIGRATION_FILES = (
     "0028_source_research_enrollments.sql",
     "0029_source_enrollment_d0_evidence.sql",
     "0030_source_rule_adjacent_index.sql",
+    "0031_source_cohort_group_stats.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -71,6 +72,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R07_T0_RESEARCH_ENROLLMENT_R1": frozenset({28}),
     "R07_T0_D0_EVIDENCE_R1": frozenset({29}),
     "R07_T0_ADJACENT_INDEX_R1": frozenset({30}),
+    "R07_T0_COHORT_PG_CONSUMER_R1": frozenset({31}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -198,6 +200,9 @@ _RELATIONS_BY_MIGRATION_COUNT[28] = _RELATIONS_BY_MIGRATION_COUNT[27] | {
 }
 _RELATIONS_BY_MIGRATION_COUNT[29] = _RELATIONS_BY_MIGRATION_COUNT[28]
 _RELATIONS_BY_MIGRATION_COUNT[30] = _RELATIONS_BY_MIGRATION_COUNT[29]
+_RELATIONS_BY_MIGRATION_COUNT[31] = _RELATIONS_BY_MIGRATION_COUNT[30] | {
+    "source_cohort_group_stats",
+}
 
 
 class BindingRefused(Exception):

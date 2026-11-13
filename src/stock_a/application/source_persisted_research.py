@@ -11,6 +11,7 @@ from stock_a.research.entry_context.errors import ResearchEntryError
 from stock_a.research.entry_context.sessions import _load_calendar
 from stock_a.research.source_forward_path import exploratory_raw_path
 from stock_a.storage.postgres.research_events import read_source_events
+from stock_a.storage.postgres.cohort_stats import read_cohort_page
 from stock_a.storage.postgres.research_facts import (
     read_board_members,
     read_research_keys,
@@ -38,45 +39,8 @@ def read_persisted_cohort_keys(config, *, target, research_cutoff, source_packag
     )
 
 
-def read_persisted_cohort(
-    config,
-    *,
-    target,
-    research_cutoff,
-    source_package_id,
-    profile_revision,
-    history_session_count,
-    d1_history_session_count,
-    event_window_start,
-    rule,
-    horizon,
-    offset=0,
-    limit=30,
-    symbol=None,
-    include_risk=False,
-):
-    """精确版本只读；未到期与已到期但未保存的事实分别表达。"""
-    if target > research_cutoff or offset < 0 or not 1 <= limit <= 100:
-        raise ValueError("目标日、截止日或分页参数无效")
-    _, _, revision, calendar = _load_calendar(research_cutoff)
-    if target not in calendar:
-        raise ResearchEntryError("TARGET_NOT_TRADING_SESSION", "目标日不在官方日历中")
-    index = calendar.index(target) + horizon
-    endpoint_day = calendar[index] if index < len(calendar) else None
-    due = endpoint_day is not None and endpoint_day <= research_cutoff
-    rows = read_research_rows(
-        config,
-        target=target,
-        source_package_id=source_package_id,
-        profile_revision=profile_revision,
-        history_session_count=history_session_count,
-        d1_history_session_count=d1_history_session_count,
-        event_window_start=event_window_start,
-        calendar_revision=revision,
-        rule=rule,
-        horizon=horizon,
-        research_cutoff=research_cutoff,
-    )
+def summarize_cohort_rows(rows, *, rule, due):
+    """离线汇总冻结规则及端点事实，保留精确分数口径。"""
     groups = []
     for state, label in (
         ("TRUE", "MATCH"),
@@ -123,6 +87,50 @@ def read_persisted_cohort(
                     "unevaluable_reasons": dict(reasons),
                 }
             )
+    return groups
+
+
+def read_persisted_cohort(
+    config,
+    *,
+    target,
+    research_cutoff,
+    source_package_id,
+    profile_revision,
+    history_session_count,
+    d1_history_session_count,
+    event_window_start,
+    rule,
+    horizon,
+    offset=0,
+    limit=30,
+    symbol=None,
+    include_risk=False,
+):
+    """精确版本只读；未到期与已到期但未保存的事实分别表达。"""
+    if target > research_cutoff or offset < 0 or not 1 <= limit <= 100:
+        raise ValueError("目标日、截止日或分页参数无效")
+    _, _, revision, calendar = _load_calendar(research_cutoff)
+    if target not in calendar:
+        raise ResearchEntryError("TARGET_NOT_TRADING_SESSION", "目标日不在官方日历中")
+    index = calendar.index(target) + horizon
+    endpoint_day = calendar[index] if index < len(calendar) else None
+    due = endpoint_day is not None and endpoint_day <= research_cutoff
+    common = dict(
+        config=config,
+        target=target,
+        source_package_id=source_package_id,
+        profile_revision=profile_revision,
+        history_session_count=history_session_count,
+        d1_history_session_count=d1_history_session_count,
+        event_window_start=event_window_start,
+        calendar_revision=revision,
+        horizon=horizon,
+        research_cutoff=research_cutoff,
+    )
+    source_pool_count, groups, rows, selected_rules = read_cohort_page(
+        **common, rule=rule, offset=offset, limit=limit, symbol=symbol
+    )
     if include_risk and symbol is None:
         raise ValueError("风险分量需要指定来源代码")
     followup = None
@@ -189,19 +197,9 @@ def read_persisted_cohort(
         d1_rows = (
             rows
             if rule == "D1_ANCHOR_WINDOW"
-            else read_research_rows(
-                config,
-                target=target,
-                source_package_id=source_package_id,
-                profile_revision=profile_revision,
-                history_session_count=history_session_count,
-                d1_history_session_count=d1_history_session_count,
-                event_window_start=event_window_start,
-                calendar_revision=revision,
-                rule="D1_ANCHOR_WINDOW",
-                horizon=horizon,
-                research_cutoff=research_cutoff,
-            )
+            else read_cohort_page(
+                **common, rule="D1_ANCHOR_WINDOW", offset=0, limit=1, symbol=symbol
+            )[2]
         )
         d1 = next((row for row in d1_rows if row[0] == symbol), None)
         events = read_source_events(
@@ -258,19 +256,9 @@ def read_persisted_cohort(
             launch_rows = (
                 rows
                 if rule == "LAUNCH_CONFIRM"
-                else read_research_rows(
-                    config,
-                    target=target,
-                    source_package_id=source_package_id,
-                    profile_revision=profile_revision,
-                    history_session_count=history_session_count,
-                    d1_history_session_count=d1_history_session_count,
-                    event_window_start=event_window_start,
-                    calendar_revision=revision,
-                    rule="LAUNCH_CONFIRM",
-                    horizon=horizon,
-                    research_cutoff=research_cutoff,
-                )
+                else read_cohort_page(
+                    **common, rule="LAUNCH_CONFIRM", offset=0, limit=1, symbol=symbol
+                )[2]
             )
             launch = next((row for row in launch_rows if row[0] == symbol), None)
             if launch is None or launch[21] != selected[21]:
@@ -302,8 +290,9 @@ def read_persisted_cohort(
         "horizon": horizon,
         "endpoint_session": endpoint_day.isoformat() if endpoint_day else None,
         "due": due,
-        "source_pool_count": len(rows),
+        "source_pool_count": source_pool_count,
         "groups": groups,
+        "selected_rules": selected_rules,
         "frozen_candidate_followup": followup,
         "frozen_rule_followup": rule_followup,
         "d1_anchor_events": anchor_events,
@@ -320,12 +309,16 @@ def read_persisted_cohort(
                 "path_quality": row[10],
                 "path_reasons": row[11],
             }
-            for row in rows[offset : offset + limit]
+            for row in rows
         ],
         "page": {
             "offset": offset,
             "limit": limit,
-            "next_offset": offset + limit if offset + limit < len(rows) else None,
+            "next_offset": (
+                offset + limit
+                if symbol is None and offset + limit < source_pool_count
+                else None
+            ),
         },
         "database_transaction": "READ_ONLY",
         "database_write_attempted": False,

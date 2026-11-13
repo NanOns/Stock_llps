@@ -577,6 +577,14 @@ def _run_source_market_observation(args) -> int:
                     previous_session=adjacent[0],
                     events=events,
                 )
+                from stock_a.application.source_cohort_stats import persist_cohort_stats
+
+                result["cohort_stats"] = persist_cohort_stats(
+                    config,
+                    target=facts["target"],
+                    research_cutoff=cutoff,
+                    source_package_id=args.source_package_id,
+                )
                 return {
                     **result,
                     "profile_revision": revision,
