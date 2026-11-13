@@ -155,9 +155,213 @@ function evidenceStateLabel(value) {
     }[value] || "UNKNOWN"
   );
 }
+function t0EarlyContexts(t0) {
+  return Array.isArray(t0?.enrollments)
+    ? t0.enrollments.flatMap((entry) =>
+        Array.isArray(entry.early_contexts) ? entry.early_contexts : [],
+      )
+    : [];
+}
+function exactRatioText(numerator, denominator, unit = "") {
+  if (numerator == null || denominator == null || Number(denominator) === 0)
+    return "UNKNOWN";
+  const value = Number(numerator) / Number(denominator);
+  const decimal = Number.isFinite(value) ? value.toFixed(2) : "UNKNOWN";
+  return `${decimal}${unit}（${numerator}/${denominator}）`;
+}
+function rpsRankText(context, prefix) {
+  const first = context[`${prefix}_rank_first`];
+  const last = context[`${prefix}_rank_last`];
+  if (!Number.isInteger(first) || !Number.isInteger(last))
+    return `${prefix.toUpperCase()} ${evidenceStatusLabel(context[`${prefix}_quality`])} · 未排名`;
+  const rank = first === last ? `第 ${first} 位` : `并列第 ${first}–${last} 位`;
+  const valid = context[`${prefix}_valid_member_count`];
+  const unknown = context[`${prefix}_unknown_member_count`];
+  const outside = context[`${prefix}_out_of_source_pool_member_count`];
+  return `${prefix.toUpperCase()} ${rank} / ${valid} 位可评价成员 · UNKNOWN ${unknown} · 来源池外 ${outside ?? "UNKNOWN"}`;
+}
+function t0EarlySummary(t0) {
+  const contexts = t0EarlyContexts(t0);
+  if (contexts.length) return t0ContextsSummary(contexts, t0);
+  const registrations = Array.isArray(t0?.enrollments) ? t0.enrollments : [];
+  if (registrations.length) {
+    const missing = registrations.find(
+      (entry) =>
+        !Array.isArray(entry.early_contexts) || !entry.early_contexts.length,
+    );
+    return `T0板内观察 ${missing?.early_status || "NO_STORED_FACT"} · ${missing?.early_reason || "该日期没有已存板内观察事实"}`;
+  }
+  return "T0板内观察 NO_STORED_FACT · 当前对象没有已存观察登记";
+}
+function t0ContextsSummary(contexts, fallback = {}) {
+  if (!contexts.length)
+    return `T0板内观察 ${fallback?.status || "NOT_COMPUTED"} · ${fallback?.reason || "NO_STORED_FACT"}`;
+  const pulse = { TRUE: 0, FALSE: 0, UNKNOWN: 0, NOT_COMPUTED: 0 };
+  const alignment = {
+    SUPPORT: 0,
+    CONFLICT: 0,
+    MIXED: 0,
+    UNKNOWN: 0,
+    NEUTRAL: 0,
+  };
+  const transitionMissing = { count: 0 };
+  for (const context of contexts) {
+    pulse[context.pulse_state] = (pulse[context.pulse_state] || 0) + 1;
+    alignment[context.alignment_state] =
+      (alignment[context.alignment_state] || 0) + 1;
+    if (context.transition_status !== "AVAILABLE") transitionMissing.count += 1;
+  }
+  return `T0板内 ${contexts.length} 条登记×板块事实 · PULSE TRUE/FALSE/UNKNOWN ${pulse.TRUE}/${pulse.FALSE}/${pulse.UNKNOWN + pulse.NOT_COMPUTED} · 同向/冲突/混合 ${alignment.SUPPORT}/${alignment.CONFLICT}/${alignment.MIXED} · 相邻转移未计算 ${transitionMissing.count} · NON_PIT`;
+}
+const earlyCodeLabels = {
+  D0_FALSE_TO_TRUE: "D0 同源新增启动",
+  PULSE_TRUE: "当前板块 PULSE 为 TRUE",
+  PULSE_APPEARED: "相邻 PULSE 新出现",
+  PULSE_PERSISTED: "相邻 PULSE 连续成立",
+  RPS5_FRONT_HALF: "RPS5 位于板内前半",
+  RPS20_FRONT_HALF: "RPS20 位于板内前半",
+  PULSE_FALSE: "当前板块 PULSE 为 FALSE",
+  PULSE_CEASED: "相邻 PULSE 本日退场",
+  RPS5_BACK_HALF: "RPS5 位于板内后半",
+  RPS20_BACK_HALF: "RPS20 位于板内后半",
+  RPS5_RPS20_MIXED: "RPS5 与 RPS20 板内位置分化",
+  MEMBERSHIP_UNKNOWN: "成员快照不能证明完整映射",
+  PULSE_CURRENT_UNKNOWN: "当前 PULSE 为 UNKNOWN",
+  PULSE_NOT_COMPUTED: "当前 PULSE 尚未计算或没有已存事实",
+  PULSE_TRANSITION_NOT_COMPUTED: "没有精确相邻 PULSE 转移事实",
+  RPS5_UNKNOWN: "RPS5 值或板内位置未知",
+  RPS20_UNKNOWN: "RPS20 值或板内位置未知",
+};
+const earlyCaseLabels = {
+  D0_PULSE_APPEARED_FRONT: "D0 新增 + PULSE 新现 + RPS5/RPS20 同在板内前半",
+  D0_PULSE_TRUE_FRONT: "D0 新增 + 当前 PULSE TRUE + RPS5/RPS20 同在板内前半",
+  D0_PULSE_TRUE_BACK: "D0 新增 + 当前 PULSE TRUE，但 RPS5/RPS20 同在板内后半",
+  D0_PULSE_TRUE_MIXED: "D0 新增 + 当前 PULSE TRUE，但 RPS5/RPS20 位置分化",
+  D0_PULSE_FALSE_CONFLICT: "D0 新增与当前 PULSE FALSE/相邻退场冲突",
+  PULSE_TRUE_BACK: "当前 PULSE TRUE，但个股 RPS5/RPS20 同在板内后半",
+  PULSE_UNKNOWN: "板块 PULSE 当前状态未知",
+  NO_BOARD_MAPPING: "T0 对象没有可证的板块映射",
+  BOARD_CONTEXT: "已保存板块上下文；当前没有更具体的同向或冲突标签",
+};
+const pulseReasonLabels = {
+  BOARD_MEMBER_COUNT_BELOW_FIVE: "板块成员少于5只",
+  COMMON_MEMBER_COUNT_BELOW_FIVE: "两期共同成员少于5只",
+  COMPARISON_QUOTE_COUNT_BELOW_FIVE: "比较端可用报价少于5只",
+  TARGET_QUOTE_COUNT_BELOW_FIVE: "目标端可用报价少于5只",
+  COMMON_MEMBER_COVERAGE_BELOW_80_PERCENT: "两期共同成员覆盖低于80%",
+  COMPARISON_QUOTE_COVERAGE_BELOW_80_PERCENT: "比较端报价覆盖低于80%",
+  TARGET_QUOTE_COVERAGE_BELOW_80_PERCENT: "目标端报价覆盖低于80%",
+  BREADTH_DELTA1_COMPARISON_VALUE_UNKNOWN: "比较端板块宽度未知",
+  BREADTH_DELTA1_TARGET_VALUE_UNKNOWN: "目标端板块宽度未知",
+  RET5_COMPARISON_VALUE_UNKNOWN: "比较端板块5会话收益未知",
+  RET5_TARGET_VALUE_UNKNOWN: "目标端板块5会话收益未知",
+};
+function codeListText(codes) {
+  if (!Array.isArray(codes) || !codes.length) return "无已证项目";
+  return codes.map((code) => earlyCodeLabels[code] || code).join("；");
+}
+function t0EarlyObservationDetails(registrations) {
+  const panel = node("div", null, "rule t0-early-observations");
+  panel.append(
+    node("strong", "T0 自动早期研究观察 · 假设 EARLY_BOARD_RELATIVE_T0_R1"),
+    node(
+      "p",
+      "每条T0登记分别保留所有当前行业/GN板块；当前成员关系为 NON_PIT 回看。板内名次只比较同板块、同来源版本的已存RPS值；PULSE转移缺事实时保持 NOT_COMPUTED。此解释层不改变D0/Seed/RPS/PULSE规则，也不是龙头、买入或收益预测证明。",
+    ),
+  );
+  if (!registrations.length) {
+    panel.append(node("p", "NO_STORED_FACT：当前对象没有已存T0登记。"));
+    return panel;
+  }
+
+  for (const registration of registrations) {
+    const contexts = Array.isArray(registration.early_contexts)
+      ? registration.early_contexts
+      : [];
+    panel.append(
+      node(
+        "h4",
+        `登记 #${registration.id} ${registration.kind || "UNKNOWN"} · ${registration.rule_id || registration.fact_type || "D0来源事实"} · 后继 ${registration.followup?.status || "NOT_COMPUTED"}（${registration.followup?.reason || "NO_STORED_LANDMARK"}）`,
+      ),
+    );
+    if (!contexts.length) {
+      panel.append(
+        node(
+          "p",
+          `登记 #${registration.id} 的板内观察 ${registration.early_status || "NOT_COMPUTED"} · ${registration.early_reason || "NO_STORED_FACT"}`,
+        ),
+      );
+      continue;
+    }
+    for (const context of contexts) {
+      const board = context.catalog_id
+        ? `${boardKindLabel(context.board_kind)} ${context.board_name || context.board_native_id}`
+        : `板块映射 ${context.membership_status || "UNKNOWN"}`;
+      const pulseText =
+        context.pulse_status === "AVAILABLE"
+          ? `PULSE ${context.pulse_state}`
+          : `PULSE ${context.pulse_status || "UNKNOWN"}（${context.pulse_state || "UNKNOWN"}）`;
+      const pulseReasons = Array.isArray(context.pulse_reason_codes)
+        ? context.pulse_reason_codes
+            .map((reason) => pulseReasonLabels[reason] || reason)
+            .join("、")
+        : "";
+      const transitionEndpointReasons = [
+        ...(context.previous_reason_codes || []),
+        ...(context.target_reason_codes || []),
+      ];
+      const transitionReasonText = transitionEndpointReasons.length
+        ? ` · 端点原因 ${codeListText(transitionEndpointReasons)}`
+        : "";
+      const transitionText =
+        context.transition_status === "AVAILABLE"
+          ? `相邻变化 ${context.transition_state}（${context.previous_state || "UNKNOWN"}→${context.target_state || "UNKNOWN"}）${transitionReasonText}`
+          : `相邻变化 ${context.transition_status || "NOT_COMPUTED"}（${(context.transition_reason_codes || []).join("、") || "PULSE_TRANSITION_FACTS_NOT_SAVED_FOR_EXACT_INPUT"}）`;
+      const rps5Value = exactRatioText(
+        context.rps5_numerator,
+        context.rps5_denominator,
+      );
+      const rps20Value = exactRatioText(
+        context.rps20_numerator,
+        context.rps20_denominator,
+      );
+      const delta3 = exactRatioText(
+        context.rps5_delta3_numerator,
+        context.rps5_delta3_denominator,
+        " pp",
+      );
+      const pulseMetrics =
+        context.pulse_status === "AVAILABLE"
+          ? ` · dq5 ${exactRatioText(context.pulse_dq5_numerator, context.pulse_dq5_denominator, " pp")} · breadth Δ ${exactRatioText(context.pulse_breadth_delta1_numerator, context.pulse_breadth_delta1_denominator, " pp")}`
+          : "";
+      panel.append(
+        node(
+          "p",
+          `${board} · ${pulseText}${pulseReasons ? `（${pulseReasons}）` : ""} · ${transitionText}${pulseMetrics} · 成员 ${context.membership_quality || context.snapshot_source_quality || "UNKNOWN"} · ${context.membership_mode || "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"}`,
+        ),
+        node(
+          "p",
+          `D0 ${context.d0_before_state || "UNKNOWN"}→${context.d0_after_state || "UNKNOWN"} ${context.d0_transition || "NOT_COMPUTED"} · RPS5 ${rps5Value}；${rpsRankText(context, "rps5")} · RPS20 ${rps20Value}；${rpsRankText(context, "rps20")} · RPS5 Δ3 ${delta3}`,
+        ),
+        node(
+          "p",
+          `研究判断 ${earlyCaseLabels[context.research_case] || context.research_case || "UNKNOWN"} · 板内位置 ${context.relative_position || "UNKNOWN"} · 同向/冲突关系 ${context.alignment_state || "UNKNOWN"}`,
+        ),
+        node("p", `支持证据：${codeListText(context.support_codes)}`),
+        node("p", `反证：${codeListText(context.counter_codes)}`),
+        node("p", `未知原因：${codeListText(context.unknown_codes)}`),
+        node(
+          "p",
+          `下一步：${context.next_check_code || "WAIT_FOR_NEXT_STORED_SESSION"} · NON_PIT_EXPLORATORY · RAW_UNADJUSTED；后继未到期时仍为 NOT_DUE。`,
+        ),
+      );
+    }
+  }
+  return panel;
+}
 function stockObservationSummary(item) {
   const order = item.observation_order || {};
-  return [
+  const summary = [
     `${order.layer_label || "证据 UNKNOWN"}`,
     `Seed ${evidenceStateLabel(order.seed_rule_state)}`,
     `D1 锚 ${evidenceStateLabel(order.d1_anchor_state)}`,
@@ -165,6 +369,9 @@ function stockObservationSummary(item) {
     `D1 价格 ${order.d1_target_price_quality || "UNKNOWN"}`,
     `PULSE ${order.pulse_status || "UNKNOWN"}`,
   ].join(" · ");
+  return item.t0_observation
+    ? `${summary} · ${t0EarlySummary(item.t0_observation)}`
+    : summary;
 }
 function boardPulseSummary(board) {
   const pulse = board.cross_period_pulse || {};
@@ -1192,6 +1399,7 @@ function focusEvidenceDetails(item, context) {
       `Seed ${seed.source_seed?.state || "UNKNOWN"} · S1 ${seed.s1?.state || "UNKNOWN"} · S2 ${seed.s2?.state || "UNKNOWN"} · Safety ${seed.safety?.state || "UNKNOWN"} · 目标收盘 ${seed.target_close_quality || "UNKNOWN"} ${seed.target_close_reason || ""}`,
     ),
   );
+  details.append(t0EarlyObservationDetails(registrations));
   const ruleList = node("ul", null, "focus-rule-list");
   for (const [rule, fact] of Object.entries(facts)) {
     const reason = Array.isArray(fact?.reasons) ? fact.reasons.join("、") : "";
@@ -1393,6 +1601,7 @@ async function loadFocusAuto(context, offset = 0) {
         item.observation_reason || "已保存的来源研究事实",
         `D0 ${item.d0_change?.transition || item.transition || "UNKNOWN"}`,
         `T0 ${item.t0_observation?.status || "UNKNOWN"} · NON_PIT`,
+        t0EarlySummary(item.t0_observation),
       ];
       root.append(
         rowButton(
@@ -1922,7 +2131,7 @@ async function openD0Board(board, offset = 0) {
             : displayStockName(item),
           `代码 ${displayStockCode(item)} · ${item.source_pool_status} · D0 ${evidenceStateLabel(item.d0.after_state)} ${item.d0.transition} · Seed ${evidenceStateLabel(item.seed.source_seed)} / S1 ${evidenceStateLabel(item.seed.s1)} / S2 ${evidenceStateLabel(item.seed.s2)} / Safety ${evidenceStateLabel(item.seed.safety)} · D1 ${item.d1.target_price_quality} · 材料锚 ${item.d1.material_anchor_count}`,
           `RPS5 ${item.seed.rps5_board_rank ? `${item.seed.rps5_board_rank}/${item.seed.rps5_board_rank_denominator}位（并列${item.seed.rps5_board_tie_count}只）` : "未排名"} · RPS20 ${item.seed.rps20_board_rank ? `${item.seed.rps20_board_rank}/${item.seed.rps20_board_rank_denominator}位（并列${item.seed.rps20_board_tie_count}只）` : "未排名"}`,
-          `RPS值 ${item.seed.rps5 || "UNKNOWN"} / ${item.seed.rps20 || "UNKNOWN"}（完整来源池）；板块排名分母为有OBSERVED值成员 · NON_PIT`,
+          `RPS值 ${item.seed.rps5 || "UNKNOWN"} / ${item.seed.rps20 || "UNKNOWN"}（完整来源池）；板块排名分母为有OBSERVED值成员 · NON_PIT · ${t0ContextsSummary(item.t0_early_observations || [], { status: item.t0_early_status || "NO_STORED_FACT" })}`,
           () => openStock(item.source_symbol, item),
           index,
         ),
@@ -2815,6 +3024,11 @@ async function openStock(symbol, row = {}) {
         {
           t0_observation: data.t0_observation,
           research_evidence: storedEvidence,
+          d0_change: {
+            before_state: storedEvidence?.d0?.before?.state,
+            after_state: storedEvidence?.d0?.after?.state,
+            transition: storedEvidence?.d0?.transition,
+          },
         },
         c,
       ),

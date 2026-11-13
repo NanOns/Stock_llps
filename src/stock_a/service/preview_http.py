@@ -182,6 +182,60 @@ class PreviewHttpError(Exception):
         super().__init__(message)
 
 
+def _attach_t0_early_contexts(
+    config: Mapping[str, Any], entries: Sequence[dict[str, Any]]
+) -> None:
+    """一次性将页面登记ID批量联接到已存板内观察。"""
+    enrollment_ids = [entry["id"] for entry in entries]
+    from stock_a.storage.postgres.t0_early_observations import (
+        read_source_t0_early_observations_for_enrollments,
+    )
+
+    contexts_by_enrollment = {}
+    for start in range(0, len(enrollment_ids), 300):
+        contexts_by_enrollment.update(
+            read_source_t0_early_observations_for_enrollments(
+                config, enrollment_ids=enrollment_ids[start : start + 300]
+            )
+        )
+    for entry in entries:
+        entry["early_contexts"] = contexts_by_enrollment.get(entry["id"], [])
+        entry["early_status"] = (
+            "AVAILABLE" if entry["early_contexts"] else "NO_STORED_FACT"
+        )
+        entry["early_reason"] = (
+            None if entry["early_contexts"] else "该目标日没有已存板内观察事实"
+        )
+
+
+def _read_enrollment_followups_page(
+    config: Mapping[str, Any],
+    *,
+    target: date,
+    cutoff: date,
+    enrollment_ids: Sequence[int],
+    successor_sessions: Sequence[date],
+) -> dict[int, dict[str, Any]]:
+    """按现役后继Reader的300条上限分批读取当前页登记。"""
+    from stock_a.storage.postgres.research_enrollment import (
+        read_enrollment_followups,
+    )
+
+    result: dict[int, dict[str, Any]] = {}
+    for start in range(0, len(enrollment_ids), 300):
+        selected = list(enrollment_ids[start : start + 300])
+        result.update(
+            read_enrollment_followups(
+                config,
+                target=target,
+                cutoff=cutoff,
+                enrollment_ids=selected,
+                successor_sessions=tuple(successor_sessions),
+            )
+        )
+    return result
+
+
 def _source_context_preview_error(error: Exception) -> PreviewHttpError | None:
     """保留来源上下文读者的稳定错误码，并映射为可解释的HTTP状态。"""
     code = getattr(error, "code", None)
@@ -1344,6 +1398,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             enrollments = enrollment_by_symbol.get(symbol, [])
             for enrollment in enrollments:
                 enrollment["followup"] = followups[enrollment["id"]]
+            _attach_t0_early_contexts(config, enrollments)
             followup_states = {item["followup"]["status"] for item in enrollments}
             followup_reasons = {item["followup"]["reason"] for item in enrollments}
             followup_status = (
@@ -2459,6 +2514,108 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             len(filtered) if watch_group == "D0_NEW" else len(watch_group_rows)
         )
         page = watch_group_rows[offset : offset + limit]
+        page_symbols = sorted({item["source_symbol"] for item in page})
+        if page_symbols:
+            from stock_a.storage.postgres.research_enrollment import (
+                read_enrollments_for_symbols,
+            )
+
+            enrollment_by_symbol = read_enrollments_for_symbols(
+                self.preview_server.state.config,
+                target=target_session,
+                package=source_package_id,
+                capture=after_source["source_capture_id"],
+                before=before_session,
+                before_capture=before_source["source_capture_id"],
+                include_d0=True,
+                symbols=page_symbols,
+                rule_scope=(
+                    evidence.get("rule_scope")
+                    if evidence.get("rules_status") == "AVAILABLE"
+                    else None
+                ),
+            )
+            page_enrollments = [
+                entry
+                for symbol in page_symbols
+                for entry in enrollment_by_symbol.get(symbol, [])
+            ]
+            official_sessions = _official_calendar(research_cutoff)["sessions"]
+            successor_sessions = tuple(
+                day
+                for day in official_sessions
+                if target_session < day <= research_cutoff
+            )
+            page_followups = (
+                _read_enrollment_followups_page(
+                    self.preview_server.state.config,
+                    target=target_session,
+                    cutoff=research_cutoff,
+                    enrollment_ids=[entry["id"] for entry in page_enrollments],
+                    successor_sessions=successor_sessions,
+                )
+                if target_session in official_sessions
+                else {
+                    entry["id"]: {
+                        "status": "UNKNOWN",
+                        "reason": "CALENDAR_WINDOW_UNAVAILABLE",
+                    }
+                    for entry in page_enrollments
+                }
+            )
+            for entry in page_enrollments:
+                entry["followup"] = page_followups[entry["id"]]
+            _attach_t0_early_contexts(
+                self.preview_server.state.config, page_enrollments
+            )
+            for stock in page:
+                registrations = enrollment_by_symbol.get(stock["source_symbol"], [])
+                followup_states = {
+                    entry["followup"]["status"] for entry in registrations
+                }
+                followup_reasons = {
+                    entry["followup"]["reason"] for entry in registrations
+                }
+                t0_status = (
+                    "ENTRY"
+                    if any(entry["kind"] == "ENTRY" for entry in registrations)
+                    else "DAILY_LANDMARK"
+                    if any(entry["kind"] == "DAILY_LANDMARK" for entry in registrations)
+                    else "FIRST_OBSERVED_LEFT_CENSORED"
+                    if registrations
+                    else "UNKNOWN"
+                    if stock.get("watch_group") == "UNKNOWN"
+                    else "KNOWN_NO_SIGNAL"
+                    if stock.get("watch_group") == "KNOWN_NO_SIGNAL"
+                    else "NOT_COMPUTED"
+                )
+                stock["t0_observation"] = {
+                    "status": t0_status,
+                    "enrollments": registrations,
+                    "reason": "NO_STORED_FACT" if not registrations else None,
+                    "followup_status": next(iter(followup_states))
+                    if len(followup_states) == 1
+                    else "MULTIPLE"
+                    if followup_states
+                    else "NOT_COMPUTED",
+                    "followup_reason": next(iter(followup_reasons))
+                    if len(followup_reasons) == 1
+                    else "SEE_RULE_DETAILS"
+                    if followup_reasons
+                    else "NO_STORED_FACT",
+                    "target_session": target_session.isoformat(),
+                    "source_package_id": source_package_id,
+                    "source_capture_id": after_source["source_capture_id"],
+                    "profile_revision": (evidence.get("seed_scope") or {}).get(
+                        "profile_revision"
+                    ),
+                    "rule_version": (evidence.get("rule_scope") or {}).get(
+                        "rule_version"
+                    ),
+                    "scope": "NON_PIT_EXPLORATORY",
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "research_only": True,
+                }
         for stock in page:
             stock["detail_request"] = {
                 "method": "POST",
@@ -3629,6 +3786,59 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     )
                 except ResearchDayPgError as error:
                     raise PreviewHttpError(409, error.code, str(error)) from error
+                selected_board = result.get("selected_board_observation")
+                members = (
+                    selected_board.get("members")
+                    if isinstance(selected_board, Mapping)
+                    else None
+                )
+                if (
+                    isinstance(members, list)
+                    and values.get("board_kind") in {"INDUSTRY", "CONCEPT"}
+                    and values.get("board_native_id")
+                ):
+                    source_package_id = _package_id(values["source_package_id"])
+                    source_context = read_source_version_context(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        source_package_id=source_package_id,
+                    )
+                    if source_context.get("status") == "AVAILABLE":
+                        from stock_a.storage.postgres.t0_early_observations import (
+                            read_source_t0_early_observations_for_symbols,
+                        )
+
+                        symbols = [
+                            member["source_symbol"]
+                            for member in members
+                            if isinstance(member, Mapping)
+                            and isinstance(member.get("source_symbol"), str)
+                        ]
+                        contexts_by_symbol = (
+                            read_source_t0_early_observations_for_symbols(
+                                self.preview_server.state.config,
+                                target_session=target,
+                                source_package_id=source_package_id,
+                                source_capture_id=source_context["source_capture_id"],
+                                source_symbols=sorted(set(symbols)),
+                                board_kind=values["board_kind"],
+                                board_native_id=values["board_native_id"],
+                            )
+                            if symbols
+                            else {}
+                        )
+                        for member in members:
+                            if isinstance(member, dict):
+                                member["t0_early_observations"] = (
+                                    contexts_by_symbol.get(
+                                        member.get("source_symbol"), []
+                                    )
+                                )
+                                member["t0_early_status"] = (
+                                    "AVAILABLE"
+                                    if member["t0_early_observations"]
+                                    else "NO_STORED_FACT"
+                                )
                 self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/product/market":
@@ -5643,6 +5853,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 for entry in entries:
                     entry["followup"] = followups[entry["id"]]
+                _attach_t0_early_contexts(config, entries)
                 followup_states = {entry["followup"]["status"] for entry in entries}
                 result["t0_observation"] = {
                     "status": "AVAILABLE"

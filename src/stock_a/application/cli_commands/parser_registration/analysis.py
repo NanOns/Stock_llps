@@ -178,6 +178,11 @@ def register_commands(commands):
         help="从已存规则和路径事实离线汇总冻结Cohort，不读取价格历史",
     )
     research_day.add_argument(
+        "--t0-early-observations-from-saved",
+        action="store_true",
+        help="仅从已存T0、Seed、成员、PULSE及RPS事实生产板内观察typed结果",
+    )
+    research_day.add_argument(
         "--d0-launch-reference-only",
         action="store_true",
         help="仅生产相邻会话消费者明确需要的LAUNCH_CONFIRM前日D0参考事实",

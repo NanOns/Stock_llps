@@ -82,10 +82,48 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
             raise ValueError(
                 "--include-sector-pulse 仅用于单日--static-only，并须提供不同的行业与GN数字快照ID"
             )
-        if snapshot_ids_supplied and not args.include_sector_pulse:
+        if (
+            snapshot_ids_supplied
+            and not args.include_sector_pulse
+            and not args.t0_early_observations_from_saved
+        ):
             raise ValueError("板块数字快照ID只能与 --include-sector-pulse 同时使用")
         sector_snapshot_ids = snapshot_ids if args.include_sector_pulse else None
         config, config_path = load_runtime_config()
+        if args.t0_early_observations_from_saved:
+            if (
+                not args.persist
+                or args.start_session
+                or args.static_only
+                or args.enrollment_from_saved
+                or args.cohort_stats_from_saved
+                or args.d0_launch_reference_only
+                or args.include_sector_pulse
+                or not all(snapshot_ids.values())
+                or snapshot_ids["INDUSTRY"] == snapshot_ids["CONCEPT"]
+            ):
+                raise ValueError(
+                    "T0板内观察仅支持单日--persist，并须提供不同的行业与GN快照ID"
+                )
+            from stock_a.application.source_t0_early_observation import (
+                persist_source_t0_early_observations_from_saved,
+            )
+
+            target = _parse_session_date(args.target_session)
+            cutoff = _parse_session_date(args.research_cutoff)
+            if target > cutoff:
+                raise ValueError("目标会话晚于研究截止日期")
+            report = persist_source_t0_early_observations_from_saved(
+                config,
+                target_session=target,
+                research_cutoff=cutoff,
+                source_package_id=args.source_package_id,
+                snapshot_ids=snapshot_ids,
+            )
+            report["configuration_path"] = str(config_path)
+            report["ok"] = True
+            _emit(report)
+            return _EXIT_OK
         if args.cohort_stats_from_saved:
             if (
                 not args.persist

@@ -1742,22 +1742,18 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
     }
 
 
-def read_source_launch_watch_board_rps_comparison(
+def read_source_launch_watch_board_rps_comparisons(
     config: Mapping[str, Any],
     *,
     target_session: date,
     source_package_id: int,
     source_capture_id: int,
-    source_symbols: Sequence[str],
+    board_symbol_contexts: Sequence[tuple[int, str, str, str]],
     seed_scope: Mapping[str, Any],
-    board_kind: str,
-    board_native_id: str,
-    board_snapshot_id: int,
-) -> dict[str, dict[str, Any]]:
-    """在一个所选板块内按精确分数比较RPS5/RPS20并保留并列。"""
+) -> dict[tuple[int, str, str, str], dict[str, Any]]:
+    """一次读取同一目标来源池，精确比较多个板块内RPS5/RPS20并保留并列。"""
     from stock_a.storage.postgres import source_raw
 
-    symbols = tuple(sorted(set(source_symbols)))
     scope_fields = (
         "profile_revision",
         "producer_contract",
@@ -1774,49 +1770,72 @@ def read_source_launch_watch_board_rps_comparison(
         or source_package_id <= 0
         or type(source_capture_id) is not int
         or source_capture_id <= 0
-        or any(
-            not isinstance(item, str) or _SYMBOL.fullmatch(item) is None
-            for item in symbols
-        )
-        or len(symbols) != len(source_symbols)
-        or len(symbols) > 30
+        or isinstance(board_symbol_contexts, (str, bytes))
+        or not isinstance(board_symbol_contexts, Sequence)
         or not isinstance(seed_scope, Mapping)
         or any(not seed_scope.get(name) for name in scope_fields)
         or type(seed_scope.get("history_session_count")) is not int
         or not 1 <= seed_scope["history_session_count"] <= 75
-        or board_kind not in {"INDUSTRY", "CONCEPT"}
-        or not isinstance(board_native_id, str)
-        or not board_native_id
-        or len(board_native_id) > 64
-        or type(board_snapshot_id) is not int
-        or board_snapshot_id <= 0
     ):
-        raise ValueError("板内RPS对比输入无效")
-    if not symbols:
-        return {}
+        raise ValueError("多板块板内RPS对比输入无效")
 
-    with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
+    normalized: list[tuple[int, str, str, str]] = []
+    for item in board_symbol_contexts:
+        if not isinstance(item, (tuple, list)) or len(item) != 4:
+            raise ValueError("板块与来源代码上下文键必须是四元组")
+        snapshot_id, board_kind, board_native_id, symbol = item
+        if (
+            type(snapshot_id) is not int
+            or snapshot_id <= 0
+            or board_kind not in {"INDUSTRY", "CONCEPT"}
+            or not isinstance(board_native_id, str)
+            or not board_native_id
+            or len(board_native_id) > 64
+            or not isinstance(symbol, str)
+            or _SYMBOL.fullmatch(symbol) is None
+        ):
+            raise ValueError("多板块板内RPS对比含无效板块或来源代码键")
+        normalized.append((snapshot_id, board_kind, board_native_id, symbol))
+    contexts = tuple(sorted(set(normalized)))
+    if len(contexts) != len(normalized) or len(contexts) > 50000:
+        raise ValueError("多板块板内RPS上下文重复或超过有界比较预算")
+    if not contexts:
+        return {}
+    if len({context[:3] for context in contexts}) > 2000:
+        raise ValueError("多板块板内RPS板块数量超过有界比较预算")
+
+    # 对正整数分母<=N，两个不同有理数至少相差1/N²；SQL只在
+    # NUMERIC除法精度满足10^scale>2N²时以窗口排序，否则拒绝近似名次。
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
         _,
         cursor,
         _,
     ):
         cursor.execute(
             """WITH params AS (
-    SELECT %s::date AS target_session, %s::bigint AS source_package_id,
-           %s::bigint AS source_capture_id, %s::text[] AS source_symbols,
-           %s::text AS profile_revision, %s::text AS producer_contract,
-           %s::text AS producer_version, %s::smallint AS history_session_count,
-           %s::text AS calendar_id, %s::text AS calendar_revision,
-           %s::text AS research_mode, %s::text AS price_coordinate,
-           %s::text AS board_kind, %s::text AS board_native_id,
-           %s::bigint AS board_snapshot_id
-), requested AS (
-    SELECT unnest(source_symbols) AS source_symbol FROM params
+    SELECT %s::date AS target_session,%s::bigint AS source_package_id,
+           %s::bigint AS source_capture_id,%s::text AS profile_revision,
+           %s::text AS producer_contract,%s::text AS producer_version,
+           %s::smallint AS history_session_count,%s::text AS calendar_id,
+           %s::text AS calendar_revision,%s::text AS research_mode,
+           %s::text AS price_coordinate
+), requested_contexts AS MATERIALIZED (
+    SELECT * FROM unnest(%s::bigint[],%s::text[],%s::text[],%s::text[])
+      AS requested(snapshot_id,board_kind,board_native_id,source_symbol)
+), requested_boards AS MATERIALIZED (
+    SELECT DISTINCT snapshot_id,board_kind,board_native_id FROM requested_contexts
+), source_scope AS MATERIALIZED (
+    SELECT r.source_symbol
+    FROM source_raw_daily r CROSS JOIN params p
+    WHERE r.session_date=p.target_session
+      AND r.source_package_id=p.source_package_id
+      AND r.source_capture_id=p.source_capture_id
+), source_count AS (
+    SELECT count(*)::numeric AS expected_source_count FROM source_scope
 ), seed AS MATERIALIZED (
-    SELECT s.source_symbol, s.rps5_numerator, s.rps5_denominator,
-           s.rps5_quality, s.rps5_reason,
-           s.rps20_numerator, s.rps20_denominator,
-           s.rps20_quality, s.rps20_reason
+    SELECT s.source_symbol,s.rps5_numerator,s.rps5_denominator,
+           s.rps5_quality,s.rps5_reason,s.rps20_numerator,s.rps20_denominator,
+           s.rps20_quality,s.rps20_reason
     FROM source_pool_seed_day_facts s CROSS JOIN params p
     WHERE s.target_session=p.target_session
       AND s.source_package_id=p.source_package_id
@@ -1829,63 +1848,114 @@ def read_source_launch_watch_board_rps_comparison(
       AND s.calendar_revision=p.calendar_revision
       AND s.research_mode=p.research_mode
       AND s.price_coordinate=p.price_coordinate
-), selected_metrics AS (
-    SELECT r.source_symbol, v.metric, v.numerator, v.denominator,
-           v.quality, v.reason
-    FROM requested r LEFT JOIN seed s USING (source_symbol)
+), selected_metrics AS MATERIALIZED (
+    SELECT r.snapshot_id,r.board_kind,r.board_native_id,r.source_symbol,
+           v.metric,v.numerator,v.denominator,v.quality,v.reason
+    FROM requested_contexts r LEFT JOIN seed s USING (source_symbol)
     CROSS JOIN LATERAL (VALUES
-        ('RPS5'::text, s.rps5_numerator, s.rps5_denominator, s.rps5_quality, s.rps5_reason),
-        ('RPS20'::text, s.rps20_numerator, s.rps20_denominator, s.rps20_quality, s.rps20_reason)
+      ('RPS5'::text,s.rps5_numerator,s.rps5_denominator,s.rps5_quality,s.rps5_reason),
+      ('RPS20'::text,s.rps20_numerator,s.rps20_denominator,s.rps20_quality,s.rps20_reason)
     ) AS v(metric,numerator,denominator,quality,reason)
+), snapshot_members AS MATERIALIZED (
+    SELECT DISTINCT c.snapshot_id,m.board_kind,m.board_native_id,m.source_symbol
+    FROM requested_boards requested
+    JOIN tdx_sector_catalog c ON c.snapshot_id=requested.snapshot_id
+      AND c.board_kind=requested.board_kind
+      AND c.board_native_id=requested.board_native_id
+    JOIN tdx_sector_members m ON m.catalog_id=c.id
+      AND m.board_kind=requested.board_kind
+      AND m.board_native_id=requested.board_native_id
 ), board_members AS MATERIALIZED (
-    SELECT DISTINCT m.source_symbol
-    FROM tdx_sector_members m
-    JOIN tdx_sector_catalog c ON c.id=m.catalog_id
-    CROSS JOIN params p
-    JOIN source_raw_daily raw ON raw.source_symbol=m.source_symbol
-       AND raw.session_date=p.target_session
-       AND raw.source_package_id=p.source_package_id
-       AND raw.source_capture_id=p.source_capture_id
-    WHERE c.snapshot_id=p.board_snapshot_id
-      AND m.board_kind=p.board_kind
-      AND m.board_native_id=p.board_native_id
+    SELECT member.snapshot_id,member.board_kind,member.board_native_id,
+           member.source_symbol
+    FROM snapshot_members member
+    JOIN source_scope raw USING (source_symbol)
+), snapshot_counts AS (
+    SELECT snapshot_id,board_kind,board_native_id,count(*)::integer AS snapshot_member_count
+    FROM snapshot_members GROUP BY snapshot_id,board_kind,board_native_id
 ), peer_metrics AS (
-    SELECT member.source_symbol, v.metric, v.numerator, v.denominator, v.quality
-    FROM board_members member JOIN seed s USING (source_symbol)
+    SELECT member.snapshot_id,member.board_kind,member.board_native_id,
+           member.source_symbol,v.metric,v.numerator,v.denominator,v.quality
+    FROM board_members member LEFT JOIN seed s USING (source_symbol)
     CROSS JOIN LATERAL (VALUES
-        ('RPS5'::text, s.rps5_numerator, s.rps5_denominator, s.rps5_quality),
-        ('RPS20'::text, s.rps20_numerator, s.rps20_denominator, s.rps20_quality)
+      ('RPS5'::text,s.rps5_numerator,s.rps5_denominator,s.rps5_quality),
+      ('RPS20'::text,s.rps20_numerator,s.rps20_denominator,s.rps20_quality)
     ) AS v(metric,numerator,denominator,quality)
+), valid_peer_metrics AS MATERIALIZED (
+    SELECT peer.snapshot_id,peer.board_kind,peer.board_native_id,
+           peer.source_symbol,peer.metric,peer.numerator,peer.denominator,
+           peer.numerator/peer.denominator AS order_value
+    FROM peer_metrics peer
+    WHERE peer.quality='OBSERVED' AND peer.numerator IS NOT NULL
+      AND peer.denominator>0
+), ratio_order_contract AS (
+    SELECT COALESCE(bool_and(
+        peer.numerator=trunc(peer.numerator)
+        AND peer.denominator=trunc(peer.denominator)
+        AND peer.denominator<=source_count.expected_source_count
+        AND power(10::numeric,scale(peer.order_value))
+            > 2*source_count.expected_source_count*source_count.expected_source_count
+    ),true) AS proven_exact_order
+    FROM valid_peer_metrics peer CROSS JOIN source_count
+), ranked_peer_metrics AS (
+    SELECT peer.snapshot_id,peer.board_kind,peer.board_native_id,
+           peer.source_symbol,peer.metric,
+           rank() OVER (
+             PARTITION BY peer.snapshot_id,peer.board_kind,peer.board_native_id,peer.metric
+             ORDER BY peer.order_value DESC
+           )::integer AS rank_first,
+           count(*) OVER (
+             PARTITION BY peer.snapshot_id,peer.board_kind,peer.board_native_id,
+                          peer.metric,peer.order_value
+           )::integer AS tied_member_count,
+           count(*) OVER (
+             PARTITION BY peer.snapshot_id,peer.board_kind,peer.board_native_id,
+                          peer.metric
+           )::integer AS valid_member_count
+    FROM valid_peer_metrics peer
+), metric_counts AS (
+    SELECT peer.snapshot_id,peer.board_kind,peer.board_native_id,peer.metric,
+           count(DISTINCT peer.source_symbol)::integer AS source_pool_member_count,
+           count(DISTINCT peer.source_symbol) FILTER (
+             WHERE peer.quality='OBSERVED' AND peer.numerator IS NOT NULL
+               AND peer.denominator>0
+           )::integer AS valid_member_count
+    FROM peer_metrics peer
+    GROUP BY peer.snapshot_id,peer.board_kind,peer.board_native_id,peer.metric
 )
-SELECT selected.source_symbol, selected.metric,
-       selected.numerator::text, selected.denominator::text,
-       selected.quality, selected.reason,
-       count(*) FILTER (
-           WHERE peer.quality='OBSERVED' AND peer.numerator IS NOT NULL
-             AND peer.denominator>0
-             AND peer.numerator * selected.denominator
-                 > selected.numerator * peer.denominator
-       )::integer AS higher_member_count,
-       count(*) FILTER (
-           WHERE peer.quality='OBSERVED' AND peer.numerator IS NOT NULL
-             AND peer.denominator>0
-             AND peer.numerator * selected.denominator
-                 = selected.numerator * peer.denominator
-       )::integer AS tied_member_count,
-       count(*) FILTER (
-           WHERE peer.quality='OBSERVED' AND peer.numerator IS NOT NULL
-             AND peer.denominator>0
-       )::integer AS valid_member_count
+SELECT selected.snapshot_id,selected.board_kind,selected.board_native_id,
+       selected.source_symbol,selected.metric,selected.numerator::text,
+       selected.denominator::text,selected.quality,selected.reason,
+       ranked.rank_first-1 AS higher_member_count,
+       ranked.tied_member_count,
+       COALESCE(counts.valid_member_count,0) AS valid_member_count,
+       COALESCE(counts.source_pool_member_count,0) AS source_pool_member_count,
+       COALESCE(snapshot.snapshot_member_count,0) AS snapshot_member_count,
+       ratio_order_contract.proven_exact_order
 FROM selected_metrics selected
-LEFT JOIN peer_metrics peer ON peer.metric=selected.metric
-GROUP BY selected.source_symbol, selected.metric, selected.numerator,
-         selected.denominator, selected.quality, selected.reason
-ORDER BY selected.source_symbol COLLATE "C", selected.metric""",
+LEFT JOIN ranked_peer_metrics ranked
+  ON ranked.snapshot_id=selected.snapshot_id
+ AND ranked.board_kind=selected.board_kind
+ AND ranked.board_native_id=selected.board_native_id
+ AND ranked.source_symbol=selected.source_symbol
+ AND ranked.metric=selected.metric
+LEFT JOIN metric_counts counts
+  ON counts.snapshot_id=selected.snapshot_id
+ AND counts.board_kind=selected.board_kind
+ AND counts.board_native_id=selected.board_native_id
+ AND counts.metric=selected.metric
+LEFT JOIN snapshot_counts snapshot
+  ON snapshot.snapshot_id=selected.snapshot_id
+ AND snapshot.board_kind=selected.board_kind
+ AND snapshot.board_native_id=selected.board_native_id
+CROSS JOIN ratio_order_contract
+ORDER BY selected.snapshot_id,selected.board_kind,
+         selected.board_native_id COLLATE "C",selected.source_symbol COLLATE "C",
+         selected.metric""",
             (
                 target_session,
                 source_package_id,
                 source_capture_id,
-                list(symbols),
                 seed_scope["profile_revision"],
                 seed_scope["producer_contract"],
                 seed_scope["producer_version"],
@@ -1894,15 +1964,21 @@ ORDER BY selected.source_symbol COLLATE "C", selected.metric""",
                 seed_scope["calendar_revision"],
                 seed_scope["research_mode"],
                 seed_scope["price_coordinate"],
-                board_kind,
-                board_native_id,
-                board_snapshot_id,
+                [item[0] for item in contexts],
+                [item[1] for item in contexts],
+                [item[2] for item in contexts],
+                [item[3] for item in contexts],
             ),
         )
         rows = cursor.fetchall()
 
-    result: dict[str, dict[str, Any]] = {symbol: {} for symbol in symbols}
+    result: dict[tuple[int, str, str, str], dict[str, Any]] = {
+        context: {} for context in contexts
+    }
     for (
+        snapshot_id,
+        board_kind,
+        board_native_id,
         symbol,
         metric,
         numerator,
@@ -1912,7 +1988,13 @@ ORDER BY selected.source_symbol COLLATE "C", selected.metric""",
         higher,
         tied,
         valid,
+        source_pool_member_count,
+        snapshot_member_count,
+        proven_exact_order,
     ) in rows:
+        if proven_exact_order is not True:
+            raise ValueError("RPS分母/数值精度不符合板内精确排序合同；拒绝返回近似名次")
+        key = (int(snapshot_id), board_kind, board_native_id, symbol)
         has_value = (
             quality == "OBSERVED"
             and numerator is not None
@@ -1920,7 +2002,7 @@ ORDER BY selected.source_symbol COLLATE "C", selected.metric""",
             and int(denominator) > 0
         )
         valid_count = int(valid or 0)
-        result[symbol][metric] = {
+        result[key][metric] = {
             "status": "AVAILABLE" if has_value and valid_count > 0 else "UNKNOWN",
             "numerator": numerator if has_value else None,
             "denominator": denominator if has_value else None,
@@ -1930,13 +2012,74 @@ ORDER BY selected.source_symbol COLLATE "C", selected.metric""",
             "tied_member_count": int(tied or 0) if has_value else None,
             "valid_member_count": valid_count,
             "rank_with_ties": int(higher or 0) + 1 if has_value else None,
+            "rank_first": int(higher or 0) + 1 if has_value else None,
+            "rank_last": int(higher or 0) + int(tied or 0) if has_value else None,
+            "source_pool_member_count": int(source_pool_member_count or 0),
+            "unknown_member_count": max(
+                0, int(source_pool_member_count or 0) - valid_count
+            ),
+            "snapshot_member_count": int(snapshot_member_count or 0),
+            "out_of_source_pool_member_count": max(
+                0,
+                int(snapshot_member_count or 0) - int(source_pool_member_count or 0),
+            ),
             "rank_scope": "CURRENT_SELECTED_BOARD_NON_PIT",
             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
         }
     return result
 
 
+def read_source_launch_watch_board_rps_comparison(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    source_package_id: int,
+    source_capture_id: int,
+    source_symbols: Sequence[str],
+    seed_scope: Mapping[str, Any],
+    board_kind: str,
+    board_native_id: str,
+    board_snapshot_id: int,
+) -> dict[str, dict[str, Any]]:
+    """在用户选定的单板块内复用多板块比较内核并保留并列。"""
+    symbols = tuple(sorted(set(source_symbols)))
+    if (
+        isinstance(source_symbols, (str, bytes))
+        or len(symbols) != len(source_symbols)
+        or len(symbols) > 30
+        or board_kind not in {"INDUSTRY", "CONCEPT"}
+        or not isinstance(board_native_id, str)
+        or not board_native_id
+        or len(board_native_id) > 64
+        or type(board_snapshot_id) is not int
+        or board_snapshot_id <= 0
+        or any(
+            not isinstance(item, str) or _SYMBOL.fullmatch(item) is None
+            for item in symbols
+        )
+    ):
+        raise ValueError("板内RPS对比输入无效")
+    if not symbols:
+        return {}
+    contexts = [
+        (board_snapshot_id, board_kind, board_native_id, symbol) for symbol in symbols
+    ]
+    compared = read_source_launch_watch_board_rps_comparisons(
+        config,
+        target_session=target_session,
+        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        board_symbol_contexts=contexts,
+        seed_scope=seed_scope,
+    )
+    return {
+        symbol: compared[(board_snapshot_id, board_kind, board_native_id, symbol)]
+        for symbol in symbols
+    }
+
+
 __all__ = [
+    "read_source_launch_watch_board_rps_comparisons",
     "read_source_launch_watch_board_rps_comparison",
     "read_source_launch_watch_evidence",
     "read_source_launch_watch_page",
