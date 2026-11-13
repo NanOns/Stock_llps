@@ -1276,4 +1276,667 @@ def _read_single_symbol_context(
     }
 
 
-__all__ = ["read_source_launch_watch_evidence"]
+def read_source_launch_watch_page(
+    config: Mapping[str, Any],
+    *,
+    before_session: date,
+    target_session: date,
+    source_package_id: int,
+    before_capture_id: int,
+    target_capture_id: int,
+    expected_source_count: int,
+    watch_group: str,
+    offset: int,
+    limit: int,
+    d1_history_session_count: int | None = None,
+    board_kind: str | None = None,
+    board_native_id: str | None = None,
+    board_snapshot_id: int | None = None,
+) -> dict[str, Any]:
+    """从现有PG研究事实按组聚合并分页，不在HTTP进程整理全来源池。"""
+    from stock_a.storage.postgres import source_raw
+
+    groups = {
+        "D0_NEW",
+        "SEED_RULE",
+        "D1_MATERIAL",
+        "UNKNOWN",
+        "KNOWN_NO_SIGNAL",
+    }
+    invalid_fields = []
+    if type(before_session) is not date or type(target_session) is not date:
+        invalid_fields.append("日期类型")
+    elif before_session >= target_session:
+        invalid_fields.append("相邻日期顺序")
+    if type(source_package_id) is not int or source_package_id <= 0:
+        invalid_fields.append("来源包ID")
+    if type(before_capture_id) is not int or before_capture_id <= 0:
+        invalid_fields.append("前日捕获ID")
+    if type(target_capture_id) is not int or target_capture_id <= 0:
+        invalid_fields.append("目标日捕获ID")
+    if type(expected_source_count) is not int or expected_source_count <= 0:
+        invalid_fields.append("来源池分母")
+    if watch_group not in groups:
+        invalid_fields.append("观察分组")
+    if type(offset) is not int or offset < 0:
+        invalid_fields.append("页偏移")
+    if type(limit) is not int or not 1 <= limit <= 30:
+        invalid_fields.append("页大小")
+    if d1_history_session_count is not None and (
+        type(d1_history_session_count) is not int
+        or not 1 <= d1_history_session_count <= 75
+    ):
+        invalid_fields.append("D1历史会话数")
+    if (board_kind is None) != (board_native_id is None):
+        invalid_fields.append("板块类型与原生ID配对")
+    if (board_kind is None) != (board_snapshot_id is None):
+        invalid_fields.append("板块快照配对")
+    if board_kind is not None and board_kind not in {"INDUSTRY", "CONCEPT"}:
+        invalid_fields.append("板块类型")
+    if board_native_id is not None and (
+        not board_native_id or len(board_native_id) > 64
+    ):
+        invalid_fields.append("板块原生ID")
+    if board_snapshot_id is not None and (
+        type(board_snapshot_id) is not int or board_snapshot_id <= 0
+    ):
+        invalid_fields.append("板块快照ID")
+    if invalid_fields:
+        raise ValueError("来源观察PG分页键无效：" + "、".join(invalid_fields))
+
+    started = time.perf_counter()
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """WITH params AS (
+    SELECT %s::date AS before_session, %s::date AS target_session,
+           %s::bigint AS source_package_id, %s::bigint AS before_capture_id,
+           %s::bigint AS target_capture_id, %s::bigint AS expected_source_count,
+           %s::smallint AS d1_history_session_count, %s::text[] AS rule_ids,
+           %s::text AS watch_group, %s::text AS board_kind,
+           %s::text AS board_native_id, %s::bigint AS board_snapshot_id,
+           %s::integer AS page_offset, %s::integer AS page_limit
+), target_pool AS MATERIALIZED (
+    SELECT r.source_symbol, r.market
+    FROM source_raw_daily r CROSS JOIN params p
+    WHERE r.session_date=p.target_session
+      AND r.source_package_id=p.source_package_id
+      AND r.source_capture_id=p.target_capture_id
+), d0_scope_candidates AS MATERIALIZED (
+    SELECT d.producer_version, d.algorithm_contract, d.session_contract,
+           d.calendar_revision, count(*)::bigint AS fact_count,
+           count(DISTINCT d.source_symbol)::bigint AS symbol_count,
+           min(d.target_source_count)::bigint AS target_source_count,
+           max(d.target_source_count)::bigint AS target_source_count_max,
+           min(d.union_source_count)::bigint AS union_source_count,
+           max(d.union_source_count)::bigint AS union_source_count_max
+    FROM source_d0_launch_day_facts d CROSS JOIN params p
+    WHERE d.before_session=p.before_session AND d.target_session=p.target_session
+      AND d.source_package_id=p.source_package_id
+      AND d.before_capture_id=p.before_capture_id
+      AND d.target_capture_id=p.target_capture_id
+    GROUP BY d.producer_version, d.algorithm_contract, d.session_contract,
+             d.calendar_revision
+), d0_scope_status AS (
+    SELECT CASE
+        WHEN count(*)=0 THEN 'NOT_COMPUTED'
+        WHEN count(*)>1 THEN 'AMBIGUOUS'
+        WHEN bool_and(fact_count=union_source_count
+                      AND symbol_count=union_source_count
+                      AND target_source_count=target_source_count_max
+                      AND union_source_count=union_source_count_max
+                      AND target_source_count=(SELECT expected_source_count FROM params)
+                      AND union_source_count>=target_source_count)
+            THEN 'AVAILABLE'
+        ELSE 'INCOMPLETE'
+    END AS status
+    FROM d0_scope_candidates
+), d0_scope AS (
+    SELECT c.* FROM d0_scope_candidates c
+    WHERE (SELECT status FROM d0_scope_status)='AVAILABLE'
+), d0_by_symbol AS (
+    SELECT d.source_symbol, count(*)::integer AS fact_count,
+           min(d.transition) AS transition,
+           min(d.before_state) AS before_state,
+           min(d.after_state) AS after_state
+    FROM source_d0_launch_day_facts d
+    JOIN d0_scope s ON s.producer_version=d.producer_version
+                   AND s.algorithm_contract=d.algorithm_contract
+                   AND s.session_contract=d.session_contract
+                   AND s.calendar_revision=d.calendar_revision
+    CROSS JOIN params p
+    WHERE d.before_session=p.before_session AND d.target_session=p.target_session
+      AND d.source_package_id=p.source_package_id
+      AND d.before_capture_id=p.before_capture_id
+      AND d.target_capture_id=p.target_capture_id
+    GROUP BY d.source_symbol
+), seed_scope_candidates AS MATERIALIZED (
+    SELECT s.profile_revision, s.producer_contract, s.producer_version,
+           s.history_session_count, s.calendar_id, s.calendar_revision,
+           s.research_mode, s.price_coordinate, count(*)::bigint AS fact_count,
+           count(DISTINCT s.source_symbol)::bigint AS symbol_count
+    FROM source_pool_seed_day_facts s CROSS JOIN params p
+    WHERE s.target_session=p.target_session
+      AND s.source_package_id=p.source_package_id
+      AND s.source_capture_id=p.target_capture_id
+    GROUP BY s.profile_revision, s.producer_contract, s.producer_version,
+             s.history_session_count, s.calendar_id, s.calendar_revision,
+             s.research_mode, s.price_coordinate
+), seed_scope_status AS (
+    SELECT CASE
+        WHEN count(*)=0 THEN 'NOT_COMPUTED'
+        WHEN count(*)>1 THEN 'AMBIGUOUS'
+        WHEN bool_and(fact_count=(SELECT expected_source_count FROM params)
+                      AND symbol_count=(SELECT expected_source_count FROM params))
+            THEN 'AVAILABLE'
+        ELSE 'INCOMPLETE'
+    END AS status
+    FROM seed_scope_candidates
+), seed_scope AS (
+    SELECT c.* FROM seed_scope_candidates c
+    WHERE (SELECT status FROM seed_scope_status)='AVAILABLE'
+), seed_by_symbol AS (
+    SELECT s.source_symbol, count(*)::integer AS fact_count,
+           min(s.source_seed_state) AS source_seed_state,
+           min(s.s1_state) AS s1_state, min(s.s2_state) AS s2_state,
+           min(s.safety_state) AS safety_state
+    FROM source_pool_seed_day_facts s JOIN seed_scope k
+      ON k.profile_revision=s.profile_revision
+     AND k.producer_contract=s.producer_contract
+     AND k.producer_version=s.producer_version
+     AND k.history_session_count=s.history_session_count
+     AND k.calendar_id=s.calendar_id
+     AND k.calendar_revision=s.calendar_revision
+     AND k.research_mode=s.research_mode
+     AND k.price_coordinate=s.price_coordinate
+    CROSS JOIN params p
+    WHERE s.target_session=p.target_session
+      AND s.source_package_id=p.source_package_id
+      AND s.source_capture_id=p.target_capture_id
+    GROUP BY s.source_symbol
+), rule_scope_candidates AS MATERIALIZED (
+    SELECT r.rule_version, r.profile_revision, r.history_session_count,
+           r.d1_history_session_count, r.event_window_start,
+           r.calendar_revision, r.scope, count(*)::bigint AS fact_count,
+           count(DISTINCT r.source_symbol)::bigint AS symbol_count,
+           count(DISTINCT r.rule_id)::bigint AS rule_count
+    FROM source_rule_evaluations r CROSS JOIN params p
+    WHERE r.target_session=p.target_session
+      AND r.source_package_id=p.source_package_id
+      AND r.source_capture_id=p.target_capture_id
+      AND r.rule_id=ANY(p.rule_ids)
+    GROUP BY r.rule_version, r.profile_revision, r.history_session_count,
+             r.d1_history_session_count, r.event_window_start,
+             r.calendar_revision, r.scope
+), rule_scope_status AS (
+    SELECT CASE
+        WHEN count(*)=0 THEN 'NOT_COMPUTED'
+        WHEN count(*)>1 THEN 'AMBIGUOUS'
+        WHEN bool_and(fact_count=(SELECT expected_source_count * cardinality(rule_ids) FROM params)
+                      AND symbol_count=(SELECT expected_source_count FROM params)
+                      AND rule_count=(SELECT cardinality(rule_ids) FROM params))
+            THEN 'AVAILABLE'
+        ELSE 'INCOMPLETE'
+    END AS status
+    FROM rule_scope_candidates
+), rule_scope AS (
+    SELECT c.* FROM rule_scope_candidates c
+    WHERE (SELECT status FROM rule_scope_status)='AVAILABLE'
+), rule_by_symbol AS (
+    SELECT r.source_symbol, count(DISTINCT r.rule_id)::integer AS fact_count,
+           bool_or(r.state='TRUE') AS has_true,
+           bool_or(r.state='UNKNOWN') AS has_unknown
+    FROM source_rule_evaluations r JOIN rule_scope k
+      ON k.rule_version=r.rule_version
+     AND k.profile_revision=r.profile_revision
+     AND k.history_session_count=r.history_session_count
+     AND k.d1_history_session_count=r.d1_history_session_count
+     AND k.event_window_start=r.event_window_start
+     AND k.calendar_revision=r.calendar_revision
+     AND k.scope=r.scope
+    CROSS JOIN params p
+    WHERE r.target_session=p.target_session
+      AND r.source_package_id=p.source_package_id
+      AND r.source_capture_id=p.target_capture_id
+      AND r.rule_id=ANY(p.rule_ids)
+    GROUP BY r.source_symbol
+), d1_scope_candidates AS MATERIALIZED (
+    SELECT d.d1_history_session_count, d.calendar_revision,
+           d.producer_contract, d.producer_version,
+           d.material_change_contract, d.research_mode, d.price_coordinate,
+           count(*)::bigint AS fact_count,
+           count(DISTINCT d.source_symbol)::bigint AS symbol_count
+    FROM source_d1_structure_day_facts d CROSS JOIN params p
+    WHERE d.target_session=p.target_session
+      AND d.source_package_id=p.source_package_id
+      AND d.target_capture_id=p.target_capture_id
+      AND (p.d1_history_session_count IS NULL
+           OR d.d1_history_session_count=p.d1_history_session_count)
+    GROUP BY d.d1_history_session_count, d.calendar_revision,
+             d.producer_contract, d.producer_version,
+             d.material_change_contract, d.research_mode, d.price_coordinate
+), d1_scope_status AS (
+    SELECT CASE
+        WHEN count(*)=0 THEN 'NOT_COMPUTED'
+        WHEN count(*)>1 THEN 'AMBIGUOUS'
+        WHEN bool_and(fact_count>=symbol_count
+                      AND symbol_count=(SELECT expected_source_count FROM params))
+            THEN 'AVAILABLE'
+        ELSE 'INCOMPLETE'
+    END AS status
+    FROM d1_scope_candidates
+), d1_scope AS (
+    SELECT c.* FROM d1_scope_candidates c
+    WHERE (SELECT status FROM d1_scope_status)='AVAILABLE'
+), d1_by_symbol AS (
+    SELECT d.source_symbol, count(DISTINCT d.structure_type)::integer AS structure_count,
+           sum(d.material_change_anchor_count)::integer AS material_anchor_count,
+           bool_or(d.target_price_quality='UNKNOWN') AS unknown_price
+    FROM source_d1_structure_day_facts d JOIN d1_scope k
+      ON k.d1_history_session_count=d.d1_history_session_count
+     AND k.calendar_revision=d.calendar_revision
+     AND k.producer_contract=d.producer_contract
+     AND k.producer_version=d.producer_version
+     AND k.material_change_contract=d.material_change_contract
+     AND k.research_mode=d.research_mode
+     AND k.price_coordinate=d.price_coordinate
+    CROSS JOIN params p
+    WHERE d.target_session=p.target_session
+      AND d.source_package_id=p.source_package_id
+      AND d.target_capture_id=p.target_capture_id
+    GROUP BY d.source_symbol
+), scope_status AS (
+    SELECT (SELECT status FROM d0_scope_status) AS d0,
+           (SELECT status FROM seed_scope_status) AS seed,
+           (SELECT status FROM rule_scope_status) AS rules,
+           (SELECT status FROM d1_scope_status) AS d1,
+           CASE WHEN (SELECT status FROM seed_scope_status)='AVAILABLE'
+                  AND (SELECT status FROM rule_scope_status)='AVAILABLE'
+                  AND (SELECT status FROM d1_scope_status)='AVAILABLE'
+                THEN (SELECT r.profile_revision=s.profile_revision
+                             AND r.history_session_count=s.history_session_count
+                             AND r.d1_history_session_count=d.d1_history_session_count
+                             AND r.calendar_revision=d.calendar_revision
+                             AND r.scope='NON_PIT_EXPLORATORY'
+                             AND s.research_mode='NON_PIT_RETROSPECTIVE'
+                             AND d.research_mode='NON_PIT_RETROSPECTIVE'
+                             AND s.price_coordinate=d.price_coordinate
+                             AND s.price_coordinate='RAW_UNADJUSTED'
+                      FROM rule_scope r CROSS JOIN seed_scope s CROSS JOIN d1_scope d)
+                ELSE FALSE END AS rules_match_seed
+), base AS (
+    SELECT p.source_symbol, p.market, d.transition, d.before_state, d.after_state,
+           d.fact_count AS d0_fact_count, s.fact_count AS seed_fact_count,
+           s.source_seed_state, s.s1_state, s.s2_state, s.safety_state,
+           r.fact_count AS rule_fact_count, r.has_true AS rules_have_true,
+           r.has_unknown AS rules_have_unknown,
+           x.structure_count AS d1_structure_count,
+           x.material_anchor_count AS d1_material_anchor_count,
+           x.unknown_price AS d1_unknown_price,
+           g.d0 AS d0_scope_status, g.seed AS seed_scope_status,
+           g.rules AS rule_scope_status, g.d1 AS d1_scope_status,
+           g.rules_match_seed,
+           COALESCE(s.source_seed_state='TRUE' OR s.s1_state='TRUE'
+                    OR s.s2_state='TRUE' OR r.has_true, FALSE) AS has_seed_rule,
+           COALESCE(x.material_anchor_count, 0)>0 AS has_d1_material,
+           (g.d0<>'AVAILABLE' OR d.fact_count IS DISTINCT FROM 1
+             OR d.transition NOT IN ('FALSE_TO_TRUE','FALSE_TO_FALSE','FALSE_TO_UNKNOWN',
+                                     'TRUE_TO_TRUE','TRUE_TO_FALSE','TRUE_TO_UNKNOWN',
+                                     'UNKNOWN_TO_TRUE','UNKNOWN_TO_FALSE','UNKNOWN_TO_UNKNOWN',
+                                     'AFTER_ONLY')
+             OR position('UNKNOWN' in COALESCE(d.transition,''))>0
+             OR g.seed<>'AVAILABLE' OR s.fact_count IS DISTINCT FROM 1
+             OR s.source_seed_state IS NULL OR s.source_seed_state NOT IN ('TRUE','FALSE')
+             OR s.s1_state IS NULL OR s.s1_state NOT IN ('TRUE','FALSE')
+             OR s.s2_state IS NULL OR s.s2_state NOT IN ('TRUE','FALSE')
+             OR s.safety_state IS NULL OR s.safety_state NOT IN ('TRUE','FALSE')
+             OR g.rules<>'AVAILABLE' OR NOT g.rules_match_seed
+             OR r.fact_count IS DISTINCT FROM (SELECT cardinality(rule_ids) FROM params)
+             OR COALESCE(r.has_unknown, TRUE)
+             OR g.d1<>'AVAILABLE' OR x.structure_count IS DISTINCT FROM 5
+             OR COALESCE(x.unknown_price, TRUE)) AS has_unknown_evidence
+    FROM target_pool p
+    LEFT JOIN d0_by_symbol d ON d.source_symbol=p.source_symbol
+    LEFT JOIN seed_by_symbol s ON s.source_symbol=p.source_symbol
+    LEFT JOIN rule_by_symbol r ON r.source_symbol=p.source_symbol
+    LEFT JOIN d1_by_symbol x ON x.source_symbol=p.source_symbol
+    CROSS JOIN scope_status g
+), classified AS MATERIALIZED (
+    SELECT b.*,
+           CASE WHEN transition='FALSE_TO_TRUE' THEN 'D0_NEW'
+                WHEN has_seed_rule THEN 'SEED_RULE'
+                WHEN has_d1_material THEN 'D1_MATERIAL'
+                WHEN has_unknown_evidence THEN 'UNKNOWN'
+                ELSE 'KNOWN_NO_SIGNAL' END AS watch_group,
+           array_remove(ARRAY[
+               CASE WHEN d0_scope_status<>'AVAILABLE' OR d0_fact_count IS DISTINCT FROM 1
+                    THEN 'D0_PAIR_FACT_NOT_SAVED_FOR_EXACT_INPUT' END,
+               CASE WHEN position('UNKNOWN' in COALESCE(transition,''))>0
+                    THEN 'D0_ENDPOINT_STATE_UNKNOWN' END,
+               CASE WHEN seed_scope_status<>'AVAILABLE' OR seed_fact_count IS DISTINCT FROM 1
+                    THEN 'SEED_SCOPE_OR_SYMBOL_FACT_INCOMPLETE' END,
+               CASE WHEN rule_scope_status<>'AVAILABLE' OR NOT rules_match_seed
+                         OR rule_fact_count IS DISTINCT FROM (SELECT cardinality(rule_ids) FROM params)
+                    THEN 'RULE_SCOPE_OR_SYMBOL_FACT_INCOMPLETE' END,
+               CASE WHEN d1_scope_status<>'AVAILABLE' OR d1_structure_count IS DISTINCT FROM 5
+                    THEN 'D1_SCOPE_OR_STRUCTURE_FACT_INCOMPLETE' END,
+               CASE WHEN d1_unknown_price THEN 'D1_TARGET_PRICE_UNKNOWN' END
+           ]::text[], NULL) AS unknown_reason_codes
+    FROM base b
+), group_counts AS (
+    SELECT watch_group, count(*)::integer AS row_count
+    FROM classified GROUP BY watch_group
+), filtered AS MATERIALIZED (
+    SELECT c.* FROM classified c CROSS JOIN params p
+    WHERE c.watch_group=p.watch_group
+      AND (p.board_kind IS NULL OR EXISTS (
+          SELECT 1 FROM tdx_sector_members m
+          JOIN tdx_sector_catalog catalog ON catalog.id=m.catalog_id
+          WHERE catalog.snapshot_id=p.board_snapshot_id
+            AND m.board_kind=p.board_kind
+            AND m.board_native_id=p.board_native_id
+            AND m.source_symbol=c.source_symbol
+      ))
+), page AS MATERIALIZED (
+    SELECT f.* FROM filtered f CROSS JOIN params p
+    ORDER BY f.source_symbol COLLATE "C"
+    OFFSET (SELECT page_offset FROM params)
+    LIMIT (SELECT page_limit FROM params)
+)
+SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_counts), '{}'::jsonb),
+       (SELECT count(*)::integer FROM target_pool),
+       (SELECT count(DISTINCT source_symbol)::integer FROM target_pool),
+       (SELECT count(*)::integer FROM filtered),
+       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+           'source_symbol',source_symbol,'market',market,'transition',transition,
+           'before_state',before_state,'after_state',after_state,
+           'watch_group',watch_group,'unknown_reason_codes',unknown_reason_codes,
+           'd0_scope_status',d0_scope_status,'seed_scope_status',seed_scope_status,
+           'rule_scope_status',rule_scope_status,'d1_scope_status',d1_scope_status,
+           'rules_match_seed',rules_match_seed
+       ) ORDER BY source_symbol COLLATE "C") FROM page), '[]'::jsonb),
+       (SELECT d0 FROM scope_status), (SELECT seed FROM scope_status),
+       (SELECT rules FROM scope_status), (SELECT d1 FROM scope_status),
+       (SELECT rules_match_seed FROM scope_status),
+       (SELECT jsonb_build_object(
+           'profile_revision',profile_revision,'producer_contract',producer_contract,
+           'producer_version',producer_version,'history_session_count',history_session_count,
+           'calendar_id',calendar_id,'calendar_revision',calendar_revision,
+           'research_mode',research_mode,'price_coordinate',price_coordinate
+       ) FROM seed_scope)""",
+            (
+                before_session,
+                target_session,
+                source_package_id,
+                before_capture_id,
+                target_capture_id,
+                expected_source_count,
+                d1_history_session_count,
+                list(_RULE_IDS),
+                watch_group,
+                board_kind,
+                board_native_id,
+                board_snapshot_id,
+                offset,
+                limit,
+            ),
+        )
+        row = cursor.fetchone()
+
+    (
+        counts_raw,
+        pool_rows,
+        distinct_pool,
+        filtered_count,
+        rows_raw,
+        d0_status,
+        seed_status,
+        rules_status,
+        d1_status,
+        rules_match_seed,
+        seed_scope,
+    ) = row
+    counts = {group: int((counts_raw or {}).get(group, 0)) for group in sorted(groups)}
+    results = rows_raw or []
+    if not isinstance(results, list) or any(
+        not isinstance(item, dict) for item in results
+    ):
+        raise ValueError("来源观察PG分页结果格式无效")
+    pool_rows = int(pool_rows or 0)
+    distinct_pool = int(distinct_pool or 0)
+    return {
+        "status": "AVAILABLE"
+        if pool_rows == expected_source_count == distinct_pool
+        else "INCOMPLETE",
+        "target_source_count": pool_rows,
+        "target_distinct_source_count": distinct_pool,
+        "expected_source_count": expected_source_count,
+        "group_counts": counts,
+        "partition_closed": sum(counts.values()) == pool_rows,
+        "filtered_count": int(filtered_count or 0),
+        "results": results,
+        "scope_status": {
+            "d0": d0_status,
+            "seed": seed_status,
+            "rules": rules_status,
+            "d1": d1_status,
+            "rules_match_seed": bool(rules_match_seed),
+        },
+        "seed_scope": seed_scope,
+        "execution": {
+            "transaction": "REPEATABLE READ READ ONLY",
+            "database_write_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+            "d0_pair_fact_read": True,
+            "source_pool_python_rows_materialized": len(results),
+            "source_rule_rows_returned": 0,
+            "source_rule_rows_expected_for_full_scope": expected_source_count
+            * len(_RULE_IDS),
+            "pg_page_query_seconds": time.perf_counter() - started,
+        },
+    }
+
+
+def read_source_launch_watch_board_rps_comparison(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    source_package_id: int,
+    source_capture_id: int,
+    source_symbols: Sequence[str],
+    seed_scope: Mapping[str, Any],
+    board_kind: str,
+    board_native_id: str,
+    board_snapshot_id: int,
+) -> dict[str, dict[str, Any]]:
+    """在一个所选板块内按精确分数比较RPS5/RPS20并保留并列。"""
+    from stock_a.storage.postgres import source_raw
+
+    symbols = tuple(sorted(set(source_symbols)))
+    scope_fields = (
+        "profile_revision",
+        "producer_contract",
+        "producer_version",
+        "history_session_count",
+        "calendar_id",
+        "calendar_revision",
+        "research_mode",
+        "price_coordinate",
+    )
+    if (
+        type(target_session) is not date
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or any(
+            not isinstance(item, str) or _SYMBOL.fullmatch(item) is None
+            for item in symbols
+        )
+        or len(symbols) != len(source_symbols)
+        or len(symbols) > 30
+        or not isinstance(seed_scope, Mapping)
+        or any(not seed_scope.get(name) for name in scope_fields)
+        or type(seed_scope.get("history_session_count")) is not int
+        or not 1 <= seed_scope["history_session_count"] <= 75
+        or board_kind not in {"INDUSTRY", "CONCEPT"}
+        or not isinstance(board_native_id, str)
+        or not board_native_id
+        or len(board_native_id) > 64
+        or type(board_snapshot_id) is not int
+        or board_snapshot_id <= 0
+    ):
+        raise ValueError("板内RPS对比输入无效")
+    if not symbols:
+        return {}
+
+    with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """WITH params AS (
+    SELECT %s::date AS target_session, %s::bigint AS source_package_id,
+           %s::bigint AS source_capture_id, %s::text[] AS source_symbols,
+           %s::text AS profile_revision, %s::text AS producer_contract,
+           %s::text AS producer_version, %s::smallint AS history_session_count,
+           %s::text AS calendar_id, %s::text AS calendar_revision,
+           %s::text AS research_mode, %s::text AS price_coordinate,
+           %s::text AS board_kind, %s::text AS board_native_id,
+           %s::bigint AS board_snapshot_id
+), requested AS (
+    SELECT unnest(source_symbols) AS source_symbol FROM params
+), seed AS MATERIALIZED (
+    SELECT s.source_symbol, s.rps5_numerator, s.rps5_denominator,
+           s.rps5_quality, s.rps5_reason,
+           s.rps20_numerator, s.rps20_denominator,
+           s.rps20_quality, s.rps20_reason
+    FROM source_pool_seed_day_facts s CROSS JOIN params p
+    WHERE s.target_session=p.target_session
+      AND s.source_package_id=p.source_package_id
+      AND s.source_capture_id=p.source_capture_id
+      AND s.profile_revision=p.profile_revision
+      AND s.producer_contract=p.producer_contract
+      AND s.producer_version=p.producer_version
+      AND s.history_session_count=p.history_session_count
+      AND s.calendar_id=p.calendar_id
+      AND s.calendar_revision=p.calendar_revision
+      AND s.research_mode=p.research_mode
+      AND s.price_coordinate=p.price_coordinate
+), selected_metrics AS (
+    SELECT r.source_symbol, v.metric, v.numerator, v.denominator,
+           v.quality, v.reason
+    FROM requested r LEFT JOIN seed s USING (source_symbol)
+    CROSS JOIN LATERAL (VALUES
+        ('RPS5'::text, s.rps5_numerator, s.rps5_denominator, s.rps5_quality, s.rps5_reason),
+        ('RPS20'::text, s.rps20_numerator, s.rps20_denominator, s.rps20_quality, s.rps20_reason)
+    ) AS v(metric,numerator,denominator,quality,reason)
+), board_members AS MATERIALIZED (
+    SELECT DISTINCT m.source_symbol
+    FROM tdx_sector_members m
+    JOIN tdx_sector_catalog c ON c.id=m.catalog_id
+    CROSS JOIN params p
+    JOIN source_raw_daily raw ON raw.source_symbol=m.source_symbol
+       AND raw.session_date=p.target_session
+       AND raw.source_package_id=p.source_package_id
+       AND raw.source_capture_id=p.source_capture_id
+    WHERE c.snapshot_id=p.board_snapshot_id
+      AND m.board_kind=p.board_kind
+      AND m.board_native_id=p.board_native_id
+), peer_metrics AS (
+    SELECT member.source_symbol, v.metric, v.numerator, v.denominator, v.quality
+    FROM board_members member JOIN seed s USING (source_symbol)
+    CROSS JOIN LATERAL (VALUES
+        ('RPS5'::text, s.rps5_numerator, s.rps5_denominator, s.rps5_quality),
+        ('RPS20'::text, s.rps20_numerator, s.rps20_denominator, s.rps20_quality)
+    ) AS v(metric,numerator,denominator,quality)
+)
+SELECT selected.source_symbol, selected.metric,
+       selected.numerator::text, selected.denominator::text,
+       selected.quality, selected.reason,
+       count(*) FILTER (
+           WHERE peer.quality='OBSERVED' AND peer.numerator IS NOT NULL
+             AND peer.denominator>0
+             AND peer.numerator * selected.denominator
+                 > selected.numerator * peer.denominator
+       )::integer AS higher_member_count,
+       count(*) FILTER (
+           WHERE peer.quality='OBSERVED' AND peer.numerator IS NOT NULL
+             AND peer.denominator>0
+             AND peer.numerator * selected.denominator
+                 = selected.numerator * peer.denominator
+       )::integer AS tied_member_count,
+       count(*) FILTER (
+           WHERE peer.quality='OBSERVED' AND peer.numerator IS NOT NULL
+             AND peer.denominator>0
+       )::integer AS valid_member_count
+FROM selected_metrics selected
+LEFT JOIN peer_metrics peer ON peer.metric=selected.metric
+GROUP BY selected.source_symbol, selected.metric, selected.numerator,
+         selected.denominator, selected.quality, selected.reason
+ORDER BY selected.source_symbol COLLATE "C", selected.metric""",
+            (
+                target_session,
+                source_package_id,
+                source_capture_id,
+                list(symbols),
+                seed_scope["profile_revision"],
+                seed_scope["producer_contract"],
+                seed_scope["producer_version"],
+                seed_scope["history_session_count"],
+                seed_scope["calendar_id"],
+                seed_scope["calendar_revision"],
+                seed_scope["research_mode"],
+                seed_scope["price_coordinate"],
+                board_kind,
+                board_native_id,
+                board_snapshot_id,
+            ),
+        )
+        rows = cursor.fetchall()
+
+    result: dict[str, dict[str, Any]] = {symbol: {} for symbol in symbols}
+    for (
+        symbol,
+        metric,
+        numerator,
+        denominator,
+        quality,
+        reason,
+        higher,
+        tied,
+        valid,
+    ) in rows:
+        has_value = (
+            quality == "OBSERVED"
+            and numerator is not None
+            and denominator is not None
+            and int(denominator) > 0
+        )
+        valid_count = int(valid or 0)
+        result[symbol][metric] = {
+            "status": "AVAILABLE" if has_value and valid_count > 0 else "UNKNOWN",
+            "numerator": numerator if has_value else None,
+            "denominator": denominator if has_value else None,
+            "quality": quality or "UNKNOWN",
+            "reason": reason,
+            "higher_member_count": int(higher or 0) if has_value else None,
+            "tied_member_count": int(tied or 0) if has_value else None,
+            "valid_member_count": valid_count,
+            "rank_with_ties": int(higher or 0) + 1 if has_value else None,
+            "rank_scope": "CURRENT_SELECTED_BOARD_NON_PIT",
+            "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+        }
+    return result
+
+
+__all__ = [
+    "read_source_launch_watch_board_rps_comparison",
+    "read_source_launch_watch_evidence",
+    "read_source_launch_watch_page",
+]

@@ -6,6 +6,7 @@ from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
+from collections import defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
@@ -1051,6 +1052,406 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             )
         )
 
+    def _source_launch_watch_focus_saved_page(
+        self,
+        *,
+        before_session: date,
+        target_session: date,
+        research_cutoff: date,
+        source_package_id: int,
+        industry_snapshot_id: int | None,
+        concept_snapshot_id: int | None,
+        offset: int,
+        limit: int,
+        watch_group: str,
+        d1_history_session_count: int | None,
+        board_kind: str | None,
+        board_native_id: str | None,
+    ) -> dict[str, Any]:
+        """从已保存事实按组分页，范围限于当前页和选中板块。"""
+        request_started = time.perf_counter()
+        request_cpu_started = time.process_time()
+        config = self.preview_server.state.config
+        before_source = read_source_version_context(
+            config,
+            target_session=before_session,
+            source_package_id=source_package_id,
+        )
+        after_source = read_source_version_context(
+            config,
+            target_session=target_session,
+            source_package_id=source_package_id,
+        )
+        if (
+            before_source.get("status") != "AVAILABLE"
+            or after_source.get("status") != "AVAILABLE"
+            or before_source.get("source_package_id") != source_package_id
+            or after_source.get("source_package_id") != source_package_id
+        ):
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_SOURCE_IDENTITY_MISMATCH",
+                "相邻Raw来源包或捕获不完整，不能读取来源观察分页",
+            )
+        board_snapshot_id = (
+            industry_snapshot_id
+            if board_kind == "INDUSTRY"
+            else concept_snapshot_id
+            if board_kind == "CONCEPT"
+            else None
+        )
+        if board_kind is not None and board_snapshot_id is None:
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_BOARD_SNAPSHOT_UNAVAILABLE",
+                "所选板块类型没有精确绑定的成员快照",
+            )
+
+        from stock_a.storage.postgres.source_launch_watch_evidence import (
+            read_source_launch_watch_board_rps_comparison,
+            read_source_launch_watch_evidence,
+            read_source_launch_watch_page,
+        )
+
+        try:
+            page_result = read_source_launch_watch_page(
+                config,
+                before_session=before_session,
+                target_session=target_session,
+                source_package_id=source_package_id,
+                before_capture_id=before_source["source_capture_id"],
+                target_capture_id=after_source["source_capture_id"],
+                expected_source_count=after_source["capture_expected_row_count"],
+                watch_group=watch_group,
+                offset=offset,
+                limit=limit,
+                d1_history_session_count=d1_history_session_count,
+                board_kind=board_kind,
+                board_native_id=board_native_id,
+                board_snapshot_id=board_snapshot_id,
+            )
+        except ValueError as error:
+            if not str(error).startswith("来源观察PG分页键无效："):
+                raise
+            raise PreviewHttpError(
+                400,
+                "SOURCE_LAUNCH_WATCH_PAGE_ARGUMENT_INVALID",
+                str(error),
+            ) from error
+        if page_result.get("status") != "AVAILABLE" or not page_result.get(
+            "partition_closed"
+        ):
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_PARTITION_INCOMPLETE",
+                "目标Raw来源池或互斥观察分组未闭合，已拒绝显示局部总数",
+            )
+
+        page_rows = page_result["results"]
+        page_symbols = [item["source_symbol"] for item in page_rows]
+        if page_symbols:
+            evidence = read_source_launch_watch_evidence(
+                config,
+                target_session=target_session,
+                source_package_id=source_package_id,
+                source_capture_id=after_source["source_capture_id"],
+                expected_source_count=after_source["capture_expected_row_count"],
+                source_symbols=page_symbols,
+                d1_history_session_count=d1_history_session_count,
+            )
+            from stock_a.application.source_d0_tdx_membership import (
+                read_tdx_sector_memberships_for_symbols,
+            )
+
+            membership_read = read_tdx_sector_memberships_for_symbols(
+                config,
+                source_symbols=page_symbols,
+                target_session=target_session,
+                industry_snapshot_id=industry_snapshot_id,
+                concept_snapshot_id=concept_snapshot_id,
+            )
+        else:
+            evidence = {
+                "status": "AVAILABLE_EMPTY",
+                "seed_status": page_result["scope_status"]["seed"],
+                "d1_status": page_result["scope_status"]["d1"],
+                "rules_status": page_result["scope_status"]["rules"],
+                "seed_scope": page_result.get("seed_scope"),
+                "rule_scope": None,
+                "d1_scope": None,
+                "by_symbol": {},
+                "execution": {
+                    "transaction": "REPEATABLE READ READ ONLY",
+                    "database_write_attempted": False,
+                    "ddl_executed": False,
+                    "dml_executed": False,
+                },
+            }
+            membership_read = {
+                "status": "AVAILABLE_EMPTY",
+                "memberships": [],
+                "snapshots": [],
+                "missing_membership_kinds": [
+                    kind
+                    for kind, value in (
+                        ("INDUSTRY", industry_snapshot_id),
+                        ("CONCEPT", concept_snapshot_id),
+                    )
+                    if value is None
+                ],
+                "execution": {
+                    "transaction": "REPEATABLE READ READ ONLY",
+                    "database_write_attempted": False,
+                    "select_statement_count": 0,
+                    "select_rows_returned": 0,
+                },
+            }
+
+        memberships_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for membership in membership_read.get("memberships", []):
+            memberships_by_symbol[membership["source_symbol"]].append(membership)
+        page_boards = {
+            (
+                membership["snapshot_id"],
+                membership["board_kind"],
+                membership["board_native_id"],
+            ): {
+                "snapshot_id": membership["snapshot_id"],
+                "board_kind": membership["board_kind"],
+                "board_native_id": membership["board_native_id"],
+            }
+            for membership in membership_read.get("memberships", [])
+        }
+        from stock_a.storage.postgres.sector_pulse_facts import (
+            read_source_sector_pulse_for_boards,
+        )
+
+        pulse = read_source_sector_pulse_for_boards(
+            config,
+            target_session=target_session,
+            source_package_id=source_package_id,
+            source_capture_id=after_source["source_capture_id"],
+            source_pool_count=after_source["capture_expected_row_count"],
+            boards=list(page_boards.values()),
+        )
+        pulse_by_board = pulse.get("by_board", {})
+        board_comparison: dict[str, dict[str, Any]] = {}
+        if board_kind is not None and page_symbols and page_result.get("seed_scope"):
+            board_comparison = read_source_launch_watch_board_rps_comparison(
+                config,
+                target_session=target_session,
+                source_package_id=source_package_id,
+                source_capture_id=after_source["source_capture_id"],
+                source_symbols=page_symbols,
+                seed_scope=page_result["seed_scope"],
+                board_kind=board_kind,
+                board_native_id=board_native_id,
+                board_snapshot_id=board_snapshot_id,
+            )
+
+        evidence_by_symbol = evidence.get("by_symbol", {})
+        group_counts = page_result["group_counts"]
+        global_total = group_counts.get("D0_NEW", 0)
+        results = []
+        for rank, row in enumerate(page_rows, start=offset + 1):
+            symbol = row["source_symbol"]
+            item_evidence = evidence_by_symbol.get(symbol, {})
+            d0_change = {
+                "transition": row.get("transition"),
+                "before_state": row.get("before_state"),
+                "after_state": row.get("after_state"),
+            }
+            group = row["watch_group"]
+            reasons = set(row.get("unknown_reason_codes") or [])
+            for scope in ("seed", "d1", "rules"):
+                detail = item_evidence.get(scope, {})
+                reasons.update(detail.get("reason_codes", ()))
+                if scope == "seed":
+                    for name in ("source_seed", "s1", "s2", "safety"):
+                        reasons.update(detail.get(name, {}).get("reasons", ()))
+                elif scope == "d1":
+                    reasons.update(detail.get("target_price_reasons", ()))
+                else:
+                    for fact in detail.get("facts", {}).values():
+                        reasons.update(fact.get("reasons", ()))
+            if group == "UNKNOWN" and not reasons:
+                reasons.add("UNKNOWN_REASON_NOT_PERSISTED")
+            member_rows = memberships_by_symbol.get(symbol, [])
+            enriched_memberships = []
+            for membership in member_rows:
+                key = f"{membership['board_kind']}:{membership['board_native_id']}"
+                enriched_memberships.append(
+                    {
+                        **membership,
+                        "pulse_context": pulse_by_board.get(
+                            key,
+                            {
+                                "status": "NOT_COMPUTED",
+                                "reason_codes": [
+                                    "PULSE_FACTS_NOT_SAVED_FOR_EXACT_BOARD"
+                                ],
+                                "snapshot_id": membership["snapshot_id"],
+                                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                            },
+                        ),
+                    }
+                )
+            t0_status = (
+                "OBSERVED"
+                if group in {"D0_NEW", "SEED_RULE", "D1_MATERIAL"}
+                else "UNKNOWN"
+                if group == "UNKNOWN"
+                else "KNOWN_NO_SIGNAL"
+            )
+            source_version = {
+                "source_package_id": source_package_id,
+                "source_capture_id": after_source["source_capture_id"],
+                "target_session": target_session.isoformat(),
+                "raw_row_count": after_source["raw_row_count"],
+                "source_time_quality": after_source["source_time_quality"],
+                "source_clock_role": after_source["source_clock_role"],
+                "parser_contract": after_source["parser_contract"],
+            }
+            results.append(
+                {
+                    **row,
+                    "d0_change": d0_change,
+                    "observation_reason": {
+                        "D0_NEW": "已保存D0 FALSE→TRUE相邻会话事实",
+                        "SEED_RULE": "已保存Seed、S1/S2或冻结规则TRUE事实",
+                        "D1_MATERIAL": "已保存D1材料变化锚事实",
+                        "UNKNOWN": "目标条件存在缺失或不能判定的证据",
+                        "KNOWN_NO_SIGNAL": "完整已保存条件未证任何观察线索",
+                    }[group],
+                    "unknown_reason_codes": sorted(reasons),
+                    "research_evidence": item_evidence,
+                    "source_version": source_version,
+                    "t0_observation": {
+                        "status": t0_status,
+                        "target_session": target_session.isoformat(),
+                        "source_package_id": source_package_id,
+                        "source_capture_id": after_source["source_capture_id"],
+                        "profile_revision": (page_result.get("seed_scope") or {}).get(
+                            "profile_revision"
+                        ),
+                        "rule_version": (evidence.get("rule_scope") or {}).get(
+                            "rule_version"
+                        ),
+                        "scope": "NON_PIT_EXPLORATORY",
+                        "price_coordinate": "RAW_UNADJUSTED",
+                        "research_only": True,
+                    },
+                    "also_in_sectors": enriched_memberships,
+                    "membership_status": membership_read.get("status", "UNKNOWN"),
+                    "board_comparison": board_comparison.get(symbol),
+                    "observation_order": {"rank": rank, "basis": "SOURCE_SYMBOL_ASC"},
+                }
+            )
+
+        selected_total = page_result["filtered_count"]
+        next_offset = (
+            offset + len(results) if offset + len(results) < selected_total else None
+        )
+        return {
+            "ok": True,
+            "contract": "STOCK_A_SOURCE_LAUNCH_WATCH_API_R1",
+            "request_identity": {
+                "before_session": before_session.isoformat(),
+                "target_session": target_session.isoformat(),
+                "research_cutoff": research_cutoff.isoformat(),
+                "source_package_id": source_package_id,
+                "industry_snapshot_id": industry_snapshot_id,
+                "concept_snapshot_id": concept_snapshot_id,
+            },
+            "source_change_status": {
+                "transition_scope": "SAVED_SOURCE_D0_ADJACENT_FACTS",
+                "price_coordinate": "RAW_UNADJUSTED",
+                "pit_status": "NON_PIT_RETROSPECTIVE",
+                "source_key_set": {
+                    "after_count": page_result["target_source_count"],
+                    "after_distinct_count": page_result["target_distinct_source_count"],
+                    "partition_closed": page_result["partition_closed"],
+                },
+            },
+            "membership_status": {
+                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                "snapshots": membership_read.get("snapshots", []),
+                "missing_membership_kinds": membership_read.get(
+                    "missing_membership_kinds", []
+                ),
+                "page_symbol_count": len(page_symbols),
+                "mapped_distinct_source_symbol_count": membership_read.get(
+                    "matched_source_symbol_count", 0
+                ),
+                "membership_relation_count": membership_read.get(
+                    "membership_relation_count", 0
+                ),
+            },
+            "filter": {
+                "board_kind": board_kind,
+                "board_native_id": board_native_id,
+                "global_total": global_total,
+                "filtered_total": selected_total,
+                "watch_group": watch_group,
+            },
+            "watch_groups": {
+                "counts": group_counts,
+                "target_source_pool_denominator": page_result["target_source_count"],
+                "partition_closed": page_result["partition_closed"],
+                "unassigned_known_false_count": 0,
+                "grouping": "D0_NEW > SEED_RULE > D1_MATERIAL > UNKNOWN > KNOWN_NO_SIGNAL",
+            },
+            "pagination": {
+                "offset": offset,
+                "limit": limit,
+                "page_count": len(results),
+                "total_count": selected_total,
+                "next_offset": next_offset,
+            },
+            "boards": [],
+            "observation_ordering": {
+                "candidate_count": group_counts.get(watch_group, 0),
+                "ordering": "SOURCE_SYMBOL_ASC",
+                "page_scope": True,
+            },
+            "board_selection": {
+                "status": "SELECTED_BOARD_ONLY" if board_kind else "NOT_FILTERED"
+            },
+            "stored_evidence_status": {
+                "status": "AVAILABLE"
+                if page_result["scope_status"]["rules_match_seed"]
+                else "UNKNOWN",
+                "seed": page_result["scope_status"]["seed"],
+                "d1": page_result["scope_status"]["d1"],
+                "rules": page_result["scope_status"]["rules"],
+                "seed_scope": page_result.get("seed_scope"),
+                "rule_scope": evidence.get("rule_scope"),
+                "d1_scope": evidence.get("d1_scope"),
+            },
+            "sector_pulse_status": pulse.get("status", "NOT_COMPUTED"),
+            "results": results,
+            "execution": {
+                **page_result["execution"],
+                "d0_full_pool_computed_before_selection": False,
+                "cache_hit": False,
+                "membership_read_scope": "CURRENT_PAGE_SYMBOLS_ONLY",
+                "pulse_read_scope": "CURRENT_PAGE_MEMBER_BOARDS_ONLY",
+                "sector_pulse_cross_period_recalculated": False,
+                "evidence_symbol_count": len(page_symbols),
+                "rule_rows_returned_to_python": sum(
+                    len(item.get("rules", {}).get("facts", {}))
+                    for item in evidence_by_symbol.values()
+                ),
+                "api_server_processing_wall_seconds": time.perf_counter()
+                - request_started,
+                "api_server_process_cpu_seconds": time.process_time()
+                - request_cpu_started,
+                "database_write": False,
+                "ddl_executed": False,
+                "dml_executed": False,
+            },
+        }
+
     def _source_launch_watch(self, body: Any) -> dict[str, Any]:
         """读取完整D0新增集合和板块归属后，再按请求分页。"""
         request_started = time.perf_counter()
@@ -1139,8 +1540,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "offset必须为0至允许上限之间的整数",
             )
         limit = _positive_int(body["limit"], "limit", 30)
+        focus_request = "watch_group" in body
         watch_group = body.get("watch_group", "D0_NEW")
-        if watch_group not in {"D0_NEW", "SEED_RULE", "D1_MATERIAL", "UNKNOWN"}:
+        if watch_group not in {
+            "D0_NEW",
+            "SEED_RULE",
+            "D1_MATERIAL",
+            "UNKNOWN",
+            "KNOWN_NO_SIGNAL",
+        }:
             raise PreviewHttpError(
                 400, "SOURCE_LAUNCH_WATCH_GROUP_INVALID", "来源观察分组无效"
             )
@@ -1192,6 +1600,22 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 409,
                 "SOURCE_LAUNCH_WATCH_SESSIONS_NOT_ADJACENT",
                 "前后日期必须是同一现役日历版本中的严格相邻官方会话",
+            )
+
+        if focus_request:
+            return self._source_launch_watch_focus_saved_page(
+                before_session=before_session,
+                target_session=target_session,
+                research_cutoff=research_cutoff,
+                source_package_id=source_package_id,
+                industry_snapshot_id=industry_snapshot_id,
+                concept_snapshot_id=concept_snapshot_id,
+                offset=offset,
+                limit=limit,
+                watch_group=watch_group,
+                d1_history_session_count=d1_history_session_count,
+                board_kind=board_kind,
+                board_native_id=board_native_id,
             )
 
         from stock_a.application.source_d0_tdx_membership import (

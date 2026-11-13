@@ -911,3 +911,42 @@ td.empty {
   overflow-wrap: anywhere;
   min-width: 0;
 }
+
+.focus-filter-state {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin: 12px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+.focus-evidence {
+  margin: 0 0 14px 16px;
+  padding: 10px 14px;
+  border-left: 2px solid #dce4e1;
+  color: #435b59;
+  font-size: 13px;
+}
+.focus-evidence summary {
+  color: #176b58;
+  cursor: pointer;
+  font-weight: 650;
+}
+.focus-evidence p {
+  margin: 9px 0;
+}
+.focus-rule-list {
+  margin: 8px 0;
+  padding-left: 22px;
+}
+.focus-board-links {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 8px 0;
+}
+.focus-board-link {
+  text-align: left;
+}

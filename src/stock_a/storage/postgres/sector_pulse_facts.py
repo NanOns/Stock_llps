@@ -933,8 +933,198 @@ def read_source_sector_pulse_day(
     }
 
 
+def read_source_sector_pulse_for_boards(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    source_package_id: int,
+    source_capture_id: int,
+    source_pool_count: int,
+    boards: Sequence[Mapping[str, Any]],
+) -> dict[str, Any]:
+    """仅读取观察页涉及板块的已存PULSE，不装载完整板块目录。"""
+    if (
+        type(target_session) is not date
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or type(source_pool_count) is not int
+        or source_pool_count <= 0
+        or isinstance(boards, (str, bytes))
+        or not isinstance(boards, Sequence)
+        or len(boards) > 2000
+    ):
+        raise SectorPulsePgError(
+            "SECTOR_PULSE_PAGE_ARGUMENT_INVALID", "观察页PULSE读取范围无效"
+        )
+    normalized: list[tuple[int, str, str]] = []
+    for board in boards:
+        if not isinstance(board, Mapping):
+            raise SectorPulsePgError(
+                "SECTOR_PULSE_PAGE_BOARD_INVALID", "观察页板块身份无效"
+            )
+        snapshot_id = board.get("snapshot_id")
+        kind = board.get("board_kind")
+        native_id = board.get("board_native_id")
+        if (
+            type(snapshot_id) is not int
+            or snapshot_id <= 0
+            or kind not in _KINDS
+            or not isinstance(native_id, str)
+            or not native_id
+            or len(native_id) > 64
+        ):
+            raise SectorPulsePgError(
+                "SECTOR_PULSE_PAGE_BOARD_INVALID", "观察页板块身份无效"
+            )
+        normalized.append((snapshot_id, kind, native_id))
+    if len(set(normalized)) != len(normalized):
+        raise SectorPulsePgError(
+            "SECTOR_PULSE_PAGE_BOARD_DUPLICATED", "观察页板块身份重复"
+        )
+    if not normalized:
+        return {
+            "status": "NOT_COMPUTED",
+            "reason_codes": ["NO_MAPPED_BOARD_FOR_PAGE"],
+            "by_board": {},
+            "board_count": 0,
+            "database_write_attempted": False,
+        }
+
+    with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            "SELECT profile_revision,count(*)::bigint,count(DISTINCT source_symbol)::bigint "
+            "FROM source_pool_seed_day_facts WHERE target_session=%s "
+            "AND source_package_id=%s AND source_capture_id=%s "
+            "GROUP BY profile_revision ORDER BY profile_revision",
+            (target_session, source_package_id, source_capture_id),
+        )
+        seed_scopes = cursor.fetchall()
+        if (
+            len(seed_scopes) != 1
+            or int(seed_scopes[0][1]) != source_pool_count
+            or int(seed_scopes[0][2]) != source_pool_count
+        ):
+            reason = (
+                "SOURCE_PROFILE_REVISION_AMBIGUOUS"
+                if len(seed_scopes) > 1
+                else "SOURCE_PROFILE_FACTS_NOT_COMPLETE"
+            )
+            return {
+                "status": "NOT_COMPUTED",
+                "reason_codes": [reason],
+                "by_board": {
+                    f"{kind}:{native_id}": {
+                        "status": "NOT_COMPUTED",
+                        "reason_codes": [reason],
+                        "snapshot_id": snapshot_id,
+                    }
+                    for snapshot_id, kind, native_id in normalized
+                },
+                "board_count": len(normalized),
+                "database_write_attempted": False,
+            }
+        profile_revision = str(seed_scopes[0][0]).strip()
+        if re.fullmatch(PROFILE_REVISION_PATTERN, profile_revision) is None:
+            raise SectorPulsePgError(
+                "SECTOR_PULSE_PROFILE_REVISION_INVALID", "PG Seed修订不是显式业务版本"
+            )
+        cursor.execute(
+            f"""WITH requested(snapshot_id,board_kind,board_native_id) AS (
+    SELECT * FROM unnest(%s::bigint[],%s::text[],%s::text[])
+)
+SELECT requested.snapshot_id,requested.board_kind,requested.board_native_id,
+       catalog.id AS requested_catalog_id,p.id,{", ".join("p." + c for c in _COLUMNS)},
+       catalog.snapshot_id
+FROM requested
+LEFT JOIN tdx_sector_catalog catalog
+  ON catalog.snapshot_id=requested.snapshot_id
+ AND catalog.board_kind=requested.board_kind
+ AND catalog.board_native_id=requested.board_native_id
+LEFT JOIN {_TABLE} p
+  ON p.catalog_id=catalog.id
+ AND p.target_session=%s AND p.source_package_id=%s
+ AND p.source_capture_id=%s AND p.profile_revision=%s
+ AND p.algorithm_contract=%s
+ORDER BY requested.board_kind,requested.board_native_id COLLATE "C" OFFSET 0""",
+            (
+                [item[0] for item in normalized],
+                [item[1] for item in normalized],
+                [item[2] for item in normalized],
+                target_session,
+                source_package_id,
+                source_capture_id,
+                profile_revision,
+                _ALGORITHM,
+            ),
+        )
+        rows = cursor.fetchall()
+
+    by_board: dict[str, dict[str, Any]] = {}
+    for values in rows:
+        snapshot_id, kind, native_id, catalog_id, fact_id = values[:5]
+        key = f"{kind}:{native_id}"
+        if catalog_id is None or fact_id is None:
+            by_board[key] = {
+                "status": "NOT_COMPUTED",
+                "reason_codes": ["PULSE_FACTS_NOT_SAVED_FOR_EXACT_BOARD"],
+                "snapshot_id": int(snapshot_id),
+                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+            }
+            continue
+        fact = dict(zip(_COLUMNS, values[5 : 5 + len(_COLUMNS)], strict=True))
+        fact["id"] = int(fact_id)
+        fact["catalog_id"] = int(catalog_id)
+        fact["snapshot_id"] = int(values[-1])
+        valid = (
+            fact["target_session"] == target_session
+            and int(fact["source_package_id"]) == source_package_id
+            and int(fact["source_capture_id"]) == source_capture_id
+            and fact["board_kind"] == kind
+            and fact["board_native_id"] == native_id
+            and fact["algorithm_contract"] == _ALGORITHM
+            and fact["calculation_status"] == "COMPLETE"
+            and fact["formal_rotation_state"] == "NOT_EVALUATED"
+            and fact["research_mode"] == "NON_PIT_RETROSPECTIVE"
+            and fact["membership_mode"] == "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT"
+            and fact["price_coordinate"] == "RAW_UNADJUSTED"
+            and int(fact["snapshot_board_count"]) > 0
+            and int(fact["source_pool_count"]) == source_pool_count
+            and int(fact["ret5_denominator"]) == int(fact["member_count"])
+            and int(fact["breadth_denominator"]) == int(fact["member_count"])
+        )
+        by_board[key] = {
+            **(_pulse_payload(fact) if valid else {}),
+            "status": "AVAILABLE" if valid else "INCOMPLETE",
+            "reason_codes": [] if valid else ["PULSE_TYPED_FACT_CONTRACT_MISMATCH"],
+            "snapshot_id": int(snapshot_id),
+            "catalog_id": int(catalog_id),
+            "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+        }
+    statuses = [item.get("status") for item in by_board.values()]
+    complete = bool(statuses) and all(status == "AVAILABLE" for status in statuses)
+    return {
+        "status": "AVAILABLE"
+        if complete
+        else "PARTIAL"
+        if any(status == "AVAILABLE" for status in statuses)
+        else "NOT_COMPUTED",
+        "reason_codes": [] if complete else ["PULSE_SELECTED_BOARD_FACTS_INCOMPLETE"],
+        "by_board": by_board,
+        "board_count": len(normalized),
+        "database_write_attempted": False,
+        "cross_period_recalculated": False,
+    }
+
+
 __all__ = [
     "SectorPulsePgError",
     "persist_source_sector_pulse_day",
     "read_source_sector_pulse_day",
+    "read_source_sector_pulse_for_boards",
 ]
