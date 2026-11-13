@@ -321,6 +321,9 @@
                   <span id="boardSummary">等待 D1 深入研究</span
                   ><span>材料变化交集 · 当前成员快照 NON_PIT</span>
                 </div>
+                <p id="boardCompareStatus" role="status">
+                  选择两个板块后比较成员交集、独有集合、去重分母、D0新增、Seed与目标价质量。
+                </p>
                 <div class="table-scroll">
                   <table>
                     <thead>
@@ -410,11 +413,22 @@
                 <div>
                   <h2>来源级自动观察（探索）</h2>
                   <p>
-                    按已保存 D0 新增与现有
-                    Seed、D1、九规则事实排序；仅供研究跟踪。
+                    只读取同日已保存 D0、Seed、D1
+                    与九规则事实；按分组查看，不重算算法。
                   </p>
                 </div>
               </div>
+              <label class="inline-filter"
+                >观察分组
+                <select id="focusAutoGroup">
+                  <option value="D0_NEW">D0 新增</option>
+                  <option value="SEED_RULE">
+                    Seed / S1 / S2 / 冻结规则为 TRUE
+                  </option>
+                  <option value="D1_MATERIAL">D1 材料变化</option>
+                  <option value="UNKNOWN">未知或缺少事实</option>
+                </select>
+              </label>
               <p id="focusAutoStatus" role="status">等待当前日期的来源观察。</p>
               <div id="focusAutoRows"></div>
               <div class="pagination">

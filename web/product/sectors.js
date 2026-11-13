@@ -7,7 +7,7 @@ import {
   element,
 } from "./state.js";
 
-export function renderD1Boards(data, openBoard) {
+export function renderD1Boards(data, openBoard, compareBoard) {
   const rows = byId("boardRows");
   const missing = Object.entries(data.membership_availability || {})
     .filter(([, status]) => status !== "AVAILABLE")
@@ -32,6 +32,10 @@ export function renderD1Boards(data, openBoard) {
     button.type = "button";
     button.addEventListener("click", () => openBoard(board));
     action.append(button);
+    const compareButton = element("button", "比较 +", "text-button");
+    compareButton.type = "button";
+    compareButton.addEventListener("click", () => compareBoard(board));
+    action.append(compareButton);
     row.append(action);
     rows.append(row);
   }

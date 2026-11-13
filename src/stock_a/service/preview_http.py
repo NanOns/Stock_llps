@@ -48,6 +48,7 @@ from stock_a.storage.postgres.research_facts import (
 from stock_a.storage.postgres.research_day_facts import (
     ResearchDayPgError,
     read_source_research_day,
+    read_source_board_comparison,
     read_source_research_day_scope,
 )
 from stock_a.contracts import PriceProfileContractError, load_price_profile_contract
@@ -154,6 +155,7 @@ _DIAGNOSTIC_ROUTES = frozenset(
         "/api/product/resolve-stock-code",
         "/api/product/market",
         "/api/product/d1-material",
+        "/api/product/board-comparison",
         "/api/source-symbol-price-profile-breadth-members",
         "/api/source-symbol-price-profile-breadth",
         "/api/source-symbol-price-profile-changes",
@@ -1065,6 +1067,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         }
         board_fields = {"board_kind", "board_native_id"}
         evidence_fields = {"d1_history_session_count"}
+        watch_fields = {"watch_group"}
         if not isinstance(body, dict) or not required.issubset(body):
             raise PreviewHttpError(
                 400,
@@ -1072,12 +1075,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "请求必须显式绑定双日期、研究截止、来源包ID、双板块快照和分页",
             )
         body_fields = frozenset(body)
-        if body_fields not in {
-            frozenset(required),
-            frozenset(required | board_fields),
-            frozenset(required | evidence_fields),
-            frozenset(required | board_fields | evidence_fields),
-        }:
+        allowed_body_fields = {
+            frozenset(
+                required
+                | (board_fields if has_board else set())
+                | (evidence_fields if has_evidence else set())
+                | (watch_fields if has_watch else set())
+            )
+            for has_board in (False, True)
+            for has_evidence in (False, True)
+            for has_watch in (False, True)
+        }
+        if body_fields not in allowed_body_fields:
             raise PreviewHttpError(
                 400,
                 "SOURCE_LAUNCH_WATCH_FIELDS_INVALID",
@@ -1130,6 +1139,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "offset必须为0至允许上限之间的整数",
             )
         limit = _positive_int(body["limit"], "limit", 30)
+        watch_group = body.get("watch_group", "D0_NEW")
+        if watch_group not in {"D0_NEW", "SEED_RULE", "D1_MATERIAL", "UNKNOWN"}:
+            raise PreviewHttpError(
+                400, "SOURCE_LAUNCH_WATCH_GROUP_INVALID", "来源观察分组无效"
+            )
         d1_history_session_count = (
             _positive_int(
                 body["d1_history_session_count"], "d1_history_session_count", 75
@@ -1441,6 +1455,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "D0实际Raw来源键或来源包ID与请求不一致",
                 )
             source_symbols = [row["source_symbol"] for row in ft_rows]
+            target_pool_symbols = [
+                row["source_symbol"]
+                for row in all_change_rows
+                if row.get("transition") != "BEFORE_ONLY"
+            ]
+            if len(target_pool_symbols) != after_source["raw_row_count"]:
+                raise PreviewHttpError(
+                    409,
+                    "SOURCE_LAUNCH_WATCH_TARGET_POOL_MISMATCH",
+                    "D0目标态来源代码集合未闭合到目标Raw分母",
+                )
             try:
                 membership_started = time.perf_counter()
                 membership_read = read_tdx_sector_memberships_for_symbols(
@@ -1487,7 +1512,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 source_package_id=source_package_id,
                 source_capture_id=after_source["source_capture_id"],
                 expected_source_count=after_source["raw_row_count"],
-                source_symbols=source_symbols,
+                source_symbols=target_pool_symbols,
                 d1_history_session_count=d1_history_session_count,
             )
             ordered_symbols = [stock.get("source_symbol") for stock in stocks]
@@ -1517,7 +1542,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "板块归属必须返回请求绑定的行业与GN概念双快照",
                 )
             return (
-                {key: value for key, value in changes.items() if key != "results"},
+                changes,
                 complete,
                 d0_reader_wall_seconds,
                 membership_read_wall_seconds,
@@ -1803,7 +1828,136 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
             ]
         filtered_total = len(filtered)
-        page = filtered[offset : offset + limit]
+        d0_stock_by_symbol = {item["source_symbol"]: item for item in stocks}
+        change_by_symbol = {
+            item["source_symbol"]: item
+            for item in changes["results"]
+            if item.get("transition") != "BEFORE_ONLY"
+        }
+        evidence_by_symbol = evidence.get("by_symbol", {})
+        watch_rows_by_group: dict[str, list[dict[str, Any]]] = {
+            "D0_NEW": [],
+            "SEED_RULE": [],
+            "D1_MATERIAL": [],
+            "UNKNOWN": [],
+        }
+        for symbol in sorted(change_by_symbol):
+            change = change_by_symbol[symbol]
+            before_change = change.get("before")
+            after_change = change.get("after")
+            d0_change = {
+                "transition": change.get("transition"),
+                "before_state": before_change.get("scenario_raw")
+                if isinstance(before_change, Mapping)
+                else None,
+                "after_state": after_change.get("scenario_raw")
+                if isinstance(after_change, Mapping)
+                else None,
+            }
+            if change.get("transition") == "FALSE_TO_TRUE":
+                item = d0_stock_by_symbol.get(symbol)
+                if item is not None:
+                    watch_rows_by_group["D0_NEW"].append(
+                        {**item, "watch_group": "D0_NEW", "d0_change": d0_change}
+                    )
+                continue
+            item_evidence = evidence_by_symbol.get(symbol, {})
+            seed = item_evidence.get("seed", {})
+            rules = item_evidence.get("rules", {}).get("facts", {})
+            d1 = item_evidence.get("d1", {})
+            has_seed_rule = any(
+                candidate.get("state") == "TRUE"
+                for candidate in (
+                    seed.get("source_seed", {}),
+                    seed.get("s1", {}),
+                    seed.get("s2", {}),
+                    *rules.values(),
+                )
+            )
+            group = (
+                "SEED_RULE"
+                if has_seed_rule
+                else "D1_MATERIAL"
+                if int(d1.get("material_change_anchor_count") or 0) > 0
+                else "UNKNOWN"
+                if any(
+                    item_evidence.get(scope, {}).get("status")
+                    in {"UNKNOWN", "PARTIAL", "NOT_COMPUTED"}
+                    for scope in ("seed", "d1", "rules")
+                )
+                or any(
+                    candidate.get("state") == "UNKNOWN"
+                    for candidate in (
+                        seed.get("source_seed", {}),
+                        seed.get("s1", {}),
+                        seed.get("s2", {}),
+                        seed.get("safety", {}),
+                        *rules.values(),
+                    )
+                )
+                or d1.get("target_price_quality") == "UNKNOWN"
+                else None
+            )
+            if group is None:
+                continue
+            reason_codes = []
+            for scope in ("seed", "d1", "rules"):
+                detail = item_evidence.get(scope, {})
+                reason_codes.extend(detail.get("reason_codes", ()))
+                if scope == "seed":
+                    for state_name in ("source_seed", "s1", "s2", "safety"):
+                        reason_codes.extend(
+                            detail.get(state_name, {}).get("reasons", ())
+                        )
+                elif scope == "d1":
+                    reason_codes.extend(detail.get("target_price_reasons", ()))
+                else:
+                    for rule_fact in detail.get("facts", {}).values():
+                        reason_codes.extend(rule_fact.get("reasons", ()))
+            if not reason_codes:
+                reason_codes.append("UNKNOWN_REASON_NOT_PERSISTED")
+            watch_rows_by_group[group].append(
+                {
+                    "source_symbol": symbol,
+                    "market": change.get("market"),
+                    "transition": change.get("transition"),
+                    "d0_change": d0_change,
+                    "watch_group": group,
+                    "observation_reason": (
+                        "已保存Seed/S1/S2或冻结规则为TRUE"
+                        if group == "SEED_RULE"
+                        else "已保存D1结构材料变化锚点"
+                        if group == "D1_MATERIAL"
+                        else "研究事实缺失或存在UNKNOWN，需核对"
+                    ),
+                    "unknown_reason_codes": sorted(set(reason_codes)),
+                    "research_evidence": item_evidence,
+                }
+            )
+        watch_group_counts = {
+            group: len(rows) for group, rows in watch_rows_by_group.items()
+        }
+        if watch_group == "D0_NEW":
+            d0_watch_by_symbol = {
+                item["source_symbol"]: item for item in watch_rows_by_group["D0_NEW"]
+            }
+            if any(
+                stock["source_symbol"] not in d0_watch_by_symbol for stock in filtered
+            ):
+                raise PreviewHttpError(
+                    409,
+                    "SOURCE_LAUNCH_WATCH_D0_GROUP_INCOMPLETE",
+                    "D0新增页面行未闭合到保存的前后态迁移事实",
+                )
+            watch_group_rows = [
+                d0_watch_by_symbol[stock["source_symbol"]] for stock in filtered
+            ]
+        else:
+            watch_group_rows = watch_rows_by_group[watch_group]
+        filtered_total = (
+            len(filtered) if watch_group == "D0_NEW" else len(watch_group_rows)
+        )
+        page = watch_group_rows[offset : offset + limit]
         for stock in page:
             stock["detail_request"] = {
                 "method": "POST",
@@ -1879,6 +2033,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "board_native_id": board_native_id,
                 "global_total": complete["global_new_stock_count"],
                 "filtered_total": filtered_total,
+                "watch_group": watch_group,
+            },
+            "watch_groups": {
+                "counts": watch_group_counts,
+                "target_source_pool_denominator": len(change_by_symbol),
+                "unassigned_known_false_count": max(
+                    0,
+                    len(change_by_symbol) - sum(watch_group_counts.values()),
+                ),
+                "grouping": "D0_NEW > SEED_RULE > D1_MATERIAL > UNKNOWN",
             },
             "pagination": {
                 "offset": offset,
@@ -1970,6 +2134,88 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "dml_executed": False,
             },
         }
+
+    def _board_comparison(self, body: Any) -> dict[str, Any]:
+        required = {
+            "target_session",
+            "research_cutoff",
+            "source_package_id",
+            "d1_history_session_count",
+            "industry_snapshot_id",
+            "concept_snapshot_id",
+            "board_a",
+            "board_b",
+        }
+        if not isinstance(body, dict) or set(body) != required:
+            raise PreviewHttpError(
+                400,
+                "BOARD_COMPARISON_FIELDS_INVALID",
+                "双板块比较请求字段不完整或含额外字段",
+            )
+        target = _iso_date(body["target_session"])
+        cutoff = _iso_date(body["research_cutoff"], "research_cutoff")
+        _require_research_cutoff(cutoff, self.preview_server.state.research_cutoff)
+        _require_research_cutoff(target, cutoff)
+        package = _package_id(body["source_package_id"])
+        history_count = _positive_int(
+            body["d1_history_session_count"], "d1_history_session_count", 32767
+        )
+        snapshots = {
+            "INDUSTRY": (
+                _snapshot_id(body["industry_snapshot_id"])
+                if body["industry_snapshot_id"] is not None
+                else None
+            ),
+            "CONCEPT": (
+                _snapshot_id(body["concept_snapshot_id"])
+                if body["concept_snapshot_id"] is not None
+                else None
+            ),
+        }
+        if (
+            snapshots["INDUSTRY"] is not None
+            and snapshots["INDUSTRY"] == snapshots["CONCEPT"]
+        ):
+            raise PreviewHttpError(
+                400,
+                "BOARD_COMPARISON_SNAPSHOTS_NOT_DISTINCT",
+                "行业与GN比较必须绑定不同的成员快照",
+            )
+
+        def parse_board(value: Any, label: str) -> tuple[str, str]:
+            if (
+                not isinstance(value, dict)
+                or set(value) != {"board_kind", "board_native_id"}
+                or value["board_kind"] not in {"INDUSTRY", "CONCEPT"}
+                or not isinstance(value["board_native_id"], str)
+                or not value["board_native_id"].strip()
+                or value["board_native_id"] != value["board_native_id"].strip()
+                or len(value["board_native_id"]) > 128
+            ):
+                raise PreviewHttpError(
+                    400,
+                    "BOARD_COMPARISON_BOARD_INVALID",
+                    f"{label}必须是有效的精确板块类型和原生编号",
+                )
+            return value["board_kind"], value["board_native_id"]
+
+        board_a = parse_board(body["board_a"], "board_a")
+        board_b = parse_board(body["board_b"], "board_b")
+        try:
+            result = read_source_board_comparison(
+                self.preview_server.state.config,
+                target_session=target,
+                source_package_id=package,
+                d1_history_session_count=history_count,
+                snapshot_ids=snapshots,
+                board_a_kind=board_a[0],
+                board_a_native_id=board_a[1],
+                board_b_kind=board_b[0],
+                board_b_native_id=board_b[1],
+            )
+        except ResearchDayPgError as error:
+            raise PreviewHttpError(409, error.code, str(error)) from error
+        return {"ok": True, **result}
 
     def _d1_material(self, body: Any) -> dict[str, Any]:
         required = {
@@ -4134,6 +4380,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "/api/preview/source-launch-watch",
             "/api/preview/sector-change-stocks",
             "/api/product/d1-material",
+            "/api/product/board-comparison",
         }:
             self._error(
                 PreviewHttpError(
@@ -4158,6 +4405,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     400,
                     "D1_MATERIAL_QUERY_REJECTED",
                     "D1材料观察POST只接受JSON请求体，不接受查询参数",
+                )
+            )
+            return
+        if post_path == "/api/product/board-comparison" and self.path != post_path:
+            self._error(
+                PreviewHttpError(
+                    400,
+                    "BOARD_COMPARISON_QUERY_REJECTED",
+                    "双板块比较POST只接受JSON请求体",
                 )
             )
             return
@@ -4221,6 +4477,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 return
             if post_path == "/api/product/d1-material":
                 self._send_json(200, self._d1_material(body))
+                return
+            if post_path == "/api/product/board-comparison":
+                self._send_json(200, self._board_comparison(body))
                 return
             if post_path == "/api/preview/sector-change-stocks":
                 self._send_json(200, self._sector_change_stocks(body))

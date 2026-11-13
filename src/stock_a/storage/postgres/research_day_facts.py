@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import Counter
 from datetime import date, datetime
 from decimal import Decimal
 from fractions import Fraction
@@ -1013,6 +1014,13 @@ def _read_selected_board_observation(
         }
 
     cursor.execute(
+        "SELECT source_symbol FROM source_raw_daily "
+        "WHERE session_date=%s AND source_package_id=%s AND source_capture_id=%s",
+        (target_session, source_package_id, target_capture_id),
+    )
+    target_source_symbols = {row[0] for row in cursor.fetchall()}
+
+    cursor.execute(
         "SELECT source_symbol, before_state, after_state, transition "
         f"FROM source_d0_launch_day_facts WHERE {d0_predicate} "
         "AND source_symbol=ANY(%s) ORDER BY source_symbol",
@@ -1022,12 +1030,6 @@ def _read_selected_board_observation(
         row[0]: {"before_state": row[1], "after_state": row[2], "transition": row[3]}
         for row in cursor.fetchall()
     }
-
-    cursor.execute(
-        f"SELECT count(DISTINCT source_symbol) FROM source_d1_structure_day_facts WHERE {d1_predicate}",
-        d1_params,
-    )
-    d1_pool_count = int(cursor.fetchone()[0] or 0)
 
     # Seed画像窗与D1结构窗各自有独立业务键，不能强制使用同一会话数。
     cursor.execute(
@@ -1051,7 +1053,7 @@ def _read_selected_board_observation(
             seed_scope_status = (
                 "AVAILABLE"
                 if int(candidate[9]) == int(candidate[8])
-                and int(candidate[9]) == d1_pool_count
+                and int(candidate[9]) == len(target_source_symbols)
                 else "INCOMPLETE"
             )
         else:
@@ -1136,14 +1138,16 @@ def _read_selected_board_observation(
     seed_counts = {"TRUE": 0, "FALSE": 0, "UNKNOWN": 0, "NOT_COMPUTED": 0}
     d1_anchor_members = 0
     d1_anchor_count = 0
-    d1_price_observed = 0
-    d1_price_unknown = 0
+    d1_price_observed_members = 0
+    d1_price_unknown_members = 0
+    d1_price_observed_structure_rows = 0
+    d1_price_unknown_structure_rows = 0
     d1_price_quality_counts: dict[str, int] = {}
     rps5_values: dict[str, Fraction] = {}
     rps20_values: dict[str, Fraction] = {}
     for symbol, membership_quality in member_rows:
         d1 = d1_by_symbol.get(symbol)
-        in_target_source_pool = d1 is not None
+        in_target_source_pool = symbol in target_source_symbols
         d0 = d0_by_symbol.get(symbol)
         after_state = d0.get("after_state") if d0 else None
         d0_state = (
@@ -1186,9 +1190,17 @@ def _read_selected_board_observation(
                 "rps5": None,
                 "rps5_quality": seed[12] or "UNKNOWN",
                 "rps5_board_rank": None,
+                "rps5_board_rank_denominator": 0,
+                "rps5_board_tie_count": 0,
+                "rps5_value_scope": "FULL_SOURCE_POOL_RPS",
+                "rps5_rank_scope": "CURRENT_BOARD_OBSERVED_MEMBERS",
                 "rps20": None,
                 "rps20_quality": seed[15] or "UNKNOWN",
                 "rps20_board_rank": None,
+                "rps20_board_rank_denominator": 0,
+                "rps20_board_tie_count": 0,
+                "rps20_value_scope": "FULL_SOURCE_POOL_RPS",
+                "rps20_rank_scope": "CURRENT_BOARD_OBSERVED_MEMBERS",
             }
             for name, numerator, denominator, quality, destination in (
                 ("rps5", seed[10], seed[11], seed[12], rps5_values),
@@ -1207,9 +1219,11 @@ def _read_selected_board_observation(
             anchors_for_member = int(d1[2] or 0)
             d1_anchor_count += anchors_for_member
             d1_anchor_members += int(int(d1[1] or 0) > 0)
-            d1_price_observed += int(d1[3] or 0)
-            d1_price_unknown += int(d1[4] or 0)
+            d1_price_observed_structure_rows += int(d1[3] or 0)
+            d1_price_unknown_structure_rows += int(d1[4] or 0)
             quality_set = set(d1[5] or ())
+            d1_price_observed_members += int("OBSERVED" in quality_set)
+            d1_price_unknown_members += int("UNKNOWN" in quality_set)
             price_quality = (
                 "OBSERVED"
                 if quality_set == {"OBSERVED"}
@@ -1260,12 +1274,14 @@ def _read_selected_board_observation(
     for metric_name, values in (("rps5", rps5_values), ("rps20", rps20_values)):
         ordered_values = sorted(set(values.values()), reverse=True)
         ranks = {value: index + 1 for index, value in enumerate(ordered_values)}
+        tie_counts = Counter(values.values())
         for member in members:
             seed_metric = member["seed"]
             if member["source_symbol"] in values:
-                seed_metric[f"{metric_name}_board_rank"] = ranks[
-                    values[member["source_symbol"]]
-                ]
+                value = values[member["source_symbol"]]
+                seed_metric[f"{metric_name}_board_rank"] = ranks[value]
+                seed_metric[f"{metric_name}_board_rank_denominator"] = len(values)
+                seed_metric[f"{metric_name}_board_tie_count"] = tie_counts[value]
 
     state_order = {"TRUE": 0, "FALSE": 1, "UNKNOWN": 2, "NOT_COMPUTED": 3}
     members.sort(
@@ -1335,8 +1351,10 @@ def _read_selected_board_observation(
             else "PARTIAL",
             "material_change_members": d1_anchor_members,
             "material_anchor_count": d1_anchor_count,
-            "target_price_observed": d1_price_observed,
-            "target_price_unknown": d1_price_unknown,
+            "target_price_observed": d1_price_observed_members,
+            "target_price_unknown": d1_price_unknown_members,
+            "target_price_observed_structure_rows": d1_price_observed_structure_rows,
+            "target_price_unknown_structure_rows": d1_price_unknown_structure_rows,
             "target_price_quality_counts": d1_price_quality_counts,
         },
         "cross_kind_overlap": {
@@ -2059,9 +2077,376 @@ def read_source_research_day_scope(
     }
 
 
+def read_source_board_comparison(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    source_package_id: int,
+    d1_history_session_count: int,
+    snapshot_ids: Mapping[str, int | None],
+    board_a_kind: str,
+    board_a_native_id: str,
+    board_b_kind: str,
+    board_b_native_id: str,
+) -> dict[str, Any]:
+    """在同一只读快照内比较两个当前板块及其已存来源级事实。"""
+    if (
+        type(target_session) is not date
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or type(d1_history_session_count) is not int
+        or not 1 <= d1_history_session_count <= 32767
+        or not isinstance(snapshot_ids, Mapping)
+        or set(snapshot_ids) != {"INDUSTRY", "CONCEPT"}
+        or board_a_kind not in {"INDUSTRY", "CONCEPT"}
+        or board_b_kind not in {"INDUSTRY", "CONCEPT"}
+        or not isinstance(board_a_native_id, str)
+        or not board_a_native_id.strip()
+        or not isinstance(board_b_native_id, str)
+        or not board_b_native_id.strip()
+    ):
+        raise ResearchDayPgError("BOARD_COMPARISON_QUERY_INVALID", "双板块比较键无效")
+    selected = (
+        (board_a_kind, board_a_native_id),
+        (board_b_kind, board_b_native_id),
+    )
+    if selected[0] == selected[1]:
+        raise ResearchDayPgError(
+            "BOARD_COMPARISON_DUPLICATE", "请选择两个不同的精确板块"
+        )
+    for kind, snapshot_id in snapshot_ids.items():
+        if snapshot_id is not None and (
+            type(snapshot_id) is not int or snapshot_id <= 0
+        ):
+            raise ResearchDayPgError(
+                "BOARD_COMPARISON_SNAPSHOT_INVALID", "板块快照编号无效"
+            )
+    for kind, _native_id in selected:
+        if snapshot_ids[kind] is None:
+            raise ResearchDayPgError(
+                "BOARD_COMPARISON_SNAPSHOT_MISSING",
+                f"所选{kind}板块缺少精确成员快照",
+            )
+
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _connection_identity,
+    ):
+        for kind, snapshot_id in snapshot_ids.items():
+            if snapshot_id is None:
+                continue
+            expected_source_kind = (
+                "TDX_TDXHY_CFG" if kind == "INDUSTRY" else "TDX_INFOHARBOR_BLOCK_DAT"
+            )
+            cursor.execute(
+                "SELECT source_kind,research_mode FROM tdx_sector_source_snapshots "
+                "WHERE snapshot_id=%s",
+                (snapshot_id,),
+            )
+            if cursor.fetchone() != (
+                expected_source_kind,
+                "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT",
+            ):
+                raise ResearchDayPgError(
+                    "BOARD_COMPARISON_SNAPSHOT_MISMATCH",
+                    f"{kind}成员快照来源或NON_PIT身份不匹配",
+                )
+
+        cursor.execute(
+            "SELECT DISTINCT r.source_capture_id,c.normalized_count "
+            "FROM source_raw_daily r JOIN source_captures c "
+            "ON c.capture_id=r.source_capture_id "
+            "AND c.source_package_id=r.source_package_id "
+            "AND c.target_session=r.session_date "
+            "WHERE r.session_date=%s AND r.source_package_id=%s "
+            "ORDER BY r.source_capture_id LIMIT 2",
+            (target_session, source_package_id),
+        )
+        captures = cursor.fetchall()
+        if len(captures) != 1:
+            raise ResearchDayPgError(
+                "BOARD_COMPARISON_SOURCE_VERSION_AMBIGUOUS",
+                "目标日与来源包没有唯一Raw捕获",
+            )
+        target_capture_id, expected_source_count = captures[0]
+        cursor.execute(
+            "SELECT source_symbol FROM source_raw_daily "
+            "WHERE session_date=%s AND source_package_id=%s "
+            "AND source_capture_id=%s ORDER BY source_symbol",
+            (target_session, source_package_id, target_capture_id),
+        )
+        source_symbols = {row[0] for row in cursor.fetchall()}
+        source_pool_status = (
+            "AVAILABLE"
+            if len(source_symbols) == expected_source_count
+            else "INCOMPLETE"
+        )
+
+        board_sets: list[set[str]] = []
+        board_sizes: list[int] = []
+        for kind, native_id in selected:
+            cursor.execute(
+                "SELECT c.id FROM tdx_sector_catalog c "
+                "WHERE c.snapshot_id=%s AND c.board_kind=%s AND c.board_native_id=%s",
+                (snapshot_ids[kind], kind, native_id),
+            )
+            catalog_ids = [int(row[0]) for row in cursor.fetchall()]
+            if len(catalog_ids) != 1:
+                raise ResearchDayPgError(
+                    "BOARD_COMPARISON_BOARD_NOT_UNIQUE",
+                    "精确板块在绑定快照中不存在或不唯一",
+                )
+            cursor.execute(
+                "SELECT source_symbol FROM tdx_sector_members "
+                "WHERE catalog_id=%s ORDER BY source_symbol",
+                (catalog_ids[0],),
+            )
+            members = {row[0] for row in cursor.fetchall()}
+            board_sizes.append(len(members))
+            board_sets.append(members)
+
+        cursor.execute(
+            "SELECT DISTINCT before_capture_id,producer_version,algorithm_contract,"
+            "session_contract,calendar_revision FROM source_d0_launch_day_facts "
+            "WHERE target_session=%s AND source_package_id=%s AND target_capture_id=%s "
+            "ORDER BY before_capture_id,producer_version,algorithm_contract",
+            (target_session, source_package_id, target_capture_id),
+        )
+        d0_scopes = cursor.fetchall()
+        d0_by_symbol: dict[str, tuple[str | None, str | None]] = {}
+        d0_status = "NOT_COMPUTED"
+        if len(d0_scopes) == 1:
+            d0_scope = d0_scopes[0]
+            d0_predicate = (
+                "target_session=%s AND source_package_id=%s "
+                "AND before_capture_id=%s AND target_capture_id=%s "
+                "AND producer_version=%s AND algorithm_contract=%s "
+                "AND session_contract=%s AND calendar_revision=%s"
+            )
+            d0_params = (
+                target_session,
+                source_package_id,
+                d0_scope[0],
+                target_capture_id,
+                d0_scope[1],
+                d0_scope[2],
+                d0_scope[3],
+                d0_scope[4],
+            )
+            cursor.execute(
+                "SELECT source_symbol,transition,after_state "
+                f"FROM source_d0_launch_day_facts WHERE {d0_predicate}",
+                d0_params,
+            )
+            rows = cursor.fetchall()
+            d0_by_symbol = {row[0]: (row[1], row[2]) for row in rows}
+            d0_status = (
+                "AVAILABLE"
+                if len(d0_by_symbol) == len(source_symbols)
+                else "INCOMPLETE"
+            )
+
+        cursor.execute(
+            "SELECT DISTINCT profile_revision,producer_contract,producer_version,"
+            "history_session_count,calendar_id,calendar_revision,research_mode,"
+            "price_coordinate FROM source_pool_seed_day_facts "
+            "WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+            "ORDER BY profile_revision,producer_version",
+            (target_session, source_package_id, target_capture_id),
+        )
+        seed_scopes = cursor.fetchall()
+        seed_by_symbol: dict[str, str] = {}
+        seed_status = "NOT_COMPUTED"
+        if len(seed_scopes) == 1:
+            seed_scope = seed_scopes[0]
+            if (
+                seed_scope[6] == "NON_PIT_RETROSPECTIVE"
+                and seed_scope[7] == "RAW_UNADJUSTED"
+            ):
+                cursor.execute(
+                    "SELECT source_symbol,source_seed_state FROM source_pool_seed_day_facts "
+                    "WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+                    "AND profile_revision=%s AND producer_contract=%s AND producer_version=%s "
+                    "AND history_session_count=%s AND calendar_id=%s AND calendar_revision=%s "
+                    "AND research_mode=%s AND price_coordinate=%s",
+                    (target_session, source_package_id, target_capture_id, *seed_scope),
+                )
+                rows = cursor.fetchall()
+                seed_by_symbol = {row[0]: row[1] or "UNKNOWN" for row in rows}
+                seed_status = (
+                    "AVAILABLE"
+                    if len(seed_by_symbol) == len(source_symbols)
+                    else "INCOMPLETE"
+                )
+            else:
+                seed_status = "UNKNOWN"
+        elif len(seed_scopes) > 1:
+            seed_status = "AMBIGUOUS"
+
+        cursor.execute(
+            "SELECT DISTINCT d1_history_session_count,calendar_revision,"
+            "producer_contract,producer_version,material_change_contract,"
+            "research_mode,price_coordinate FROM source_d1_structure_day_facts "
+            "WHERE target_session=%s AND source_package_id=%s AND target_capture_id=%s "
+            "AND d1_history_session_count=%s "
+            "ORDER BY calendar_revision,producer_contract,producer_version",
+            (
+                target_session,
+                source_package_id,
+                target_capture_id,
+                d1_history_session_count,
+            ),
+        )
+        d1_scopes = cursor.fetchall()
+        d1_by_symbol: dict[str, tuple[str, int, int]] = {}
+        d1_status = "NOT_COMPUTED"
+        if len(d1_scopes) == 1:
+            d1_scope = d1_scopes[0]
+            if (
+                d1_scope[5] == "NON_PIT_RETROSPECTIVE"
+                and d1_scope[6] == "RAW_UNADJUSTED"
+            ):
+                cursor.execute(
+                    "SELECT source_symbol,"
+                    "array_agg(DISTINCT target_price_quality ORDER BY target_price_quality),"
+                    "coalesce(sum(material_change_anchor_count),0)::bigint,count(*)::int "
+                    "FROM source_d1_structure_day_facts "
+                    "WHERE target_session=%s AND source_package_id=%s AND target_capture_id=%s "
+                    "AND d1_history_session_count=%s AND calendar_revision=%s "
+                    "AND producer_contract=%s AND producer_version=%s "
+                    "AND material_change_contract=%s AND research_mode=%s "
+                    "AND price_coordinate=%s "
+                    "GROUP BY source_symbol",
+                    (
+                        target_session,
+                        source_package_id,
+                        target_capture_id,
+                        *d1_scope,
+                    ),
+                )
+                rows = cursor.fetchall()
+                d1_by_symbol = {
+                    row[0]: (
+                        "OBSERVED"
+                        if set(row[1] or ()) == {"OBSERVED"}
+                        else "UNKNOWN"
+                        if "UNKNOWN" in set(row[1] or ())
+                        else "PARTIAL",
+                        int(row[2] or 0),
+                        int(row[3]),
+                    )
+                    for row in rows
+                }
+                d1_status = (
+                    "AVAILABLE"
+                    if len(d1_by_symbol) == len(source_symbols)
+                    and all(
+                        item[2] == len(_STRUCTURE_TYPES)
+                        for item in d1_by_symbol.values()
+                    )
+                    else "INCOMPLETE"
+                )
+            else:
+                d1_status = "UNKNOWN"
+        elif len(d1_scopes) > 1:
+            d1_status = "AMBIGUOUS"
+
+    intersection = board_sets[0] & board_sets[1]
+    union = board_sets[0] | board_sets[1]
+    set_groups = {
+        "board_a": board_sets[0],
+        "board_b": board_sets[1],
+        "intersection": intersection,
+        "board_a_only": board_sets[0] - board_sets[1],
+        "board_b_only": board_sets[1] - board_sets[0],
+        "union_deduplicated": union,
+    }
+
+    def cohort_summary(symbols: set[str]) -> dict[str, Any]:
+        in_source = symbols & source_symbols
+        new_symbols = {
+            symbol
+            for symbol in in_source
+            if d0_by_symbol.get(symbol, (None, None))[0] == "FALSE_TO_TRUE"
+        }
+        seed_symbols = in_source & seed_by_symbol.keys()
+        d1_symbols = in_source & d1_by_symbol.keys()
+        return {
+            "membership_count": len(symbols),
+            "source_pool_member_count": len(in_source),
+            "source_pool_denominator": len(source_symbols),
+            "d0_new_count": len(new_symbols) if d0_status == "AVAILABLE" else None,
+            "seed": {
+                "status": seed_status,
+                "stored_member_denominator": len(seed_symbols),
+                "true_count": sum(
+                    seed_by_symbol[item] == "TRUE" for item in seed_symbols
+                )
+                if seed_status == "AVAILABLE"
+                else None,
+                "unknown_count": sum(
+                    seed_by_symbol[item] == "UNKNOWN" for item in seed_symbols
+                )
+                if seed_status == "AVAILABLE"
+                else None,
+            },
+            "target_price": {
+                "status": d1_status,
+                "stored_member_denominator": len(d1_symbols),
+                "observed_count": sum(
+                    d1_by_symbol[item][0] == "OBSERVED" for item in d1_symbols
+                )
+                if d1_status == "AVAILABLE"
+                else None,
+                "unknown_count": sum(
+                    d1_by_symbol[item][0] == "UNKNOWN" for item in d1_symbols
+                )
+                if d1_status == "AVAILABLE"
+                else None,
+            },
+            "d1_material_member_count": sum(
+                d1_by_symbol[item][1] > 0 for item in d1_symbols
+            )
+            if d1_status == "AVAILABLE"
+            else None,
+        }
+
+    return {
+        "status": "AVAILABLE" if source_pool_status == "AVAILABLE" else "INCOMPLETE",
+        "target_session": target_session.isoformat(),
+        "source_package_id": source_package_id,
+        "source_capture_id": target_capture_id,
+        "source_pool_count": len(source_symbols),
+        "d0_scope_status": d0_status,
+        "seed_scope_status": seed_status,
+        "d1_scope_status": d1_status,
+        "boards": [
+            {
+                "board_kind": selected[index][0],
+                "board_native_id": selected[index][1],
+                "snapshot_member_count": board_sizes[index],
+            }
+            for index in range(2)
+        ],
+        "comparison": {
+            name: cohort_summary(symbols) for name, symbols in set_groups.items()
+        },
+        "membership_overlap_count": len(intersection),
+        "membership_union_deduplicated_count": len(union),
+        "execution": {
+            "transaction": "READ ONLY PG SNAPSHOT",
+            "database_write_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+        },
+    }
+
+
 __all__ = [
     "ResearchDayPgError",
     "persist_source_research_day",
     "read_source_research_day",
+    "read_source_board_comparison",
     "read_source_research_day_scope",
 ]
