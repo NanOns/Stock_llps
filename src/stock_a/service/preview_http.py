@@ -152,6 +152,7 @@ _DIAGNOSTIC_ROUTES = frozenset(
         "/api/preview/sector-change-context",
         "/api/preview/sector-change-stocks",
         "/api/preview/source-launch-watch",
+        "/api/preview/t0-early-observations",
         "/api/preview/source-page",
         "/api/preview/stock-timeline",
         "/api/preview/stock",
@@ -1167,6 +1168,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
 
         from stock_a.storage.postgres.source_launch_watch_evidence import (
             read_source_launch_watch_board_rps_comparison,
+            read_source_launch_watch_d0_boards,
             read_source_launch_watch_evidence,
             read_source_launch_watch_page,
         )
@@ -1268,6 +1270,37 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         memberships_by_symbol: dict[str, list[dict[str, Any]]] = defaultdict(list)
         for membership in membership_read.get("memberships", []):
             memberships_by_symbol[membership["source_symbol"]].append(membership)
+        home_board_result = {"status": "NOT_REQUESTED", "boards": []}
+        if watch_group == "D0_NEW" and board_kind is None and limit == 30:
+            d0_scope_status = page_result["scope_status"]["d0"]
+            if d0_scope_status == "AVAILABLE":
+                home_board_result = read_source_launch_watch_d0_boards(
+                    config,
+                    before_session=before_session,
+                    target_session=target_session,
+                    source_package_id=source_package_id,
+                    before_capture_id=before_source["source_capture_id"],
+                    target_capture_id=after_source["source_capture_id"],
+                    expected_source_count=after_source["capture_expected_row_count"],
+                    industry_snapshot_id=industry_snapshot_id,
+                    concept_snapshot_id=concept_snapshot_id,
+                )
+                if home_board_result.get("status") != "AVAILABLE":
+                    raise PreviewHttpError(
+                        409,
+                        "SOURCE_LAUNCH_WATCH_BOARD_SCOPE_INCOMPLETE",
+                        "完整D0事实可用时，首页板块摘要未能绑定同一范围",
+                    )
+            else:
+                home_board_result = {
+                    "status": d0_scope_status,
+                    "total_board_count": None,
+                    "boards": [],
+                    "execution": {
+                        "database_write_attempted": False,
+                        "d0_board_summary_query_executed": False,
+                    },
+                }
         page_boards = {
             (
                 membership["snapshot_id"],
@@ -1280,6 +1313,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             }
             for membership in membership_read.get("memberships", [])
         }
+        for board in home_board_result.get("boards", []):
+            key = (
+                board["snapshot_id"],
+                board["board_kind"],
+                board["board_native_id"],
+            )
+            page_boards[key] = {
+                "snapshot_id": board["snapshot_id"],
+                "board_kind": board["board_kind"],
+                "board_native_id": board["board_native_id"],
+            }
         from stock_a.storage.postgres.sector_pulse_facts import (
             read_source_sector_pulse_for_boards,
         )
@@ -1293,6 +1337,48 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             boards=list(page_boards.values()),
         )
         pulse_by_board = pulse.get("by_board", {})
+        quality_by_source = {
+            snapshot.get("source_kind"): snapshot.get("source_quality_counts") or {}
+            for snapshot in membership_read.get("snapshots", [])
+        }
+        quality_by_kind = {
+            "INDUSTRY": quality_by_source.get("TDX_TDXHY_CFG", {}),
+            "CONCEPT": quality_by_source.get("TDX_INFOHARBOR_BLOCK_DAT", {}),
+        }
+        for index, board in enumerate(home_board_result.get("boards", []), start=1):
+            key = f"{board['board_kind']}:{board['board_native_id']}"
+            board["cross_period_pulse"] = pulse_by_board.get(
+                key,
+                {
+                    "status": "NOT_COMPUTED",
+                    "reason_codes": ["PULSE_FACTS_NOT_SAVED_FOR_EXACT_BOARD"],
+                    "snapshot_id": board["snapshot_id"],
+                    "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                },
+            )
+            board["cross_period_pulse_transition"] = {
+                "status": "NOT_COMPUTED",
+                "transition_state": "NOT_COMPUTED",
+                "reason_codes": ["PULSE_TRANSITION_FACTS_NOT_SAVED_FOR_EXACT_INPUT"],
+                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+            }
+            quality_counts = quality_by_kind.get(board["board_kind"], {})
+            board["membership_source_quality"] = {
+                "quality": quality_counts.get("quality", "UNKNOWN"),
+                "source_unmapped_rows": quality_counts.get("unmapped_source_rows"),
+            }
+            board["home_selection_reason"] = (
+                "首页按已证D0新增成员数降序；数量相同按行业、概念、板块名称和编号稳定排序。"
+                if board["home_featured"]
+                else (
+                    "首页最多展示15个板块；完整列表仍可搜索和分页，本板按同一D0成员数顺序"
+                    f"排第{board['observation_rank']}位。"
+                )
+            )
+            board["observation_basis"] = (
+                "仅按已存D0新增成员数排列；PULSE只作为同日上下文。"
+            )
+            board["observation_rank"] = board.get("observation_rank") or index
         board_comparison: dict[str, dict[str, Any]] = {}
         if board_kind is not None and page_symbols and page_result.get("seed_scope"):
             board_comparison = read_source_launch_watch_board_rps_comparison(
@@ -1350,7 +1436,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             }
         )
         group_counts = page_result["group_counts"]
-        global_total = group_counts.get("D0_NEW", 0)
+        global_total = (
+            group_counts.get("D0_NEW", 0)
+            if page_result["scope_status"]["d0"] == "AVAILABLE"
+            else None
+        )
         results = []
         for rank, row in enumerate(page_rows, start=offset + 1):
             symbol = row["source_symbol"]
@@ -1398,7 +1488,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             enrollments = enrollment_by_symbol.get(symbol, [])
             for enrollment in enrollments:
                 enrollment["followup"] = followups[enrollment["id"]]
-            _attach_t0_early_contexts(config, enrollments)
+                enrollment["early_status"] = (
+                    "AVAILABLE"
+                    if row.get("t0_triage_summary", {}).get("status") == "AVAILABLE"
+                    else "NO_STORED_FACT"
+                )
             followup_states = {item["followup"]["status"] for item in enrollments}
             followup_reasons = {item["followup"]["reason"] for item in enrollments}
             followup_status = (
@@ -1454,6 +1548,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "t0_observation": {
                         "status": t0_status,
                         "enrollments": enrollments,
+                        "triage_summary": row.get("t0_triage_summary"),
                         "reason": "NO_STORED_FACT"
                         if not enrollments and t0_status == "NOT_COMPUTED"
                         else None,
@@ -1475,7 +1570,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "also_in_sectors": enriched_memberships,
                     "membership_status": membership_read.get("status", "UNKNOWN"),
                     "board_comparison": board_comparison.get(symbol),
-                    "observation_order": {"rank": rank, "basis": "SOURCE_SYMBOL_ASC"},
+                    "research_reading_order": {
+                        "rank": rank,
+                        "contract": "T0_RESEARCH_TRIAGE_R1",
+                        "triage_state": row.get("t0_triage_state", "NO_T0_FACT"),
+                        "triage_rank": row.get("t0_triage_rank", 5),
+                        "home_featured": watch_group == "D0_NEW" and rank <= 30,
+                        "tie_break": "SOURCE_SYMBOL_ASC",
+                    },
+                    "home_selection_reason": (
+                        "按已存T0证据分型排序；同层按来源代码升序。"
+                        "此顺序只供研究阅读，不改变D0、五组资格或正式Priority。"
+                    ),
                 }
             )
 
@@ -1496,6 +1602,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             },
             "source_change_status": {
                 "transition_scope": "SAVED_SOURCE_D0_ADJACENT_FACTS",
+                "status": page_result["scope_status"]["d0"],
                 "price_coordinate": "RAW_UNADJUSTED",
                 "pit_status": "NON_PIT_RETROSPECTIVE",
                 "source_key_set": {
@@ -1531,6 +1638,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "partition_closed": page_result["partition_closed"],
                 "unassigned_known_false_count": 0,
                 "grouping": "D0_NEW > SEED_RULE > D1_MATERIAL > UNKNOWN > KNOWN_NO_SIGNAL",
+                "d0_scope_status": page_result["scope_status"]["d0"],
             },
             "pagination": {
                 "offset": offset,
@@ -1539,10 +1647,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "total_count": selected_total,
                 "next_offset": next_offset,
             },
-            "boards": [],
+            "boards": home_board_result.get("boards", []),
+            "board_summary": {
+                "status": home_board_result.get("status", "NOT_REQUESTED"),
+                "total_board_count": home_board_result.get("total_board_count", 0),
+                "returned_board_count": len(home_board_result.get("boards", [])),
+            },
             "observation_ordering": {
                 "candidate_count": group_counts.get(watch_group, 0),
-                "ordering": "SOURCE_SYMBOL_ASC",
+                "ordering": "T0_RESEARCH_TRIAGE_R1",
+                "precedence": [
+                    "CURRENT_SAME_DIRECTION",
+                    "MIXED",
+                    "CURRENT_COUNTER",
+                    "UNKNOWN",
+                    "NO_PROVED_CASE",
+                    "NO_T0_FACT",
+                ],
+                "tie_break": "SOURCE_SYMBOL_ASC",
+                "meaning": "仅研究阅读顺序；不改变五组资格、D0顺序、正式Priority或收益判断。",
                 "page_scope": True,
             },
             "board_selection": {
@@ -1574,6 +1697,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     len(item.get("rules", {}).get("facts", {}))
                     for item in evidence_by_symbol.values()
                 ),
+                "t0_early_summary_rows_returned_to_python": sum(
+                    item.get("t0_triage_summary", {}).get("status") == "AVAILABLE"
+                    for item in page_rows
+                ),
+                "t0_early_full_context_rows_returned_to_python": 0,
+                "t0_early_full_contexts_loaded": False,
+                "page_selection_and_triage_order_executed_in_postgresql": True,
+                "home_board_summary_rows_returned_to_python": len(
+                    home_board_result.get("boards", [])
+                ),
+                "d0_full_pool_python_materialization": False,
                 "api_server_processing_wall_seconds": time.perf_counter()
                 - request_started,
                 "api_server_process_cpu_seconds": time.process_time()
@@ -1584,8 +1718,97 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             },
         }
 
+    def _source_t0_early_observations(self, body: Any) -> dict[str, Any]:
+        """用户展开单股时，按精确来源版本读取全部已存T0板内事实。"""
+        required = {
+            "symbol",
+            "target_session",
+            "source_package_id",
+            "source_capture_id",
+        }
+        if not isinstance(body, dict) or set(body) != required:
+            raise PreviewHttpError(
+                400,
+                "T0_EARLY_DETAIL_FIELDS_INVALID",
+                "T0板内详情必须显式绑定来源代码、目标日、来源包和捕获ID",
+            )
+        symbol = _symbol(body["symbol"])
+        target = _iso_date(body["target_session"])
+        _require_research_cutoff(target, self.preview_server.state.research_cutoff)
+        package = _package_id(body["source_package_id"])
+        capture = _package_id(body["source_capture_id"])
+        source = read_source_version_context(
+            self.preview_server.state.config,
+            target_session=target,
+            source_package_id=package,
+        )
+        if (
+            source.get("status") != "AVAILABLE"
+            or source.get("source_capture_id") != capture
+        ):
+            raise PreviewHttpError(
+                409,
+                "T0_EARLY_DETAIL_SOURCE_MISMATCH",
+                "T0板内详情来源包或捕获与已存Raw版本不一致",
+            )
+        from stock_a.storage.postgres.t0_early_observations import (
+            read_source_t0_early_observations_for_symbols,
+            read_source_t0_early_triage_summaries_for_symbols,
+        )
+
+        contexts = read_source_t0_early_observations_for_symbols(
+            self.preview_server.state.config,
+            target_session=target,
+            source_package_id=package,
+            source_capture_id=capture,
+            source_symbols=[symbol],
+        ).get(symbol, [])
+        triage_summary = read_source_t0_early_triage_summaries_for_symbols(
+            self.preview_server.state.config,
+            target_session=target,
+            source_package_id=package,
+            source_capture_id=capture,
+            source_symbols=[symbol],
+        )[symbol]
+        if any(
+            context.get("target_session") != target
+            or context.get("source_package_id") != package
+            or context.get("source_capture_id") != capture
+            for context in contexts
+        ):
+            raise PreviewHttpError(
+                409,
+                "T0_EARLY_DETAIL_READBACK_SCOPE_MISMATCH",
+                "T0板内详情读回超出请求的精确日期或来源版本",
+            )
+        by_enrollment: dict[str, list[dict[str, Any]]] = {}
+        for context in contexts:
+            key = str(context["enrollment_id"])
+            by_enrollment.setdefault(key, []).append(context)
+        return {
+            "ok": True,
+            "symbol": symbol,
+            "target_session": target.isoformat(),
+            "source_package_id": package,
+            "source_capture_id": capture,
+            "status": "AVAILABLE" if contexts else "NO_STORED_FACT",
+            "triage_summary": triage_summary,
+            "registration_count": len(by_enrollment),
+            "relation_count": len(contexts),
+            "by_enrollment": by_enrollment,
+            "scope": "NON_PIT_EXPLORATORY",
+            "price_coordinate": "RAW_UNADJUSTED",
+            "execution": {
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "dml_executed": False,
+                "full_t0_pool_materialized": False,
+                "single_symbol_only": True,
+            },
+        }
+
     def _source_launch_watch(self, body: Any) -> dict[str, Any]:
-        """读取完整D0新增集合和板块归属后，再按请求分页。"""
+        """从PG按研究分型排序后读取有界D0或Focus页面。"""
         request_started = time.perf_counter()
         request_cpu_started = time.process_time()
         required = {
@@ -1672,7 +1895,6 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "offset必须为0至允许上限之间的整数",
             )
         limit = _positive_int(body["limit"], "limit", 30)
-        focus_request = "watch_group" in body
         watch_group = body.get("watch_group", "D0_NEW")
         if watch_group not in {
             "D0_NEW",
@@ -1734,1064 +1956,20 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "前后日期必须是同一现役日历版本中的严格相邻官方会话",
             )
 
-        if focus_request:
-            return self._source_launch_watch_focus_saved_page(
-                before_session=before_session,
-                target_session=target_session,
-                research_cutoff=research_cutoff,
-                source_package_id=source_package_id,
-                industry_snapshot_id=industry_snapshot_id,
-                concept_snapshot_id=concept_snapshot_id,
-                offset=offset,
-                limit=limit,
-                watch_group=watch_group,
-                d1_history_session_count=d1_history_session_count,
-                board_kind=board_kind,
-                board_native_id=board_native_id,
-            )
-
-        from stock_a.application.source_d0_tdx_membership import (
-            build_d0_launch_watch_membership_result,
-            read_tdx_sector_memberships_for_symbols,
-        )
-
-        def build_full_watch():
-            try:
-                d0_started = time.perf_counter()
-                from stock_a.storage.postgres.static_research_facts import (
-                    read_source_d0_scenario_day,
-                )
-                from stock_a.application.source_d0_raw import (
-                    present_saved_d0_scenario_day,
-                )
-
-                before_day = present_saved_d0_scenario_day(
-                    read_source_d0_scenario_day(
-                        self.preview_server.state.config,
-                        target_session=before_session,
-                        source_package_id=source_package_id,
-                        scenario="LAUNCH_CONFIRM",
-                    )
-                )
-                after_day = present_saved_d0_scenario_day(
-                    read_source_d0_scenario_day(
-                        self.preview_server.state.config,
-                        target_session=target_session,
-                        source_package_id=source_package_id,
-                        scenario="LAUNCH_CONFIRM",
-                    )
-                )
-                if (
-                    before_day["source_version"]["source_package_id"]
-                    != after_day["source_version"]["source_package_id"]
-                    or before_day["official_calendar"] != after_day["official_calendar"]
-                    or before_day["session_contract"] != after_day["session_contract"]
-                    or before_day["algorithm_contract"]
-                    != after_day["algorithm_contract"]
-                ):
-                    raise PreviewHttpError(
-                        409,
-                        "SOURCE_LAUNCH_WATCH_SOURCE_IDENTITY_MISMATCH",
-                        "PG保存的D0相邻事实来源、日历或算法合同不一致",
-                    )
-
-                def endpoint(day):
-                    actual = _official_calendar(
-                        date.fromisoformat(day["target_session"])
-                    )
-                    sessions = actual["sessions"]
-                    target_index = sessions.index(
-                        date.fromisoformat(day["target_session"])
-                    )
-                    count = day["history_session_count"]
-                    window = sessions[
-                        max(0, target_index - count + 1) : target_index + 1
-                    ]
-                    states = {name: 0 for name in ("TRUE", "FALSE", "UNKNOWN")}
-                    for result in day["results"]:
-                        states[result["scenario_raw"]] += 1
-                    return {
-                        "target_session": day["target_session"],
-                        "research_cutoff": research_cutoff.isoformat(),
-                        "strict_official_sessions": [
-                            item.isoformat() for item in window
-                        ],
-                        "official_calendar": day["official_calendar"],
-                        "source_version": day["source_version"],
-                        "source_pool": {
-                            "source_count": day["source_pool"]["source_count"],
-                            "scenario_state_counts": states,
-                            "scenario_state_partition_closed": True,
-                            "scenario_state_partition_scope": "FULL_SOURCE_POOL",
-                        },
-                        "session_contract": day["session_contract"],
-                        "algorithm_contract": day["algorithm_contract"],
-                        "scenario_role": "DIAGNOSTIC_ONLY",
-                        "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
-                        "research_universe_status": "UNKNOWN",
-                        "absolute_liquidity_cny_status": "UNKNOWN_UNIT_UNVERIFIED",
-                        "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
-                        "pit_status": "NON_PIT_RETROSPECTIVE",
-                        "price_coordinate": "RAW_UNADJUSTED",
-                        "execution": {
-                            "transaction": "READ ONLY PG STORED FACTS",
-                            "database_write_attempted": False,
-                            "ddl_executed": False,
-                            "dml_executed": False,
-                        },
-                    }
-
-                before_index = {
-                    item["source_symbol"]: item for item in before_day["results"]
-                }
-                after_index = {
-                    item["source_symbol"]: item for item in after_day["results"]
-                }
-                transition_names = (
-                    "FALSE_TO_TRUE",
-                    "FALSE_TO_FALSE",
-                    "FALSE_TO_UNKNOWN",
-                    "TRUE_TO_TRUE",
-                    "TRUE_TO_FALSE",
-                    "TRUE_TO_UNKNOWN",
-                    "UNKNOWN_TO_TRUE",
-                    "UNKNOWN_TO_FALSE",
-                    "UNKNOWN_TO_UNKNOWN",
-                )
-                transition_counts = {name: 0 for name in transition_names}
-                changes_rows = []
-                for symbol in sorted(set(before_index) | set(after_index)):
-                    prior = before_index.get(symbol)
-                    current = after_index.get(symbol)
-                    prior_state = prior["scenario_raw"] if prior else None
-                    current_state = current["scenario_raw"] if current else None
-                    transition = (
-                        "BEFORE_ONLY"
-                        if current is None
-                        else "AFTER_ONLY"
-                        if prior is None
-                        else f"{prior_state}_TO_{current_state}"
-                    )
-                    if prior is not None and current is not None:
-                        transition_counts[transition] += 1
-                    changes_rows.append(
-                        {
-                            "market": symbol[:2],
-                            "source_symbol": symbol,
-                            "transition": transition,
-                            "prior_unknown": prior_state == "UNKNOWN",
-                            "before": prior,
-                            "after": current,
-                            "identity_status": "SOURCE_SYMBOL_ONLY",
-                            "price_coordinate": "RAW_UNADJUSTED",
-                            "pit_status": "NON_PIT_RETROSPECTIVE",
-                            "scenario_role": "DIAGNOSTIC_ONLY",
-                            "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
-                        }
-                    )
-                before_symbols, after_symbols = set(before_index), set(after_index)
-                comparable = len(before_symbols & after_symbols)
-                before_only = len(before_symbols - after_symbols)
-                after_only = len(after_symbols - before_symbols)
-                before_endpoint, after_endpoint = (
-                    endpoint(before_day),
-                    endpoint(after_day),
-                )
-                changes = {
-                    "ok": True,
-                    "contract": "STOCK_A_D0_LAUNCH_ADJACENT_TRANSITION_RAW_R1",
-                    "producer_version": after_day["producer_version"],
-                    "action": "changes",
-                    "scenario": "LAUNCH_CONFIRM",
-                    "pair_status": "COMPARABLE",
-                    "transition_semantics": "THREE_VALUED_KLEENE_CROSS_SESSION",
-                    "scenario_role": "DIAGNOSTIC_ONLY",
-                    "formal_admission_status": "NOT_AUTHORIZED_SOURCE_SYMBOL_DIAGNOSTIC",
-                    "research_universe_status": "UNKNOWN",
-                    "absolute_liquidity_cny_status": "UNKNOWN_UNIT_UNVERIFIED",
-                    "stable_security_id_status": "STABLE_SECURITY_ID_UNVERIFIED",
-                    "pit_status": "NON_PIT_RETROSPECTIVE",
-                    "session_contract": after_day["session_contract"],
-                    "research_cutoff": research_cutoff.isoformat(),
-                    "price_coordinate": "RAW_UNADJUSTED",
-                    "entity_identity": "SOURCE_SYMBOL_ONLY",
-                    "before": before_endpoint,
-                    "after": after_endpoint,
-                    "source_key_set": {
-                        "key": "market+source_symbol",
-                        "evaluation_scope": "FULL_SOURCE_POOL",
-                        "before_count": len(before_symbols),
-                        "after_count": len(after_symbols),
-                        "comparable_intersection_count": comparable,
-                        "source_union_count": len(changes_rows),
-                        "before_only_count": before_only,
-                        "after_only_count": after_only,
-                        "pair_not_comparable_count": 0,
-                        "union_partition_closed": comparable + before_only + after_only
-                        == len(changes_rows),
-                    },
-                    "transition_counts": transition_counts,
-                    "transition_counts_scope": "FULL_SOURCE_POOL",
-                    "missing_endpoint_counts": {
-                        "BEFORE_ONLY": before_only,
-                        "AFTER_ONLY": after_only,
-                    },
-                    "selection": {
-                        "transition": "ALL",
-                        "symbol": None,
-                        "matched_count": len(changes_rows),
-                        "offset": 0,
-                        "limit": len(changes_rows),
-                        "page_count": len(changes_rows),
-                        "next_offset": None,
-                        "evaluated_before_filter_and_pagination": True,
-                    },
-                    "results": changes_rows,
-                    "execution": {
-                        "transaction": "READ ONLY PG STORED FACTS",
-                        "database_write_attempted": False,
-                        "ddl_executed": False,
-                        "dml_executed": False,
-                    },
-                }
-                d0_reader_wall_seconds = time.perf_counter() - d0_started
-            except (SourceD0RawError, ValueError) as error:
-                mapped = _source_context_preview_error(error)
-                if mapped is None:
-                    raise
-                raise mapped from error
-
-            all_change_rows = changes.get("results")
-            selection = changes.get("selection")
-            transition_counts = changes.get("transition_counts")
-            source_key_set = changes.get("source_key_set")
-            if (
-                not isinstance(all_change_rows, list)
-                or not isinstance(selection, Mapping)
-                or not isinstance(transition_counts, Mapping)
-                or not isinstance(source_key_set, Mapping)
-                or selection.get("transition") != "ALL"
-                or len(all_change_rows) != source_key_set.get("source_union_count")
-                or selection.get("matched_count") != len(all_change_rows)
-                or selection.get("next_offset") is not None
-                or selection.get("evaluated_before_filter_and_pagination") is not True
-                or source_key_set.get("union_partition_closed") is not True
-                or sum(transition_counts.values())
-                != source_key_set.get("comparable_intersection_count")
-            ):
-                raise PreviewHttpError(
-                    409,
-                    "SOURCE_LAUNCH_WATCH_D0_RESULT_INCOMPLETE",
-                    "D0完整来源并集、九态转移及动态分母未闭合，已拒绝返回部分名单",
-                )
-            ft_rows = [
-                row
-                for row in all_change_rows
-                if isinstance(row, Mapping) and row.get("transition") == "FALSE_TO_TRUE"
-            ]
-            if len(ft_rows) != transition_counts.get("FALSE_TO_TRUE"):
-                raise PreviewHttpError(
-                    409,
-                    "SOURCE_LAUNCH_WATCH_FT_PARTITION_OPEN",
-                    "FALSE_TO_TRUE集合未闭合到完整九态转移计数",
-                )
-            if (
-                changes.get("before", {})
-                .get("source_version", {})
-                .get("source_package_id")
-                != source_package_id
-                or changes.get("after", {})
-                .get("source_version", {})
-                .get("source_package_id")
-                != source_package_id
-            ):
-                raise PreviewHttpError(
-                    409,
-                    "SOURCE_LAUNCH_WATCH_SOURCE_IDENTITY_MISMATCH",
-                    "D0实际Raw来源键或来源包ID与请求不一致",
-                )
-            source_symbols = [row["source_symbol"] for row in ft_rows]
-            target_pool_symbols = [
-                row["source_symbol"]
-                for row in all_change_rows
-                if row.get("transition") != "BEFORE_ONLY"
-            ]
-            if len(target_pool_symbols) != after_source["raw_row_count"]:
-                raise PreviewHttpError(
-                    409,
-                    "SOURCE_LAUNCH_WATCH_TARGET_POOL_MISMATCH",
-                    "D0目标态来源代码集合未闭合到目标Raw分母",
-                )
-            try:
-                membership_started = time.perf_counter()
-                membership_read = read_tdx_sector_memberships_for_symbols(
-                    self.preview_server.state.config,
-                    source_symbols=source_symbols,
-                    target_session=target_session,
-                    industry_snapshot_id=industry_snapshot_id,
-                    concept_snapshot_id=concept_snapshot_id,
-                )
-                membership_read_wall_seconds = time.perf_counter() - membership_started
-                aggregation_started = time.perf_counter()
-                complete = build_d0_launch_watch_membership_result(
-                    changes, membership_read
-                )
-                aggregation_wall_seconds = time.perf_counter() - aggregation_started
-            except Exception as error:
-                mapped = _source_context_preview_error(error)
-                if mapped is None:
-                    raise
-                raise mapped from error
-
-            stocks = complete.get("stocks")
-            boards = complete.get("boards")
-            if (
-                not isinstance(stocks, list)
-                or not isinstance(boards, list)
-                or complete.get("global_new_stock_count") != len(stocks)
-                or len(stocks) != len(ft_rows)
-                or complete.get("source_package_id") != source_package_id
-                or complete.get("target_session") != target_session.isoformat()
-            ):
-                raise PreviewHttpError(
-                    409,
-                    "SOURCE_LAUNCH_WATCH_MEMBERSHIP_RESULT_INCOMPLETE",
-                    "板块关系联结没有闭合到完整D0新增来源股票集合",
-                )
-            from stock_a.storage.postgres.source_launch_watch_evidence import (
-                read_source_launch_watch_evidence,
-            )
-
-            evidence = read_source_launch_watch_evidence(
-                self.preview_server.state.config,
-                target_session=target_session,
-                source_package_id=source_package_id,
-                source_capture_id=after_source["source_capture_id"],
-                expected_source_count=after_source["raw_row_count"],
-                source_symbols=target_pool_symbols,
-                d1_history_session_count=d1_history_session_count,
-            )
-            ordered_symbols = [stock.get("source_symbol") for stock in stocks]
-            if (
-                any(not isinstance(symbol, str) for symbol in ordered_symbols)
-                or ordered_symbols != sorted(ordered_symbols)
-                or len(set(ordered_symbols)) != len(ordered_symbols)
-            ):
-                raise PreviewHttpError(
-                    409,
-                    "SOURCE_LAUNCH_WATCH_STOCK_ORDER_INVALID",
-                    "完整D0新增来源股票列表必须按唯一source_symbol升序闭合",
-                )
-            membership_snapshots = complete.get("membership_snapshots")
-            if not isinstance(membership_snapshots, list) or {
-                item.get("snapshot_id")
-                for item in membership_snapshots
-                if isinstance(item, Mapping)
-            } != {
-                value
-                for value in (industry_snapshot_id, concept_snapshot_id)
-                if value is not None
-            }:
-                raise PreviewHttpError(
-                    409,
-                    "SOURCE_LAUNCH_WATCH_SNAPSHOT_PAIR_INVALID",
-                    "板块归属必须返回请求绑定的行业与GN概念双快照",
-                )
-            return (
-                changes,
-                complete,
-                d0_reader_wall_seconds,
-                membership_read_wall_seconds,
-                aggregation_wall_seconds,
-                evidence,
-            )
-
-        actual_calendar = _official_calendar(target_session)
-        calendar_identity = {
-            key: actual_calendar[key] for key in ("calendar_id", "calendar_revision")
-        }
-        before_source = read_source_version_context(
-            self.preview_server.state.config,
-            target_session=before_session,
-            source_package_id=source_package_id,
-        )
-        after_source = read_source_version_context(
-            self.preview_server.state.config,
+        return self._source_launch_watch_focus_saved_page(
+            before_session=before_session,
             target_session=target_session,
+            research_cutoff=research_cutoff,
             source_package_id=source_package_id,
+            industry_snapshot_id=industry_snapshot_id,
+            concept_snapshot_id=concept_snapshot_id,
+            offset=offset,
+            limit=limit,
+            watch_group=watch_group,
+            d1_history_session_count=d1_history_session_count,
+            board_kind=board_kind,
+            board_native_id=board_native_id,
         )
-        cache_key = (
-            before_session,
-            target_session,
-            research_cutoff,
-            source_package_id,
-            before_source["source_capture_id"],
-            after_source["source_capture_id"],
-            calendar_revision,
-            industry_snapshot_id,
-            concept_snapshot_id,
-            d1_history_session_count,
-        )
-        watch, cache_hit = self.preview_server.state.source_d0_watch(
-            cache_key, build_full_watch
-        )
-        (
-            changes,
-            complete,
-            d0_reader_wall_seconds,
-            membership_read_wall_seconds,
-            aggregation_wall_seconds,
-            evidence,
-        ) = watch
-        transition_counts = changes["transition_counts"]
-        stocks = complete["stocks"]
-        boards = complete["boards"]
-        from stock_a.storage.postgres.sector_pulse_facts import (
-            SectorPulsePgError,
-            read_source_sector_pulse_day,
-        )
-        from stock_a.storage.postgres.sector_pulse_transitions import (
-            read_source_sector_pulse_transitions,
-        )
-        from stock_a.storage.postgres.sector_pulse_followups import (
-            SectorPulseFollowupPgError,
-            read_source_sector_pulse_followups,
-        )
-
-        try:
-            sector_pulse = read_source_sector_pulse_day(
-                self.preview_server.state.config,
-                target_session=target_session,
-                source_package_id=source_package_id,
-                source_capture_id=after_source["source_capture_id"],
-                source_pool_count=after_source["raw_row_count"],
-                snapshot_ids={
-                    "INDUSTRY": industry_snapshot_id,
-                    "CONCEPT": concept_snapshot_id,
-                },
-            )
-            sector_pulse["target_session"] = target_session.isoformat()
-            sector_pulse["source_version"] = after_source
-            previous_sector_pulse = read_source_sector_pulse_day(
-                self.preview_server.state.config,
-                target_session=before_session,
-                source_package_id=source_package_id,
-                source_capture_id=before_source["source_capture_id"],
-                source_pool_count=before_source["raw_row_count"],
-                snapshot_ids={
-                    "INDUSTRY": industry_snapshot_id,
-                    "CONCEPT": concept_snapshot_id,
-                },
-            )
-            previous_sector_pulse["target_session"] = before_session.isoformat()
-            previous_sector_pulse["source_version"] = before_source
-            if previous_sector_pulse.get("status") != "AVAILABLE":
-                sector_pulse_transition = {
-                    "status": "NOT_COMPUTED",
-                    "reason_codes": [
-                        "PULSE_TRANSITION_PREVIOUS_DAY_FACTS_NOT_COMPUTED"
-                    ],
-                    "by_kind": {},
-                    "database_write_attempted": False,
-                    "ddl_executed": False,
-                    "dml_executed": False,
-                }
-            else:
-                sector_pulse_transition = read_source_sector_pulse_transitions(
-                    self.preview_server.state.config,
-                    previous_result=previous_sector_pulse,
-                    target_result=sector_pulse,
-                    calendar_identity=calendar_identity,
-                )
-            followup_calendar = _official_calendar(research_cutoff)
-            followup_sessions = tuple(followup_calendar["sessions"])
-            try:
-                followup_index = followup_sessions.index(target_session)
-                followup_targets = {
-                    horizon: followup_sessions[followup_index + horizon]
-                    if followup_index + horizon < len(followup_sessions)
-                    else None
-                    for horizon in (1, 3, 5)
-                }
-            except ValueError:
-                followup_targets = {horizon: None for horizon in (1, 3, 5)}
-            sector_pulse_followup = read_source_sector_pulse_followups(
-                self.preview_server.state.config,
-                pulse_day=sector_pulse,
-                research_cutoff=research_cutoff,
-                horizon_targets=followup_targets,
-                calendar_identity=followup_calendar,
-            )
-        except (SectorPulsePgError, RawSourcePgError) as error:
-            sector_pulse = {
-                "status": "READ_ERROR",
-                "reason_codes": [getattr(error, "code", "PULSE_PG_READ_FAILED")],
-                "by_kind": {},
-                "database_write_attempted": False,
-                "cross_period_recalculated": False,
-            }
-            sector_pulse_transition = {
-                "status": "READ_ERROR",
-                "reason_codes": [getattr(error, "code", "PULSE_PG_READ_FAILED")],
-                "by_kind": {},
-                "database_write_attempted": False,
-                "cross_period_recalculated": False,
-            }
-            sector_pulse_followup = {
-                "status": "READ_ERROR",
-                "reason_codes": [
-                    getattr(error, "code", "PULSE_FOLLOWUP_PG_READ_FAILED")
-                ],
-                "by_kind": {},
-                "database_write_attempted": False,
-                "cross_session_recalculated": False,
-            }
-        except SectorPulseFollowupPgError as error:
-            sector_pulse_followup = {
-                "status": "READ_ERROR",
-                "reason_codes": [
-                    getattr(error, "code", "PULSE_FOLLOWUP_PG_READ_FAILED")
-                ],
-                "by_kind": {},
-                "database_write_attempted": False,
-                "cross_session_recalculated": False,
-            }
-        except Exception as error:
-            sector_pulse_transition = {
-                "status": "READ_ERROR",
-                "reason_codes": [
-                    getattr(error, "code", "PULSE_TRANSITION_PG_READ_FAILED")
-                ],
-                "by_kind": {},
-                "database_write_attempted": False,
-                "cross_period_recalculated": False,
-            }
-            sector_pulse_followup = {
-                "status": "READ_ERROR",
-                "reason_codes": [getattr(error, "code", "PULSE_FOLLOWUP_READ_FAILED")],
-                "by_kind": {},
-                "database_write_attempted": False,
-                "cross_session_recalculated": False,
-            }
-        for board in boards:
-            kind = board.get("board_kind")
-            group = sector_pulse.get("by_kind", {}).get(kind, {})
-            board_id = board.get("board_native_id")
-            fact = group.get("facts", {}).get(board_id)
-            if group.get("status") == "AVAILABLE" and isinstance(fact, Mapping):
-                board["cross_period_pulse"] = fact
-            else:
-                board["cross_period_pulse"] = {
-                    "status": group.get(
-                        "status",
-                        "NOT_COMPUTED"
-                        if group
-                        else sector_pulse.get("status", "NOT_COMPUTED"),
-                    ),
-                    "reason_codes": group.get(
-                        "reason_codes", ["PULSE_BOARD_FACT_NOT_AVAILABLE"]
-                    ),
-                    "snapshot_id": group.get("snapshot_id"),
-                    "formal_rotation_state": "NOT_EVALUATED",
-                    "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                }
-            transition_group = sector_pulse_transition.get("by_kind", {}).get(kind, {})
-            transition_fact = transition_group.get("facts", {}).get(board_id)
-            if transition_group.get("status") == "AVAILABLE" and isinstance(
-                transition_fact, Mapping
-            ):
-                board["cross_period_pulse_transition"] = transition_fact
-            else:
-                board["cross_period_pulse_transition"] = {
-                    "status": transition_group.get(
-                        "status", sector_pulse_transition.get("status", "NOT_COMPUTED")
-                    ),
-                    "reason_codes": transition_group.get(
-                        "reason_codes",
-                        sector_pulse_transition.get(
-                            "reason_codes",
-                            ["PULSE_TRANSITION_FACTS_NOT_SAVED_FOR_EXACT_INPUT"],
-                        ),
-                    ),
-                    "snapshot_id": transition_group.get("snapshot_id"),
-                    "formal_rotation_state": "NOT_EVALUATED",
-                    "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                }
-            followup_group = sector_pulse_followup.get("by_kind", {}).get(kind, {})
-            followup_fact = followup_group.get("facts", {}).get(board_id)
-            if isinstance(followup_fact, Mapping):
-                board["cross_period_pulse_followup"] = followup_fact
-            else:
-                board["cross_period_pulse_followup"] = {
-                    "status": followup_group.get(
-                        "status", sector_pulse_followup.get("status", "NOT_COMPUTED")
-                    ),
-                    "reason_codes": followup_group.get(
-                        "reason_codes",
-                        sector_pulse_followup.get(
-                            "reason_codes", ["PULSE_FOLLOWUP_NOT_AVAILABLE"]
-                        ),
-                    ),
-                    "horizons": [],
-                    "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                    "research_mode": "NON_PIT_RETROSPECTIVE",
-                    "price_coordinate": "RAW_UNADJUSTED",
-                }
-        from stock_a.application.source_launch_watch_order import (
-            order_source_launch_watch,
-        )
-
-        ordered = order_source_launch_watch(
-            stocks,
-            boards,
-            evidence.get("by_symbol", {}),
-            evidence_status=evidence.get("status", "UNKNOWN"),
-        )
-        stocks = ordered["stocks"]
-        boards = ordered["boards"]
-        quality_by_kind = {}
-        for snapshot in complete.get("membership_snapshots", []):
-            counts = snapshot.get("source_quality_counts")
-            counts = counts if isinstance(counts, dict) else {}
-            quality_by_kind[snapshot.get("board_kind")] = {
-                "snapshot_id": snapshot.get("snapshot_id"),
-                "source_kind": snapshot.get("source_kind"),
-                "quality": counts.get("quality", "UNKNOWN"),
-                "source_unmapped_rows": counts.get("unmapped_source_rows"),
-                "membership_mode": snapshot.get("membership_mode")
-                or "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-            }
-        for board in boards:
-            board["membership_source_quality"] = quality_by_kind.get(
-                board.get("board_kind"),
-                {"quality": "UNKNOWN", "source_unmapped_rows": None},
-            )
-        filtered = stocks
-        if board_kind is not None and board_native_id is not None:
-            filtered = [
-                stock
-                for stock in stocks
-                if any(
-                    membership.get("board_kind") == board_kind
-                    and membership.get("board_native_id") == board_native_id
-                    and membership.get("snapshot_id")
-                    == (
-                        industry_snapshot_id
-                        if board_kind == "INDUSTRY"
-                        else concept_snapshot_id
-                    )
-                    for membership in stock.get("also_in_sectors", ())
-                )
-            ]
-        filtered_total = len(filtered)
-        d0_stock_by_symbol = {item["source_symbol"]: item for item in stocks}
-        change_by_symbol = {
-            item["source_symbol"]: item
-            for item in changes["results"]
-            if item.get("transition") != "BEFORE_ONLY"
-        }
-        evidence_by_symbol = evidence.get("by_symbol", {})
-        watch_rows_by_group: dict[str, list[dict[str, Any]]] = {
-            "D0_NEW": [],
-            "SEED_RULE": [],
-            "D1_MATERIAL": [],
-            "UNKNOWN": [],
-        }
-        for symbol in sorted(change_by_symbol):
-            change = change_by_symbol[symbol]
-            before_change = change.get("before")
-            after_change = change.get("after")
-            d0_change = {
-                "transition": change.get("transition"),
-                "before_state": before_change.get("scenario_raw")
-                if isinstance(before_change, Mapping)
-                else None,
-                "after_state": after_change.get("scenario_raw")
-                if isinstance(after_change, Mapping)
-                else None,
-            }
-            if change.get("transition") == "FALSE_TO_TRUE":
-                item = d0_stock_by_symbol.get(symbol)
-                if item is not None:
-                    watch_rows_by_group["D0_NEW"].append(
-                        {**item, "watch_group": "D0_NEW", "d0_change": d0_change}
-                    )
-                continue
-            item_evidence = evidence_by_symbol.get(symbol, {})
-            seed = item_evidence.get("seed", {})
-            rules = item_evidence.get("rules", {}).get("facts", {})
-            d1 = item_evidence.get("d1", {})
-            has_seed_rule = any(
-                candidate.get("state") == "TRUE"
-                for candidate in (
-                    seed.get("source_seed", {}),
-                    seed.get("s1", {}),
-                    seed.get("s2", {}),
-                    *rules.values(),
-                )
-            )
-            group = (
-                "SEED_RULE"
-                if has_seed_rule
-                else "D1_MATERIAL"
-                if int(d1.get("material_change_anchor_count") or 0) > 0
-                else "UNKNOWN"
-                if any(
-                    item_evidence.get(scope, {}).get("status")
-                    in {"UNKNOWN", "PARTIAL", "NOT_COMPUTED"}
-                    for scope in ("seed", "d1", "rules")
-                )
-                or any(
-                    candidate.get("state") == "UNKNOWN"
-                    for candidate in (
-                        seed.get("source_seed", {}),
-                        seed.get("s1", {}),
-                        seed.get("s2", {}),
-                        seed.get("safety", {}),
-                        *rules.values(),
-                    )
-                )
-                or d1.get("target_price_quality") == "UNKNOWN"
-                else None
-            )
-            if group is None:
-                continue
-            reason_codes = []
-            for scope in ("seed", "d1", "rules"):
-                detail = item_evidence.get(scope, {})
-                reason_codes.extend(detail.get("reason_codes", ()))
-                if scope == "seed":
-                    for state_name in ("source_seed", "s1", "s2", "safety"):
-                        reason_codes.extend(
-                            detail.get(state_name, {}).get("reasons", ())
-                        )
-                elif scope == "d1":
-                    reason_codes.extend(detail.get("target_price_reasons", ()))
-                else:
-                    for rule_fact in detail.get("facts", {}).values():
-                        reason_codes.extend(rule_fact.get("reasons", ()))
-            if not reason_codes:
-                reason_codes.append("UNKNOWN_REASON_NOT_PERSISTED")
-            watch_rows_by_group[group].append(
-                {
-                    "source_symbol": symbol,
-                    "market": change.get("market"),
-                    "transition": change.get("transition"),
-                    "d0_change": d0_change,
-                    "watch_group": group,
-                    "observation_reason": (
-                        "已保存Seed/S1/S2或冻结规则为TRUE"
-                        if group == "SEED_RULE"
-                        else "已保存D1结构材料变化锚点"
-                        if group == "D1_MATERIAL"
-                        else "研究事实缺失或存在UNKNOWN，需核对"
-                    ),
-                    "unknown_reason_codes": sorted(set(reason_codes)),
-                    "research_evidence": item_evidence,
-                }
-            )
-        watch_group_counts = {
-            group: len(rows) for group, rows in watch_rows_by_group.items()
-        }
-        if watch_group == "D0_NEW":
-            d0_watch_by_symbol = {
-                item["source_symbol"]: item for item in watch_rows_by_group["D0_NEW"]
-            }
-            if any(
-                stock["source_symbol"] not in d0_watch_by_symbol for stock in filtered
-            ):
-                raise PreviewHttpError(
-                    409,
-                    "SOURCE_LAUNCH_WATCH_D0_GROUP_INCOMPLETE",
-                    "D0新增页面行未闭合到保存的前后态迁移事实",
-                )
-            watch_group_rows = [
-                d0_watch_by_symbol[stock["source_symbol"]] for stock in filtered
-            ]
-        else:
-            watch_group_rows = watch_rows_by_group[watch_group]
-        filtered_total = (
-            len(filtered) if watch_group == "D0_NEW" else len(watch_group_rows)
-        )
-        page = watch_group_rows[offset : offset + limit]
-        page_symbols = sorted({item["source_symbol"] for item in page})
-        if page_symbols:
-            from stock_a.storage.postgres.research_enrollment import (
-                read_enrollments_for_symbols,
-            )
-
-            enrollment_by_symbol = read_enrollments_for_symbols(
-                self.preview_server.state.config,
-                target=target_session,
-                package=source_package_id,
-                capture=after_source["source_capture_id"],
-                before=before_session,
-                before_capture=before_source["source_capture_id"],
-                include_d0=True,
-                symbols=page_symbols,
-                rule_scope=(
-                    evidence.get("rule_scope")
-                    if evidence.get("rules_status") == "AVAILABLE"
-                    else None
-                ),
-            )
-            page_enrollments = [
-                entry
-                for symbol in page_symbols
-                for entry in enrollment_by_symbol.get(symbol, [])
-            ]
-            official_sessions = _official_calendar(research_cutoff)["sessions"]
-            successor_sessions = tuple(
-                day
-                for day in official_sessions
-                if target_session < day <= research_cutoff
-            )
-            page_followups = (
-                _read_enrollment_followups_page(
-                    self.preview_server.state.config,
-                    target=target_session,
-                    cutoff=research_cutoff,
-                    enrollment_ids=[entry["id"] for entry in page_enrollments],
-                    successor_sessions=successor_sessions,
-                )
-                if target_session in official_sessions
-                else {
-                    entry["id"]: {
-                        "status": "UNKNOWN",
-                        "reason": "CALENDAR_WINDOW_UNAVAILABLE",
-                    }
-                    for entry in page_enrollments
-                }
-            )
-            for entry in page_enrollments:
-                entry["followup"] = page_followups[entry["id"]]
-            _attach_t0_early_contexts(
-                self.preview_server.state.config, page_enrollments
-            )
-            for stock in page:
-                registrations = enrollment_by_symbol.get(stock["source_symbol"], [])
-                followup_states = {
-                    entry["followup"]["status"] for entry in registrations
-                }
-                followup_reasons = {
-                    entry["followup"]["reason"] for entry in registrations
-                }
-                t0_status = (
-                    "ENTRY"
-                    if any(entry["kind"] == "ENTRY" for entry in registrations)
-                    else "DAILY_LANDMARK"
-                    if any(entry["kind"] == "DAILY_LANDMARK" for entry in registrations)
-                    else "FIRST_OBSERVED_LEFT_CENSORED"
-                    if registrations
-                    else "UNKNOWN"
-                    if stock.get("watch_group") == "UNKNOWN"
-                    else "KNOWN_NO_SIGNAL"
-                    if stock.get("watch_group") == "KNOWN_NO_SIGNAL"
-                    else "NOT_COMPUTED"
-                )
-                stock["t0_observation"] = {
-                    "status": t0_status,
-                    "enrollments": registrations,
-                    "reason": "NO_STORED_FACT" if not registrations else None,
-                    "followup_status": next(iter(followup_states))
-                    if len(followup_states) == 1
-                    else "MULTIPLE"
-                    if followup_states
-                    else "NOT_COMPUTED",
-                    "followup_reason": next(iter(followup_reasons))
-                    if len(followup_reasons) == 1
-                    else "SEE_RULE_DETAILS"
-                    if followup_reasons
-                    else "NO_STORED_FACT",
-                    "target_session": target_session.isoformat(),
-                    "source_package_id": source_package_id,
-                    "source_capture_id": after_source["source_capture_id"],
-                    "profile_revision": (evidence.get("seed_scope") or {}).get(
-                        "profile_revision"
-                    ),
-                    "rule_version": (evidence.get("rule_scope") or {}).get(
-                        "rule_version"
-                    ),
-                    "scope": "NON_PIT_EXPLORATORY",
-                    "price_coordinate": "RAW_UNADJUSTED",
-                    "research_only": True,
-                }
-        for stock in page:
-            stock["detail_request"] = {
-                "method": "POST",
-                "path": "/api/preview/stock-timeline",
-                "body": {
-                    "symbol": stock["source_symbol"],
-                    "target_session": target_session.isoformat(),
-                    "source_package_id": source_package_id,
-                    "session_count": 75,
-                    "include_source_change_context": True,
-                    "research_cutoff": research_cutoff.isoformat(),
-                    "before_session": before_session.isoformat(),
-                    "before_source_package_id": source_package_id,
-                    "industry_snapshot_id": industry_snapshot_id,
-                    "concept_snapshot_id": concept_snapshot_id,
-                },
-            }
-
-        return {
-            "ok": True,
-            "contract": "STOCK_A_SOURCE_LAUNCH_WATCH_API_R1",
-            "request_identity": {
-                "before_session": before_session.isoformat(),
-                "target_session": target_session.isoformat(),
-                "research_cutoff": research_cutoff.isoformat(),
-                "source_package_id": source_package_id,
-                "industry_snapshot_id": industry_snapshot_id,
-                "concept_snapshot_id": concept_snapshot_id,
-                "calendar_revision": calendar_revision,
-            },
-            "source_change_status": {
-                "identity_status": "SOURCE_SYMBOL_ONLY",
-                "scenario": "LAUNCH_CONFIRM",
-                "transition": "FALSE_TO_TRUE",
-                "scenario_role": "DIAGNOSTIC_ONLY",
-                "price_coordinate": "RAW_UNADJUSTED",
-                "pit_status": "NON_PIT_RETROSPECTIVE",
-                "formal_admission_status": changes.get("formal_admission_status"),
-                "formal_status": "FORMAL_NOT_EVALUATED",
-                "formal_evaluation_status": "NOT_EVALUATED",
-                "seed_status": "NOT_EVALUATED",
-                "research_universe_status": "UNKNOWN",
-                "official_listing_universe_status": "UNKNOWN_NOT_CONNECTED",
-                "priority_status": "NOT_EVALUATED",
-                "d0_contract": changes.get("contract"),
-                "d0_producer_version": changes.get("producer_version"),
-                "endpoints": {
-                    "before": changes.get("before"),
-                    "after": changes.get("after"),
-                },
-                "transition_counts": transition_counts,
-                "source_key_set": changes.get("source_key_set"),
-            },
-            "membership_status": {
-                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-                "snapshots": complete.get("membership_snapshots"),
-                "missing_membership_kinds": complete.get(
-                    "missing_membership_kinds", []
-                ),
-                "global_new_stock_count": complete["global_new_stock_count"],
-                "mapped_distinct_source_symbol_count": complete[
-                    "mapped_distinct_source_symbol_count"
-                ],
-                "unmapped_distinct_source_symbol_count": complete[
-                    "unmapped_distinct_source_symbol_count"
-                ],
-                "board_membership_relation_count": complete[
-                    "board_membership_relation_count"
-                ],
-            },
-            "filter": {
-                "board_kind": board_kind,
-                "board_native_id": board_native_id,
-                "global_total": complete["global_new_stock_count"],
-                "filtered_total": filtered_total,
-                "watch_group": watch_group,
-            },
-            "watch_groups": {
-                "counts": watch_group_counts,
-                "target_source_pool_denominator": len(change_by_symbol),
-                "unassigned_known_false_count": max(
-                    0,
-                    len(change_by_symbol) - sum(watch_group_counts.values()),
-                ),
-                "grouping": "D0_NEW > SEED_RULE > D1_MATERIAL > UNKNOWN",
-            },
-            "pagination": {
-                "offset": offset,
-                "limit": limit,
-                "page_count": len(page),
-                "next_offset": offset + len(page)
-                if offset + len(page) < filtered_total
-                else None,
-            },
-            "boards": boards,
-            "observation_ordering": ordered["stock_summary"],
-            "board_selection": ordered["board_summary"],
-            "stored_evidence_status": {
-                "status": evidence.get("status", "UNKNOWN"),
-                "seed": evidence.get("seed_status", "UNKNOWN"),
-                "d1": evidence.get("d1_status", "UNKNOWN"),
-                "rules": evidence.get("rules_status", "UNKNOWN"),
-                "seed_scope": evidence.get("seed_scope"),
-                "rule_scope": evidence.get("rule_scope"),
-                "d1_scope": evidence.get("d1_scope"),
-            },
-            "sector_pulse_followup_comparison": {
-                kind: sector_pulse_followup.get("by_kind", {})
-                .get(kind, {})
-                .get(
-                    "comparison",
-                    {
-                        "status": sector_pulse_followup.get("status", "NOT_COMPUTED"),
-                        "reason_codes": sector_pulse_followup.get(
-                            "reason_codes",
-                            ["PULSE_FOLLOWUP_COMPARISON_NOT_AVAILABLE"],
-                        ),
-                        "horizons": [],
-                    },
-                )
-                for kind in ("INDUSTRY", "CONCEPT")
-            },
-            "sector_pulse_status": sector_pulse.get("status", "NOT_COMPUTED"),
-            "sector_pulse_transition_status": sector_pulse_transition.get(
-                "status", "NOT_COMPUTED"
-            ),
-            "sector_pulse_transition_reason_codes": sector_pulse_transition.get(
-                "reason_codes", []
-            ),
-            "sector_pulse_followup_status": sector_pulse_followup.get(
-                "status", "NOT_COMPUTED"
-            ),
-            "results": page,
-            "execution": {
-                "d0_full_pool_computed_before_selection": True,
-                "board_membership_read": (
-                    "REUSED_COMPLETE_SNAPSHOT"
-                    if cache_hit
-                    else "BATCHED_AVAILABLE_SNAPSHOTS_READ_ONLY"
-                    if complete.get("missing_membership_kinds")
-                    else "BATCHED_TWO_SNAPSHOT_READ_ONLY"
-                ),
-                "cache_hit": cache_hit,
-                "d0_reader_wall_seconds": d0_reader_wall_seconds,
-                "d0_reader_execution": None if cache_hit else changes.get("execution"),
-                "membership_read_wall_seconds": membership_read_wall_seconds,
-                "membership_read_execution": None
-                if cache_hit
-                else complete.get("membership_read_execution"),
-                "membership_aggregation_wall_seconds": aggregation_wall_seconds,
-                "api_server_processing_wall_seconds": (
-                    time.perf_counter() - request_started
-                ),
-                "api_server_process_cpu_seconds": (
-                    time.process_time() - request_cpu_started
-                ),
-                "d1_full_universe_scan": False,
-                "cross_period_calculation_triggered": False,
-                "sector_pulse_pg_read_only": True,
-                "sector_pulse_cross_period_recalculated": False,
-                "sector_pulse_database_write_attempted": False,
-                "sector_pulse_transition_pg_read_only": True,
-                "sector_pulse_transition_cross_period_recalculated": False,
-                "sector_pulse_transition_database_write_attempted": False,
-                "sector_pulse_followup_pg_read_only": True,
-                "sector_pulse_followup_cross_session_recalculated": False,
-                "sector_pulse_followup_raw_scan_triggered": False,
-                "sector_pulse_followup_database_write_attempted": False,
-                "sector_pulse_followup_ddl_executed": False,
-                "sector_pulse_followup_dml_executed": False,
-                "stored_research_evidence_execution": evidence.get("execution"),
-                "database_write": False,
-                "ddl_executed": False,
-                "dml_executed": False,
-            },
-        }
 
     def _board_comparison(self, body: Any) -> dict[str, Any]:
         required = {
@@ -3806,6 +2984,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     if source_context.get("status") == "AVAILABLE":
                         from stock_a.storage.postgres.t0_early_observations import (
                             read_source_t0_early_observations_for_symbols,
+                            read_source_t0_early_triage_summaries_for_symbols,
                         )
 
                         symbols = [
@@ -3827,6 +3006,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             if symbols
                             else {}
                         )
+                        triage_by_symbol = (
+                            read_source_t0_early_triage_summaries_for_symbols(
+                                self.preview_server.state.config,
+                                target_session=target,
+                                source_package_id=source_package_id,
+                                source_capture_id=source_context["source_capture_id"],
+                                source_symbols=sorted(set(symbols)),
+                            )
+                            if symbols
+                            else {}
+                        )
                         for member in members:
                             if isinstance(member, dict):
                                 member["t0_early_observations"] = (
@@ -3838,6 +3028,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                                     "AVAILABLE"
                                     if member["t0_early_observations"]
                                     else "NO_STORED_FACT"
+                                )
+                                member["t0_early_triage_summary"] = (
+                                    triage_by_symbol.get(
+                                        member.get("source_symbol"),
+                                        {
+                                            "status": "NO_STORED_FACT",
+                                            "triage_state": "NO_T0_FACT",
+                                        },
+                                    )
                                 )
                 self._send_json(200, {"ok": True, **result})
                 return
@@ -5105,6 +4304,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "/api/preview/stock",
             "/api/preview/stock-timeline",
             "/api/preview/source-launch-watch",
+            "/api/preview/t0-early-observations",
             "/api/preview/sector-change-stocks",
             "/api/product/d1-material",
             "/api/product/board-comparison",
@@ -5123,6 +4323,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     400,
                     "SOURCE_LAUNCH_WATCH_QUERY_REJECTED",
                     "来源级变化观察POST只接受JSON请求体，不接受查询参数",
+                )
+            )
+            return
+        if post_path == "/api/preview/t0-early-observations" and self.path != post_path:
+            self._error(
+                PreviewHttpError(
+                    400,
+                    "T0_EARLY_DETAIL_QUERY_REJECTED",
+                    "T0板内详情POST只接受JSON请求体，不接受查询参数",
                 )
             )
             return
@@ -5201,6 +4410,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 ) from error
             if post_path == "/api/preview/source-launch-watch":
                 self._send_json(200, self._source_launch_watch(body))
+                return
+            if post_path == "/api/preview/t0-early-observations":
+                self._send_json(200, self._source_t0_early_observations(body))
                 return
             if post_path == "/api/product/d1-material":
                 self._send_json(200, self._d1_material(body))
@@ -5854,6 +5066,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 for entry in entries:
                     entry["followup"] = followups[entry["id"]]
                 _attach_t0_early_contexts(config, entries)
+                from stock_a.storage.postgres.t0_early_observations import (
+                    read_source_t0_early_triage_summaries_for_symbols,
+                )
+
+                triage_summary = read_source_t0_early_triage_summaries_for_symbols(
+                    config,
+                    target_session=target,
+                    source_package_id=source_package_id,
+                    source_capture_id=source_context["source_capture_id"],
+                    source_symbols=[symbol],
+                )[symbol]
                 followup_states = {entry["followup"]["status"] for entry in entries}
                 result["t0_observation"] = {
                     "status": "AVAILABLE"
@@ -5869,6 +5092,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     and before_source.get("status") == "AVAILABLE"
                     else "EXACT_SCOPE_UNAVAILABLE",
                     "enrollments": entries,
+                    "triage_summary": triage_summary,
                     "followup_status": next(iter(followup_states))
                     if len(followup_states) == 1
                     else "MULTIPLE"

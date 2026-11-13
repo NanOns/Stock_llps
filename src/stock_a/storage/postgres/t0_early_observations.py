@@ -731,11 +731,224 @@ def read_source_t0_early_observations_for_symbols(
     return result
 
 
+def read_source_t0_early_triage_summaries_for_symbols(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    source_package_id: int,
+    source_capture_id: int,
+    source_symbols: Sequence[str],
+) -> dict[str, dict[str, Any]]:
+    """只读汇总指定证券的已存T0证据分型，不取回完整板内关系。"""
+    symbols = tuple(sorted(set(source_symbols)))
+    if (
+        type(target_session) is not date
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or isinstance(source_symbols, (str, bytes))
+        or len(symbols) != len(source_symbols)
+        or len(symbols) > 50
+        or any(
+            not isinstance(item, str) or _SYMBOL.fullmatch(item) is None
+            for item in symbols
+        )
+    ):
+        raise T0EarlyObservationPgError(
+            "T0_EARLY_SUMMARY_SCOPE_INVALID",
+            "T0研判摘要必须限定到不超过50只精确来源代码",
+        )
+    if not symbols:
+        return {}
+
+    with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """WITH latest AS MATERIALIZED (
+    SELECT DISTINCT ON (o.enrollment_id,o.board_context_key)
+           o.enrollment_id,o.source_symbol,o.membership_snapshot_id,
+           o.board_kind,o.board_native_id,o.board_context_key,
+           o.membership_mode,o.hypothesis_version,o.research_mode,
+           o.price_coordinate,o.research_case,o.pulse_status,o.pulse_state,
+           o.membership_status,o.rps5_position,o.rps20_position,
+           o.counter_codes,o.unknown_codes
+    FROM source_t0_early_observation_facts o
+    WHERE o.target_session=%s AND o.source_package_id=%s
+      AND o.source_capture_id=%s AND o.source_symbol=ANY(%s)
+    ORDER BY o.enrollment_id,o.board_context_key,o.recorded_at DESC,o.id DESC
+), evidence AS MATERIALIZED (
+    SELECT o.*,c.board_name,
+           o.research_case IN ('D0_PULSE_TRUE_FRONT','D0_PULSE_APPEARED_FRONT')
+               AS has_support,
+           cardinality(o.counter_codes)>0 AS has_counter,
+           (cardinality(o.unknown_codes)>0
+            OR o.membership_status='UNKNOWN'
+            OR o.pulse_status<>'AVAILABLE'
+            OR o.pulse_state IN ('UNKNOWN','NOT_COMPUTED')
+            OR o.rps5_position IN ('UNKNOWN','NOT_COMPUTED')
+            OR o.rps20_position IN ('UNKNOWN','NOT_COMPUTED')) AS has_unknown
+    FROM latest o
+    LEFT JOIN tdx_sector_catalog c
+      ON c.snapshot_id=o.membership_snapshot_id
+     AND c.board_kind=o.board_kind
+     AND c.board_native_id=o.board_native_id
+), registration AS (
+    SELECT enrollment_id,source_symbol,
+           bool_or(has_support) AS has_support,
+           bool_or(has_counter) AS has_counter,
+           bool_or(has_unknown) AS has_unknown
+    FROM evidence
+    GROUP BY enrollment_id,source_symbol
+), symbol_state AS (
+    SELECT source_symbol,
+           bool_or(has_support) AS has_support,
+           bool_or(has_counter) AS has_counter,
+           bool_or(has_unknown) AS has_unknown,
+           count(*)::integer AS registration_count,
+           count(*) FILTER(WHERE has_support AND has_counter)::integer
+               AS mixed_registration_count
+    FROM registration
+    GROUP BY source_symbol
+), evidence_counts AS (
+    SELECT source_symbol,count(*)::integer AS relation_count,
+           count(*) FILTER(WHERE has_support)::integer AS support_relation_count,
+           count(*) FILTER(WHERE has_counter)::integer AS counter_relation_count,
+           count(*) FILTER(WHERE has_unknown)::integer AS unknown_relation_count,
+           array_agg(DISTINCT research_case ORDER BY research_case)
+               AS research_cases,
+           min(hypothesis_version) AS hypothesis_version,
+           min(membership_mode) AS membership_mode,
+           min(research_mode) AS research_mode,
+           min(price_coordinate) AS price_coordinate
+    FROM evidence
+    GROUP BY source_symbol
+), symbol_boards AS (
+    SELECT source_symbol,board_kind,board_native_id,
+           max(COALESCE(board_name,board_native_id)) AS board_name,
+           bool_or(has_support) AS has_support,
+           bool_or(has_counter) AS has_counter,
+           bool_or(has_unknown) AS has_unknown
+    FROM evidence
+    WHERE board_kind IS NOT NULL AND board_native_id IS NOT NULL
+    GROUP BY source_symbol,board_kind,board_native_id
+), board_summary AS (
+    SELECT source_symbol,
+           count(*) FILTER(WHERE has_support)::integer AS support_board_count,
+           count(*) FILTER(WHERE has_counter)::integer AS counter_board_count,
+           count(*) FILTER(WHERE has_unknown)::integer AS unknown_board_count,
+           (array_agg(board_name ORDER BY board_name COLLATE "C")
+               FILTER(WHERE has_support))[1:2] AS support_board_names,
+           (array_agg(board_name ORDER BY board_name COLLATE "C")
+               FILTER(WHERE has_counter))[1:2] AS counter_board_names
+    FROM symbol_boards
+    GROUP BY source_symbol
+), reason_summary AS (
+    SELECT source_symbol,
+           (array_agg(code ORDER BY code COLLATE "C"))[1:4]
+               AS unknown_reason_codes
+    FROM (
+        SELECT DISTINCT e.source_symbol,u.code
+        FROM evidence e
+        CROSS JOIN LATERAL unnest(e.unknown_codes) AS u(code)
+    ) codes
+    GROUP BY source_symbol
+)
+SELECT s.source_symbol,
+       CASE WHEN s.has_support AND s.has_counter THEN 'MIXED'
+            WHEN s.has_support THEN 'CURRENT_SAME_DIRECTION'
+            WHEN s.has_counter THEN 'CURRENT_COUNTER'
+            WHEN s.has_unknown THEN 'UNKNOWN'
+            ELSE 'NO_PROVED_CASE' END AS triage_state,
+       s.registration_count,s.mixed_registration_count,
+       e.relation_count,e.support_relation_count,e.counter_relation_count,
+       e.unknown_relation_count,
+       COALESCE(b.support_board_count,0),COALESCE(b.counter_board_count,0),
+       COALESCE(b.unknown_board_count,0),
+       COALESCE(b.support_board_names,'{}'::text[]),
+       COALESCE(b.counter_board_names,'{}'::text[]),
+       COALESCE(r.unknown_reason_codes,'{}'::text[]),e.research_cases,
+       e.hypothesis_version,e.membership_mode,e.research_mode,e.price_coordinate
+FROM symbol_state s
+JOIN evidence_counts e USING (source_symbol)
+LEFT JOIN board_summary b USING (source_symbol)
+LEFT JOIN reason_summary r USING (source_symbol)
+ORDER BY s.source_symbol COLLATE "C"
+            """,
+            (target_session, source_package_id, source_capture_id, list(symbols)),
+        )
+        rows = cursor.fetchall()
+
+    summaries = {
+        symbol: {
+            "status": "AVAILABLE",
+            "triage_state": triage_state,
+            "registration_count": int(registration_count),
+            "mixed_registration_count": int(mixed_registration_count),
+            "relation_count": int(relation_count),
+            "support_relation_count": int(support_relation_count),
+            "counter_relation_count": int(counter_relation_count),
+            "unknown_relation_count": int(unknown_relation_count),
+            "support_board_count": int(support_board_count),
+            "counter_board_count": int(counter_board_count),
+            "unknown_board_count": int(unknown_board_count),
+            "support_board_names": list(support_board_names or []),
+            "counter_board_names": list(counter_board_names or []),
+            "unknown_reason_codes": list(unknown_reason_codes or []),
+            "research_cases": list(research_cases or []),
+            "hypothesis_version": hypothesis_version,
+            "membership_mode": membership_mode,
+            "scope": research_mode,
+            "price_coordinate": price_coordinate,
+            "source_package_id": source_package_id,
+            "source_capture_id": source_capture_id,
+        }
+        for (
+            symbol,
+            triage_state,
+            registration_count,
+            mixed_registration_count,
+            relation_count,
+            support_relation_count,
+            counter_relation_count,
+            unknown_relation_count,
+            support_board_count,
+            counter_board_count,
+            unknown_board_count,
+            support_board_names,
+            counter_board_names,
+            unknown_reason_codes,
+            research_cases,
+            hypothesis_version,
+            membership_mode,
+            research_mode,
+            price_coordinate,
+        ) in rows
+    }
+    for symbol in symbols:
+        summaries.setdefault(
+            symbol,
+            {
+                "status": "NO_STORED_FACT",
+                "triage_state": "NO_T0_FACT",
+                "registration_count": 0,
+                "relation_count": 0,
+                "source_package_id": source_package_id,
+                "source_capture_id": source_capture_id,
+            },
+        )
+    return summaries
+
+
 __all__ = [
     "T0EarlyObservationPgError",
     "persist_source_t0_early_observation_facts",
     "read_source_t0_early_observation_inputs",
     "read_source_t0_early_observations_for_enrollments",
     "read_source_t0_early_observations_for_symbols",
+    "read_source_t0_early_triage_summaries_for_symbols",
     "read_source_t0_pulse_transition_facts",
 ]

@@ -1627,6 +1627,115 @@ def read_source_launch_watch_page(
                CASE WHEN d1_unknown_price THEN 'D1_TARGET_PRICE_UNKNOWN' END
            ]::text[], NULL) AS unknown_reason_codes
     FROM base b
+), t0_latest AS MATERIALIZED (
+    SELECT DISTINCT ON (o.enrollment_id,o.board_context_key)
+           o.enrollment_id,o.source_symbol,o.membership_snapshot_id,
+           o.board_kind,o.board_native_id,o.board_context_key,
+           o.membership_mode,o.hypothesis_version,o.research_mode,
+           o.price_coordinate,o.research_case,o.pulse_status,o.pulse_state,
+           o.membership_status,o.rps5_position,o.rps20_position,
+           o.counter_codes,o.unknown_codes
+    FROM source_t0_early_observation_facts o CROSS JOIN params p
+    WHERE o.target_session=p.target_session
+      AND o.source_package_id=p.source_package_id
+      AND o.source_capture_id=p.target_capture_id
+    ORDER BY o.enrollment_id,o.board_context_key,o.recorded_at DESC,o.id DESC
+), t0_evidence AS (
+    SELECT o.*,c.board_name,
+           (o.research_case IN ('D0_PULSE_TRUE_FRONT','D0_PULSE_APPEARED_FRONT'))
+               AS has_support,
+           cardinality(o.counter_codes)>0 AS has_counter,
+           (cardinality(o.unknown_codes)>0
+            OR o.membership_status='UNKNOWN'
+            OR o.pulse_status<>'AVAILABLE'
+            OR o.pulse_state IN ('UNKNOWN','NOT_COMPUTED')
+            OR o.rps5_position IN ('UNKNOWN','NOT_COMPUTED')
+            OR o.rps20_position IN ('UNKNOWN','NOT_COMPUTED')) AS has_unknown
+    FROM t0_latest o
+    LEFT JOIN tdx_sector_catalog c
+      ON c.snapshot_id=o.membership_snapshot_id
+     AND c.board_kind=o.board_kind
+     AND c.board_native_id=o.board_native_id
+), t0_by_registration AS MATERIALIZED (
+    SELECT enrollment_id,source_symbol,
+           bool_or(has_support) AS has_support,
+           bool_or(has_counter) AS has_counter
+    FROM t0_evidence
+    GROUP BY enrollment_id,source_symbol
+), t0_registration_summary AS (
+    SELECT source_symbol,
+           count(*) FILTER(WHERE has_support AND has_counter)::integer
+               AS mixed_registration_count
+    FROM t0_by_registration
+    GROUP BY source_symbol
+), t0_symbol_boards AS MATERIALIZED (
+    SELECT source_symbol,board_kind,board_native_id,
+           max(COALESCE(board_name,board_native_id)) AS board_name,
+           bool_or(has_support) AS has_support,
+           bool_or(has_counter) AS has_counter,
+           bool_or(has_unknown) AS has_unknown
+    FROM t0_evidence
+    WHERE board_kind IS NOT NULL AND board_native_id IS NOT NULL
+    GROUP BY source_symbol,board_kind,board_native_id
+), t0_board_summary AS (
+    SELECT source_symbol,
+           count(*) FILTER(WHERE has_support)::integer AS support_board_count,
+           count(*) FILTER(WHERE has_counter)::integer AS counter_board_count,
+           count(*) FILTER(WHERE has_unknown)::integer AS unknown_board_count,
+           (array_agg(board_name ORDER BY board_name COLLATE "C")
+               FILTER(WHERE has_support))[1:2] AS support_board_names,
+           (array_agg(board_name ORDER BY board_name COLLATE "C")
+               FILTER(WHERE has_counter))[1:2] AS counter_board_names
+    FROM t0_symbol_boards
+    GROUP BY source_symbol
+), t0_reason_codes AS (
+    SELECT source_symbol,
+           (array_agg(code ORDER BY code COLLATE "C"))[1:4]
+               AS unknown_reason_codes
+    FROM (
+        SELECT DISTINCT e.source_symbol,u.code
+        FROM t0_evidence e
+        CROSS JOIN LATERAL unnest(e.unknown_codes) AS u(code)
+    ) codes
+    GROUP BY source_symbol
+), t0_by_symbol AS MATERIALIZED (
+    SELECT e.source_symbol,
+           bool_or(e.has_support) AS has_support,
+           bool_or(e.has_counter) AS has_counter,
+           bool_or(e.has_unknown) AS has_unknown,
+           count(DISTINCT e.enrollment_id)::integer AS registration_count,
+           COALESCE(m.mixed_registration_count,0) AS mixed_registration_count,
+           count(*)::integer AS relation_count,
+           count(*) FILTER(WHERE e.has_support)::integer AS support_relation_count,
+           count(*) FILTER(WHERE e.has_counter)::integer AS counter_relation_count,
+           count(*) FILTER(WHERE e.has_unknown)::integer AS unknown_relation_count,
+           array_agg(DISTINCT e.research_case ORDER BY e.research_case)
+               AS research_cases,
+           COALESCE(b.support_board_count,0) AS support_board_count,
+           COALESCE(b.counter_board_count,0) AS counter_board_count,
+           COALESCE(b.unknown_board_count,0) AS unknown_board_count,
+           COALESCE(b.support_board_names,'{}'::text[]) AS support_board_names,
+           COALESCE(b.counter_board_names,'{}'::text[]) AS counter_board_names,
+           COALESCE(r.unknown_reason_codes,'{}'::text[]) AS unknown_reason_codes,
+           min(e.hypothesis_version) AS hypothesis_version,
+           min(e.membership_mode) AS membership_mode,
+           min(e.research_mode) AS research_mode,
+           min(e.price_coordinate) AS price_coordinate
+    FROM t0_evidence e
+    LEFT JOIN t0_board_summary b ON b.source_symbol=e.source_symbol
+    LEFT JOIN t0_reason_codes r ON r.source_symbol=e.source_symbol
+    LEFT JOIN t0_registration_summary m ON m.source_symbol=e.source_symbol
+    GROUP BY e.source_symbol,b.support_board_count,b.counter_board_count,
+             b.unknown_board_count,b.support_board_names,b.counter_board_names,
+             r.unknown_reason_codes,m.mixed_registration_count
+), t0_triage AS (
+    SELECT t.*,
+           CASE WHEN has_support AND has_counter THEN 'MIXED'
+                WHEN has_support THEN 'CURRENT_SAME_DIRECTION'
+                WHEN has_counter THEN 'CURRENT_COUNTER'
+                WHEN has_unknown THEN 'UNKNOWN'
+                ELSE 'NO_PROVED_CASE' END AS triage_state
+    FROM t0_by_symbol t
 ), group_counts AS (
     SELECT watch_group, count(*)::integer AS row_count
     FROM classified GROUP BY watch_group
@@ -1642,8 +1751,51 @@ def read_source_launch_watch_page(
             AND m.source_symbol=c.source_symbol
       ))
 ), page AS MATERIALIZED (
-    SELECT f.* FROM filtered f CROSS JOIN params p
-    ORDER BY f.source_symbol COLLATE "C"
+    SELECT f.*,
+           COALESCE(t.triage_state,'NO_T0_FACT') AS t0_triage_state,
+           CASE COALESCE(t.triage_state,'NO_T0_FACT')
+             WHEN 'CURRENT_SAME_DIRECTION' THEN 0
+             WHEN 'MIXED' THEN 1
+             WHEN 'CURRENT_COUNTER' THEN 2
+             WHEN 'UNKNOWN' THEN 3
+             WHEN 'NO_PROVED_CASE' THEN 4
+             ELSE 5
+           END::smallint AS t0_triage_rank,
+           CASE WHEN t.source_symbol IS NULL THEN
+             jsonb_build_object('status','NO_STORED_FACT','triage_state','NO_T0_FACT',
+                                'registration_count',0,'relation_count',0,
+                                'scope','NON_PIT_EXPLORATORY')
+           ELSE jsonb_build_object(
+             'status','AVAILABLE','triage_state',t.triage_state,
+             'registration_count',t.registration_count,'relation_count',t.relation_count,
+             'mixed_registration_count',t.mixed_registration_count,
+             'support_relation_count',t.support_relation_count,
+             'counter_relation_count',t.counter_relation_count,
+             'unknown_relation_count',t.unknown_relation_count,
+             'research_cases',t.research_cases,
+             'support_board_count',t.support_board_count,
+             'counter_board_count',t.counter_board_count,
+             'unknown_board_count',t.unknown_board_count,
+             'support_board_names',t.support_board_names,
+             'counter_board_names',t.counter_board_names,
+             'unknown_reason_codes',t.unknown_reason_codes,
+             'hypothesis_version',t.hypothesis_version,
+             'membership_mode',t.membership_mode,
+             'scope',t.research_mode,'price_coordinate',t.price_coordinate,
+             'source_package_id',(SELECT source_package_id FROM params),
+             'source_capture_id',(SELECT target_capture_id FROM params))
+           END AS t0_triage_summary
+    FROM filtered f CROSS JOIN params p
+    LEFT JOIN t0_triage t ON t.source_symbol=f.source_symbol
+    ORDER BY CASE COALESCE(t.triage_state,'NO_T0_FACT')
+               WHEN 'CURRENT_SAME_DIRECTION' THEN 0
+               WHEN 'MIXED' THEN 1
+               WHEN 'CURRENT_COUNTER' THEN 2
+               WHEN 'UNKNOWN' THEN 3
+               WHEN 'NO_PROVED_CASE' THEN 4
+               ELSE 5
+             END,
+             f.source_symbol COLLATE "C"
     OFFSET (SELECT page_offset FROM params)
     LIMIT (SELECT page_limit FROM params)
 )
@@ -1655,10 +1807,13 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
            'source_symbol',source_symbol,'market',market,'transition',transition,
            'before_state',before_state,'after_state',after_state,
            'watch_group',watch_group,'unknown_reason_codes',unknown_reason_codes,
+           't0_triage_state',t0_triage_state,
+           't0_triage_rank',t0_triage_rank,
+           't0_triage_summary',t0_triage_summary,
            'd0_scope_status',d0_scope_status,'seed_scope_status',seed_scope_status,
            'rule_scope_status',rule_scope_status,'d1_scope_status',d1_scope_status,
            'rules_match_seed',rules_match_seed
-       ) ORDER BY source_symbol COLLATE "C") FROM page), '[]'::jsonb),
+       ) ORDER BY t0_triage_rank,source_symbol COLLATE "C") FROM page), '[]'::jsonb),
        (SELECT d0 FROM scope_status), (SELECT seed FROM scope_status),
        (SELECT rules FROM scope_status), (SELECT d1 FROM scope_status),
        (SELECT rules_match_seed FROM scope_status),
@@ -1738,6 +1893,158 @@ SELECT COALESCE((SELECT jsonb_object_agg(watch_group,row_count) FROM group_count
             "source_rule_rows_expected_for_full_scope": expected_source_count
             * len(_RULE_IDS),
             "pg_page_query_seconds": time.perf_counter() - started,
+        },
+    }
+
+
+def read_source_launch_watch_d0_boards(
+    config: Mapping[str, Any],
+    *,
+    before_session: date,
+    target_session: date,
+    source_package_id: int,
+    before_capture_id: int,
+    target_capture_id: int,
+    expected_source_count: int,
+    industry_snapshot_id: int,
+    concept_snapshot_id: int,
+) -> dict[str, Any]:
+    """从已存D0事实集合式汇总板块摘要，完整成员行仍按需读取。"""
+    from stock_a.storage.postgres import source_raw
+
+    if (
+        type(before_session) is not date
+        or type(target_session) is not date
+        or before_session >= target_session
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or type(before_capture_id) is not int
+        or before_capture_id <= 0
+        or type(target_capture_id) is not int
+        or target_capture_id <= 0
+        or type(expected_source_count) is not int
+        or expected_source_count <= 0
+        or type(industry_snapshot_id) is not int
+        or type(concept_snapshot_id) is not int
+        or industry_snapshot_id <= 0
+        or concept_snapshot_id <= 0
+        or industry_snapshot_id == concept_snapshot_id
+    ):
+        raise ValueError("D0板块摘要读取范围无效")
+
+    started = time.perf_counter()
+    with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """WITH params AS (
+    SELECT %s::date AS before_session,%s::date AS target_session,
+           %s::bigint AS source_package_id,%s::bigint AS before_capture_id,
+           %s::bigint AS target_capture_id,%s::bigint AS expected_source_count,
+           %s::bigint AS industry_snapshot_id,%s::bigint AS concept_snapshot_id
+), scope_candidates AS MATERIALIZED (
+    SELECT d.producer_version,d.algorithm_contract,d.session_contract,
+           d.calendar_revision,count(*)::bigint AS fact_count,
+           count(DISTINCT d.source_symbol)::bigint AS symbol_count,
+           min(d.target_source_count)::bigint AS target_source_count,
+           max(d.target_source_count)::bigint AS target_source_count_max,
+           min(d.union_source_count)::bigint AS union_source_count,
+           max(d.union_source_count)::bigint AS union_source_count_max
+    FROM source_d0_launch_day_facts d CROSS JOIN params p
+    WHERE d.before_session=p.before_session AND d.target_session=p.target_session
+      AND d.source_package_id=p.source_package_id
+      AND d.before_capture_id=p.before_capture_id
+      AND d.target_capture_id=p.target_capture_id
+    GROUP BY d.producer_version,d.algorithm_contract,d.session_contract,
+             d.calendar_revision
+), scope_status AS (
+    SELECT CASE WHEN count(*)=0 THEN 'NOT_COMPUTED'
+                WHEN count(*)>1 THEN 'AMBIGUOUS'
+                WHEN bool_and(fact_count=union_source_count
+                              AND symbol_count=union_source_count
+                              AND target_source_count=target_source_count_max
+                              AND union_source_count=union_source_count_max
+                              AND target_source_count=(SELECT expected_source_count FROM params)
+                              AND union_source_count>=target_source_count)
+                     THEN 'AVAILABLE'
+                ELSE 'INCOMPLETE' END AS status
+    FROM scope_candidates
+), scope AS (
+    SELECT c.* FROM scope_candidates c
+    WHERE (SELECT status FROM scope_status)='AVAILABLE'
+), d0_new AS MATERIALIZED (
+    SELECT d.source_symbol
+    FROM source_d0_launch_day_facts d JOIN scope s
+      ON s.producer_version=d.producer_version
+     AND s.algorithm_contract=d.algorithm_contract
+     AND s.session_contract=d.session_contract
+     AND s.calendar_revision=d.calendar_revision
+    CROSS JOIN params p
+    WHERE d.before_session=p.before_session AND d.target_session=p.target_session
+      AND d.source_package_id=p.source_package_id
+      AND d.before_capture_id=p.before_capture_id
+      AND d.target_capture_id=p.target_capture_id
+      AND d.transition='FALSE_TO_TRUE'
+), board_counts AS (
+    SELECT c.snapshot_id,c.board_kind,c.board_native_id,c.board_name,
+           count(DISTINCT n.source_symbol)::integer AS new_member_count,
+           s.source_quality,s.observed_at
+    FROM d0_new n
+    CROSS JOIN params p
+    JOIN tdx_sector_members m ON m.source_symbol=n.source_symbol
+    JOIN tdx_sector_catalog c ON c.id=m.catalog_id
+      AND c.snapshot_id IN (p.industry_snapshot_id,p.concept_snapshot_id)
+      AND c.board_kind=m.board_kind AND c.board_native_id=m.board_native_id
+    JOIN tdx_sector_source_snapshots s ON s.snapshot_id=c.snapshot_id
+    GROUP BY c.snapshot_id,c.board_kind,c.board_native_id,c.board_name,
+             s.source_quality,s.observed_at
+), numbered AS (
+    SELECT b.*,row_number() OVER (
+        ORDER BY new_member_count DESC,
+                 CASE board_kind WHEN 'INDUSTRY' THEN 0 WHEN 'CONCEPT' THEN 1 ELSE 2 END,
+                 board_name COLLATE "C",board_native_id COLLATE "C"
+    )::integer AS observation_rank,
+    count(*) OVER()::integer AS total_board_count
+    FROM board_counts b WHERE new_member_count>0
+), page AS MATERIALIZED (
+    SELECT n.* FROM numbered n
+)
+SELECT (SELECT status FROM scope_status),
+       COALESCE((SELECT max(total_board_count) FROM numbered),0)::integer,
+       COALESCE((SELECT jsonb_agg(jsonb_build_object(
+          'snapshot_id',snapshot_id,'board_kind',board_kind,
+          'board_native_id',board_native_id,'board_name',board_name,
+          'new_member_count',new_member_count,'observation_rank',observation_rank,
+          'home_featured',observation_rank<=15,'source_quality',source_quality,
+          'observed_at',observed_at
+       ) ORDER BY observation_rank) FROM page),'[]'::jsonb)""",
+            (
+                before_session,
+                target_session,
+                source_package_id,
+                before_capture_id,
+                target_capture_id,
+                expected_source_count,
+                industry_snapshot_id,
+                concept_snapshot_id,
+            ),
+        )
+        status, total_boards, boards = cursor.fetchone()
+
+    return {
+        "status": status,
+        "total_board_count": int(total_boards or 0),
+        "boards": boards or [],
+        "execution": {
+            "transaction": "REPEATABLE READ READ ONLY",
+            "database_write_attempted": False,
+            "ddl_executed": False,
+            "dml_executed": False,
+            "summary_scope": "ALL_D0_CHANGED_BOARD_SUMMARIES",
+            "rows_returned_to_python": len(boards or []),
+            "pg_query_seconds": time.perf_counter() - started,
         },
     }
 
