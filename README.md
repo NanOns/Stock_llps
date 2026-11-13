@@ -46,7 +46,7 @@ Git只接收业务运行必需内容、需求、设计、正式需求变更和�
 
 业务开发路线是先抽取成熟内核，完成来源事实→PG→画像→API→页面，再按实际研究依赖扩展市场、板块、个股、变化识别与跟踪；每批具体验收和当前进度只维护在外部过程资料。首次源码移植不能直接导入旧仓，必须验证目标模块自身依赖闭合。
 
-PG默认G盘配置尚不代表Windows服务已经应用。旧E盘数据不自动迁移、复制、覆盖或切换；新项目写库前必须实际核验G盘路径。当前具备分质量日线解码、字段/窗口摘要和基础画像纯求值入口；不提供尚不存在的服务启动命令。纯函数调用显式注入单位/规则，规则JSON数字用Decimal解码，不在导入期读配置；模块导入根为src/，不依赖旧仓。
+PG默认G盘配置尚不代表Windows服务已经应用。旧E盘数据不自动迁移、复制、覆盖或切换；物理位置独立核验与业务数据库身份分别记录，用户确认但未独立核验的状态不得冒充实测通过。当前具备分质量日线解码、字段/窗口摘要和基础画像纯求值入口；开发服务启动方式见下文。纯函数调用显式注入单位/规则，规则JSON数字用Decimal解码，不在导入期读配置；模块导入根为src/，不依赖旧仓。
 
 本地Git准入钩子保存在.git/hooks，不进入Git或运行包；换机须恢复准入。远端按用户指定配置，不沿用旧仓远端。
 
@@ -108,20 +108,17 @@ python -m venv 'G:\codex_tmp\stock-a\venv'
 ```python
 from collections.abc import Mapping
 
-from stock_a.canonical.identity import semantic_digest
-from stock_a.domain import FieldValue
-from stock_a.research.profile import profile
+from stock_a.research.profile import ProfileHandoff, profile
 from stock_a.sources.tdx.day import UnitContract, decode_day_record
 
 def evaluate(raw32: bytes, units: UnitContract, field_id: str,
-             inputs: Mapping[str, FieldValue], rules: Mapping):
+             handoff: ProfileHandoff, rules: Mapping, field_registry: list[Mapping]):
     day = decode_day_record(raw32, units)
-    digest = semantic_digest((day.session_date, day.prices))
-    result = profile(field_id, inputs, rules)
-    return day, digest, result
+    result = profile(field_id, handoff, rules, field_registry)
+    return day, result
 ```
 
-调用方为 `evaluate` 提供原始32字节记录、单位合同、字段ID、带质量的输入和已登记规则；画像规则需符合字段合同。接口展示纯内核调用，不代表已完成真实来源采集、全域数值验收、数据库写入、服务或页面运行。
+调用方为 `evaluate` 提供原始32字节记录、单位合同、字段ID、带质量和上下文的ProfileHandoff、已登记规则及字段注册表；画像规则需符合字段合同。接口展示纯内核调用，不代表已完成真实来源采集、全域数值验收、数据库写入、服务或页面运行。
 
 ## TDX日线有界读取
 
@@ -144,7 +141,7 @@ with open_day_file(source_path, (bound_source_root,), units, limits) as scan:
     summary = scan.summary  # 仅在EOF、顺序/预算和最终句柄检查全部通过后可读
 ```
 
-`iter_day_records(readonly_stream, units, limits)`复用同一扫描内核，适用于调用方管理的非seekable二进制流，不关闭调用方流。文件入口使用只读Windows句柄，并核验句柄最终路径、身份及扫描前后大小/修改时点。超限、坏日期、重复/冲突、路径越界、扫描中变化及提前退出都不能获得完整摘要；已yield前缀不能视为完整输入。摘要中的原始字节SHA仅描述本次读取字节，不替代来源捕获、PIT时钟或业务版本。
+`iter_day_records(readonly_stream, units, limits)`复用同一扫描内核，适用于调用方管理的非seekable二进制流，不关闭调用方流。文件入口使用只读Windows句柄，并核验句柄最终路径、身份及扫描前后大小/修改时点。超限、坏日期、重复/冲突、路径越界、扫描中变化及提前退出都不能获得完整摘要；已yield前缀不能视为完整输入。读取摘要不替代来源捕获、PIT时钟或业务版本。
 
 ## TDX真实数据研究查询
 
@@ -193,7 +190,7 @@ JSON和短摘要另提供`coverage_summary`中的当前页实际目标Bar、目�
 
 在开发环境中，产品研究服务仅监听`127.0.0.1:28766`，页面从固定`stock_a.stock`读取Raw和画像；单股查询按日期和来源版本读取PG历史并调用现役Core/Profile。服务不写PG、不扫描来源ZIP、不联网、不保存结果；结果按实际数据范围和NON_PIT质量展示，不表示官方上市总体或正式选股。
 
-页面按明确日期、来源包SHA和代码筛选Raw与画像结果；没有可用数据时显示对应缺失或质量信息。
+页面按明确日期、数字来源包ID和代码筛选Raw与画像结果；没有可用数据时显示对应缺失或质量信息。
 
 ```powershell
 $researchCutoff = Read-Host '输入研究截止日（YYYY-MM-DD）'
@@ -226,7 +223,7 @@ for record in parsed.records:
         fields = record.xrxd_fields()  # Fraction精确值；单位由版本合同固定
 ```
 
-解码会保留输入顺序、重复记录、行质量、来源位置及未知类别；类别2–14的经济语义尚未接入类别1解释。市场/代码产生的`source_symbol`不等于稳定`security_id`，解析结果也不证明真实来源、PIT或公司行为准入。协议和类别1单位合同见[实现详细设计](docs/design/实现详细设计.md#32-gbbq协议与类别1解释)。
+解码会保留输入顺序、重复记录、行质量、来源位置及未知类别；类别2–14的经济语义尚未接入类别1解释。市场/代码产生的`source_symbol`不等于稳定`security_id`，解析结果也不证明真实来源、PIT或公司行为准入。协议和类别1单位合同见[算法合同§3](docs/design/算法合同与升级规则.md#3-canonical复权与制度)。
 
 ## 精确仿射坐标运输
 
@@ -268,4 +265,4 @@ adjusted = affine_price(11, factor, tick=context.tick)  # Fraction(109, 10)，�
 atr = transport_difference(2, factor)  # 2；仅乘alpha，不加beta
 ```
 
-同日多事件须传唯一`same_day_order`；缺序、重复引用、未知实体或不支持事件跨越均明确拒绝。正式`ADJ:`坐标在factor中绑定tick，省略或重复传入tick都按该绑定值计算；不同tick有不同目标坐标身份。需要精确未量化结果时，必须明确使用独立`RESEARCH:`坐标和`EXACT_RESEARCH`模式。正式价格只在最终目标坐标执行一次HALF_UP。完整合同见[实现详细设计§3.3](docs/design/实现详细设计.md#33-本地仿射)。
+同日多事件须传唯一`same_day_order`；缺序、重复引用、未知实体或不支持事件跨越均明确拒绝。正式`ADJ:`坐标在factor中绑定tick，省略或重复传入tick都按该绑定值计算；不同tick有不同目标坐标身份。需要精确未量化结果时，必须明确使用独立`RESEARCH:`坐标和`EXACT_RESEARCH`模式。正式价格只在最终目标坐标执行一次HALF_UP。完整合同见[算法合同§3](docs/design/算法合同与升级规则.md#3-canonical复权与制度)。

@@ -8,7 +8,6 @@ import json
 import math
 import os
 from pathlib import Path
-import re
 import stat
 import time
 from typing import Any
@@ -25,9 +24,6 @@ _PRIVATE_CONFIG_ROOT = Path("G:/codex work/Stock A/config/private")
 _MAX_CREDENTIAL_FILE_BYTES = 8192
 _CREDENTIAL_SCHEMA = "STOCK-A-PG-CREDENTIALS/R1"
 _BUSINESS_SCHEMA = "stock"
-_DEPLOYMENT_PROOF_MAX_AGE_SECONDS = 10.0
-_MAX_DEPLOYMENT_PROOFS = 128
-_DEPLOYMENT_PROOFS: dict[str, tuple[str, float, str]] = {}
 
 
 class _CredentialContractError(ValueError):
@@ -102,43 +98,6 @@ def _is_fixed_server_address(value: Any) -> bool:
         interface.version == 4
         and interface.network.prefixlen == 32
         and interface.ip == ipaddress.IPv4Address("127.0.0.1")
-    )
-
-
-def _configuration_snapshot(config: dict[str, Any]) -> str:
-    return json.dumps(
-        config,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
-    )
-
-
-def _deployment_snapshot(physical: dict[str, Any], checks: list[dict[str, Any]]) -> str:
-    deployment_checks = [
-        item
-        for item in checks
-        if isinstance(item, dict)
-        and isinstance(item.get("check"), str)
-        and item["check"].startswith(
-            (
-                "deployment_",
-                "actual_cluster_",
-                "business_backend_",
-                "resolved_",
-                "tablespace:",
-                "temporary_tablespaces",
-            )
-        )
-    ]
-    value = {"proof": physical.get("deployment_proof"), "checks": deployment_checks}
-    return json.dumps(
-        value,
-        sort_keys=True,
-        separators=(",", ":"),
-        ensure_ascii=False,
-        allow_nan=False,
     )
 
 
@@ -1352,34 +1311,6 @@ def inspect_postgres(
                 )
                 is True,
             }
-            if overall == "READY":
-                context = str(uuid.uuid4())
-                config_identity = _configuration_snapshot(config)
-                proof_expiry = time.monotonic() + _DEPLOYMENT_PROOF_MAX_AGE_SECONDS
-                result.update(
-                    {
-                        "inspection_context": context,
-                        "configuration_identity": config_identity,
-                        "deployment_proof_expires_in_seconds": _DEPLOYMENT_PROOF_MAX_AGE_SECONDS,
-                        "admission_actions": [],
-                    }
-                )
-                if physical_summary["deployment_storage_checks"] == "PASS":
-                    result["admission_actions"] = ["WRITE", "PUBLISH"]
-                    _DEPLOYMENT_PROOFS[context] = (
-                        config_identity,
-                        proof_expiry,
-                        _deployment_snapshot(physical_summary, result["checks"]),
-                    )
-                    now = time.monotonic()
-                    for stale_context in [
-                        key
-                        for key, value in _DEPLOYMENT_PROOFS.items()
-                        if value[1] < now
-                    ]:
-                        _DEPLOYMENT_PROOFS.pop(stale_context, None)
-                    while len(_DEPLOYMENT_PROOFS) > _MAX_DEPLOYMENT_PROOFS:
-                        _DEPLOYMENT_PROOFS.pop(next(iter(_DEPLOYMENT_PROOFS)))
             return result
     except Exception as error:
         # Do not include exception text: drivers can embed DSNs or server-provided private details.
@@ -1396,150 +1327,3 @@ def inspect_postgres(
             "checks": [],
             "database_connection": None,
         }
-
-
-def write_admission(
-    inspection: dict[str, Any],
-    *,
-    requested_context: str | None = None,
-    requested_configuration: dict[str, Any] | None = None,
-    requested_action: str | None = None,
-    requested_connection: Any | None = None,
-) -> tuple[bool, str]:
-    """在实际业务连接上重新核验并绑定一次性部署证明后决定是否可写。"""
-    if (
-        not isinstance(inspection, dict)
-        or inspection.get("status") != "DB_MIGRATION_READY"
-    ):
-        return False, "PostgreSQL身份或部署核验未就绪；拒绝新项目写入与发布"
-    physical = inspection.get("database_connection")
-    checks = inspection.get("checks")
-    if not isinstance(physical, dict) or not isinstance(checks, list):
-        return False, "PostgreSQL核验摘要不完整；拒绝新项目写入与发布"
-    if (
-        inspection.get("connection_attempted") is not True
-        or inspection.get("deployment_applied") is not True
-        or physical.get("session_user") != "stock_a"
-        or physical.get("current_user") != "stock_a"
-        or physical.get("database") != "stock_a"
-        or physical.get("schema") != "stock"
-        or physical.get("business_schema_exists") is not True
-        or physical.get("database_owner") != "stock_a"
-        or (physical.get("business_schema") or {}).get("owner") != "stock_a"
-        or physical.get("role_attributes", {}).get("rolsuper") is not False
-        or physical.get("role_attributes", {}).get("rolcreatedb") is not False
-        or physical.get("role_attributes", {}).get("rolcreaterole") is not False
-        or physical.get("role_attributes", {}).get("rolbypassrls") is not False
-        or physical.get("role_attributes", {}).get("owns_business_objects") is not True
-        or not checks
-        or any(
-            not isinstance(item, dict) or item.get("status") != "PASS"
-            for item in checks
-        )
-    ):
-        return (
-            False,
-            "真实stock_a登录、数据库身份或部署核验不匹配；拒绝新项目写入与发布",
-        )
-    context = inspection.get("inspection_context")
-    if (
-        not isinstance(context, str)
-        or not context
-        or requested_context != context
-        or requested_action not in ("WRITE", "PUBLISH")
-        or requested_action not in inspection.get("admission_actions", [])
-    ):
-        return False, "写入请求未绑定本次核验上下文、配置或允许动作"
-    try:
-        requested_snapshot = (
-            _configuration_snapshot(requested_configuration)
-            if isinstance(requested_configuration, dict)
-            else None
-        )
-    except (TypeError, ValueError):
-        requested_snapshot = None
-    if requested_snapshot != inspection.get("configuration_identity"):
-        return False, "写入请求配置与实际核验配置不一致"
-    proof_binding = _DEPLOYMENT_PROOFS.pop(context, None)
-    if (
-        proof_binding is None
-        or proof_binding[0] != requested_snapshot
-        or time.monotonic() > proof_binding[1]
-        or physical.get("deployment_storage_checks") != "PASS"
-        or not isinstance(physical.get("deployment_proof"), dict)
-        or physical["deployment_proof"].get("cluster_system_identifier")
-        != requested_configuration.get("application_identity", {}).get(
-            "cluster_system_identifier"
-        )
-        or _deployment_snapshot(physical, checks) != proof_binding[2]
-    ):
-        return (
-            False,
-            "独立部署存储证明缺失、过期或与当前配置/实际簇不匹配；拒绝新项目写入与发布",
-        )
-    if requested_connection is None:
-        return False, "写入准入必须绑定即将执行写入的真实stock_a数据库连接"
-    try:
-        deadline = time.monotonic() + _MAX_INSPECTION_SECONDS
-        with requested_connection.cursor() as cursor:
-            current = _fetch_business_identity(
-                _DeadlineCursor(cursor, deadline), deadline=deadline
-            )
-        current_checks = evaluate_identity(
-            requested_configuration,
-            {
-                **(current.get("identity") or {}),
-                "database": current["database"],
-                "schema": current["schema"],
-                "session_user": current["session_user"],
-                "role_attributes": current["role_attributes"],
-                "migration_version": current["migration_version"],
-            },
-        )
-        current_checks.extend(
-            [
-                _safe_compare(current["port"], 5432, "server_port"),
-                _safe_compare(current["server_address"], "127.0.0.1", "server_address"),
-                _safe_compare(current["current_user"], "stock_a", "current_user"),
-                _safe_compare(
-                    current.get("database_owner"), "stock_a", "database_owner"
-                ),
-                _safe_compare(
-                    (current.get("business_schema") or {}).get("owner"),
-                    "stock_a",
-                    "business_schema_owner",
-                ),
-            ]
-        )
-        schema = current.get("business_schema") or {}
-        current_checks.extend(
-            IdentityCheck(
-                name,
-                "PASS" if schema.get(key) is True else "REJECT",
-                expected="true",
-                actual="true" if schema.get(key) is True else "false",
-                reason=None
-                if schema.get(key) is True
-                else "stock_a必须可管理固定stock schema",
-            )
-            for key, name in (
-                ("session_user_usage", "schema_usage"),
-                ("session_user_create", "schema_create"),
-            )
-        )
-        deployment_checks, current_proof = _deployment_storage_checks(
-            requested_configuration, current, timeout_seconds=_MAX_INSPECTION_SECONDS
-        )
-        if current_proof is None or any(
-            item.status != "PASS" for item in current_checks + deployment_checks
-        ):
-            return (
-                False,
-                "即将写入的真实数据库连接未通过项目身份/实际部署复核；拒绝新项目写入与发布",
-            )
-    except Exception:
-        return (
-            False,
-            "即将写入的真实数据库连接无法完成独立部署复核；拒绝新项目写入与发布",
-        )
-    return True, "PostgreSQL stock_a业务账号及项目部署身份核验通过"

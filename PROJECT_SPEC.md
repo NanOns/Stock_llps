@@ -100,7 +100,7 @@ RAW OHLCV/amount按供应方原单位验证并规范，金额CNY、量的股/手
 
 HH_PROGRESS=max(H[t−4:t])>max(H[t−9:t−5])；LL_PROGRESS=min(L[t−4:t])<min(L[t−9:t−5])。区间两端包含，使用同坐标actual bars，不读未来高低。
 
-位置按bias≥3先EXTENDED，再pos60的0.8/0.6/0.4/0.2分区。drawdown60、near_high20及closed周/月趋势的唯一精确规则正文见[算法合同§9.7](docs/design/算法合同与升级规则.md#97-foundation基础画像的确定表达)，机器expression_ref绑定具体rule_id；near_high20明确采用0.5 ATR研究基线，见CHG-014；11项机器规则与纯求值入口不等于实际行情、PG/API/UI已通过。历史窗口与context传递见该合同§9.8。
+位置按bias≥3先EXTENDED，再pos60的0.8/0.6/0.4/0.2分区。drawdown60、near_high20及closed周/月趋势的唯一精确规则正文见[算法合同§9.7](docs/design/算法合同与升级规则.md#97-基础价格画像的确定表达)，机器expression_ref绑定具体rule_id；near_high20明确采用0.5 ATR研究基线，见算法合同§9.7；11项机器规则与纯求值入口不等于实际行情、PG/API/UI已通过。历史窗口与context传递见该合同§9.8。
 
 均线BULL_ALIGNED为MA5>MA10>MA20且slope20>0，BEAR反向，TRANSITION用MA5/MA20及slope符号，其余MIXED。相对状态的Δ3统一指rps5_delta3_pp，按first-true：ACTIVE_EMERGENCE为Δ3≥10且(正在压缩或均线BULL_TRANSITION/BULL_ALIGNED)；PASSIVE_RESILIENCE为rel_market_1>0且非ACTIVE且Δ3≤0；LEADING_ACCELERATING为RPS20≥80且Δ3>0；LEADING_STABLE为RPS20≥80且Δ3≥−3；IMPROVING为Δ3>3；WEAKENING为Δ3<−3；LAGGING为RPS20<20；其余NEUTRAL。所需compression/MA状态未知不得落默认中性。
 
@@ -164,7 +164,7 @@ Focus是研究跟踪，不是持仓，也不是验证样本全集。独立Cohort
 
 为消除排序空白，提出新项目`FOCUS_RECENCY_ORDER_R1`：默认按最后已验证跟踪事件交易日降序，再entity_id/episode_id稳定排序；风险/有效性为显式过滤/分组，手动置顶作为独立用户视图，不改研究Priority/Cohort。本项目通过CHG-016正式采用，事件白名单和手动操作语义见算法§11.8，非旧合同追认；后续变更另升版本，不临场改权重。
 
-观察身份含T0、Lane H/L/late、rule/version、entity及数字来源捕获ID；同业务键异数值内容拒绝，合法变化追加，高revision查询不改first。hook走真实分Lane分组/发布路径，覆盖缺import、重复lane字段、混合实体与部分成功重试。
+观察身份含T0、Lane H/L/late、rule/version、entity及数字来源捕获ID；同业务键异数值内容拒绝，合法变化追加，高revision查询不改first。分Lane处理保留各自业务键，覆盖重复lane字段、混合实体及部分成功重试。
 
 Schedule与outcome分层：PENDING是计划/观测状态，不能以同source+key永久挡住到期DUE结果。结算key=observation/horizon/settlement_revision与明确evaluation identity，不能简单加运行时间逃避幂等。仅用接受的后继来源追加，不改T0；T+1/3/5/10/20按交易会话，不到期/停牌/缺失/右删失各有原因。
 
