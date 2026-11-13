@@ -86,6 +86,37 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
             raise ValueError("板块数字快照ID只能与 --include-sector-pulse 同时使用")
         sector_snapshot_ids = snapshot_ids if args.include_sector_pulse else None
         config, config_path = load_runtime_config()
+        if args.enrollment_from_saved:
+            if (
+                not args.persist
+                or args.start_session
+                or args.static_only
+                or args.d0_launch_reference_only
+                or args.include_sector_pulse
+                or snapshot_ids_supplied
+            ):
+                raise ValueError("已存事实登记仅支持单日并须显式指定--persist")
+            from stock_a.application.research_window import resolve_pg_history_window
+            from stock_a.storage.postgres.research_enrollment import (
+                persist_existing_enrollments,
+            )
+
+            target = _parse_session_date(args.target_session)
+            cutoff = _parse_session_date(args.research_cutoff)
+            if target > cutoff:
+                raise ValueError("目标会话晚于研究截止日期")
+            _, sessions, _ = resolve_pg_history_window(target.isoformat(), 2)
+            report = persist_existing_enrollments(
+                config,
+                target=target,
+                before=sessions[0],
+                package=args.source_package_id,
+                d1_history_count=args.d1_history_session_count,
+            )
+            report["configuration_path"] = str(config_path)
+            report["ok"] = True
+            _emit(report)
+            return _EXIT_OK
         if args.d0_launch_reference_only:
             if (
                 not args.persist

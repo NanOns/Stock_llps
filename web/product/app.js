@@ -1104,10 +1104,17 @@ function focusEvidenceDetails(item, context) {
   const d1 = evidence.d1 || {};
   const version = item.source_version || {};
   const t0 = item.t0_observation || {};
+  const registrations = Array.isArray(t0.enrollments) ? t0.enrollments : [];
   details.append(
     node(
       "p",
       `T0 ${t0.status || "UNKNOWN"} · ${t0.target_session || context.target_session} · 包 ${t0.source_package_id ?? "UNKNOWN"} / 捕获 ${t0.source_capture_id ?? "UNKNOWN"} · 画像 ${t0.profile_revision || "UNKNOWN"} · ${t0.price_coordinate || "UNKNOWN"} · NON_PIT_EXPLORATORY`,
+    ),
+    node(
+      "p",
+      registrations.length
+        ? `已存研究登记：${registrations.map((entry) => `#${entry.id} ${entry.rule_id || entry.fact_type} ${entry.kind} · ${entry.reason} · 后继 ${entry.followup?.status || "NOT_COMPUTED"} / ${entry.followup?.reason || "NO_STORED_LANDMARK"}`).join("；")}`
+        : `研究登记：${t0.reason || t0.status || "NO_STORED_FACT"}`,
     ),
     node(
       "p",
@@ -1148,7 +1155,7 @@ function focusEvidenceDetails(item, context) {
     ),
     node(
       "p",
-      "后续状态 NOT_DUE / WAITING_FOR_FUTURE_SESSION；正式 Focus Episode、D2、Risk、Priority 未计算。",
+      `后续状态 ${t0.followup_status || "NOT_COMPUTED"} / ${t0.followup_reason || "NO_STORED_LANDMARK"}；正式 Focus Episode、D2、Risk、Priority 未计算。`,
     ),
   );
   const memberships = item.also_in_sectors || [];
@@ -1310,7 +1317,7 @@ async function loadFocusAuto(context, offset = 0) {
             : displayStockName(item),
           `第 ${item.observation_order?.rank || offset + index + 1} 位 · ${details.join(" · ")}`,
           `T0 ${item.t0_observation?.status || "UNKNOWN"}`,
-          "NOT_DUE · 正式 Focus Episode / Priority / D2 未计算",
+          `${item.t0_observation?.followup_status || "NOT_COMPUTED"} · 正式 Focus Episode / Priority / D2 未计算`,
           () => {
             state.focusAutoSelectedItem = item;
             $("cohortSymbol").value = displayStockCode(item);
@@ -1359,7 +1366,7 @@ async function loadFocusAuto(context, offset = 0) {
         `${groupLabels[group] || group} ${format(total)}` +
         ` · 分母闭合 ${result.watch_groups?.partition_closed ? "是" : "UNKNOWN"}` +
         ` · 本页已存PULSE ${availablePulseCount}/${pageMemberships.length}` +
-        " · NOT_DUE / WAITING_FOR_FUTURE_SESSION · NON_PIT",
+        " · 来源研究 NON_PIT",
     );
     message(
       "focusAutoPage",
@@ -3214,7 +3221,7 @@ $("focusReadStock").addEventListener("click", async () => {
       [
         "T0来源观察",
         state.focusAutoSelectedItem?.source_symbol === symbol
-          ? `${state.focusAutoSelectedItem.t0_observation?.status || "UNKNOWN"} · ${state.focusAutoSelectedItem.watch_group || "UNKNOWN"} · ${state.focusAutoSelectedItem.observation_reason || "无已存原因"} · NOT_DUE / WAITING_FOR_FUTURE_SESSION · NON_PIT`
+          ? `${state.focusAutoSelectedItem.t0_observation?.status || "UNKNOWN"} · ${state.focusAutoSelectedItem.watch_group || "UNKNOWN"} · ${state.focusAutoSelectedItem.observation_reason || "无已存原因"} · ${state.focusAutoSelectedItem.t0_observation?.followup_status || "NOT_COMPUTED"} / ${state.focusAutoSelectedItem.t0_observation?.followup_reason || "NO_STORED_LANDMARK"} · NON_PIT`
           : `${data.stored_research_evidence_status || "UNKNOWN"} · 该单股读取未绑定来源分组；未知不等于无信号。`,
       ],
       [
@@ -3239,7 +3246,7 @@ $("focusReadStock").addEventListener("click", async () => {
       ),
       [
         "后续状态",
-        "NOT_DUE / WAITING_FOR_FUTURE_SESSION；正式 Focus Episode、D2、Risk 与 Priority 未计算。",
+        `${state.focusAutoSelectedItem?.source_symbol === symbol ? state.focusAutoSelectedItem.t0_observation?.followup_status || "NOT_COMPUTED" : "NOT_COMPUTED"}；正式 Focus Episode、D2、Risk 与 Priority 未计算。`,
       ],
     ]);
   } catch (error) {

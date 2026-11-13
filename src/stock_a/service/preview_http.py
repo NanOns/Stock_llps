@@ -1250,6 +1250,47 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             )
 
         evidence_by_symbol = evidence.get("by_symbol", {})
+        from stock_a.storage.postgres.research_enrollment import (
+            read_enrollment_followups,
+            read_enrollments_for_symbols,
+        )
+
+        enrollment_by_symbol = read_enrollments_for_symbols(
+            config,
+            target=target_session,
+            package=source_package_id,
+            capture=after_source["source_capture_id"],
+            before=before_session,
+            before_capture=before_source["source_capture_id"],
+            include_d0=page_result["scope_status"]["d0"] == "AVAILABLE",
+            symbols=page_symbols,
+            rule_scope=(
+                evidence.get("rule_scope")
+                if evidence.get("rules_status") == "AVAILABLE"
+                else None
+            ),
+        )
+        calendar_sessions = _official_calendar(research_cutoff)["sessions"]
+        successor_sessions = tuple(
+            day for day in calendar_sessions if target_session < day <= research_cutoff
+        )
+        enrollment_ids = [
+            item["id"] for entries in enrollment_by_symbol.values() for item in entries
+        ]
+        followups = (
+            read_enrollment_followups(
+                config,
+                target=target_session,
+                cutoff=research_cutoff,
+                enrollment_ids=enrollment_ids,
+                successor_sessions=successor_sessions,
+            )
+            if target_session in calendar_sessions
+            else {
+                item: {"status": "UNKNOWN", "reason": "CALENDAR_WINDOW_UNAVAILABLE"}
+                for item in enrollment_ids
+            }
+        )
         group_counts = page_result["group_counts"]
         global_total = group_counts.get("D0_NEW", 0)
         results = []
@@ -1296,12 +1337,37 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         ),
                     }
                 )
+            enrollments = enrollment_by_symbol.get(symbol, [])
+            for enrollment in enrollments:
+                enrollment["followup"] = followups[enrollment["id"]]
+            followup_states = {item["followup"]["status"] for item in enrollments}
+            followup_reasons = {item["followup"]["reason"] for item in enrollments}
+            followup_status = (
+                next(iter(followup_states))
+                if len(followup_states) == 1
+                else "MULTIPLE"
+                if followup_states
+                else "NOT_COMPUTED"
+            )
+            followup_reason = (
+                next(iter(followup_reasons))
+                if len(followup_reasons) == 1
+                else "SEE_RULE_DETAILS"
+                if followup_reasons
+                else "NO_STORED_FACT"
+            )
             t0_status = (
-                "OBSERVED"
-                if group in {"D0_NEW", "SEED_RULE", "D1_MATERIAL"}
+                "ENTRY"
+                if any(item["kind"] == "ENTRY" for item in enrollments)
+                else "DAILY_LANDMARK"
+                if any(item["kind"] == "DAILY_LANDMARK" for item in enrollments)
+                else "FIRST_OBSERVED_LEFT_CENSORED"
+                if enrollments
                 else "UNKNOWN"
                 if group == "UNKNOWN"
                 else "KNOWN_NO_SIGNAL"
+                if group == "KNOWN_NO_SIGNAL"
+                else "NOT_COMPUTED"
             )
             source_version = {
                 "source_package_id": source_package_id,
@@ -1328,6 +1394,12 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "source_version": source_version,
                     "t0_observation": {
                         "status": t0_status,
+                        "enrollments": enrollments,
+                        "reason": "NO_STORED_FACT"
+                        if not enrollments and t0_status == "NOT_COMPUTED"
+                        else None,
+                        "followup_status": followup_status,
+                        "followup_reason": followup_reason,
                         "target_session": target_session.isoformat(),
                         "source_package_id": source_package_id,
                         "source_capture_id": after_source["source_capture_id"],

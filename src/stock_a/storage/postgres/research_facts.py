@@ -249,7 +249,7 @@ def _insert_and_compare(cursor, table, columns, rows, key_columns, selection, ar
     return inserted
 
 
-def write_research_rows(config, *, rules, paths, events=None):
+def write_research_rows(config, *, rules, paths, previous_session, events=None):
     """单T0整体事务；同键相同内容幂等，异值拒绝并回滚。"""
     if not rules:
         raise ValueError("不允许写入空规则来源池")
@@ -316,10 +316,26 @@ def write_research_rows(config, *, rules, paths, events=None):
                 event_window_start=first[9],
                 calendar_revision=first[10],
             )
+        from stock_a.storage.postgres.research_enrollment import insert_rule_enrollments
+
+        enrollment = insert_rule_enrollments(
+            cursor,
+            target=target,
+            before=previous_session,
+            package=package,
+            capture=capture,
+            rule_version=first[5],
+            profile_revision=first[6],
+            history_count=first[7],
+            d1_history_count=first[8],
+            event_window_start=first[9],
+            calendar_revision=first[10],
+        )
     return {
         "inserted_rules": count_rules,
         "inserted_paths": count_paths,
         "events": event_result,
+        "research_enrollments": enrollment,
     }
 
 

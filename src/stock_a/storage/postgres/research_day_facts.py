@@ -898,9 +898,23 @@ def _persist_source_research_day_once(
                     "RESEARCH_DAY_TYPED_READBACK_MISMATCH",
                     "事务内typed事实读回和预期不一致，拒绝提交",
                 )
+        from stock_a.storage.postgres.research_enrollment import insert_d0_enrollments
+
+        enrollment = insert_d0_enrollments(
+            cursor,
+            target=facts.target_session,
+            package=facts.source_package_id,
+            capture=facts.target_capture_id,
+            before=facts.before_session,
+            before_capture=facts.before_capture_id,
+            producer_version=facts.d0_producer_version,
+            algorithm_contract=facts.d0_algorithm_contract,
+            session_contract=facts.d0_session_contract,
+            calendar_revision=facts.calendar_revision,
+        )
     return {
         "status": "IDEMPOTENT_ALREADY_PRESENT"
-        if all(existing_scopes)
+        if all(existing_scopes) and enrollment["inserted"] == 0
         else "WRITTEN_AND_TYPED_READBACK_VERIFIED",
         "rows_expected": {
             table.rsplit(".", 1)[-1]: len(rows)
@@ -909,13 +923,15 @@ def _persist_source_research_day_once(
             )
         },
         "rows_inserted": inserted,
+        "research_enrollments": enrollment,
         "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED"
-        if all(existing_scopes)
+        if all(existing_scopes) and enrollment["inserted"] == 0
         else None,
         "transaction": "SERIALIZABLE_ATOMIC_THREE_TABLE_WRITE",
-        "database_write_attempted": any(inserted.values()),
+        "database_write_attempted": any(inserted.values())
+        or enrollment["inserted"] > 0,
         "ddl_executed": False,
-        "dml_executed": any(inserted.values()),
+        "dml_executed": any(inserted.values()) or enrollment["inserted"] > 0,
     }
 
 

@@ -39,6 +39,9 @@ _MIGRATION_FILES = (
     "0025_r06_profile_revision_encoding.sql",
     "0026_numeric_installation_identity.sql",
     "0027_source_symbol_display_names.sql",
+    "0028_source_research_enrollments.sql",
+    "0029_source_enrollment_d0_evidence.sql",
+    "0030_source_rule_adjacent_index.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -65,6 +68,9 @@ _TASK_SCOPE_MIGRATIONS = {
     "R06_PROFILE_REVISION_LENGTH_CHAIN_R1": frozenset({25}),
     "R06_NUMERIC_INSTALLATION_IDENTITY_R1": frozenset({26}),
     "R06_SYMBOL_DISPLAY_NAMES_R1": frozenset({27}),
+    "R07_T0_RESEARCH_ENROLLMENT_R1": frozenset({28}),
+    "R07_T0_D0_EVIDENCE_R1": frozenset({29}),
+    "R07_T0_ADJACENT_INDEX_R1": frozenset({30}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -187,6 +193,11 @@ _RELATIONS_BY_MIGRATION_COUNT[26] = _RELATIONS_BY_MIGRATION_COUNT[25]
 _RELATIONS_BY_MIGRATION_COUNT[27] = _RELATIONS_BY_MIGRATION_COUNT[26] | {
     "source_symbol_display_names",
 }
+_RELATIONS_BY_MIGRATION_COUNT[28] = _RELATIONS_BY_MIGRATION_COUNT[27] | {
+    "source_research_enrollments",
+}
+_RELATIONS_BY_MIGRATION_COUNT[29] = _RELATIONS_BY_MIGRATION_COUNT[28]
+_RELATIONS_BY_MIGRATION_COUNT[30] = _RELATIONS_BY_MIGRATION_COUNT[29]
 
 
 class BindingRefused(Exception):

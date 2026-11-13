@@ -678,6 +678,7 @@ def read_source_launch_watch_evidence(
         if rules_semantics_match
         else "SCOPE_MISMATCH",
         "rule_scope": {
+            "rule_version": rule_scope[0],
             "profile_revision": rule_scope[1],
             "history_session_count": rule_scope[2],
             "d1_history_session_count": rule_scope[3],

@@ -168,6 +168,11 @@ def register_commands(commands):
         help="按既存Raw会话运行单日D0/Seed静态生产链，必须显式指定--persist",
     )
     research_day.add_argument(
+        "--enrollment-from-saved",
+        action="store_true",
+        help="单日从完整已存D0和规则事实登记研究匹配，不重新计算历史",
+    )
+    research_day.add_argument(
         "--d0-launch-reference-only",
         action="store_true",
         help="仅生产相邻会话消费者明确需要的LAUNCH_CONFIRM前日D0参考事实",

@@ -563,8 +563,19 @@ def _run_source_market_observation(args) -> int:
                         source_package_id=args.source_package_id,
                         d1_history_session_count=args.d1_history_session_count,
                     )
+                from stock_a.application.research_window import (
+                    resolve_pg_history_window,
+                )
+
+                _, adjacent, _ = resolve_pg_history_window(
+                    facts["target"].isoformat(), 2
+                )
                 result = write_research_rows(
-                    config, rules=rules, paths=paths, events=events
+                    config,
+                    rules=rules,
+                    paths=paths,
+                    previous_session=adjacent[0],
+                    events=events,
                 )
                 return {
                     **result,
