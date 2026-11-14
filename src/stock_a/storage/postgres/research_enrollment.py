@@ -321,7 +321,7 @@ def _rule_context_comparable(
     before: date,
     target: date,
 ) -> bool:
-    """仅允许完整同语义规则范围的一会话自然历史窗口增长。"""
+    """仅允许完整同语义规则范围的一会话窗口增长或固定长度滚动。"""
     if not before_context or not target_context:
         return False
     if not all(
@@ -578,6 +578,12 @@ def insert_rule_enrollments(
     previous_capture_id = (
         previous_context["capture"] if previous_is_comparable else None
     )
+    previous_profile_revision = (
+        previous_context["profile"]["revision"] if previous_is_comparable else None
+    )
+    previous_history_count = (
+        previous_context["profile"]["history_count"] if previous_is_comparable else None
+    )
     previous_event_window_start = (
         previous_context["rule"]["event_window_start"]
         if previous_is_comparable
@@ -592,11 +598,8 @@ def insert_rule_enrollments(
              ON p.target_session=%s AND p.source_package_id=r.source_package_id
             AND p.source_symbol=r.source_symbol AND p.rule_id=r.rule_id
             AND p.source_capture_id=%s AND %s::boolean
-            AND p.rule_version=r.rule_version
-            AND split_part(p.profile_revision,'|',1)=split_part(r.profile_revision,'|',1)
-            AND split_part(p.profile_revision,'|',3)=split_part(r.profile_revision,'|',3)
-            AND split_part(p.profile_revision,'|',4)=split_part(r.profile_revision,'|',4)
-            AND p.history_session_count+1=r.history_session_count
+            AND p.rule_version=r.rule_version AND p.profile_revision=%s
+            AND p.history_session_count=%s
             AND p.d1_history_session_count=r.d1_history_session_count
             AND p.event_window_start=%s AND r.event_window_start=%s
             AND p.calendar_revision=r.calendar_revision AND p.scope=r.scope
@@ -615,6 +618,8 @@ def insert_rule_enrollments(
             before,
             previous_capture_id,
             previous_is_comparable,
+            previous_profile_revision,
+            previous_history_count,
             previous_event_window_start,
             current_event_window_start,
             before,
@@ -629,6 +634,7 @@ def insert_rule_enrollments(
             calendar_revision,
         ),
     )
+    rule_rows = cursor.fetchall()
     rows = []
     for (
         fact_id,
@@ -638,7 +644,7 @@ def insert_rule_enrollments(
         d0_count,
         d0_id,
         d0_before_state,
-    ) in cursor.fetchall():
+    ) in rule_rows:
         if previous_count == 1 and d0_count == 1 and previous_state != d0_before_state:
             raise EnrollmentConflict("规则前态与同谓词D0相邻证据不一致")
         previous = (
