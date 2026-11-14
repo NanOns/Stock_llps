@@ -1429,6 +1429,92 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             boards=list(page_boards.values()),
         )
         pulse_by_board = pulse.get("by_board", {})
+        pulse_transition_by_board: dict[str, dict[str, Any]] = {}
+        if page_boards:
+            previous_pulse = read_source_sector_pulse_for_boards(
+                config,
+                target_session=before_session,
+                source_package_id=source_package_id,
+                source_capture_id=before_source["source_capture_id"],
+                source_pool_count=before_source["capture_expected_row_count"],
+                boards=list(page_boards.values()),
+            )
+            previous_by_board = previous_pulse.get("by_board", {})
+            previous_revisions = {
+                item.get("profile_revision")
+                for item in previous_by_board.values()
+                if item.get("status") == "AVAILABLE"
+                and isinstance(item.get("profile_revision"), str)
+            }
+            target_revisions = {
+                item.get("profile_revision")
+                for item in pulse_by_board.values()
+                if item.get("status") == "AVAILABLE"
+                and isinstance(item.get("profile_revision"), str)
+            }
+            if len(previous_revisions) == 1 and len(target_revisions) == 1:
+                target_ids = []
+                for board_key, target_fact in pulse_by_board.items():
+                    previous_fact = previous_by_board.get(board_key, {})
+                    pulse_fact_id = target_fact.get("pulse_fact_id")
+                    if (
+                        target_fact.get("status") == "AVAILABLE"
+                        and previous_fact.get("status") == "AVAILABLE"
+                        and previous_fact.get("snapshot_id")
+                        == target_fact.get("snapshot_id")
+                        and type(pulse_fact_id) is int
+                    ):
+                        target_ids.append(pulse_fact_id)
+                if target_ids:
+                    from stock_a.storage.postgres.t0_early_observations import (
+                        read_source_t0_pulse_transition_facts,
+                    )
+
+                    transitions = read_source_t0_pulse_transition_facts(
+                        config,
+                        target_pulse_ids=target_ids,
+                        previous_session=before_session,
+                        target_session=target_session,
+                        source_package_id=source_package_id,
+                        previous_source_capture_id=before_source["source_capture_id"],
+                        target_source_capture_id=after_source["source_capture_id"],
+                        previous_profile_revision=next(iter(previous_revisions)),
+                        target_profile_revision=next(iter(target_revisions)),
+                    )
+                    for board_key, target_fact in pulse_by_board.items():
+                        pulse_fact_id = target_fact.get("pulse_fact_id")
+                        transition = transitions.get(pulse_fact_id)
+                        if transition is None:
+                            continue
+                        pulse_transition_by_board[board_key] = {
+                            **transition,
+                            "snapshot_id": target_fact.get("snapshot_id"),
+                            "research_mode": "NON_PIT_RETROSPECTIVE",
+                            "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                            "price_coordinate": "RAW_UNADJUSTED",
+                            "formal_rotation_state": "NOT_EVALUATED",
+                            "previous_profile_revision": next(iter(previous_revisions)),
+                            "target_profile_revision": next(iter(target_revisions)),
+                        }
+            elif previous_revisions and target_revisions:
+                for board_key, target_fact in pulse_by_board.items():
+                    previous_fact = previous_by_board.get(board_key, {})
+                    if (
+                        target_fact.get("status") == "AVAILABLE"
+                        and previous_fact.get("status") == "AVAILABLE"
+                    ):
+                        pulse_transition_by_board[board_key] = {
+                            "status": "UNKNOWN",
+                            "transition_state": "PULSE_TRANSITION_UNKNOWN",
+                            "reason_codes": [
+                                "PULSE_TRANSITION_PROFILE_REVISION_AMBIGUOUS"
+                            ],
+                            "snapshot_id": target_fact.get("snapshot_id"),
+                            "research_mode": "NON_PIT_RETROSPECTIVE",
+                            "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                            "price_coordinate": "RAW_UNADJUSTED",
+                            "formal_rotation_state": "NOT_EVALUATED",
+                        }
         quality_by_source = {
             snapshot.get("source_kind"): snapshot.get("source_quality_counts") or {}
             for snapshot in membership_read.get("snapshots", [])
@@ -1448,12 +1534,17 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
                 },
             )
-            board["cross_period_pulse_transition"] = {
-                "status": "NOT_COMPUTED",
-                "transition_state": "NOT_COMPUTED",
-                "reason_codes": ["PULSE_TRANSITION_FACTS_NOT_SAVED_FOR_EXACT_INPUT"],
-                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
-            }
+            board["cross_period_pulse_transition"] = pulse_transition_by_board.get(
+                key,
+                {
+                    "status": "NOT_COMPUTED",
+                    "transition_state": "NOT_COMPUTED",
+                    "reason_codes": [
+                        "PULSE_TRANSITION_FACTS_NOT_SAVED_FOR_EXACT_INPUT"
+                    ],
+                    "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                },
+            )
             quality_counts = quality_by_kind.get(board["board_kind"], {})
             board["membership_source_quality"] = {
                 "quality": quality_counts.get("quality", "UNKNOWN"),
@@ -1690,6 +1781,27 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         next_offset = (
             offset + len(results) if offset + len(results) < selected_total else None
         )
+        response_boards = home_board_result.get("boards", [])
+        if board_kind is not None and board_native_id is not None:
+            board_key = f"{board_kind}:{board_native_id}"
+            response_boards = [
+                {
+                    "board_kind": board_kind,
+                    "board_native_id": board_native_id,
+                    "cross_period_pulse": pulse_by_board.get(board_key),
+                    "cross_period_pulse_transition": pulse_transition_by_board.get(
+                        board_key,
+                        {
+                            "status": "NOT_COMPUTED",
+                            "transition_state": "NOT_COMPUTED",
+                            "reason_codes": [
+                                "PULSE_TRANSITION_FACTS_NOT_SAVED_FOR_EXACT_INPUT"
+                            ],
+                            "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                        },
+                    ),
+                }
+            ]
         return {
             "ok": True,
             "contract": "STOCK_A_SOURCE_LAUNCH_WATCH_API_R1",
@@ -1748,7 +1860,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "total_count": selected_total,
                 "next_offset": next_offset,
             },
-            "boards": home_board_result.get("boards", []),
+            "boards": response_boards,
             "board_summary": {
                 "status": home_board_result.get("status", "NOT_REQUESTED"),
                 "total_board_count": home_board_result.get("total_board_count", 0),

@@ -6,6 +6,7 @@ from datetime import date
 import re
 from typing import Any, Mapping, Sequence
 
+from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 from stock_a.storage.postgres import source_raw
 
 
@@ -344,9 +345,11 @@ def read_source_t0_pulse_transition_facts(
     target_session: date,
     source_package_id: int,
     previous_source_capture_id: int | None,
+    target_source_capture_id: int,
     previous_profile_revision: str | None,
+    target_profile_revision: str,
 ) -> dict[int, dict[str, Any]]:
-    """读取精确相邻日期、相同来源包和Profile修订的既存PULSE转移。"""
+    """读取绑定两端独立来源捕获和Profile修订的既存PULSE转移。"""
     pulse_ids = tuple(sorted(set(target_pulse_ids)))
     if (
         type(previous_session) is not date
@@ -354,6 +357,8 @@ def read_source_t0_pulse_transition_facts(
         or previous_session >= target_session
         or type(source_package_id) is not int
         or source_package_id <= 0
+        or type(target_source_capture_id) is not int
+        or target_source_capture_id <= 0
         or any(type(item) is not int or item <= 0 for item in pulse_ids)
         or len(pulse_ids) > 2000
     ):
@@ -369,6 +374,15 @@ def read_source_t0_pulse_transition_facts(
     if type(previous_source_capture_id) is not int or previous_source_capture_id <= 0:
         raise T0EarlyObservationPgError(
             "T0_EARLY_PREVIOUS_CAPTURE_INVALID", "前一Raw捕获ID无效"
+        )
+    if (
+        not isinstance(previous_profile_revision, str)
+        or re.fullmatch(PROFILE_REVISION_PATTERN, previous_profile_revision) is None
+        or not isinstance(target_profile_revision, str)
+        or re.fullmatch(PROFILE_REVISION_PATTERN, target_profile_revision) is None
+    ):
+        raise T0EarlyObservationPgError(
+            "T0_EARLY_PROFILE_REVISION_INVALID", "相邻两端Profile修订必须分别显式绑定"
         )
 
     with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
@@ -394,7 +408,8 @@ def read_source_t0_pulse_transition_facts(
                  AND previous.profile_revision=%s
                  AND target.target_session=%s
                  AND target.source_package_id=%s
-                 AND target.profile_revision=previous.profile_revision
+                 AND target.source_capture_id=%s
+                 AND target.profile_revision=%s
                  AND t.transition_contract='SOURCE_CROSS_PERIOD_PULSE_TRANSITION_R1'
                  AND t.research_mode='NON_PIT_RETROSPECTIVE'
                  AND t.price_coordinate='RAW_UNADJUSTED'
@@ -407,6 +422,8 @@ def read_source_t0_pulse_transition_facts(
                 previous_profile_revision,
                 target_session,
                 source_package_id,
+                target_source_capture_id,
+                target_profile_revision,
             ),
         )
         rows = cursor.fetchall()
@@ -575,6 +592,8 @@ SELECT o.id,o.enrollment_id,e.enrollment_kind,e.reason_code AS enrollment_reason
        p.pulse_reason_codes,
        o.pulse_transition_id,o.transition_status,o.transition_state,
        o.transition_reason_codes,t.previous_pulse_state,t.target_pulse_state,
+       t.previous_pulse_state AS previous_state,
+       t.target_pulse_state AS target_state,
        t.previous_reason_codes,t.target_reason_codes,
        o.snapshot_member_count,o.source_pool_member_count,
        o.rps5_quality,o.rps5_reason,o.rps5_rank_first,o.rps5_rank_last,

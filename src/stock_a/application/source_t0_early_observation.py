@@ -12,6 +12,7 @@ from stock_a.storage.postgres.research_enrollment import (
     read_enrollment_followups,
 )
 from stock_a.storage.postgres.sector_pulse_facts import (
+    read_source_sector_pulse_day,
     read_source_sector_pulse_for_boards,
 )
 from stock_a.storage.postgres.source_launch_watch_evidence import (
@@ -280,6 +281,18 @@ def persist_source_t0_early_observations_from_saved(
         and previous_source.get("source_package_id") == source_package_id
         else None
     )
+    previous_profile_revision = None
+    if previous_capture_id is not None:
+        previous_pulse = read_source_sector_pulse_day(
+            config,
+            target_session=previous_session,
+            source_package_id=source_package_id,
+            source_capture_id=previous_capture_id,
+            source_pool_count=int(previous_source["capture_expected_row_count"]),
+            snapshot_ids=dict(snapshot_ids),
+        )
+        if previous_pulse.get("status") == "AVAILABLE":
+            previous_profile_revision = previous_pulse.get("profile_revision")
     transition_targets = [
         int(item["pulse_fact_id"])
         for item in pulse_by_board.values()
@@ -292,7 +305,9 @@ def persist_source_t0_early_observations_from_saved(
         target_session=target_session,
         source_package_id=source_package_id,
         previous_source_capture_id=previous_capture_id,
-        previous_profile_revision=inputs["seed_scope"]["profile_revision"],
+        target_source_capture_id=source_version["source_capture_id"],
+        previous_profile_revision=previous_profile_revision,
+        target_profile_revision=inputs["seed_scope"]["profile_revision"],
     )
 
     comparison_started = time.perf_counter()
