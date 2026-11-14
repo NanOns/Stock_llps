@@ -177,6 +177,72 @@ function enrollmentFollowupText(followup) {
     : "";
   return `${followup.status || "NOT_COMPUTED"} / ${followup.reason || "NO_STORED_LANDMARK"}${identity}${reasons ? ` · 规则原因 ${reasons}` : ""}`;
 }
+function enrollmentFollowupHistoryDetails(entry) {
+  const followup = entry?.followup;
+  if (!followup) return null;
+  const history = Array.isArray(followup.history) ? followup.history : [];
+  const statusLabels = {
+    CONTINUES: "持续符合",
+    EXIT_PROVED: "已证退出",
+    PAUSED_UNKNOWN: "未知暂停",
+    UNKNOWN: "状态未知",
+    LEFT_CENSORED: "未知间隔后恢复匹配",
+    FIRST_OBSERVED_LEFT_CENSORED: "左截断后首次观察为匹配",
+    REENTRY: "已证退出后再次匹配",
+    NO_MATCH: "当前不匹配",
+    NOT_DUE: "尚未到期",
+    INCOMPLETE: "观察窗口不完整",
+  };
+  const reasonLabels = {
+    COMPARABLE_TRUE: "相邻可比事实为 TRUE",
+    COMPARABLE_FALSE: "相邻可比事实为 FALSE",
+    OBSERVED_FALSE_AFTER_UNKNOWN: "未知后观察到 FALSE",
+    CURRENT_STATE_UNKNOWN: "当前事实状态为 UNKNOWN",
+    NO_STORED_FACT: "该会话没有已存事实",
+    RULE_CONTEXT_NOT_COMPARABLE: "规则上下文不可比较",
+    AMBIGUOUS_OR_NONADJACENT_FACT: "事实不唯一或不是合法相邻事实",
+    REENTRY_NOT_PROVED_AFTER_UNKNOWN: "未知间隔后重见 TRUE，无法证明重入",
+    MATCH_AFTER_UNKNOWN_INTERVAL: "未知间隔后恢复匹配，连续性无法证明",
+    MATCH_AFTER_PROVED_EXIT: "已证退出后再次匹配",
+    CURRENT_STATE_FALSE: "当前事实为 FALSE",
+    WAITING_FOR_FUTURE_SESSION: "等待后续官方交易会话",
+  };
+  const details = node("details", null, "focus-enrollment-history");
+  details.append(
+    node(
+      "summary",
+      `登记 #${entry.id} 逐会话状态（${history.length} 个后继会话）`,
+    ),
+  );
+  if (!history.length) {
+    details.append(
+      node(
+        "p",
+        `${statusLabels[followup.status] || followup.status || "未计算"} · ${reasonLabels[followup.reason] || followup.reason || "尚无后继事实"} · 暂无已到期后继会话。`,
+      ),
+    );
+    return details;
+  }
+  const rows = node("ul");
+  for (const item of history) {
+    const status = statusLabels[item.status] || item.status || "未知";
+    const reason = reasonLabels[item.reason] || item.reason || "原因未记录";
+    const state = item.state ? ` · 规则状态 ${item.state}` : "";
+    rows.append(
+      node(
+        "li",
+        `${item.session || "日期未知"} · ${status}（${item.status || "UNKNOWN"}） · ${reason}${state}`,
+      ),
+    );
+  }
+  details.append(rows);
+  if (followup.history_truncated) {
+    details.append(
+      node("p", "仅列出最早的 20 个官方后继会话；更远窗口未在本次读取。"),
+    );
+  }
+  return details;
+}
 function enrollmentSummaryText(entry) {
   return `#${entry.id} ${entry.rule_id || entry.fact_type} ${entry.kind || "UNKNOWN"} · ${entry.reason || "UNKNOWN"} · ${enrollmentScopeText(entry)} · 后继 ${enrollmentFollowupText(entry.followup)}`;
 }
@@ -2004,6 +2070,7 @@ function focusEvidenceDetails(item, context) {
         ? `已存研究登记：${registrations.map(enrollmentSummaryText).join("；")}`
         : `研究登记：${t0.reason || t0.status || "NO_STORED_FACT"}`,
     ),
+    ...registrations.map(enrollmentFollowupHistoryDetails).filter(Boolean),
     node(
       "p",
       item.seed_t1_outcome?.d0_transition_status === "NOT_COMPUTED"

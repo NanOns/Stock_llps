@@ -1147,6 +1147,8 @@ def read_enrollment_followups(
             item: {
                 "status": "NOT_DUE",
                 "reason": "WAITING_FOR_FUTURE_SESSION",
+                "history": [],
+                "history_truncated": False,
                 "base_fact_id": anchors_by_id[item]["rule_fact_id"],
                 "base_capture_id": anchors_by_id[item]["capture"],
                 "rule_id": anchors_by_id[item]["rule_id"],
@@ -1257,6 +1259,7 @@ def read_enrollment_followups(
         previous_capture = anchor["capture"]
         last_exit = None
         detail = None
+        history = []
         for session in selected:
             candidate_detail: dict[str, Any] | None = None
             if anchor["is_rule"]:
@@ -1375,6 +1378,7 @@ def read_enrollment_followups(
                         "rule_reasons": candidate_detail["reasons"],
                     }
                 )
+            history.append(dict(detail))
             previous_state = current.state if current else None
             if anchor["is_rule"]:
                 previous_capture = (
@@ -1387,7 +1391,13 @@ def read_enrollment_followups(
                 )
             previous = session
         assert detail is not None
-        if len(successor_sessions) > len(selected):
+        history_truncated = len(successor_sessions) > len(selected)
+        detail = {
+            **detail,
+            "history": history,
+            "history_truncated": history_truncated,
+        }
+        if history_truncated:
             detail = {
                 **detail,
                 "status": "INCOMPLETE",
