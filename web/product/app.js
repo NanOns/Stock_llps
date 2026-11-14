@@ -1885,6 +1885,28 @@ function formatCohortCenter(row) {
   return `${formatCohortReturn(row.mean_return)} / ${formatCohortReturn(row.median_return)}`;
 }
 
+function formatCohortMedian(value) {
+  if (typeof value !== "string") return "不可评价";
+  try {
+    const [numeratorText, denominatorText = "1"] = value.split("/", 2);
+    const numerator = BigInt(numeratorText);
+    const denominator = BigInt(denominatorText);
+    if (denominator === 0n) return "不可评价";
+    const negative = numerator < 0n !== denominator < 0n;
+    const absoluteNumerator = numerator < 0n ? -numerator : numerator;
+    const absoluteDenominator = denominator < 0n ? -denominator : denominator;
+    const scaled =
+      (absoluteNumerator * 1000000n + absoluteDenominator / 2n) /
+      absoluteDenominator;
+    const whole = scaled / 10000n;
+    const decimal = String(scaled % 10000n).padStart(4, "0");
+    const sign = negative && scaled !== 0n ? "-" : "";
+    return `${sign}${whole}.${decimal}%（原始比值 ${value}）`;
+  } catch {
+    return `原始比值 ${value}`;
+  }
+}
+
 function renderFocusS2T1Cohort(summary) {
   const status = $("focusS2T1CohortStatus");
   const tables = $("focusS2T1CohortTables");
@@ -4223,7 +4245,14 @@ async function readCohort() {
       ["完整来源分母", d.source_pool_count],
       ...d.groups.map((g) => [
         `${g.group} · ${g.weighting === "stock" ? "按代码" : "按事件"}`,
-        `总数 ${g.count}；可评价 ${g.evaluable}；未知 ${g.unknown}；到期状态 ${JSON.stringify(g.maturity)}；原因 ${JSON.stringify(g.unevaluable_reasons)}`,
+        [
+          `总数 ${g.count}；可评价 ${g.evaluable}；未知 ${g.unknown}`,
+          `正/非正 ${g.positive}/${g.non_positive}`,
+          `中位收益 ${formatCohortMedian(g.median)}`,
+          `路径质量 ${JSON.stringify(g.path_quality)}`,
+          `到期状态 ${JSON.stringify(g.maturity)}`,
+          `原因 ${JSON.stringify(g.unevaluable_reasons)}`,
+        ].join("；"),
       ]),
       [
         "所选代码后继事实",
