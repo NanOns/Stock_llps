@@ -308,6 +308,7 @@ def write_forward_path_rows(
     paths,
     source_symbols,
     endpoint_source_capture_id,
+    research_cutoff,
 ):
     """为完整Seed来源池保存共享后继路径；不创建规则、登记或Episode。"""
     symbols = tuple(sorted(set(source_symbols)))
@@ -500,6 +501,23 @@ def write_forward_path_rows(
         )
         if cursor.fetchone() != (len(symbols), len(symbols)):
             raise ResearchFactConflict("T+1typed结果写入后未闭合T0来源池分母")
+        from stock_a.storage.postgres.source_s2_t1_cohort import (
+            persist_source_s2_t1_cohort_in_transaction,
+        )
+
+        cohort_result = persist_source_s2_t1_cohort_in_transaction(
+            cursor,
+            target_session=target,
+            endpoint_session=endpoint_session,
+            research_cutoff=research_cutoff,
+            source_package_id=package,
+            source_capture_id=capture,
+            endpoint_source_capture_id=endpoint_source_capture_id,
+            source_symbols=symbols,
+            path_rule_version=path_version,
+            calendar_revision=calendar_revision,
+            insert_and_compare=_insert_and_compare,
+        )
         if inserted:
             cursor.execute(
                 """DELETE FROM source_cohort_group_stats
@@ -518,6 +536,9 @@ def write_forward_path_rows(
         "idempotent": inserted == 0,
         "path_rule_version": path_version,
         "calendar_revision": calendar_revision,
+        "s2_t1_cohort_stats_inserted": cohort_result["inserted_rows"],
+        "s2_t1_cohort_version": cohort_result["cohort_version"],
+        "_s2_t1_cohort_expected_rows": cohort_result["expected_rows"],
         "transaction": "SERIALIZABLE",
     }
 

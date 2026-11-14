@@ -2271,7 +2271,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     ),
                 }
             ]
-        return {
+        response = {
             "ok": True,
             "contract": "STOCK_A_SOURCE_LAUNCH_WATCH_API_R1",
             "request_identity": {
@@ -2406,6 +2406,29 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "dml_executed": False,
             },
         }
+        from stock_a.storage.postgres.source_s2_t1_cohort import (
+            SourceS2T1CohortReadError,
+            read_source_s2_t1_cohort_for_focus,
+        )
+
+        try:
+            response["s2_t1_cohort"] = read_source_s2_t1_cohort_for_focus(
+                config,
+                target_session=target_session,
+                endpoint_session=successor_sessions[0] if successor_sessions else None,
+                research_cutoff=research_cutoff,
+                source_package_id=source_package_id,
+                source_capture_id=after_source["source_capture_id"],
+            )
+        except SourceS2T1CohortReadError as error:
+            raise PreviewHttpError(
+                409, "S2_T1_COHORT_READ_REJECTED", str(error)
+            ) from error
+        response["execution"]["s2_t1_cohort_summary_rows_returned_to_python"] = (
+            12 if response["s2_t1_cohort"].get("status") == "AVAILABLE" else 0
+        )
+        response["execution"]["s2_t1_cohort_full_pool_materialized"] = False
+        return response
 
     def _source_t0_early_observations(self, body: Any) -> dict[str, Any]:
         """用户展开单股时，按精确来源版本读取全部已存T0板内事实。"""

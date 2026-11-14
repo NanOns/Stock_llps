@@ -241,7 +241,9 @@ def persist_source_t1_forward_from_saved(
         paths=paths,
         source_symbols=symbols,
         endpoint_source_capture_id=endpoint_source["source_capture_id"],
+        research_cutoff=research_cutoff,
     )
+    expected_cohort_rows = write_result.pop("_s2_t1_cohort_expected_rows")
     try:
         readback = read_forward_path_scope(
             config,
@@ -254,8 +256,37 @@ def persist_source_t1_forward_from_saved(
             "T+1写入事务已提交，但独立PG读回未通过；请核对精确T0范围后恢复",
             database_write_attempted=True,
         ) from error
+    try:
+        from stock_a.storage.postgres.source_s2_t1_cohort import (
+            read_source_s2_t1_cohort_scope,
+        )
+
+        cohort_readback = read_source_s2_t1_cohort_scope(
+            config,
+            target_session=target_session,
+            endpoint_session=endpoint_session,
+            research_cutoff=research_cutoff,
+            source_package_id=source_package_id,
+            source_capture_id=source["source_capture_id"],
+            endpoint_source_capture_id=endpoint_source["source_capture_id"],
+            expected_rows=expected_cohort_rows,
+        )
+        if (
+            cohort_readback.get("status") != "AVAILABLE"
+            or cohort_readback.get("rows_read_back") != 12
+        ):
+            raise ValueError("S2/T+1统计读回未闭合")
+    except Exception as error:
+        raise SourceResearchDayError(
+            "S2_T1_COHORT_READBACK_FAILED",
+            "T+1事务已提交，但S2三态分组统计未能在异事务完整读回",
+            database_write_attempted=True,
+        ) from error
+    changed = bool(
+        write_result["inserted_paths"] or write_result["s2_t1_cohort_stats_inserted"]
+    )
     return {
-        "status": "PERSISTED" if write_result["inserted_paths"] else "IDEMPOTENT",
+        "status": "PERSISTED" if changed else "IDEMPOTENT",
         "target_session": target_session.isoformat(),
         "endpoint_session": endpoint_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
@@ -271,12 +302,14 @@ def persist_source_t1_forward_from_saved(
         "source_count": len(symbols),
         "expected_paths": len(paths),
         "inserted_paths": write_result["inserted_paths"],
-        "idempotent": write_result["idempotent"],
+        "s2_t1_cohort_stats_inserted": write_result["s2_t1_cohort_stats_inserted"],
+        "idempotent": not changed,
         "path_rule_version": write_result["path_rule_version"],
         "write_transaction": write_result["transaction"],
         "readback": readback,
+        "s2_t1_cohort_stats_readback": cohort_readback,
         "database_write_attempted": True,
-        "database_changed": write_result["inserted_paths"] > 0,
+        "database_changed": changed,
         "source_collection": False,
         "raw_recalculated": False,
         "seed_recalculated": False,

@@ -950,3 +950,82 @@ td.empty {
 .focus-board-link {
   text-align: left;
 }
+
+.focus-s2-t1-cohort {
+  min-width: 0;
+  margin: 18px 0;
+  padding-top: 14px;
+  border-top: 1px solid #e8efeb;
+}
+.focus-s2-t1-cohort h3 {
+  margin: 0 0 8px;
+  color: #25463a;
+  font-size: 15px;
+}
+.focus-s2-t1-cohort h4 {
+  margin: 16px 0 8px;
+  color: #365249;
+  font-size: 12px;
+}
+.focus-s2-t1-cohort #focusS2T1CohortStatus,
+.focus-s2-t1-cohort #focusS2T1CohortNote {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.focus-s2-t1-table-scroll {
+  max-width: 100%;
+  overscroll-behavior-x: contain;
+}
+.focus-s2-t1-table {
+  min-width: 820px;
+  table-layout: fixed;
+}
+.focus-s2-t1-table th,
+.focus-s2-t1-table td {
+  padding: 9px 10px;
+  font-size: 11px;
+  line-height: 1.45;
+  vertical-align: top;
+  overflow-wrap: anywhere;
+}
+.focus-s2-t1-table--groups th:nth-child(1) {
+  width: 75px;
+}
+.focus-s2-t1-table--groups th:nth-child(2) {
+  width: 75px;
+}
+.focus-s2-t1-table--groups th:nth-child(3) {
+  width: 205px;
+}
+.focus-s2-t1-table--groups th:nth-child(4) {
+  width: 170px;
+}
+.focus-s2-t1-table--groups th:nth-child(5) {
+  width: 105px;
+}
+.focus-s2-t1-table--groups th:nth-child(6) {
+  width: 165px;
+}
+.focus-s2-t1-table--transitions th:nth-child(1) {
+  width: 100px;
+}
+.focus-s2-t1-table--transitions th:nth-child(2) {
+  width: 65px;
+}
+.focus-s2-t1-table--transitions th:nth-child(3) {
+  width: 190px;
+}
+.focus-s2-t1-table--transitions th:nth-child(4) {
+  width: 170px;
+}
+.focus-s2-t1-table--transitions th:nth-child(5) {
+  width: 95px;
+}
+.focus-s2-t1-table--transitions th:nth-child(6) {
+  width: 330px;
+}
+.focus-s2-t1-table--transitions td:last-child {
+  overflow-wrap: anywhere;
+}

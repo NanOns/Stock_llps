@@ -1787,6 +1787,127 @@ function s2ContinuityReasonText(outcome) {
   return parts.join("；");
 }
 
+function formatCohortReturn(value) {
+  if (!value || typeof value.percent !== "string") return "不可评价";
+  const parsed = Number(value.percent);
+  return `${parsed > 0 ? "+" : ""}${value.percent}%`;
+}
+
+function formatCohortCoverage(row) {
+  const observed = row.endpoint_observed_count ?? 0;
+  const denominator = row.member_count ?? 0;
+  const percent = denominator
+    ? `（${((observed / denominator) * 100).toFixed(1)}%）`
+    : "（无分母）";
+  return `${format(observed)} / ${format(denominator)} ${percent} · 端点UNKNOWN ${format(row.endpoint_unknown_count ?? 0)}`;
+}
+
+function formatCohortCenter(row) {
+  return `${formatCohortReturn(row.mean_return)} / ${formatCohortReturn(row.median_return)}`;
+}
+
+function renderFocusS2T1Cohort(summary) {
+  const status = $("focusS2T1CohortStatus");
+  const tables = $("focusS2T1CohortTables");
+  tables.replaceChildren();
+  if (!summary || summary.status !== "AVAILABLE") {
+    const state = summary?.status || "UNKNOWN";
+    const detail = summary?.reason_codes?.join("、") || "没有可证明的完整统计";
+    status.textContent =
+      state === "NOT_DUE"
+        ? `T+1后继 ${state} · ${detail}；当前日期仍显示自身Seed/D0状态，不借用前一日统计。`
+        : `S2固定组T+1摘要 ${state} · ${detail}；未知或未计算不解释为零。`;
+    return;
+  }
+
+  status.textContent =
+    `${summary.target_session}固定T0 → ${summary.endpoint_session}已存T+1 · ` +
+    `完整来源分母 ${format(summary.source_pool_count)} · ` +
+    `画像窗口 ${summary.history_session_counts.join(" → ")} · ` +
+    `Seed ${summary.producer_contract} / ${summary.producer_version} · ` +
+    `日历 ${summary.calendar_revision} · ${summary.research_mode} / ${summary.price_coordinate}`;
+
+  const overallHeading = node("h4", "T0固定S2三态组");
+  const overallTable = node("table");
+  overallTable.className = "focus-s2-t1-table focus-s2-t1-table--groups";
+  const overallHead = node("thead");
+  const overallHeader = node("tr");
+  [
+    "T0 S2组",
+    "组分母",
+    "T+1可评价覆盖 / 端点UNKNOWN",
+    "均值 / 中位 OBSERVED_ONLY",
+    "正 / 非正",
+    "最小～最大",
+  ].forEach((label) => overallHeader.append(node("th", label)));
+  overallHead.append(overallHeader);
+  overallTable.append(overallHead);
+  const overallBody = node("tbody");
+  for (const row of summary.groups) {
+    const tr = node("tr");
+    [
+      row.t0_s2_state,
+      format(row.member_count),
+      formatCohortCoverage(row),
+      formatCohortCenter(row),
+      `${format(row.positive_count)} / ${format(row.non_positive_count)}`,
+      `${formatCohortReturn(row.min_return)} ～ ${formatCohortReturn(row.max_return)}`,
+    ].forEach((value) => tr.append(node("td", value)));
+    overallBody.append(tr);
+  }
+  overallTable.append(overallBody);
+  const overallScroll = node(
+    "div",
+    "",
+    "table-scroll focus-s2-t1-table-scroll",
+  );
+  overallScroll.append(overallTable);
+
+  const trueRows = summary.t0_true_t1_states;
+  const trueHeading = node(
+    "h4",
+    `T0 S2 TRUE：${format(summary.groups.find((row) => row.t0_s2_state === "TRUE")?.member_count)}只的T+1事后分层`,
+  );
+  const trueTable = node("table");
+  trueTable.className = "focus-s2-t1-table focus-s2-t1-table--transitions";
+  const trueHead = node("thead");
+  const trueHeader = node("tr");
+  [
+    "T+1 S2状态（事后）",
+    "组内人数",
+    "T+1收盘覆盖 / 端点UNKNOWN",
+    "均值 / 中位 OBSERVED_ONLY",
+    "正 / 非正",
+    "冻结S2未满足原因（股票频数）",
+  ].forEach((label) => trueHeader.append(node("th", label)));
+  trueHead.append(trueHeader);
+  trueTable.append(trueHead);
+  const trueBody = node("tbody");
+  for (const row of trueRows) {
+    const reasons = row.failure_reasons.length
+      ? row.failure_reasons
+          .map((item) => `${item.code}（${format(item.stock_count)}）`)
+          .join("；")
+      : row.t1_s2_state === "TRUE"
+        ? "无不持续原因"
+        : "没有已存原因码";
+    const tr = node("tr");
+    [
+      row.t1_s2_state,
+      format(row.member_count),
+      formatCohortCoverage(row),
+      formatCohortCenter(row),
+      `${format(row.positive_count)} / ${format(row.non_positive_count)}`,
+      reasons,
+    ].forEach((value) => tr.append(node("td", value)));
+    trueBody.append(tr);
+  }
+  trueTable.append(trueBody);
+  const trueScroll = node("div", "", "table-scroll focus-s2-t1-table-scroll");
+  trueScroll.append(trueTable);
+  tables.append(overallHeading, overallScroll, trueHeading, trueScroll);
+}
+
 function seedT1SummaryText(outcome, includeContinuity = true) {
   if (!outcome) return "个股Seed T+1结果未读取 · NOT_COMPUTED";
   const continuityPrefix = includeContinuity
@@ -2011,6 +2132,7 @@ async function loadFocusAuto(context, offset = 0) {
   state.focusAutoOffset = offset;
   const root = $("focusAutoRows");
   root.replaceChildren();
+  renderFocusS2T1Cohort({ status: "LOADING" });
   $("focusAutoPrev").disabled = $("focusAutoNext").disabled = true;
   message("focusAutoPage", "—");
   if (!context?.contextReady) {
@@ -2043,6 +2165,10 @@ async function loadFocusAuto(context, offset = 0) {
   void loadFocusMarketContext(context);
   if (!context?.previous_session || !context?.source_package_id) {
     message("focusAutoStatus", "相邻同源会话不可用；自动观察范围 UNKNOWN。");
+    renderFocusS2T1Cohort({
+      status: "UNKNOWN",
+      reason_codes: ["ADJACENT_SOURCE_CONTEXT_UNAVAILABLE"],
+    });
     return;
   }
   message(
@@ -2078,6 +2204,7 @@ async function loadFocusAuto(context, offset = 0) {
       activePage !== "focus"
     )
       return;
+    renderFocusS2T1Cohort(result.s2_t1_cohort);
     const scope = result.stored_evidence_status || {};
     if (
       ["d0", "seed", "d1", "rules"].every(
@@ -2185,8 +2312,13 @@ async function loadFocusAuto(context, offset = 0) {
                 ? "所选行业/GN在当前观察分组中没有已证成员；成员关系与观察资格保持分开。"
                 : `当前日期的${groupLabels[group] || group}分组没有记录。`;
   } catch (error) {
-    if (token === state.focusAutoRequest && state.selected === context)
+    if (token === state.focusAutoRequest && state.selected === context) {
+      renderFocusS2T1Cohort({
+        status: "UNKNOWN",
+        reason_codes: ["S2_T1_COHORT_READ_FAILED"],
+      });
       message("focusAutoStatus", `自动来源观察不可用：${error.message}`);
+    }
   }
 }
 
