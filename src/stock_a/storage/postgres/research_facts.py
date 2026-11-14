@@ -222,6 +222,306 @@ def prepare_research_rows(
     return rules, paths
 
 
+def prepare_forward_path_rows(
+    *,
+    target,
+    source,
+    calendar_revision,
+    session_versions,
+    outcomes,
+    source_package_id,
+    horizon,
+):
+    """将现役原始价格路径算法的已到期结果转为共享typed行。"""
+    if (
+        type(target) is not date
+        or type(horizon) is not int
+        or horizon not in {1, 3, 5, 10, 20}
+        or not isinstance(calendar_revision, str)
+        or not calendar_revision
+        or not isinstance(outcomes, Mapping)
+        or not outcomes
+    ):
+        raise ValueError("后继路径日期、期限、日历或结果集合无效")
+    capture = source.get("source_capture_id")
+    if (
+        type(capture) is not int
+        or capture <= 0
+        or source.get("source_package_id") != source_package_id
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+    ):
+        raise ValueError("后继路径缺少真实T0来源包或捕获ID")
+
+    rows = []
+    for symbol in sorted(outcomes):
+        fact = outcomes[symbol]
+        if fact.get("due") is not True:
+            continue
+        endpoint_day = date.fromisoformat(fact["target_session"])
+        version = session_versions.get(endpoint_day.isoformat())
+        if (
+            endpoint_day <= target
+            or not isinstance(version, Mapping)
+            or version.get("status") != "CLOSED"
+            or version.get("row_count") != len(outcomes)
+        ):
+            raise ValueError("已到期后继路径没有完整且同一日历的Raw来源分区")
+        endpoint = fact["endpoint"]["raw_close_relative_change"]
+        endpoint_num, endpoint_den = _fraction_pair(endpoint.get("value"))
+        values = fact.get("path_values") or {}
+        mfe = _fraction_pair(values.get("mfe"))
+        mae = _fraction_pair(values.get("mae"))
+        mdd = _fraction_pair(values.get("mdd"))
+        rows.append(
+            (
+                target,
+                symbol,
+                source_package_id,
+                capture,
+                horizon,
+                PATH_VERSION,
+                calendar_revision,
+                endpoint_day,
+                fact["maturity"],
+                endpoint["quality"],
+                endpoint.get("reason"),
+                endpoint_num,
+                endpoint_den,
+                fact["path_quality"],
+                list(fact["path_reasons"]),
+                *mfe,
+                *mae,
+                *mdd,
+                "RAW_UNADJUSTED",
+                SCOPE,
+            )
+        )
+    if len(rows) != len(outcomes):
+        raise ValueError("本批T+1结果未全部成熟，拒绝保存不完整路径行")
+    return rows
+
+
+def write_forward_path_rows(
+    config,
+    *,
+    paths,
+    source_symbols,
+    endpoint_source_capture_id,
+):
+    """为完整Seed来源池保存共享后继路径；不创建规则、登记或Episode。"""
+    symbols = tuple(sorted(set(source_symbols)))
+    if (
+        not paths
+        or not symbols
+        or len(symbols) != len(source_symbols)
+        or len(paths) != len(symbols)
+        or type(endpoint_source_capture_id) is not int
+        or endpoint_source_capture_id <= 0
+    ):
+        raise ValueError("后继路径写入必须绑定非空且唯一的完整来源代码集合")
+    first = paths[0]
+    target, _symbol, package, capture = first[:4]
+    horizon, path_version, calendar_revision, endpoint_session = first[4:8]
+    if (
+        type(target) is not date
+        or horizon != 1
+        or path_version != PATH_VERSION
+        or type(endpoint_session) is not date
+        or endpoint_session <= target
+        or not calendar_revision
+        or tuple(sorted(row[1] for row in paths)) != symbols
+        or any(
+            row[:4] != (target, row[1], package, capture)
+            or row[4:8] != (horizon, path_version, calendar_revision, endpoint_session)
+            or row[21:] != ("RAW_UNADJUSTED", SCOPE)
+            for row in paths
+        )
+    ):
+        raise ValueError("T+1路径行存在日期、来源、坐标、期限或业务键混用")
+
+    with _transaction(config, write=True, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """SELECT target_session, source_package_id, normalized_count,
+                      parser_contract, source_time_quality, source_clock_role,
+                      source_available_at
+               FROM source_captures WHERE capture_id=%s""",
+            (capture,),
+        )
+        t0_capture = cursor.fetchone()
+        cursor.execute(
+            """SELECT target_session, source_package_id, normalized_count,
+                      parser_contract, source_time_quality, source_clock_role,
+                      source_available_at
+               FROM source_captures WHERE capture_id=%s""",
+            (endpoint_source_capture_id,),
+        )
+        endpoint_capture = cursor.fetchone()
+        expected_capture_prefix = (
+            "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT",
+            "NON_PIT_OBSERVED",
+        )
+        if (
+            t0_capture is None
+            or endpoint_capture is None
+            or t0_capture[0] != target
+            or endpoint_capture[0] != endpoint_session
+            or t0_capture[1] != package
+            or endpoint_capture[1] != package
+            or t0_capture[2] != len(symbols)
+            or endpoint_capture[2] != len(symbols)
+            or t0_capture[3] != endpoint_capture[3]
+            or t0_capture[4] != expected_capture_prefix[1]
+            or endpoint_capture[4] != expected_capture_prefix[1]
+            or t0_capture[5] != expected_capture_prefix[0]
+            or endpoint_capture[5] != expected_capture_prefix[0]
+            or t0_capture[6] is not None
+            or endpoint_capture[6] is not None
+        ):
+            raise ValueError("T0与T+1捕获不完整、非同源或时钟质量不符合研究范围")
+
+        cursor.execute(
+            """SELECT profile_revision, producer_contract, producer_version,
+                      history_session_count, calendar_id, calendar_revision,
+                      research_mode, price_coordinate, count(*),
+                      count(DISTINCT source_symbol)
+               FROM source_pool_seed_day_facts
+               WHERE target_session=%s AND source_package_id=%s AND source_capture_id=%s
+               GROUP BY profile_revision, producer_contract, producer_version,
+                        history_session_count, calendar_id, calendar_revision,
+                        research_mode, price_coordinate
+               ORDER BY profile_revision""",
+            (target, package, capture),
+        )
+        seed_scopes = cursor.fetchall()
+        if (
+            len(seed_scopes) != 1
+            or seed_scopes[0][5] != calendar_revision
+            or seed_scopes[0][6] != "NON_PIT_RETROSPECTIVE"
+            or seed_scopes[0][7] != "RAW_UNADJUSTED"
+            or seed_scopes[0][8] != len(symbols)
+            or seed_scopes[0][9] != len(symbols)
+        ):
+            raise ValueError("T0 Seed不是单一、完整且与后继路径同日历的范围")
+
+        for label, session, source_capture_id in (
+            ("T0", target, capture),
+            ("T+1", endpoint_session, endpoint_source_capture_id),
+        ):
+            cursor.execute(
+                """WITH expected(source_symbol) AS (
+                         SELECT unnest(%s::text[])
+                     ), stored(source_symbol) AS (
+                         SELECT source_symbol FROM source_raw_daily
+                         WHERE session_date=%s AND source_package_id=%s
+                           AND source_capture_id=%s
+                     ), delta AS (
+                         (SELECT source_symbol FROM stored
+                          EXCEPT SELECT source_symbol FROM expected)
+                         UNION ALL
+                         (SELECT source_symbol FROM expected
+                          EXCEPT SELECT source_symbol FROM stored)
+                     )
+                     SELECT (SELECT count(*) FROM stored),
+                            (SELECT count(DISTINCT source_symbol) FROM stored),
+                            (SELECT count(*) FROM delta)""",
+                (list(symbols), session, package, source_capture_id),
+            )
+            row_count, distinct_count, difference_count = cursor.fetchone()
+            if (row_count, distinct_count, difference_count) != (
+                len(symbols),
+                len(symbols),
+                0,
+            ):
+                raise ValueError(f"{label}Raw未与T0 Seed来源代码集合精确闭合")
+
+        cursor.execute(
+            """SELECT source_symbol, endpoint_session
+               FROM source_forward_path_facts
+               WHERE target_session=%s AND source_package_id=%s
+                 AND source_capture_id=%s AND horizon=%s
+                 AND path_rule_version=%s AND calendar_revision=%s
+               ORDER BY source_symbol""",
+            (
+                target,
+                package,
+                capture,
+                horizon,
+                path_version,
+                calendar_revision,
+            ),
+        )
+        existing_rows = cursor.fetchall()
+        if existing_rows and (
+            not {row[0] for row in existing_rows}.issubset(symbols)
+            or any(row[1] != endpoint_session for row in existing_rows)
+        ):
+            raise ResearchFactConflict("同一T+1业务键已有范围外或错期路径行")
+
+        inserted = _insert_and_compare(
+            cursor,
+            "source_forward_path_facts",
+            PATH_COLUMNS,
+            paths,
+            PATH_KEY,
+            "target_session=%s AND source_package_id=%s AND source_capture_id=%s "
+            "AND horizon=%s AND path_rule_version=%s AND calendar_revision=%s "
+            "AND endpoint_session=%s",
+            (
+                target,
+                package,
+                capture,
+                horizon,
+                path_version,
+                calendar_revision,
+                endpoint_session,
+            ),
+        )
+        cursor.execute(
+            """SELECT count(*), count(DISTINCT source_symbol)
+               FROM source_forward_path_facts
+               WHERE target_session=%s AND source_package_id=%s
+                 AND source_capture_id=%s AND horizon=%s
+                 AND path_rule_version=%s AND calendar_revision=%s
+                 AND endpoint_session=%s""",
+            (
+                target,
+                package,
+                capture,
+                horizon,
+                path_version,
+                calendar_revision,
+                endpoint_session,
+            ),
+        )
+        if cursor.fetchone() != (len(symbols), len(symbols)):
+            raise ResearchFactConflict("T+1typed结果写入后未闭合T0来源池分母")
+        if inserted:
+            cursor.execute(
+                """DELETE FROM source_cohort_group_stats
+                   WHERE target_session=%s AND source_package_id=%s
+                     AND source_capture_id=%s""",
+                (target, package, capture),
+            )
+    return {
+        "target_session": target.isoformat(),
+        "endpoint_session": endpoint_session.isoformat(),
+        "source_package_id": package,
+        "source_capture_id": capture,
+        "endpoint_source_capture_id": endpoint_source_capture_id,
+        "expected_paths": len(paths),
+        "inserted_paths": inserted,
+        "idempotent": inserted == 0,
+        "path_rule_version": path_version,
+        "calendar_revision": calendar_revision,
+        "transaction": "SERIALIZABLE",
+    }
+
+
 def _insert_and_compare(cursor, table, columns, rows, key_columns, selection, args):
     if not rows:
         return 0

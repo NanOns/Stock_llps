@@ -1758,6 +1758,64 @@ async function loadFocusMarketContext(context) {
   }
 }
 
+function seedT1SummaryText(outcome) {
+  if (!outcome) return "个股Seed T+1结果未读取 · NOT_COMPUTED";
+  const sourceSeed = outcome.source_seed?.state || "UNKNOWN";
+  const s1 = outcome.s1?.state || "UNKNOWN";
+  const s2 = outcome.s2?.state || "UNKNOWN";
+  const safety = outcome.safety?.state || "UNKNOWN";
+  const formalSeed = outcome.formal_seed?.state || "UNKNOWN";
+  const condition = `来源形态Seed ${sourceSeed}（S1 ${s1} / S2 ${s2}）· Safety ${safety} · 正式Seed ${formalSeed} · D0 ${outcome.d0_transition_status || "UNKNOWN"} · 九规则 ${outcome.rule_status || "UNKNOWN"}`;
+  const endpoint = outcome.endpoint || {};
+  const reason =
+    [
+      ...new Set(
+        [
+          ...(outcome.reason_codes || []),
+          endpoint.reason,
+          outcome.t1_price?.reason,
+        ].filter(Boolean),
+      ),
+    ].join("、") || "无原因码";
+  if (
+    outcome.status === "OBSERVED" &&
+    outcome.t0_price?.close &&
+    outcome.t1_price?.close &&
+    endpoint.return_numerator != null &&
+    endpoint.return_denominator != null
+  ) {
+    return `T+1 ${outcome.successor_session} · RAW_UNADJUSTED 收盘 ${outcome.t1_price.close} / T0 ${outcome.t0_price.close} · close(T+1)/close(T0)-1 = ${endpoint.return_numerator}/${endpoint.return_denominator} · ${condition} · NON_PIT`;
+  }
+  if (outcome.status === "NOT_DUE")
+    return `个股T+1 NOT_DUE · ${condition} · NON_PIT / RAW_UNADJUSTED`;
+  return `个股T+1 ${outcome.status || "UNKNOWN"}${outcome.successor_session ? ` ${outcome.successor_session}` : ""} · ${outcome.t1_price?.quality || "UNKNOWN"} ${reason} · ${condition} · NON_PIT / RAW_UNADJUSTED`;
+}
+
+function seedT1ReasonText(outcome) {
+  if (!outcome) return "Seed冻结原因：未读取。";
+  const reasons = outcome.condition_reasons || {};
+  const labels = [
+    ["来源形态Seed", reasons.source_seed],
+    ["S1", reasons.s1],
+    ["S2", reasons.s2],
+    ["Safety", reasons.safety],
+  ];
+  const parts = labels
+    .filter(([, codes]) => Array.isArray(codes) && codes.length)
+    .map(([label, codes]) => `${label}：${codes.join("、")}`);
+  return parts.length ? parts.join("；") : "Seed冻结条件没有额外原因码。";
+}
+
+function sourceD0SummaryText(d0) {
+  if (!d0) return "D0事实未返回。";
+  const scenarios = d0.scenarios || {};
+  const launch = scenarios.LAUNCH_CONFIRM?.state || "UNKNOWN";
+  const recovery = scenarios.RECOVERY_TURN?.state || "UNKNOWN";
+  if (d0.status === "NOT_COMPUTED")
+    return `D0相邻转移 NOT_COMPUTED；单日 LAUNCH_CONFIRM ${launch} / RECOVERY_TURN ${recovery} 仅为当日原始谓词，不证明 ENTRY。`;
+  return `D0相邻转移 ${d0.status || "UNKNOWN"} · LAUNCH_CONFIRM ${launch} / RECOVERY_TURN ${recovery}。`;
+}
+
 function focusEvidenceDetails(item, context) {
   const details = node("details", null, "focus-evidence");
   details.append(node("summary", "查看规则条件、板块关系与板内比较"));
@@ -1782,12 +1840,16 @@ function focusEvidenceDetails(item, context) {
     ),
     node(
       "p",
-      `D0 ${item.d0_change?.before_state || "UNKNOWN"}→${item.d0_change?.after_state || "UNKNOWN"} · ${item.transition || "UNKNOWN"} · Raw来源质量 ${version.source_time_quality || "UNKNOWN"} / ${version.source_clock_role || "UNKNOWN"}`,
+      item.seed_t1_outcome?.d0_transition_status === "NOT_COMPUTED"
+        ? `D0相邻转移 NOT_COMPUTED · Raw来源质量 ${version.source_time_quality || "UNKNOWN"} / ${version.source_clock_role || "UNKNOWN"}`
+        : `D0 ${item.d0_change?.before_state || "UNKNOWN"}→${item.d0_change?.after_state || "UNKNOWN"} · ${item.transition || item.seed_t1_outcome?.d0_transition_status || "UNKNOWN"} · Raw来源质量 ${version.source_time_quality || "UNKNOWN"} / ${version.source_clock_role || "UNKNOWN"}`,
     ),
     node(
       "p",
-      `Seed ${seed.source_seed?.state || "UNKNOWN"} · S1 ${seed.s1?.state || "UNKNOWN"} · S2 ${seed.s2?.state || "UNKNOWN"} · Safety ${seed.safety?.state || "UNKNOWN"} · 目标收盘 ${seed.target_close_quality || "UNKNOWN"} ${seed.target_close_reason || ""}`,
+      `来源形态Seed ${seed.source_seed?.state || "UNKNOWN"} · S1 ${seed.s1?.state || "UNKNOWN"} · S2 ${seed.s2?.state || "UNKNOWN"} · Safety ${seed.safety?.state || "UNKNOWN"} · 正式Seed ${item.seed_t1_outcome?.formal_seed?.state || "UNKNOWN"} · 目标收盘 ${seed.target_close_quality || "UNKNOWN"} ${seed.target_close_reason || ""}`,
     ),
+    node("p", seedT1SummaryText(item.seed_t1_outcome)),
+    node("p", `Seed冻结原因：${seedT1ReasonText(item.seed_t1_outcome)}`),
   );
   details.append(
     t0EarlyObservationDetails(
@@ -2000,8 +2062,9 @@ async function loadFocusAuto(context, offset = 0) {
       const details = [
         String(item.watch_group || state.focusAutoGroup),
         item.observation_reason || "已保存的来源研究事实",
-        `D0 ${item.d0_change?.transition || item.transition || "UNKNOWN"}`,
+        `D0 ${item.d0_change?.transition || item.transition || item.seed_t1_outcome?.d0_transition_status || "UNKNOWN"}`,
         `T0 ${item.t0_observation?.status || "UNKNOWN"} · NON_PIT`,
+        seedT1SummaryText(item.seed_t1_outcome),
         t0EarlySummary(item.t0_observation),
       ];
       root.append(
@@ -4057,7 +4120,7 @@ $("focusReadStock").addEventListener("click", async () => {
         `${format(data.raw?.[k]?.value)} · ${data.raw?.[k]?.quality || "UNKNOWN"} · ${data.raw?.[k]?.reason || "—"}`,
       ]),
       [
-        "T0来源观察",
+        "T0研究登记",
         (data.t0_observation?.enrollments || [])
           .map(
             (entry) =>
@@ -4066,13 +4129,16 @@ $("focusReadStock").addEventListener("click", async () => {
           .join("；") ||
           `${data.t0_observation?.status || "UNKNOWN"} · ${data.t0_observation?.reason || "NO_STORED_FACT"}`,
       ],
+      ["D0来源事实", sourceD0SummaryText(data.t0_observation?.d0_context)],
       [
         "Seed / S1 / S2 / Safety",
         (() => {
           const seed = data.stored_research_evidence?.seed || {};
-          return `Seed ${seed.source_seed?.state || "UNKNOWN"}；S1 ${seed.s1?.state || "UNKNOWN"}；S2 ${seed.s2?.state || "UNKNOWN"}；Safety ${seed.safety?.state || "UNKNOWN"}`;
+          return `来源形态Seed ${seed.source_seed?.state || "UNKNOWN"}；S1 ${seed.s1?.state || "UNKNOWN"}；S2 ${seed.s2?.state || "UNKNOWN"}；Safety ${seed.safety?.state || "UNKNOWN"}；正式Seed ${data.seed_t1_outcome?.formal_seed?.state || "UNKNOWN"}`;
         })(),
       ],
+      ["Seed观察T+1", seedT1SummaryText(data.seed_t1_outcome)],
+      ["Seed冻结原因", seedT1ReasonText(data.seed_t1_outcome)],
       [
         "D1材料与目标价",
         (() => {

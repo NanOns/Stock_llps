@@ -2032,6 +2032,30 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         successor_sessions = tuple(
             day for day in calendar_sessions if target_session < day <= research_cutoff
         )
+        if target_session not in calendar_sessions:
+            raise PreviewHttpError(
+                409,
+                "SOURCE_LAUNCH_WATCH_TARGET_CALENDAR_UNAVAILABLE",
+                "目标会话不在当前官方日历范围内，不能读取个股后继结果",
+            )
+        from stock_a.storage.postgres.source_launch_watch_evidence import (
+            read_source_seed_t1_outcomes,
+        )
+
+        seed_t1_by_symbol = read_source_seed_t1_outcomes(
+            config,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            source_package_id=source_package_id,
+            source_capture_id=after_source["source_capture_id"],
+            expected_source_count=after_source["capture_expected_row_count"],
+            source_symbols=page_symbols,
+            successor_sessions=successor_sessions,
+        )
+        for seed_t1 in seed_t1_by_symbol.values():
+            seed_t1["d0_transition_status"] = page_result["scope_status"]["d0"]
+            seed_t1["rule_status"] = page_result["scope_status"]["rules"]
+            seed_t1["d1_status"] = page_result["scope_status"]["d1"]
         enrollment_ids = [
             item["id"] for entries in enrollment_by_symbol.values() for item in entries
         ]
@@ -2167,6 +2191,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     }[group],
                     "unknown_reason_codes": sorted(reasons),
                     "research_evidence": item_evidence,
+                    "seed_t1_outcome": seed_t1_by_symbol.get(symbol),
                     "source_version": source_version,
                     "t0_observation": {
                         "status": t0_status,
@@ -5744,7 +5769,39 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     selected_profile_revision=profile_revision,
                     membership_snapshot_ids=membership_snapshot_ids,
                 )
-                result["stored_research_evidence"] = saved_evidence["by_symbol"][symbol]
+                single_evidence = saved_evidence["by_symbol"][symbol]
+                d0_transition_status = single_evidence.get("d0", {}).get(
+                    "status", "UNKNOWN"
+                )
+                calendar_sessions = _official_calendar(research_cutoff)["sessions"]
+                if target not in calendar_sessions:
+                    raise PreviewHttpError(
+                        409,
+                        "STOCK_SEED_T1_TARGET_CALENDAR_UNAVAILABLE",
+                        "目标会话不在当前官方日历范围内，不能读取个股后继结果",
+                    )
+                successor_sessions = tuple(
+                    day for day in calendar_sessions if target < day <= research_cutoff
+                )
+                from stock_a.storage.postgres.source_launch_watch_evidence import (
+                    read_source_seed_t1_outcomes,
+                )
+
+                seed_t1_outcome = read_source_seed_t1_outcomes(
+                    self.preview_server.state.config,
+                    target_session=target,
+                    research_cutoff=research_cutoff,
+                    source_package_id=source_package_id,
+                    source_capture_id=source_context["source_capture_id"],
+                    expected_source_count=source_context["capture_expected_row_count"],
+                    source_symbols=(symbol,),
+                    successor_sessions=successor_sessions,
+                )[symbol]
+                seed_t1_outcome["d0_transition_status"] = d0_transition_status
+                seed_t1_outcome["rule_status"] = single_evidence["rules"]["status"]
+                seed_t1_outcome["d1_status"] = single_evidence["d1"]["status"]
+                result["seed_t1_outcome"] = seed_t1_outcome
+                result["stored_research_evidence"] = single_evidence
                 result["stored_research_evidence_execution"] = saved_evidence[
                     "execution"
                 ]
@@ -5783,7 +5840,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             else None
                         ),
                     ).get(symbol, [])
-                calendar = _official_calendar(research_cutoff)["sessions"]
+                calendar = calendar_sessions
                 ids = [entry["id"] for entry in entries]
                 followups = (
                     read_enrollment_followups(
@@ -5841,19 +5898,35 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     stored_status=followup_status,
                     stored_reason=followup_reason,
                 )
-                result["t0_observation"] = {
-                    "status": "AVAILABLE"
+                registration_status = (
+                    "AVAILABLE"
                     if entries
+                    else "NOT_COMPUTED"
+                    if d0_transition_status == "NOT_COMPUTED"
+                    or single_evidence["rules"]["status"] == "NOT_COMPUTED"
                     else "NO_STORED_FACT"
                     if before_source.get("status") == "AVAILABLE"
-                    and saved_evidence.get("rules_status") == "AVAILABLE"
-                    else "UNKNOWN",
-                    "reason": None
+                    and single_evidence["rules"]["status"] == "AVAILABLE"
+                    else "UNKNOWN"
+                )
+                registration_reason = (
+                    None
                     if entries
+                    else "D0_ADJACENT_LAUNCH_FACT_NOT_SAVED_FOR_EXACT_INPUT"
+                    if d0_transition_status == "NOT_COMPUTED"
+                    else "RULE_FACTS_NOT_COMPUTED_FOR_EXACT_INPUT"
+                    if single_evidence["rules"]["status"] == "NOT_COMPUTED"
                     else "NO_STORED_FACT"
-                    if saved_evidence.get("rules_status") == "AVAILABLE"
-                    and before_source.get("status") == "AVAILABLE"
-                    else "EXACT_SCOPE_UNAVAILABLE",
+                    if registration_status == "NO_STORED_FACT"
+                    else "EXACT_SCOPE_UNAVAILABLE"
+                )
+                result["t0_observation"] = {
+                    "status": registration_status,
+                    "reason": registration_reason,
+                    "d0_transition_status": d0_transition_status,
+                    "rule_status": single_evidence["rules"]["status"],
+                    "d1_status": single_evidence["d1"]["status"],
+                    "d0_context": single_evidence.get("d0"),
                     "enrollments": entries,
                     "triage_summary": triage_summary,
                     "followup_status": followup_status,

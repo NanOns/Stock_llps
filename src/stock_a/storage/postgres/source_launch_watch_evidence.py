@@ -743,6 +743,371 @@ def read_source_launch_watch_evidence(
     }
 
 
+def read_source_seed_t1_outcomes(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    source_package_id: int,
+    source_capture_id: int,
+    expected_source_count: int,
+    source_symbols: Sequence[str],
+    successor_sessions: Sequence[date],
+) -> dict[str, dict[str, Any]]:
+    """按当前页读取已存Seed条件、Raw收盘与共享T+1 typed结果。"""
+    from stock_a.domain.tri_state import reduce_seed_with_safety
+    from stock_a.storage.postgres import source_raw
+    from stock_a.storage.postgres.research_facts import PATH_VERSION
+
+    symbols = tuple(sorted(set(source_symbols)))
+    successors = tuple(successor_sessions)
+    if (
+        type(target_session) is not date
+        or type(research_cutoff) is not date
+        or target_session > research_cutoff
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or type(expected_source_count) is not int
+        or expected_source_count <= 0
+        or len(symbols) != len(source_symbols)
+        or len(symbols) > 100
+        or any(_SYMBOL.fullmatch(symbol) is None for symbol in symbols)
+        or any(
+            type(day) is not date or not target_session < day <= research_cutoff
+            for day in successors
+        )
+        or tuple(sorted(set(successors))) != successors
+    ):
+        raise ValueError("Seed T+1读取键或官方后继会话无效")
+    if not symbols:
+        return {}
+
+    next_session = successors[0] if successors else None
+    with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            """SELECT target_session, source_package_id, normalized_count,
+                      parser_contract, source_time_quality, source_clock_role,
+                      source_available_at
+               FROM source_captures WHERE capture_id=%s""",
+            (source_capture_id,),
+        )
+        t0_capture = cursor.fetchone()
+        cursor.execute(
+            """SELECT profile_revision, producer_contract, producer_version,
+                      history_session_count, calendar_id, calendar_revision,
+                      research_mode, price_coordinate, count(*)::bigint,
+                      count(DISTINCT source_symbol)::bigint
+               FROM source_pool_seed_day_facts
+               WHERE target_session=%s AND source_package_id=%s
+                 AND source_capture_id=%s
+               GROUP BY profile_revision, producer_contract, producer_version,
+                        history_session_count, calendar_id, calendar_revision,
+                        research_mode, price_coordinate
+               ORDER BY profile_revision, producer_version""",
+            (target_session, source_package_id, source_capture_id),
+        )
+        scopes = cursor.fetchall()
+        if not scopes:
+            scope_status = "NOT_COMPUTED"
+            seed_scope = None
+        elif len(scopes) != 1:
+            scope_status = "AMBIGUOUS"
+            seed_scope = None
+        elif scopes[0][8] < scopes[0][9] == expected_source_count:
+            scope_status = "INCOMPLETE"
+            seed_scope = scopes[0]
+        elif scopes[0][8] == scopes[0][9] == expected_source_count:
+            scope_status = "AVAILABLE"
+            seed_scope = scopes[0]
+        else:
+            scope_status = "INCOMPLETE"
+            seed_scope = scopes[0]
+
+        endpoint_capture = None
+        endpoint_capture_status = "NOT_DUE" if next_session is None else "UNKNOWN"
+        if next_session is not None:
+            cursor.execute(
+                """SELECT capture_id, normalized_count, parser_contract,
+                          source_time_quality, source_clock_role, source_available_at
+                   FROM source_captures
+                   WHERE target_session=%s AND source_package_id=%s
+                   ORDER BY capture_id""",
+                (next_session, source_package_id),
+            )
+            endpoint_captures = cursor.fetchall()
+            if len(endpoint_captures) == 1:
+                endpoint_capture = endpoint_captures[0]
+                if (
+                    endpoint_capture[1] == expected_source_count
+                    and t0_capture is not None
+                    and endpoint_capture[2] == t0_capture[3]
+                    and endpoint_capture[3] == "NON_PIT_OBSERVED"
+                    and endpoint_capture[4]
+                    == "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT"
+                    and endpoint_capture[5] is None
+                    and t0_capture[4] == "NON_PIT_OBSERVED"
+                    and t0_capture[5] == "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT"
+                    and t0_capture[6] is None
+                ):
+                    endpoint_capture_status = "AVAILABLE"
+                else:
+                    endpoint_capture_status = "UNKNOWN"
+            elif not endpoint_captures:
+                endpoint_capture_status = "UNKNOWN"
+            else:
+                endpoint_capture_status = "AMBIGUOUS"
+
+        result_by_symbol: dict[str, dict[str, Any]] = {}
+        if seed_scope is not None:
+            endpoint_capture_id = (
+                int(endpoint_capture[0])
+                if endpoint_capture_status == "AVAILABLE" and endpoint_capture
+                else None
+            )
+            cursor.execute(
+                """SELECT s.source_symbol, s.profile_revision,
+                          s.source_seed_state, s.source_seed_reasons,
+                          s.s1_state, s.s1_reasons, s.s2_state, s.s2_reasons,
+                          s.safety_state, s.safety_reasons, s.research_mode,
+                          s.price_coordinate, s.calendar_revision,
+                          r0.price_quality, r0.raw_close, r0.price_reason,
+                          r1.price_quality, r1.raw_close, r1.price_reason,
+                          r1.source_capture_id, p.endpoint_session, p.maturity,
+                          p.endpoint_quality, p.endpoint_reason,
+                          p.endpoint_numerator, p.endpoint_denominator,
+                          p.path_quality, p.path_reasons,
+                          p.price_coordinate, p.scope,
+                          CASE WHEN r0.raw_close > 0 AND r1.raw_close IS NOT NULL
+                                    AND p.endpoint_numerator IS NOT NULL
+                                    AND p.endpoint_denominator > 0
+                               THEN p.endpoint_numerator * r0.raw_close
+                                  = p.endpoint_denominator * (r1.raw_close - r0.raw_close)
+                               ELSE FALSE END AS return_matches_raw
+                   FROM source_pool_seed_day_facts s
+                   LEFT JOIN source_raw_daily r0
+                     ON r0.session_date=s.target_session
+                    AND r0.source_package_id=s.source_package_id
+                    AND r0.source_capture_id=s.source_capture_id
+                    AND r0.source_symbol=s.source_symbol
+                   LEFT JOIN source_raw_daily r1
+                     ON r1.session_date=%s
+                    AND r1.source_package_id=s.source_package_id
+                    AND r1.source_capture_id=%s
+                    AND r1.source_symbol=s.source_symbol
+                   LEFT JOIN source_forward_path_facts p
+                     ON p.target_session=s.target_session
+                    AND p.source_package_id=s.source_package_id
+                    AND p.source_capture_id=s.source_capture_id
+                    AND p.source_symbol=s.source_symbol AND p.horizon=1
+                    AND p.path_rule_version=%s
+                    AND p.calendar_revision=s.calendar_revision
+                    AND p.endpoint_session=%s
+                   WHERE s.target_session=%s AND s.source_package_id=%s
+                     AND s.source_capture_id=%s AND s.profile_revision=%s
+                     AND s.source_symbol=ANY(%s)
+                   ORDER BY s.source_symbol""",
+                (
+                    next_session,
+                    endpoint_capture_id,
+                    PATH_VERSION,
+                    next_session,
+                    target_session,
+                    source_package_id,
+                    source_capture_id,
+                    seed_scope[0],
+                    list(symbols),
+                ),
+            )
+            rows = cursor.fetchall()
+            for row in rows:
+                (
+                    symbol,
+                    profile_revision,
+                    source_seed_state,
+                    source_seed_reasons,
+                    s1_state,
+                    s1_reasons,
+                    s2_state,
+                    s2_reasons,
+                    safety_state,
+                    safety_reasons,
+                    research_mode,
+                    price_coordinate,
+                    calendar_revision,
+                    t0_quality,
+                    t0_close,
+                    t0_reason,
+                    t1_quality,
+                    t1_close,
+                    t1_reason,
+                    t1_capture_id,
+                    endpoint_day,
+                    maturity,
+                    endpoint_quality,
+                    endpoint_reason,
+                    numerator,
+                    denominator,
+                    path_quality,
+                    path_reasons,
+                    path_coordinate,
+                    path_scope,
+                    return_matches_raw,
+                ) = row
+                source_seed = {
+                    "state": _state(source_seed_state),
+                    "reasons": _reasons(source_seed_reasons),
+                }
+                safety = {
+                    "state": _state(safety_state),
+                    "reasons": _reasons(safety_reasons),
+                }
+                formal_seed = reduce_seed_with_safety(safety, source_seed)
+                reasons = {
+                    "source_seed": source_seed["reasons"],
+                    "s1": _reasons(s1_reasons),
+                    "s2": _reasons(s2_reasons),
+                    "safety": safety["reasons"],
+                }
+                if next_session is None:
+                    status = "NOT_DUE"
+                    status_reasons = ["WAITING_FOR_FUTURE_SESSION"]
+                elif scope_status != "AVAILABLE":
+                    status = "UNKNOWN"
+                    status_reasons = [f"SEED_SCOPE_{scope_status}"]
+                elif endpoint_capture_status != "AVAILABLE":
+                    status = "UNKNOWN"
+                    status_reasons = [f"T1_SOURCE_CAPTURE_{endpoint_capture_status}"]
+                elif endpoint_day is None:
+                    status = "NOT_COMPUTED"
+                    status_reasons = ["T1_FORWARD_PATH_FACT_NOT_SAVED"]
+                elif endpoint_quality != "OBSERVED":
+                    status = "UNKNOWN"
+                    status_reasons = list(
+                        dict.fromkeys(
+                            reason
+                            for reason in (
+                                endpoint_reason,
+                                t0_reason,
+                                t1_reason,
+                                "T1_RAW_CLOSE_NOT_OBSERVED",
+                            )
+                            if reason
+                        )
+                    )
+                elif (
+                    t0_quality != "OBSERVED"
+                    or t1_quality != "OBSERVED"
+                    or t0_close is None
+                    or t1_close is None
+                    or numerator is None
+                    or denominator is None
+                    or denominator <= 0
+                    or endpoint_day != next_session
+                    or t1_capture_id != endpoint_capture_id
+                    or return_matches_raw is not True
+                    or path_coordinate != "RAW_UNADJUSTED"
+                    or path_scope != "NON_PIT_EXPLORATORY"
+                    or research_mode != "NON_PIT_RETROSPECTIVE"
+                    or price_coordinate != "RAW_UNADJUSTED"
+                ):
+                    status = "UNKNOWN"
+                    status_reasons = ["T0_T1_PRICE_OR_SOURCE_IDENTITY_MISMATCH"]
+                else:
+                    status = "OBSERVED"
+                    status_reasons = []
+                result_by_symbol[symbol] = {
+                    "status": status,
+                    "reason_codes": status_reasons,
+                    "observation_scope": "SAVED_SEED_T0_NON_PIT",
+                    "target_session": target_session.isoformat(),
+                    "successor_session": (
+                        next_session.isoformat() if next_session else None
+                    ),
+                    "research_cutoff": research_cutoff.isoformat(),
+                    "source_package_id": source_package_id,
+                    "source_capture_id": source_capture_id,
+                    "successor_capture_id": (
+                        endpoint_capture_id if endpoint_capture_id else None
+                    ),
+                    "profile_revision": profile_revision,
+                    "calendar_revision": calendar_revision,
+                    "source_seed": source_seed,
+                    "s1": {"state": _state(s1_state), "reasons": reasons["s1"]},
+                    "s2": {"state": _state(s2_state), "reasons": reasons["s2"]},
+                    "safety": safety,
+                    "formal_seed": formal_seed,
+                    "condition_reasons": reasons,
+                    "research_mode": research_mode,
+                    "price_coordinate": price_coordinate,
+                    "t0_price": {
+                        "quality": t0_quality or "UNKNOWN",
+                        "close": str(t0_close) if t0_close is not None else None,
+                        "reason": t0_reason,
+                    },
+                    "t1_price": {
+                        "quality": t1_quality or "UNKNOWN",
+                        "close": str(t1_close) if t1_close is not None else None,
+                        "reason": t1_reason,
+                        "source_time_quality": (
+                            endpoint_capture[3]
+                            if endpoint_capture_status == "AVAILABLE"
+                            and endpoint_capture
+                            else "UNKNOWN"
+                        ),
+                        "source_clock_role": (
+                            endpoint_capture[4]
+                            if endpoint_capture_status == "AVAILABLE"
+                            and endpoint_capture
+                            else "UNKNOWN"
+                        ),
+                    },
+                    "endpoint": {
+                        "status": endpoint_quality or "NOT_COMPUTED",
+                        "maturity": maturity or "NOT_DUE",
+                        "reason": endpoint_reason,
+                        "return_numerator": (
+                            str(numerator) if numerator is not None else None
+                        ),
+                        "return_denominator": (
+                            str(denominator) if denominator is not None else None
+                        ),
+                        "path_quality": path_quality or "NOT_COMPUTED",
+                        "path_reasons": _reasons(path_reasons),
+                        "price_coordinate": path_coordinate or "UNKNOWN",
+                        "scope": path_scope or "UNKNOWN",
+                        "formula": "close(T+1)/close(T0)-1",
+                    },
+                    "seed_scope_status": scope_status,
+                    "endpoint_capture_status": endpoint_capture_status,
+                }
+
+    for symbol in symbols:
+        if symbol not in result_by_symbol:
+            result_by_symbol[symbol] = {
+                "status": "NOT_COMPUTED"
+                if scope_status == "NOT_COMPUTED"
+                else "UNKNOWN",
+                "reason_codes": [
+                    "SEED_FACT_NOT_SAVED_FOR_EXACT_SOURCE_SYMBOL"
+                    if scope_status != "NOT_COMPUTED"
+                    else "SEED_SCOPE_NOT_COMPUTED"
+                ],
+                "observation_scope": "SAVED_SEED_T0_NON_PIT",
+                "target_session": target_session.isoformat(),
+                "successor_session": next_session.isoformat() if next_session else None,
+                "research_cutoff": research_cutoff.isoformat(),
+                "research_mode": "NON_PIT_RETROSPECTIVE",
+                "price_coordinate": "RAW_UNADJUSTED",
+            }
+    return result_by_symbol
+
+
 def _read_single_symbol_context(
     cursor: Any,
     *,
