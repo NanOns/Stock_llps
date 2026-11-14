@@ -28,14 +28,17 @@ def read_source_pool_rps(
     target_session: date,
     research_cutoff: date,
     source_package_id: int,
+    page_size: int = 100,
 ) -> dict[str, Any]:
     """各精确端点分别读取完整来源池；RAW结果仅作后验描述。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
         or target_session > research_cutoff
+        or type(page_size) is not int
+        or not 1 <= page_size <= 5000
     ):
-        raise ValueError("目标会话必须不晚于研究截止")
+        raise ValueError("目标会话、截止日或完整池读取页大小无效")
     _, sessions, revision = resolve_pg_history_window(target_session.isoformat(), 24)
     calendar_data, _, _, _ = _load_calendar(target_session)
     calendar = MarketSessionCalendar(calendar_data["calendar_id"], revision, sessions)
@@ -56,9 +59,10 @@ def read_source_pool_rps(
                 source_package_id=source_package_id,
                 sessions=sessions if offset == 0 else (end,),
                 offset=page_offset,
-                limit=100,
+                limit=page_size,
                 market="ALL",
                 board="ALL",
+                allow_full_pool_page=page_size > 100,
             )
             if total is None:
                 total = page["total_count"]

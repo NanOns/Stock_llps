@@ -2168,6 +2168,7 @@ def read_raw_daily_history_page(
     board: str,
     source_symbol: str | None = None,
     include_parser_contract: bool = False,
+    allow_full_pool_page: bool = False,
 ) -> dict[str, Any]:
     """SQL过滤并分页选候选，再以单个只读PG事务批量读取本页历史。"""
     selected_sessions = _validate_history_query(
@@ -2176,14 +2177,18 @@ def read_raw_daily_history_page(
         source_package_id=source_package_id,
         sessions=sessions,
     )
+    max_page_size = 5000 if allow_full_pool_page else 100
     if (
         type(offset) is not int
         or not 0 <= offset <= 2**31 - 1
         or type(limit) is not int
-        or not 1 <= limit <= 100
+        or not 1 <= limit <= max_page_size
+        or type(allow_full_pool_page) is not bool
+        or (allow_full_pool_page and source_symbol is not None)
     ):
         raise RawSourcePgError(
-            "PG_PAGE_INVALID", "PG历史分页offset须为非负整数且limit为1至100"
+            "PG_PAGE_INVALID",
+            "PG历史分页offset须为非负整数；普通页为1至100，离线完整来源池页为1至5000",
         )
     if len(selected_sessions) * limit > 750_000:
         raise RawSourcePgError("PG_HISTORY_BUDGET_EXCEEDED", "单页历史行数预算超限")

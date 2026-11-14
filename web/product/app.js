@@ -162,6 +162,24 @@ function t0EarlyContexts(t0) {
       )
     : [];
 }
+function enrollmentScopeText(entry) {
+  if (entry?.fact_type !== "RULE")
+    return `来源捕获 ${entry?.source_capture_id ?? "UNKNOWN"}`;
+  return `${entry.rule_version || "UNKNOWN_RULE_VERSION"} · Profile ${entry.profile_revision || "UNKNOWN"} · 历史 ${entry.history_session_count ?? "UNKNOWN"}/${entry.d1_history_session_count ?? "UNKNOWN"} · 事件窗 ${entry.event_window_start || "UNKNOWN"} · 捕获 ${entry.source_capture_id ?? "UNKNOWN"} · 日历 ${entry.calendar_revision || "UNKNOWN"}`;
+}
+function enrollmentFollowupText(followup) {
+  if (!followup) return "NOT_COMPUTED / NO_STORED_LANDMARK";
+  const identity = followup.fact_id
+    ? ` · 同规则事实 #${followup.fact_id} ${followup.state || "UNKNOWN"} · Profile ${followup.profile_revision || "UNKNOWN"} · 历史 ${followup.history_session_count ?? "UNKNOWN"}/${followup.d1_history_session_count ?? "UNKNOWN"} · 事件窗 ${followup.event_window_start || "UNKNOWN"} · 捕获 ${followup.source_capture_id ?? "UNKNOWN"} · 日历 ${followup.calendar_revision || "UNKNOWN"}`
+    : "";
+  const reasons = Array.isArray(followup.rule_reasons)
+    ? followup.rule_reasons.join("、")
+    : "";
+  return `${followup.status || "NOT_COMPUTED"} / ${followup.reason || "NO_STORED_LANDMARK"}${identity}${reasons ? ` · 规则原因 ${reasons}` : ""}`;
+}
+function enrollmentSummaryText(entry) {
+  return `#${entry.id} ${entry.rule_id || entry.fact_type} ${entry.kind || "UNKNOWN"} · ${entry.reason || "UNKNOWN"} · ${enrollmentScopeText(entry)} · 后继 ${enrollmentFollowupText(entry.followup)}`;
+}
 function exactRatioText(numerator, denominator, unit = "") {
   if (numerator == null || denominator == null || Number(denominator) === 0)
     return "UNKNOWN";
@@ -541,12 +559,7 @@ function t0EarlyObservationDetails(
     const contexts = Array.isArray(registration.early_contexts)
       ? registration.early_contexts
       : [];
-    panel.append(
-      node(
-        "h4",
-        `登记 #${registration.id} ${registration.kind || "UNKNOWN"} · ${registration.rule_id || registration.fact_type || "D0来源事实"} · 后继 ${registration.followup?.status || "NOT_COMPUTED"}（${registration.followup?.reason || "NO_STORED_LANDMARK"}）`,
-      ),
-    );
+    panel.append(node("h4", enrollmentSummaryText(registration)));
     if (!contexts.length) {
       panel.append(
         node(
@@ -1988,7 +2001,7 @@ function focusEvidenceDetails(item, context) {
     node(
       "p",
       registrations.length
-        ? `已存研究登记：${registrations.map((entry) => `#${entry.id} ${entry.rule_id || entry.fact_type} ${entry.kind} · ${entry.reason} · 后继 ${entry.followup?.status || "NOT_COMPUTED"} / ${entry.followup?.reason || "NO_STORED_LANDMARK"}`).join("；")}`
+        ? `已存研究登记：${registrations.map(enrollmentSummaryText).join("；")}`
         : `研究登记：${t0.reason || t0.status || "NO_STORED_FACT"}`,
     ),
     node(
@@ -4290,10 +4303,7 @@ $("focusReadStock").addEventListener("click", async () => {
       [
         "T0研究登记",
         (data.t0_observation?.enrollments || [])
-          .map(
-            (entry) =>
-              `#${entry.id} ${entry.rule_id || entry.fact_type} ${entry.kind} · ${entry.reason} · ${entry.followup?.status} / ${entry.followup?.reason}`,
-          )
+          .map(enrollmentSummaryText)
           .join("；") ||
           `${data.t0_observation?.status || "UNKNOWN"} · ${data.t0_observation?.reason || "NO_STORED_FACT"}`,
       ],

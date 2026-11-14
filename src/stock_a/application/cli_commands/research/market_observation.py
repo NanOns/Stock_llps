@@ -424,7 +424,9 @@ def _run_source_market_observation(args) -> int:
             profile_revision=args.profile_revision,
             profile_contract=contract,
             history_session_count=args.history_session_count,
-            **({"allow_missing_market": True} if args.view == "fep" else {}),
+            **(
+                {"allow_missing_market": True} if args.view in {"cohort", "fep"} else {}
+            ),
         )
         d1 = read_observation_d1(
             config,

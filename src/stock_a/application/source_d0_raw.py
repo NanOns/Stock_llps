@@ -273,6 +273,7 @@ def read_source_shape_cohort(config, day, *, research_cutoff, source_package_id)
                         target_session=prior,
                         research_cutoff=research_cutoff,
                         source_package_id=source_package_id,
+                        page_size=5000,
                     )["facts"]
                 except RawSourcePgError as error:
                     if error.code != "PG_SOURCE_NO_MATCH":
