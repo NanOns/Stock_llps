@@ -515,7 +515,7 @@ def read_enrollment_followups(
     enrollment_ids: list[int],
     successor_sessions: tuple[date, ...],
 ) -> dict[int, dict[str, Any]]:
-    """对当前页登记按至多20个官方后继会话批量读取同规则事实。"""
+    """校验登记锚定目标后，按至多20个官方后继会话读取同规则事实。"""
     if (
         type(target) is not date
         or type(cutoff) is not date
@@ -532,19 +532,34 @@ def read_enrollment_followups(
         raise ValueError("研究登记后继读取范围无效")
     if not enrollment_ids:
         return {}
-    if not successor_sessions:
-        return {
-            item: {"status": "NOT_DUE", "reason": "WAITING_FOR_FUTURE_SESSION"}
-            for item in enrollment_ids
-        }
     selected = successor_sessions[:20]
+    rows: list[tuple[Any, ...]] = []
+    invalid_anchor_scope = False
     with _transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
         cursor,
         _,
     ):
         cursor.execute(
-            """SELECT e.id,n.target_session,n.id,n.after_state,n.before_session,
+            """SELECT e.id,
+                      CASE WHEN e.d0_fact_id IS NOT NULL THEN d.target_session
+                           ELSE r.target_session END,
+                      e.d0_fact_id IS NOT NULL,e.rule_fact_id IS NOT NULL
+               FROM source_research_enrollments e
+               LEFT JOIN source_d0_launch_day_facts d ON d.id=e.d0_fact_id
+               LEFT JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
+               WHERE e.id=ANY(%s)""",
+            (enrollment_ids,),
+        )
+        anchors = cursor.fetchall()
+        invalid_anchor_scope = (
+            len(anchors) != len(enrollment_ids)
+            or {row[0] for row in anchors} != set(enrollment_ids)
+            or any(row[1] != target or row[2] == row[3] for row in anchors)
+        )
+        if not invalid_anchor_scope and successor_sessions:
+            cursor.execute(
+                """SELECT e.id,n.target_session,n.id,n.after_state,n.before_session,
                       n.before_state,n.before_capture_id,n.target_capture_id,b.target_capture_id
                FROM source_research_enrollments e
                JOIN source_d0_launch_day_facts b ON b.id=e.d0_fact_id
@@ -556,11 +571,11 @@ def read_enrollment_followups(
                  AND n.calendar_revision=b.calendar_revision
                  AND n.price_coordinate=b.price_coordinate AND n.research_mode=b.research_mode
                WHERE e.id=ANY(%s) AND n.target_session=ANY(%s)""",
-            (enrollment_ids, list(selected)),
-        )
-        rows = list(cursor.fetchall())
-        cursor.execute(
-            """SELECT e.id,n.target_session,n.id,n.state,NULL::date,
+                (enrollment_ids, list(selected)),
+            )
+            rows = list(cursor.fetchall())
+            cursor.execute(
+                """SELECT e.id,n.target_session,n.id,n.state,NULL::date,
                       NULL::text,NULL::bigint,NULL::bigint,NULL::bigint
                FROM source_research_enrollments e
                JOIN source_rule_evaluations b ON b.id=e.rule_fact_id
@@ -571,9 +586,16 @@ def read_enrollment_followups(
                  AND n.d1_history_session_count=b.d1_history_session_count
                  AND n.calendar_revision=b.calendar_revision AND n.scope=b.scope
                WHERE e.id=ANY(%s) AND n.target_session=ANY(%s)""",
-            (enrollment_ids, list(selected)),
-        )
-        rows.extend(cursor.fetchall())
+                (enrollment_ids, list(selected)),
+            )
+            rows.extend(cursor.fetchall())
+    if invalid_anchor_scope:
+        raise ValueError("研究登记父事实与请求目标会话不一致，拒绝跨日期附着")
+    if not successor_sessions:
+        return {
+            item: {"status": "NOT_DUE", "reason": "WAITING_FOR_FUTURE_SESSION"}
+            for item in enrollment_ids
+        }
     by_key: dict[tuple[int, date], list[tuple[Any, ...]]] = {}
     base_captures = {}
     for (
