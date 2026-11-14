@@ -522,6 +522,75 @@ def write_forward_path_rows(
     }
 
 
+def read_forward_path_scope(
+    config,
+    *,
+    paths,
+    source_symbols,
+):
+    """在新只读事务中逐行核对已提交的完整后继路径范围。"""
+    symbols = tuple(sorted(set(source_symbols)))
+    expected = tuple(sorted(paths, key=lambda row: row[1]))
+    if (
+        not symbols
+        or len(symbols) != len(source_symbols)
+        or len(expected) != len(symbols)
+        or tuple(row[1] for row in expected) != symbols
+    ):
+        raise ValueError("T+1异事务读回必须绑定唯一完整来源代码集合")
+    first = expected[0]
+    target, _symbol, package, capture = first[:4]
+    horizon, path_version, calendar_revision, endpoint_session = first[4:8]
+    if any(
+        row[:4] != (target, row[1], package, capture)
+        or row[4:8] != (horizon, path_version, calendar_revision, endpoint_session)
+        for row in expected
+    ):
+        raise ValueError("T+1异事务读回键跨越多个来源范围")
+    columns = sql.SQL(", ").join(map(sql.Identifier, PATH_COLUMNS))
+    with _transaction(config, write=False, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            sql.SQL("SELECT {} FROM source_forward_path_facts WHERE ").format(columns)
+            + sql.SQL(
+                "target_session=%s AND source_package_id=%s "
+                "AND source_capture_id=%s AND horizon=%s "
+                "AND path_rule_version=%s AND calendar_revision=%s "
+                "AND endpoint_session=%s ORDER BY source_symbol"
+            ),
+            (
+                target,
+                package,
+                capture,
+                horizon,
+                path_version,
+                calendar_revision,
+                endpoint_session,
+            ),
+        )
+        stored = tuple(tuple(row) for row in cursor.fetchall())
+    if len(stored) != len(expected) or tuple(row[1] for row in stored) != symbols:
+        raise ResearchFactConflict("T+1异事务读回未闭合完整来源代码集合")
+    if stored != expected:
+        raise ResearchFactConflict("T+1异事务读回与本次生产typed值不一致")
+    endpoint_counts = {"OBSERVED": 0, "UNKNOWN": 0}
+    path_counts = {"OBSERVED": 0, "UNKNOWN": 0}
+    for row in stored:
+        endpoint_counts[row[9]] = endpoint_counts.get(row[9], 0) + 1
+        path_counts[row[13]] = path_counts.get(row[13], 0) + 1
+    return {
+        "status": "READ_BACK_MATCHED",
+        "transaction": "REPEATABLE READ READ ONLY",
+        "expected_paths": len(expected),
+        "read_back_paths": len(stored),
+        "endpoint_quality_counts": endpoint_counts,
+        "path_quality_counts": path_counts,
+    }
+
+
 def _insert_and_compare(cursor, table, columns, rows, key_columns, selection, args):
     if not rows:
         return 0

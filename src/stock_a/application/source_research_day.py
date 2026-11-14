@@ -35,14 +35,23 @@ from stock_a.domain.research_day_facts import (
     ExactRational,
     ResearchDayFacts,
 )
+from stock_a.research.entry_context.sessions import _load_calendar
+from stock_a.research.source_forward_path import exploratory_raw_path
 from stock_a.storage.postgres.research_day_facts import (
     persist_source_research_day,
+)
+from stock_a.storage.postgres.research_facts import (
+    prepare_forward_path_rows,
+    read_forward_path_scope,
+    write_forward_path_rows,
 )
 from stock_a.storage.postgres.static_research_facts import (
     persist_static_d0_reference_scenario,
     persist_static_research_day,
+    read_source_pool_seed_forward_scope,
 )
 from stock_a.storage.postgres.source_raw import (
+    read_raw_daily_forward_pool,
     read_raw_daily_catalog,
     read_source_version_context,
 )
@@ -70,9 +79,209 @@ _D1_STRUCTURE_TYPES = {
 class SourceResearchDayError(ValueError):
     """单日研究批次的生产者输出或分母未闭合。"""
 
-    def __init__(self, code: str, message: str):
+    def __init__(
+        self, code: str, message: str, *, database_write_attempted: bool = False
+    ):
         self.code = code
+        self.database_write_attempted = database_write_attempted
         super().__init__(message)
+
+
+def persist_source_t1_forward_from_saved(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    research_cutoff: date,
+    source_package_id: int,
+) -> dict[str, Any]:
+    """复用已存Raw、Seed和价格路径算法，生产单一T+1 typed范围。"""
+    if (
+        type(target_session) is not date
+        or type(research_cutoff) is not date
+        or target_session > research_cutoff
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+    ):
+        raise SourceResearchDayError(
+            "T1_FORWARD_SCOPE_INVALID", "T+1目标、截止日期或来源包编号无效"
+        )
+    target_calendar, _, _, target_calendar_sessions = _load_calendar(target_session)
+    _, _, _, cutoff_calendar_sessions = _load_calendar(research_cutoff)
+    if (
+        target_session not in target_calendar_sessions
+        or research_cutoff not in cutoff_calendar_sessions
+        or target_session not in cutoff_calendar_sessions
+    ):
+        raise SourceResearchDayError(
+            "T1_FORWARD_CALENDAR_INVALID", "T+1范围不在已核验的官方日历内"
+        )
+    target_index = cutoff_calendar_sessions.index(target_session)
+    if target_index + 1 >= len(cutoff_calendar_sessions):
+        return {
+            "status": "NOT_DUE",
+            "target_session": target_session.isoformat(),
+            "research_cutoff": research_cutoff.isoformat(),
+            "source_package_id": source_package_id,
+            "database_write": False,
+            "ddl_executed": False,
+            "source_collection": False,
+            "raw_recalculated": False,
+            "seed_recalculated": False,
+        }
+    endpoint_session = cutoff_calendar_sessions[target_index + 1]
+    if endpoint_session > research_cutoff:
+        return {
+            "status": "NOT_DUE",
+            "target_session": target_session.isoformat(),
+            "endpoint_session": endpoint_session.isoformat(),
+            "research_cutoff": research_cutoff.isoformat(),
+            "source_package_id": source_package_id,
+            "database_write": False,
+            "ddl_executed": False,
+            "source_collection": False,
+            "raw_recalculated": False,
+            "seed_recalculated": False,
+        }
+
+    target_calendar = _load_calendar(target_session)[0]
+    endpoint_calendar = _load_calendar(endpoint_session)[0]
+    if endpoint_calendar["revision"] != target_calendar["revision"]:
+        raise SourceResearchDayError(
+            "T1_FORWARD_CALENDAR_REVISION_MISMATCH",
+            "T0与T+1使用不同年度日历修订，现有路径业务键不能安全表达该跨年范围",
+        )
+
+    source = read_source_version_context(
+        config,
+        target_session=target_session,
+        source_package_id=source_package_id,
+    )
+    endpoint_source = read_source_version_context(
+        config,
+        target_session=endpoint_session,
+        source_package_id=source_package_id,
+    )
+    expected_clock_role = "LOCAL_VERIFIED_VIPDATA_TARGET_SCAN_NON_PIT"
+    for label, item in (("T0", source), ("T+1", endpoint_source)):
+        if (
+            item.get("status") != "AVAILABLE"
+            or item.get("version_status") != "COMPLETE"
+            or item.get("source_package_id") != source_package_id
+            or item.get("source_time_quality") != "NON_PIT_OBSERVED"
+            or item.get("source_clock_role") != expected_clock_role
+            or item.get("source_available_at") is not None
+            or item.get("parser_contract") != source.get("parser_contract")
+            or item.get("raw_row_count") != item.get("capture_expected_row_count")
+        ):
+            raise SourceResearchDayError(
+                "T1_FORWARD_SOURCE_SCOPE_INVALID",
+                f"{label}Raw捕获、来源时钟、解析合同或完整分母不符合后验同源生产范围",
+            )
+    if source.get("capture_expected_row_count") != endpoint_source.get(
+        "capture_expected_row_count"
+    ):
+        raise SourceResearchDayError(
+            "T1_FORWARD_SOURCE_POOL_MISMATCH", "T0与T+1官方Raw来源分母不同"
+        )
+
+    seed_scope = read_source_pool_seed_forward_scope(
+        config,
+        target_session=target_session,
+        source_package_id=source_package_id,
+        source_capture_id=source["source_capture_id"],
+        expected_source_count=source["capture_expected_row_count"],
+    )
+    if seed_scope["calendar_revision"] != target_calendar["revision"]:
+        raise SourceResearchDayError(
+            "T1_FORWARD_SEED_CALENDAR_MISMATCH", "已存T0 Seed与官方交易日历修订不一致"
+        )
+
+    symbols = seed_scope["source_symbols"]
+    sessions = (target_session, endpoint_session)
+    raw = read_raw_daily_forward_pool(
+        config,
+        source_symbols=symbols,
+        sessions=sessions,
+        research_cutoff=research_cutoff,
+        source_package_id=source_package_id,
+        include_parser_contract=True,
+    )
+    for day in sessions:
+        version = raw["session_versions"].get(day.isoformat())
+        if (
+            version is None
+            or version.get("status") != "CLOSED"
+            or version.get("row_count") != len(symbols)
+        ):
+            raise SourceResearchDayError(
+                "T1_FORWARD_RAW_PARTITION_INCOMPLETE",
+                f"{day.isoformat()}Raw来源池未闭合，拒绝写入任何路径行",
+            )
+
+    outcomes = {}
+    for symbol in symbols:
+        outcomes[symbol] = exploratory_raw_path(
+            sessions,
+            raw["rows_by_symbol"][symbol],
+            1,
+            target_session=endpoint_session,
+            saved_through=raw["saved_through"],
+        )
+    paths = prepare_forward_path_rows(
+        target=target_session,
+        source=source,
+        calendar_revision=seed_scope["calendar_revision"],
+        session_versions=raw["session_versions"],
+        outcomes=outcomes,
+        source_package_id=source_package_id,
+        horizon=1,
+    )
+    write_result = write_forward_path_rows(
+        config,
+        paths=paths,
+        source_symbols=symbols,
+        endpoint_source_capture_id=endpoint_source["source_capture_id"],
+    )
+    try:
+        readback = read_forward_path_scope(
+            config,
+            paths=paths,
+            source_symbols=symbols,
+        )
+    except Exception as error:
+        raise SourceResearchDayError(
+            "T1_FORWARD_READBACK_FAILED",
+            "T+1写入事务已提交，但独立PG读回未通过；请核对精确T0范围后恢复",
+            database_write_attempted=True,
+        ) from error
+    return {
+        "status": "PERSISTED" if write_result["inserted_paths"] else "IDEMPOTENT",
+        "target_session": target_session.isoformat(),
+        "endpoint_session": endpoint_session.isoformat(),
+        "research_cutoff": research_cutoff.isoformat(),
+        "source_package_id": source_package_id,
+        "source_capture_id": source["source_capture_id"],
+        "endpoint_source_capture_id": endpoint_source["source_capture_id"],
+        "profile_revision": seed_scope["profile_revision"],
+        "producer_contract": seed_scope["producer_contract"],
+        "producer_version": seed_scope["producer_version"],
+        "history_session_count": seed_scope["history_session_count"],
+        "s2_state_counts_t0": seed_scope["s2_state_counts"],
+        "calendar_revision": seed_scope["calendar_revision"],
+        "source_count": len(symbols),
+        "expected_paths": len(paths),
+        "inserted_paths": write_result["inserted_paths"],
+        "idempotent": write_result["idempotent"],
+        "path_rule_version": write_result["path_rule_version"],
+        "write_transaction": write_result["transaction"],
+        "readback": readback,
+        "database_write_attempted": True,
+        "database_changed": write_result["inserted_paths"] > 0,
+        "source_collection": False,
+        "raw_recalculated": False,
+        "seed_recalculated": False,
+        "ddl_executed": False,
+    }
 
 
 def run_source_d0_launch_reference_day(

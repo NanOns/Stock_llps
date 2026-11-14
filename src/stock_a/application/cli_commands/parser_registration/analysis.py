@@ -128,7 +128,7 @@ def register_commands(commands):
     observation.add_argument("--offset", type=int, default=0, help="观察明细分页偏移")
     observation.add_argument("--limit", type=int, default=30, help="观察明细分页条数")
     research_day = commands.add_parser(
-        "source-research-day", help="按现役D0/D1计算单日研究并可选保存typed事实"
+        "source-research-day", help="生产单日D0/D1研究或已存Seed T+1价格路径"
     )
     research_day.add_argument(
         "--target-session", required=True, help="目标官方交易会话YYYY-MM-DD"
@@ -143,8 +143,7 @@ def register_commands(commands):
     research_day.add_argument(
         "--d1-history-session-count",
         type=int,
-        required=True,
-        help="D1窗口官方会话数，须与精确研究键一致",
+        help="D1窗口官方会话数，普通单日研究模式必需",
     )
     research_day.add_argument(
         "--workers",
@@ -160,12 +159,17 @@ def register_commands(commands):
     research_day.add_argument(
         "--persist",
         action="store_true",
-        help="以单一串行化事务幂等写入三类typed事实",
+        help="显式写入当前模式对应的typed事实（SERIALIZABLE事务）",
     )
     research_day.add_argument(
         "--static-only",
         action="store_true",
         help="按既存Raw会话运行单日D0/Seed静态生产链，必须显式指定--persist",
+    )
+    research_day.add_argument(
+        "--t1-forward-from-saved",
+        action="store_true",
+        help="从已存T0 Seed与官方相邻Raw生产同一PG的T+1 typed路径",
     )
     research_day.add_argument(
         "--enrollment-from-saved",

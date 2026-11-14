@@ -16,6 +16,7 @@ from stock_a.application.runtime_config import (
 )
 from stock_a.application.source_research_day import (
     SourceResearchDayError,
+    persist_source_t1_forward_from_saved,
     run_source_d0_launch_reference_day,
     run_source_research_day,
     run_source_static_research_day,
@@ -90,6 +91,44 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
             raise ValueError("板块数字快照ID只能与 --include-sector-pulse 同时使用")
         sector_snapshot_ids = snapshot_ids if args.include_sector_pulse else None
         config, config_path = load_runtime_config()
+        if args.t1_forward_from_saved:
+            if (
+                not args.persist
+                or args.start_session
+                or args.static_only
+                or args.enrollment_from_saved
+                or args.cohort_stats_from_saved
+                or args.t0_early_observations_from_saved
+                or args.d0_launch_reference_only
+                or args.include_sector_pulse
+                or snapshot_ids_supplied
+            ):
+                raise ValueError(
+                    "T+1已存来源生产仅支持单T0、精确来源包和截止日，并须显式指定--persist"
+                )
+            report = persist_source_t1_forward_from_saved(
+                config,
+                target_session=_parse_session_date(args.target_session),
+                research_cutoff=_parse_session_date(args.research_cutoff),
+                source_package_id=args.source_package_id,
+            )
+            report["configuration_path"] = str(config_path)
+            report["ok"] = report.get("status") in {
+                "PERSISTED",
+                "IDEMPOTENT",
+                "NOT_DUE",
+            }
+            _emit(
+                report,
+                error=report["status"] not in {"PERSISTED", "IDEMPOTENT", "NOT_DUE"},
+            )
+            return (
+                _EXIT_OK
+                if report["status"] in {"PERSISTED", "IDEMPOTENT", "NOT_DUE"}
+                else _EXIT_UNAVAILABLE
+            )
+        if args.d1_history_session_count is None:
+            raise ValueError("普通单日研究模式必须显式指定--d1-history-session-count")
         if args.t0_early_observations_from_saved:
             if (
                 not args.persist
@@ -294,7 +333,9 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
                 "ok": False,
                 "code": getattr(error, "code", "RESEARCH_DAY_ARGUMENT_OR_DATA_ERROR"),
                 "message": str(error),
-                "database_write_attempted": False,
+                "database_write_attempted": getattr(
+                    error, "database_write_attempted", False
+                ),
                 "ddl_executed": False,
                 "dml_executed": False,
             },

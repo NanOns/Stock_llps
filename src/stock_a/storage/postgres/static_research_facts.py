@@ -931,6 +931,110 @@ def read_source_pool_seed_facts(
     return result
 
 
+def read_source_pool_seed_forward_scope(
+    config: Mapping[str, Any],
+    *,
+    target_session: date,
+    source_package_id: int,
+    source_capture_id: int,
+    expected_source_count: int,
+) -> dict[str, Any]:
+    """读取唯一闭合Seed范围，供已存T0来源池的后继生产复用。"""
+    if (
+        type(target_session) is not date
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or type(source_capture_id) is not int
+        or source_capture_id <= 0
+        or type(expected_source_count) is not int
+        or expected_source_count <= 0
+    ):
+        raise StaticResearchPgError(
+            "STATIC_SEED_FORWARD_KEY_INVALID", "后继生产Seed键或完整分母无效"
+        )
+    with source_raw._transaction(config, write=False, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _,
+    ):
+        cursor.execute(
+            f"""SELECT profile_revision, producer_contract, producer_version,
+                       history_session_count, calendar_id, calendar_revision,
+                       research_mode, price_coordinate, count(*)::bigint,
+                       count(DISTINCT source_symbol)::bigint,
+                       count(*) FILTER (WHERE s2_state='TRUE')::bigint,
+                       count(*) FILTER (WHERE s2_state='FALSE')::bigint,
+                       count(*) FILTER (WHERE s2_state='UNKNOWN')::bigint
+                FROM {_SEED_TABLE}
+                WHERE target_session=%s AND source_package_id=%s
+                  AND source_capture_id=%s
+                GROUP BY profile_revision, producer_contract, producer_version,
+                         history_session_count, calendar_id, calendar_revision,
+                         research_mode, price_coordinate
+                ORDER BY profile_revision, producer_version""",
+            (target_session, source_package_id, source_capture_id),
+        )
+        scopes = cursor.fetchall()
+        if not scopes:
+            raise StaticResearchPgError(
+                "STATIC_SEED_NOT_COMPUTED", "T0没有已存Seed事实，拒绝重算替代"
+            )
+        if len(scopes) != 1:
+            raise StaticResearchPgError(
+                "STATIC_SEED_SCOPE_AMBIGUOUS", "T0存在多个Seed修订范围，拒绝猜选"
+            )
+        scope = scopes[0]
+        if scope[8] != expected_source_count or scope[9] != expected_source_count:
+            raise StaticResearchPgError(
+                "STATIC_SEED_SCOPE_INCOMPLETE", "T0已存Seed与闭合Raw来源分母不一致"
+            )
+        if (
+            scope[2] != "SOURCE_POOL_SEED_CORE_PROFILE_R1"
+            or scope[6] != "NON_PIT_RETROSPECTIVE"
+            or scope[7] != "RAW_UNADJUSTED"
+        ):
+            raise StaticResearchPgError(
+                "STATIC_SEED_SCOPE_UNSUPPORTED",
+                "T0 Seed生产合同、时钟或价格坐标不受支持",
+            )
+        cursor.execute(
+            f"""SELECT source_symbol FROM {_SEED_TABLE}
+                WHERE target_session=%s AND source_package_id=%s
+                  AND source_capture_id=%s AND profile_revision=%s
+                  AND producer_version=%s
+                ORDER BY source_symbol""",
+            (
+                target_session,
+                source_package_id,
+                source_capture_id,
+                scope[0],
+                scope[2],
+            ),
+        )
+        symbols = tuple(row[0] for row in cursor.fetchall())
+    if len(symbols) != expected_source_count or len(set(symbols)) != len(symbols):
+        raise StaticResearchPgError(
+            "STATIC_SEED_SOURCE_SET_INVALID", "T0 Seed来源代码集合未闭合或重复"
+        )
+    return {
+        "profile_revision": scope[0],
+        "producer_contract": scope[1],
+        "producer_version": scope[2],
+        "history_session_count": scope[3],
+        "calendar_id": scope[4],
+        "calendar_revision": scope[5],
+        "research_mode": scope[6],
+        "price_coordinate": scope[7],
+        "source_count": scope[8],
+        "s2_state_counts": {
+            "TRUE": scope[10],
+            "FALSE": scope[11],
+            "UNKNOWN": scope[12],
+        },
+        "source_symbols": symbols,
+    }
+
+
 def read_source_stock_seed_fact(
     config: Mapping[str, Any],
     *,

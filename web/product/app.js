@@ -1758,8 +1758,40 @@ async function loadFocusMarketContext(context) {
   }
 }
 
-function seedT1SummaryText(outcome) {
+function s2ContinuitySummaryText(outcome) {
+  if (!outcome) return "同源S2跨日观察未读取 · NOT_COMPUTED";
+  const continuity = outcome.s2_continuity;
+  if (!continuity) return "同源S2跨日观察未返回 · NOT_COMPUTED";
+  if (continuity.status === "AVAILABLE") {
+    return `同源S2观察 ${continuity.target_session} ${continuity.t0_state || "UNKNOWN"} → ${continuity.successor_session} ${continuity.t1_state || "UNKNOWN"}（${continuity.transition || "UNKNOWN"}）· 画像 ${continuity.t0_profile_revision || "UNKNOWN"} → ${continuity.t1_profile_revision || "UNKNOWN"} · 后验谓词观察，不改变正式Seed、Focus资格或买入判断`;
+  }
+  if (continuity.status === "NOT_DUE") {
+    return `同源S2跨日观察 NOT_DUE · ${continuity.target_session || "目标日未知"} · ${continuity.reason_codes?.join("、") || "等待合法后继会话"}`;
+  }
+  return `同源S2跨日观察 ${continuity.status || "UNKNOWN"} · ${continuity.reason_codes?.join("、") || "后继同源画像事实不可用"}`;
+}
+
+function s2ContinuityReasonText(outcome) {
+  const continuity = outcome?.s2_continuity;
+  if (!continuity) return "同源S2两端原因：未读取。";
+  const before = continuity.t0_reasons || [];
+  const after = continuity.t1_reasons || [];
+  const statusReasons = continuity.reason_codes || [];
+  const parts = [
+    before.length ? `T0：${before.join("、")}` : "T0：无额外原因码",
+  ];
+  if (continuity.successor_session) {
+    parts.push(after.length ? `T+1：${after.join("、")}` : "T+1：无额外原因码");
+  }
+  if (statusReasons.length) parts.push(`范围：${statusReasons.join("、")}`);
+  return parts.join("；");
+}
+
+function seedT1SummaryText(outcome, includeContinuity = true) {
   if (!outcome) return "个股Seed T+1结果未读取 · NOT_COMPUTED";
+  const continuityPrefix = includeContinuity
+    ? `${s2ContinuitySummaryText(outcome)} · `
+    : "";
   const sourceSeed = outcome.source_seed?.state || "UNKNOWN";
   const s1 = outcome.s1?.state || "UNKNOWN";
   const s2 = outcome.s2?.state || "UNKNOWN";
@@ -1784,11 +1816,11 @@ function seedT1SummaryText(outcome) {
     endpoint.return_numerator != null &&
     endpoint.return_denominator != null
   ) {
-    return `T+1 ${outcome.successor_session} · RAW_UNADJUSTED 收盘 ${outcome.t1_price.close} / T0 ${outcome.t0_price.close} · close(T+1)/close(T0)-1 = ${endpoint.return_numerator}/${endpoint.return_denominator} · ${condition} · NON_PIT`;
+    return `${continuityPrefix}T+1 ${outcome.successor_session} · RAW_UNADJUSTED 收盘 ${outcome.t1_price.close} / T0 ${outcome.t0_price.close} · close(T+1)/close(T0)-1 = ${endpoint.return_numerator}/${endpoint.return_denominator} · ${condition} · NON_PIT`;
   }
   if (outcome.status === "NOT_DUE")
-    return `个股T+1 NOT_DUE · ${condition} · NON_PIT / RAW_UNADJUSTED`;
-  return `个股T+1 ${outcome.status || "UNKNOWN"}${outcome.successor_session ? ` ${outcome.successor_session}` : ""} · ${outcome.t1_price?.quality || "UNKNOWN"} ${reason} · ${condition} · NON_PIT / RAW_UNADJUSTED`;
+    return `${continuityPrefix}个股T+1 NOT_DUE · ${condition} · NON_PIT / RAW_UNADJUSTED`;
+  return `${continuityPrefix}个股T+1 ${outcome.status || "UNKNOWN"}${outcome.successor_session ? ` ${outcome.successor_session}` : ""} · ${outcome.t1_price?.quality || "UNKNOWN"} ${reason} · ${condition} · NON_PIT / RAW_UNADJUSTED`;
 }
 
 function seedT1ReasonText(outcome) {
@@ -1848,7 +1880,9 @@ function focusEvidenceDetails(item, context) {
       "p",
       `来源形态Seed ${seed.source_seed?.state || "UNKNOWN"} · S1 ${seed.s1?.state || "UNKNOWN"} · S2 ${seed.s2?.state || "UNKNOWN"} · Safety ${seed.safety?.state || "UNKNOWN"} · 正式Seed ${item.seed_t1_outcome?.formal_seed?.state || "UNKNOWN"} · 目标收盘 ${seed.target_close_quality || "UNKNOWN"} ${seed.target_close_reason || ""}`,
     ),
-    node("p", seedT1SummaryText(item.seed_t1_outcome)),
+    node("p", s2ContinuitySummaryText(item.seed_t1_outcome)),
+    node("p", s2ContinuityReasonText(item.seed_t1_outcome)),
+    node("p", seedT1SummaryText(item.seed_t1_outcome, false)),
     node("p", `Seed冻结原因：${seedT1ReasonText(item.seed_t1_outcome)}`),
   );
   details.append(
@@ -3550,6 +3584,8 @@ async function openStock(symbol, row = {}) {
         {
           t0_observation: data.t0_observation,
           research_evidence: storedEvidence,
+          seed_t1_outcome: data.seed_t1_outcome,
+          source_version: data.source_version,
           d0_change: {
             before_state: storedEvidence?.d0?.before?.state,
             after_state: storedEvidence?.d0?.after?.state,
@@ -4137,7 +4173,9 @@ $("focusReadStock").addEventListener("click", async () => {
           return `来源形态Seed ${seed.source_seed?.state || "UNKNOWN"}；S1 ${seed.s1?.state || "UNKNOWN"}；S2 ${seed.s2?.state || "UNKNOWN"}；Safety ${seed.safety?.state || "UNKNOWN"}；正式Seed ${data.seed_t1_outcome?.formal_seed?.state || "UNKNOWN"}`;
         })(),
       ],
-      ["Seed观察T+1", seedT1SummaryText(data.seed_t1_outcome)],
+      ["同源S2跨日观察", s2ContinuitySummaryText(data.seed_t1_outcome)],
+      ["S2与Seed T+1价格", seedT1SummaryText(data.seed_t1_outcome, false)],
+      ["S2两端原因", s2ContinuityReasonText(data.seed_t1_outcome)],
       ["Seed冻结原因", seedT1ReasonText(data.seed_t1_outcome)],
       [
         "D1材料与目标价",

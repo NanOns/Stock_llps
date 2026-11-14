@@ -863,6 +863,57 @@ def read_source_seed_t1_outcomes(
             else:
                 endpoint_capture_status = "AMBIGUOUS"
 
+        endpoint_seed_scope = None
+        endpoint_seed_status = "NOT_DUE" if next_session is None else "NOT_COMPUTED"
+        endpoint_seed_reasons = []
+        if next_session is not None:
+            if endpoint_capture_status != "AVAILABLE":
+                endpoint_seed_status = "UNKNOWN"
+                endpoint_seed_reasons = [f"T1_SOURCE_CAPTURE_{endpoint_capture_status}"]
+            elif scope_status != "AVAILABLE" or seed_scope is None:
+                endpoint_seed_status = scope_status
+                endpoint_seed_reasons = [f"T0_SEED_SCOPE_{scope_status}"]
+            else:
+                cursor.execute(
+                    """SELECT profile_revision, producer_contract, producer_version,
+                              history_session_count, calendar_id, calendar_revision,
+                              research_mode, price_coordinate, count(*)::bigint,
+                              count(DISTINCT source_symbol)::bigint
+                       FROM source_pool_seed_day_facts
+                       WHERE target_session=%s AND source_package_id=%s
+                         AND source_capture_id=%s
+                       GROUP BY profile_revision, producer_contract, producer_version,
+                                history_session_count, calendar_id, calendar_revision,
+                                research_mode, price_coordinate
+                       ORDER BY profile_revision, producer_version""",
+                    (next_session, source_package_id, endpoint_capture[0]),
+                )
+                endpoint_seed_scopes = cursor.fetchall()
+                if not endpoint_seed_scopes:
+                    endpoint_seed_status = "NOT_COMPUTED"
+                    endpoint_seed_reasons = ["T1_SEED_SCOPE_NOT_SAVED"]
+                elif len(endpoint_seed_scopes) != 1:
+                    endpoint_seed_status = "AMBIGUOUS"
+                    endpoint_seed_reasons = ["T1_SEED_SCOPE_AMBIGUOUS"]
+                else:
+                    endpoint_seed_scope = endpoint_seed_scopes[0]
+                    if (
+                        endpoint_seed_scope[8] != expected_source_count
+                        or endpoint_seed_scope[9] != expected_source_count
+                    ):
+                        endpoint_seed_status = "INCOMPLETE"
+                        endpoint_seed_reasons = ["T1_SEED_SCOPE_INCOMPLETE"]
+                    elif any(
+                        endpoint_seed_scope[index] != seed_scope[index]
+                        for index in (1, 2, 4, 5, 6, 7)
+                    ):
+                        endpoint_seed_status = "UNKNOWN"
+                        endpoint_seed_reasons = [
+                            "T0_T1_SEED_CONTRACT_OR_COORDINATE_MISMATCH"
+                        ]
+                    else:
+                        endpoint_seed_status = "AVAILABLE"
+
         result_by_symbol: dict[str, dict[str, Any]] = {}
         if seed_scope is not None:
             endpoint_capture_id = (
@@ -870,6 +921,35 @@ def read_source_seed_t1_outcomes(
                 if endpoint_capture_status == "AVAILABLE" and endpoint_capture
                 else None
             )
+            successor_s2_by_symbol = {}
+            if endpoint_seed_status == "AVAILABLE" and endpoint_seed_scope:
+                cursor.execute(
+                    """SELECT source_symbol, s2_state, s2_reasons
+                       FROM source_pool_seed_day_facts
+                       WHERE target_session=%s AND source_package_id=%s
+                         AND source_capture_id=%s AND profile_revision=%s
+                         AND producer_contract=%s AND producer_version=%s
+                         AND calendar_id=%s AND calendar_revision=%s
+                         AND research_mode=%s AND price_coordinate=%s
+                         AND source_symbol=ANY(%s)
+                       ORDER BY source_symbol""",
+                    (
+                        next_session,
+                        source_package_id,
+                        endpoint_capture_id,
+                        endpoint_seed_scope[0],
+                        endpoint_seed_scope[1],
+                        endpoint_seed_scope[2],
+                        endpoint_seed_scope[4],
+                        endpoint_seed_scope[5],
+                        endpoint_seed_scope[6],
+                        endpoint_seed_scope[7],
+                        list(symbols),
+                    ),
+                )
+                successor_s2_by_symbol = {
+                    row[0]: (row[1], row[2]) for row in cursor.fetchall()
+                }
             cursor.execute(
                 """SELECT s.source_symbol, s.profile_revision,
                           s.source_seed_state, s.source_seed_reasons,
@@ -974,6 +1054,79 @@ def read_source_seed_t1_outcomes(
                     "s2": _reasons(s2_reasons),
                     "safety": safety["reasons"],
                 }
+                s2_continuity = {
+                    "status": "NOT_DUE",
+                    "transition": "NOT_DUE",
+                    "target_session": target_session.isoformat(),
+                    "successor_session": (
+                        next_session.isoformat() if next_session else None
+                    ),
+                    "t0_state": _state(s2_state),
+                    "t0_reasons": _reasons(s2_reasons),
+                    "t1_state": None,
+                    "t1_reasons": [],
+                    "t0_profile_revision": profile_revision,
+                    "t1_profile_revision": None,
+                    "reason_codes": ["WAITING_FOR_FUTURE_SESSION"],
+                    "interpretation": "SAME_SOURCE_S2_PREDICATE_ONLY",
+                }
+                if next_session is not None:
+                    if scope_status != "AVAILABLE":
+                        s2_continuity.update(
+                            {
+                                "status": scope_status,
+                                "transition": "UNKNOWN",
+                                "reason_codes": [f"T0_SEED_SCOPE_{scope_status}"],
+                            }
+                        )
+                    elif endpoint_capture_status != "AVAILABLE":
+                        s2_continuity.update(
+                            {
+                                "status": "UNKNOWN",
+                                "transition": "UNKNOWN",
+                                "reason_codes": [
+                                    f"T1_SOURCE_CAPTURE_{endpoint_capture_status}"
+                                ],
+                            }
+                        )
+                    elif endpoint_seed_status != "AVAILABLE":
+                        s2_continuity.update(
+                            {
+                                "status": endpoint_seed_status,
+                                "transition": "UNKNOWN",
+                                "t1_profile_revision": (
+                                    endpoint_seed_scope[0]
+                                    if endpoint_seed_scope
+                                    else None
+                                ),
+                                "reason_codes": endpoint_seed_reasons,
+                            }
+                        )
+                    else:
+                        successor_s2 = successor_s2_by_symbol.get(symbol)
+                        if successor_s2 is None:
+                            s2_continuity.update(
+                                {
+                                    "status": "INCOMPLETE",
+                                    "transition": "UNKNOWN",
+                                    "reason_codes": [
+                                        "T1_SEED_FACT_MISSING_FOR_SOURCE_SYMBOL"
+                                    ],
+                                }
+                            )
+                        else:
+                            t1_s2_state, t1_s2_reasons = successor_s2
+                            t1_s2_state = _state(t1_s2_state)
+                            s2_continuity.update(
+                                {
+                                    "status": "AVAILABLE",
+                                    "transition": f"{_state(s2_state)}_TO_{t1_s2_state}",
+                                    "t1_state": t1_s2_state,
+                                    "t1_reasons": _reasons(t1_s2_reasons),
+                                    "t1_profile_revision": endpoint_seed_scope[0],
+                                    "reason_codes": [],
+                                }
+                            )
                 if next_session is None:
                     status = "NOT_DUE"
                     status_reasons = ["WAITING_FOR_FUTURE_SESSION"]
@@ -1040,6 +1193,7 @@ def read_source_seed_t1_outcomes(
                     "source_seed": source_seed,
                     "s1": {"state": _state(s1_state), "reasons": reasons["s1"]},
                     "s2": {"state": _state(s2_state), "reasons": reasons["s2"]},
+                    "s2_continuity": s2_continuity,
                     "safety": safety,
                     "formal_seed": formal_seed,
                     "condition_reasons": reasons,
@@ -1085,6 +1239,7 @@ def read_source_seed_t1_outcomes(
                     },
                     "seed_scope_status": scope_status,
                     "endpoint_capture_status": endpoint_capture_status,
+                    "endpoint_seed_status": endpoint_seed_status,
                 }
 
     for symbol in symbols:
