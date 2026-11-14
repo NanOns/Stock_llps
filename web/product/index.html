@@ -238,7 +238,7 @@
               <div>
                 <span class="section-kicker">SECTOR EXPLORER</span>
                 <h2>行业与概念</h2>
-                <p>
+                <p id="d0BoardDescription">
                   先浏览同日已证 D0 新增变化；成员快照回看始终标为 NON_PIT。
                 </p>
               </div>
@@ -246,12 +246,10 @@
             <section class="card table-card">
               <div class="table-caption">
                 <span id="d0BoardSummary">等待当前日期的 D0 结果</span
-                ><span>FALSE→TRUE · 当前成员快照 NON_PIT</span>
+                ><span id="d0BoardMode">FALSE→TRUE · 当前成员快照 NON_PIT</span>
               </div>
               <div class="filters d0-board-filters">
-                <label class="sr-only" for="d0BoardSearch"
-                  >搜索 D0 变化板块</label
-                >
+                <label class="sr-only" for="d0BoardSearch">搜索板块</label>
                 <input id="d0BoardSearch" placeholder="搜索板块中文名" />
                 <button id="searchD0Boards" class="button subtle">搜索</button>
                 <button id="clearD0BoardFilters" class="button subtle">
@@ -268,10 +266,10 @@
                 <table>
                   <thead>
                     <tr>
-                      <th>变化板块</th>
+                      <th id="d0BoardNameHeading">变化板块</th>
                       <th>类型</th>
-                      <th>D0 新增成员</th>
-                      <th>跨日 PULSE</th>
+                      <th id="d0BoardCountHeading">D0 新增成员</th>
+                      <th id="d0BoardPulseHeading">跨日 PULSE</th>
                       <th>快照观测</th>
                       <th>身份时态</th>
                       <th></th>

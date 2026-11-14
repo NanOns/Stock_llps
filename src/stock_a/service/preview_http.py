@@ -6,7 +6,7 @@ from stock_a.contracts.profile_revision import PROFILE_REVISION_PATTERN
 
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
-from collections import defaultdict
+from collections import Counter, defaultdict
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import re
@@ -85,6 +85,7 @@ from stock_a.application.pg_price_profiles import (
 from stock_a.application.tdx_sector_members import (
     TdxSectorMembersApplicationError,
     read_latest_tdx_sector_snapshot_observation,
+    read_tdx_sector_members,
     read_tdx_sector_source_snapshot_catalog,
 )
 from stock_a.application.source_sector_change_research import (
@@ -282,6 +283,98 @@ def _t0_list_summary(summary: Mapping[str, Any]) -> dict[str, Any]:
         if key in driver
     }
     return result
+
+
+def _membership_only_board_observation(
+    membership_page: Mapping[str, Any], *, board_kind: str, board_native_id: str
+) -> dict[str, Any]:
+    """把精确当前成员分页呈现为成员身份已知、D0/Seed/D1未计算。"""
+    total = int(membership_page.get("source_member_count", 0))
+    inside = int(membership_page.get("matched_b_t", 0))
+    outside = int(membership_page.get("unmatched_b_t", 0))
+    members = []
+    for item in membership_page.get("rows", []):
+        in_pool = item.get("b_t_membership_status") == "MATCHED_B_T"
+        members.append(
+            {
+                "source_symbol": item["source_symbol"],
+                "membership_quality": item.get("membership_quality"),
+                "source_pool_status": "IN_TARGET_SOURCE_POOL"
+                if in_pool
+                else "OUTSIDE_TARGET_SOURCE_POOL",
+                "d0": {
+                    "before_state": "UNKNOWN",
+                    "after_state": "UNKNOWN",
+                    "transition": "NOT_COMPUTED",
+                },
+                "seed": {
+                    "source_seed": "UNKNOWN",
+                    "s1": "UNKNOWN",
+                    "s2": "UNKNOWN",
+                    "safety": "UNKNOWN",
+                    "rps5_board_rank": None,
+                    "rps5_board_rank_denominator": None,
+                    "rps5_board_tie_count": None,
+                    "rps20_board_rank": None,
+                    "rps20_board_rank_denominator": None,
+                    "rps20_board_tie_count": None,
+                    "rps5": None,
+                    "rps20": None,
+                },
+                "d1": {
+                    "target_price_quality": "UNKNOWN",
+                    "material_anchor_count": None,
+                },
+                "t0_early_triage_summary": {"status": "NO_STORED_FACT"},
+            }
+        )
+    return {
+        "status": "AVAILABLE",
+        "membership_only": True,
+        "research_scope_status": "MEMBERSHIP_ONLY",
+        "reason": "当前成员关系可读；D0、Seed和D1精确研究事实未保存。",
+        "board_kind": board_kind,
+        "board_native_id": board_native_id,
+        "membership_scope": "NON_PIT_CURRENT_SNAPSHOT",
+        "snapshot_member_count": total,
+        "source_pool": {"inside": inside, "outside": outside},
+        "d0": {
+            "true": None,
+            "false": None,
+            "unknown": None,
+            "missing": inside,
+            "target_source_pool_denominator": inside,
+            "outside_target_source_pool": outside,
+            "transitions": {},
+        },
+        "seed": {
+            "scope_status": "NOT_COMPUTED",
+            "target_source_pool_denominator": inside,
+            "true": None,
+            "false": None,
+            "unknown": None,
+            "missing": inside,
+        },
+        "d1": {
+            "scope_status": "NOT_COMPUTED",
+            "material_change_members": None,
+            "material_anchor_count": None,
+            "target_price_quality_counts": {},
+        },
+        "cross_kind_overlap": {"kind": None, "member_count": None, "top_boards": []},
+        "pagination": {
+            "offset": membership_page.get("offset", 0),
+            "limit": membership_page.get("limit", len(members)),
+            "total_count": total,
+            "next_offset": (
+                int(membership_page["offset"]) + len(members)
+                if membership_page.get("empty_page_out_of_range") is not True
+                and int(membership_page.get("offset", 0)) + len(members) < total
+                else None
+            ),
+        },
+        "members": members,
+    }
 
 
 def _read_enrollment_followups_page(
@@ -1416,6 +1509,16 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "board_kind": board["board_kind"],
                 "board_native_id": board["board_native_id"],
             }
+        if (
+            board_kind is not None
+            and board_native_id is not None
+            and board_snapshot_id is not None
+        ):
+            page_boards[(board_snapshot_id, board_kind, board_native_id)] = {
+                "snapshot_id": board_snapshot_id,
+                "board_kind": board_kind,
+                "board_native_id": board_native_id,
+            }
         from stock_a.storage.postgres.sector_pulse_facts import (
             read_source_sector_pulse_for_boards,
         )
@@ -1515,6 +1618,334 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "price_coordinate": "RAW_UNADJUSTED",
                             "formal_rotation_state": "NOT_EVALUATED",
                         }
+        pulse_followup_by_board: dict[str, dict[str, Any]] = {}
+        pulse_followup_comparison: dict[str, dict[str, Any]] = {}
+        pulse_followup_execution = {
+            "reader_executed": False,
+            "read_only": True,
+            "raw_history_rows_returned_to_python": 0,
+        }
+        pulse_followup_directory: dict[str, Any] = {
+            "status": "NOT_REQUESTED",
+            "reason_codes": [],
+            "total_board_count": 0,
+            "boards": [],
+        }
+        selected_pulse_board = (
+            board_kind is not None
+            and board_native_id is not None
+            and board_snapshot_id is not None
+        )
+        pulse_directory_fallback = (
+            board_kind is None
+            and watch_group == "D0_NEW"
+            and page_result["scope_status"].get("d0") == "NOT_COMPUTED"
+            and industry_snapshot_id is not None
+            and concept_snapshot_id is not None
+        )
+        if selected_pulse_board or pulse_directory_fallback:
+            from stock_a.storage.postgres.sector_pulse_facts import (
+                read_source_sector_pulse_day,
+            )
+            from stock_a.storage.postgres.sector_pulse_followups import (
+                read_source_sector_pulse_followups,
+            )
+
+            pulse_day = read_source_sector_pulse_day(
+                config,
+                target_session=target_session,
+                source_package_id=source_package_id,
+                source_capture_id=after_source["source_capture_id"],
+                source_pool_count=after_source["capture_expected_row_count"],
+                snapshot_ids={
+                    "INDUSTRY": industry_snapshot_id,
+                    "CONCEPT": concept_snapshot_id,
+                },
+            )
+            pulse_followup_execution["pulse_board_count_read"] = sum(
+                group.get("read_board_count", 0)
+                for group in pulse_day.get("by_kind", {}).values()
+            )
+            if pulse_day.get("status") == "AVAILABLE":
+                reader_pulse_day = {
+                    "status": "AVAILABLE",
+                    "target_session": target_session.isoformat(),
+                    "profile_revision": pulse_day["profile_revision"],
+                    "source_version": {
+                        "source_package_id": source_package_id,
+                        "source_capture_id": after_source["source_capture_id"],
+                    },
+                    "by_kind": {},
+                }
+                for kind, group in pulse_day["by_kind"].items():
+                    reader_pulse_day["by_kind"][kind] = {
+                        "status": group.get("status"),
+                        "reason_codes": group.get("reason_codes", []),
+                        "snapshot_id": group.get("snapshot_id"),
+                        "expected_board_count": group.get("expected_board_count"),
+                        "read_board_count": group.get("read_board_count"),
+                        "facts": {
+                            native_id: {
+                                "state": fact.get("state"),
+                                "board_native_id": fact.get("board_native_id"),
+                                "board_name": fact.get("board_name"),
+                                "member_count": fact.get("member_count"),
+                                "pulse_fact_id": fact.get("pulse_fact_id"),
+                                "catalog_id": fact.get("catalog_id"),
+                            }
+                            for native_id, fact in group.get("facts", {}).items()
+                        },
+                    }
+                calendar = _official_calendar(research_cutoff)
+                calendar_sessions = tuple(calendar["sessions"])
+                try:
+                    target_index = calendar_sessions.index(target_session)
+                except ValueError as error:
+                    raise PreviewHttpError(
+                        409,
+                        "PULSE_FOLLOWUP_CALENDAR_TARGET_MISSING",
+                        "所选板块PULSE目标日不在绑定的官方日历中",
+                    ) from error
+                horizon_targets = {
+                    horizon: (
+                        calendar_sessions[target_index + horizon]
+                        if target_index + horizon < len(calendar_sessions)
+                        else None
+                    )
+                    for horizon in (1, 3, 5)
+                }
+                followup_read = read_source_sector_pulse_followups(
+                    config,
+                    pulse_day=reader_pulse_day,
+                    research_cutoff=research_cutoff,
+                    horizon_targets=horizon_targets,
+                    calendar_identity={
+                        "calendar_id": calendar["calendar_id"],
+                        "calendar_revision": calendar["calendar_revision"],
+                    },
+                )
+                pulse_followup_execution.update(
+                    {
+                        "reader_executed": True,
+                        "reader_status": followup_read.get("status"),
+                        "t0_session": target_session.isoformat(),
+                        "source_package_id": source_package_id,
+                        "source_capture_id": after_source["source_capture_id"],
+                        "calendar_revision": calendar["calendar_revision"],
+                    }
+                )
+                if selected_pulse_board:
+                    selected_group = followup_read.get("by_kind", {}).get(
+                        board_kind, {}
+                    )
+                    selected_fact = selected_group.get("facts", {}).get(board_native_id)
+                    if isinstance(selected_fact, Mapping):
+                        selected_followup = dict(selected_fact)
+                        t1_result = next(
+                            (
+                                item
+                                for item in selected_fact.get("horizons", ())
+                                if item.get("horizon_sessions") == 1
+                            ),
+                            None,
+                        )
+                        selected_followup["status"] = (
+                            t1_result.get("status")
+                            if isinstance(t1_result, Mapping)
+                            else "NOT_COMPUTED"
+                        )
+                        selected_followup["reason_codes"] = (
+                            list(t1_result.get("reason_codes", []))
+                            if isinstance(t1_result, Mapping)
+                            else ["FOLLOWUP_T1_RESULT_NOT_AVAILABLE"]
+                        )
+                        selected_followup.update(
+                            {
+                                "research_mode": "NON_PIT_RETROSPECTIVE",
+                                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                                "price_coordinate": "RAW_UNADJUSTED",
+                            }
+                        )
+                        pulse_followup_by_board[f"{board_kind}:{board_native_id}"] = (
+                            selected_followup
+                        )
+                    else:
+                        pulse_followup_by_board[f"{board_kind}:{board_native_id}"] = {
+                            "status": selected_group.get("status", "NOT_COMPUTED"),
+                            "reason_codes": selected_group.get(
+                                "reason_codes",
+                                ["PULSE_FOLLOWUP_BOARD_NOT_IN_SNAPSHOT"],
+                            ),
+                            "horizons": [],
+                            "research_mode": "NON_PIT_RETROSPECTIVE",
+                            "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                            "price_coordinate": "RAW_UNADJUSTED",
+                        }
+                    if isinstance(selected_group.get("comparison"), Mapping):
+                        pulse_followup_comparison[board_kind] = selected_group[
+                            "comparison"
+                        ]
+                else:
+                    snapshot_catalog = read_tdx_sector_source_snapshot_catalog(config)
+                    snapshot_by_id = {
+                        item["snapshot_id"]: item
+                        for item in snapshot_catalog.get("snapshots", [])
+                    }
+                    pulse_state_counts: Counter[str] = Counter()
+                    t1_status_counts: Counter[str] = Counter()
+                    fallback_boards = []
+                    for kind in ("INDUSTRY", "CONCEPT"):
+                        pulse_group = pulse_day["by_kind"].get(kind, {})
+                        outcome_group = followup_read.get("by_kind", {}).get(kind, {})
+                        pulse_followup_comparison[kind] = outcome_group.get(
+                            "comparison", {}
+                        )
+                        snapshot_id = pulse_group.get("snapshot_id")
+                        snapshot = snapshot_by_id.get(snapshot_id, {})
+                        for board_id, pulse_fact in pulse_group.get(
+                            "facts", {}
+                        ).items():
+                            pulse_state_counts[pulse_fact.get("state", "UNKNOWN")] += 1
+                            source_quality_parts = str(
+                                pulse_fact.get("snapshot_source_quality", "UNKNOWN")
+                            ).split(";")
+                            unmapped_value = next(
+                                (
+                                    part.partition("=")[2]
+                                    for part in source_quality_parts
+                                    if part.startswith("UNMAPPED_SOURCE_ROWS=")
+                                ),
+                                None,
+                            )
+                            outcome = outcome_group.get("facts", {}).get(board_id, {})
+                            horizons = outcome.get("horizons", [])
+                            t1_result = next(
+                                (
+                                    item
+                                    for item in horizons
+                                    if item.get("horizon_sessions") == 1
+                                ),
+                                None,
+                            )
+                            t1_status = (
+                                t1_result.get("status")
+                                if isinstance(t1_result, Mapping)
+                                else "NOT_COMPUTED"
+                            )
+                            t1_status_counts[t1_status] += 1
+                            followup = dict(outcome)
+                            followup.update(
+                                {
+                                    "status": t1_status,
+                                    "reason_codes": list(
+                                        t1_result.get("reason_codes", [])
+                                        if isinstance(t1_result, Mapping)
+                                        else ["FOLLOWUP_T1_RESULT_NOT_AVAILABLE"]
+                                    ),
+                                    "research_mode": "NON_PIT_RETROSPECTIVE",
+                                    "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                                    "price_coordinate": "RAW_UNADJUSTED",
+                                }
+                            )
+                            fallback_boards.append(
+                                {
+                                    "board_kind": kind,
+                                    "board_native_id": board_id,
+                                    "board_name": pulse_fact.get(
+                                        "board_name", board_id
+                                    ),
+                                    "snapshot_id": snapshot_id,
+                                    "observed_at": snapshot.get("observed_at"),
+                                    "membership_source_quality": {
+                                        "quality": source_quality_parts[0],
+                                        "source_unmapped_rows": (
+                                            int(unmapped_value)
+                                            if unmapped_value
+                                            and unmapped_value.isdecimal()
+                                            else None
+                                        ),
+                                    },
+                                    "cross_period_pulse": {
+                                        key: pulse_fact.get(key)
+                                        for key in (
+                                            "status",
+                                            "state",
+                                            "dq5_pp",
+                                            "breadth_delta1",
+                                            "reason_codes",
+                                            "snapshot_id",
+                                            "member_count",
+                                            "snapshot_source_quality",
+                                            "research_mode",
+                                            "membership_mode",
+                                            "price_coordinate",
+                                            "formal_rotation_state",
+                                        )
+                                    },
+                                    "cross_period_pulse_transition": {
+                                        "status": "NOT_COMPUTED",
+                                        "transition_state": "NOT_COMPUTED",
+                                        "reason_codes": [
+                                            "PULSE_TRANSITION_NOT_READ_FOR_FOLLOWUP_DIRECTORY"
+                                        ],
+                                        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                                    },
+                                    "cross_period_pulse_followup": followup,
+                                    "pulse_followup_only": True,
+                                    "home_featured": False,
+                                    "observation_basis": "只读已存T0 PULSE与后继结果；D0保持NOT_COMPUTED。",
+                                    "observation_rank": len(fallback_boards) + 1,
+                                }
+                            )
+                    fallback_boards.sort(
+                        key=lambda item: (
+                            item["board_kind"],
+                            item["board_name"],
+                            item["board_native_id"],
+                        )
+                    )
+                    for index, board in enumerate(fallback_boards, start=1):
+                        board["observation_rank"] = index
+                    pulse_followup_directory = {
+                        "status": "AVAILABLE",
+                        "target_session": target_session.isoformat(),
+                        "research_cutoff": research_cutoff.isoformat(),
+                        "research_mode": "NON_PIT_RETROSPECTIVE",
+                        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                        "price_coordinate": "RAW_UNADJUSTED",
+                        "total_board_count": len(fallback_boards),
+                        "pulse_state_counts": dict(pulse_state_counts),
+                        "t1_status_counts": dict(t1_status_counts),
+                        "comparison": pulse_followup_comparison,
+                        "boards": fallback_boards,
+                    }
+                    pulse_followup_execution[
+                        "pulse_fallback_directory_rows_returned_to_python"
+                    ] = len(fallback_boards)
+            else:
+                if selected_pulse_board:
+                    pulse_followup_by_board[f"{board_kind}:{board_native_id}"] = {
+                        "status": pulse_day.get("status", "NOT_COMPUTED"),
+                        "reason_codes": pulse_day.get(
+                            "reason_codes", ["PULSE_DAY_NOT_AVAILABLE"]
+                        ),
+                        "horizons": [],
+                        "research_mode": "NON_PIT_RETROSPECTIVE",
+                        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                        "price_coordinate": "RAW_UNADJUSTED",
+                    }
+                elif pulse_directory_fallback:
+                    pulse_followup_directory = {
+                        "status": pulse_day.get("status", "NOT_COMPUTED"),
+                        "reason_codes": pulse_day.get(
+                            "reason_codes", ["PULSE_DAY_NOT_AVAILABLE"]
+                        ),
+                        "total_board_count": None,
+                        "boards": [],
+                    }
+                pulse_followup_execution["reader_status"] = pulse_day.get(
+                    "status", "NOT_COMPUTED"
+                )
         quality_by_source = {
             snapshot.get("source_kind"): snapshot.get("source_quality_counts") or {}
             for snapshot in membership_read.get("snapshots", [])
@@ -1800,6 +2231,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
                         },
                     ),
+                    "cross_period_pulse_followup": pulse_followup_by_board.get(
+                        board_key,
+                        {
+                            "status": "NOT_COMPUTED",
+                            "reason_codes": [
+                                "PULSE_FOLLOWUP_NOT_READ_FOR_BOARD_DETAIL"
+                            ],
+                            "horizons": [],
+                            "research_mode": "NON_PIT_RETROSPECTIVE",
+                            "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                            "price_coordinate": "RAW_UNADJUSTED",
+                        },
+                    ),
                 }
             ]
         return {
@@ -1861,6 +2305,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "next_offset": next_offset,
             },
             "boards": response_boards,
+            "pulse_followup_directory": pulse_followup_directory,
             "board_summary": {
                 "status": home_board_result.get("status", "NOT_REQUESTED"),
                 "total_board_count": home_board_result.get("total_board_count", 0),
@@ -1897,6 +2342,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "d1_scope": evidence.get("d1_scope"),
             },
             "sector_pulse_status": pulse.get("status", "NOT_COMPUTED"),
+            "sector_pulse_followup_comparison": pulse_followup_comparison,
             "results": results,
             "execution": {
                 **page_result["execution"],
@@ -1905,6 +2351,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "membership_read_scope": "CURRENT_PAGE_SYMBOLS_ONLY",
                 "pulse_read_scope": "CURRENT_PAGE_MEMBER_BOARDS_ONLY",
                 "sector_pulse_cross_period_recalculated": False,
+                "sector_pulse_followup": pulse_followup_execution,
                 "evidence_symbol_count": len(page_symbols),
                 "rule_rows_returned_to_python": sum(
                     len(item.get("rules", {}).get("facts", {}))
@@ -3106,6 +3553,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "symbol",
                         "industry_snapshot_id",
                         "concept_snapshot_id",
+                        "profile_revision",
                         "board_kind",
                         "board_native_id",
                         "structure_type",
@@ -3192,9 +3640,75 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     else None
                 )
                 if (
+                    values.get("board_kind") in {"INDUSTRY", "CONCEPT"}
+                    and values.get("board_native_id")
+                    and (
+                        not isinstance(members, list)
+                        or not isinstance(selected_board, Mapping)
+                        or selected_board.get("status") != "AVAILABLE"
+                    )
+                ):
+                    board_kind = values["board_kind"]
+                    snapshot_value = values.get(
+                        "industry_snapshot_id"
+                        if board_kind == "INDUSTRY"
+                        else "concept_snapshot_id"
+                    )
+                    if snapshot_value is not None:
+                        try:
+                            membership_page = read_tdx_sector_members(
+                                self.preview_server.state.config,
+                                snapshot_id=_snapshot_id(snapshot_value),
+                                board_kind=board_kind,
+                                board_native_id=values["board_native_id"],
+                                target_session=target,
+                                research_cutoff=self.preview_server.state.research_cutoff,
+                                source_package_id=_package_id(
+                                    values["source_package_id"]
+                                ),
+                                profile_revision=(
+                                    _profile_revision(values["profile_revision"])
+                                    if "profile_revision" in values
+                                    else None
+                                ),
+                                offset=_nonnegative_int(
+                                    values.get("offset", "0"), "offset"
+                                ),
+                                limit=_positive_int(
+                                    _nonnegative_int(
+                                        values.get("limit", "30"), "limit", 50
+                                    ),
+                                    "limit",
+                                    50,
+                                ),
+                            )
+                            result["selected_board_observation"] = (
+                                _membership_only_board_observation(
+                                    membership_page,
+                                    board_kind=board_kind,
+                                    board_native_id=values["board_native_id"],
+                                )
+                            )
+                        except TdxSectorMembersApplicationError as error:
+                            result["selected_board_observation"] = {
+                                "status": "NOT_COMPUTED",
+                                "reason": error.code,
+                                "research_scope_status": "MEMBERSHIP_FALLBACK_UNAVAILABLE",
+                            }
+                        selected_board = result.get("selected_board_observation")
+                        members = (
+                            selected_board.get("members")
+                            if isinstance(selected_board, Mapping)
+                            else None
+                        )
+                if (
                     isinstance(members, list)
                     and values.get("board_kind") in {"INDUSTRY", "CONCEPT"}
                     and values.get("board_native_id")
+                    and not (
+                        isinstance(selected_board, Mapping)
+                        and selected_board.get("membership_only") is True
+                    )
                 ):
                     source_package_id = _package_id(values["source_package_id"])
                     source_context = read_source_version_context(

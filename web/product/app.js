@@ -676,6 +676,23 @@ function boardPulseSummary(board) {
     ? `PULSE ${evidenceStateLabel(pulse.state)}`
     : `PULSE ${pulse.status || "UNKNOWN"}`;
 }
+function boardPulseFollowupSummary(board) {
+  const followup = board.cross_period_pulse_followup || {};
+  const t1 = (followup.horizons || []).find(
+    (item) => item.horizon_sessions === 1,
+  );
+  if (!t1) return `T+1 ${followup.status || "NOT_COMPUTED"}`;
+  const members = `有效 ${t1.observed_member_count ?? "UNKNOWN"} · 未知 ${t1.unknown_member_count ?? "UNKNOWN"} / 固定 ${t1.fixed_member_denominator ?? "UNKNOWN"}`;
+  if (t1.status === "OBSERVED")
+    return `T+1 ${t1.target_session} ${t1.equal_weight_return_percent_4dp}% · ${members}`;
+  if (t1.status === "UNKNOWN")
+    return `T+1 ${t1.target_session} UNKNOWN · ${members} · ${(t1.reason_codes || []).join("、")}`;
+  if (t1.status === "NOT_DUE")
+    return `T+1 ${t1.target_session} 尚未到期 · 固定成员 ${t1.fixed_member_denominator ?? "UNKNOWN"}`;
+  if (t1.status === "NOT_COMPUTED")
+    return `T+1 ${t1.target_session} 尚未生产 · 固定成员 ${t1.fixed_member_denominator ?? "UNKNOWN"}`;
+  return `T+1 ${t1.target_session} ${t1.status || "INCOMPLETE"} · ${(t1.reason_codes || []).join("、")}`;
+}
 function boardSourceQualitySummary(board) {
   const source = board.membership_source_quality || {};
   return `成员源 ${source.quality || "UNKNOWN"} · 快照未映射 ${source.source_unmapped_rows ?? "UNKNOWN"}`;
@@ -1433,6 +1450,21 @@ function missingD0Kinds() {
 function renderD0Boards() {
   const rows = $("d0BoardRows");
   rows.replaceChildren();
+  const d0ScopeStatus = state.d0Result?.stored_evidence_status?.d0 || "UNKNOWN";
+  const pulseDirectory = state.d0Result?.pulse_followup_directory;
+  const pulseOnly =
+    d0ScopeStatus !== "AVAILABLE" && pulseDirectory?.status === "AVAILABLE";
+  $("d0BoardMode").textContent = pulseOnly
+    ? "T0 已存 PULSE 与后继结果 · NON_PIT 描述性回看"
+    : "FALSE→TRUE · 当前成员快照 NON_PIT";
+  $("d0BoardNameHeading").textContent = pulseOnly ? "板块" : "变化板块";
+  $("d0BoardDescription").textContent = pulseOnly
+    ? "D0 未计算；下方显示当前成员快照的已存 T0 PULSE 与后继结果，均为 NON_PIT 回看。"
+    : "先浏览同日已证 D0 新增变化；成员快照回看始终标为 NON_PIT。";
+  $("d0BoardCountHeading").textContent = pulseOnly
+    ? "T+1 后继结果"
+    : "D0 新增成员";
+  $("d0BoardPulseHeading").textContent = pulseOnly ? "T0 PULSE" : "跨日 PULSE";
   const addEmptyRow = (text) => {
     const row = node("tr");
     const cell = node("td", text, "empty");
@@ -1440,7 +1472,7 @@ function renderD0Boards() {
     row.append(cell);
     rows.append(row);
   };
-  const boards = provedD0Boards();
+  const boards = pulseOnly ? pulseDirectory.boards || [] : provedD0Boards();
   if (!state.d0Result || !Array.isArray(state.d0Result.boards)) {
     const status =
       state.d0Status === "LOADING"
@@ -1455,16 +1487,33 @@ function renderD0Boards() {
     return;
   }
 
-  const missing = missingD0Kinds();
-  if (boards.length === 0) {
-    const status = missing.length
-      ? `NO_PROVED_D0_CHANGE；成员关系 UNKNOWN：${missing.join("、")}`
-      : "NO_PROVED_D0_CHANGE：当前同源范围没有已证 FALSE→TRUE 变化板块。";
+  if (d0ScopeStatus !== "AVAILABLE" && !pulseOnly) {
+    const status = `NO_STORED_FACT / D0 ${d0ScopeStatus}：没有已存完整相邻事实；总数未知，不解释为零变化。`;
     message(
       "d0BoardSummary",
       `${state.selected?.target_session || ""} · ${status}`,
     );
-    message("d0BoardPage", "0 个已证变化板块");
+    message("d0BoardPage", `总数 UNKNOWN（${d0ScopeStatus}）`);
+    $("d0BoardPrev").disabled = $("d0BoardNext").disabled = true;
+    addEmptyRow(status);
+    return;
+  }
+
+  const missing = missingD0Kinds();
+  if (boards.length === 0) {
+    const status = pulseOnly
+      ? "当前范围没有可读取的完整已存 PULSE 板块目录。"
+      : missing.length
+        ? `NO_PROVED_D0_CHANGE；成员关系 UNKNOWN：${missing.join("、")}`
+        : "NO_PROVED_D0_CHANGE：当前同源范围没有已证 FALSE→TRUE 变化板块。";
+    message(
+      "d0BoardSummary",
+      `${state.selected?.target_session || ""} · ${status}`,
+    );
+    message(
+      "d0BoardPage",
+      pulseOnly ? "0 个已存 PULSE 板块" : "0 个已证变化板块",
+    );
     $("d0BoardPrev").disabled = $("d0BoardNext").disabled = true;
     addEmptyRow(status);
     return;
@@ -1490,18 +1539,27 @@ function renderD0Boards() {
   const missingText = missing.length
     ? ` · 成员关系 UNKNOWN：${missing.join("、")}`
     : "";
-  const orderText = state.d0Result.board_selection?.precedence?.[0]
-    ? ` · ${state.d0Result.board_selection.precedence[0]}`
-    : " · 按 D0 新增成员关系数降序";
+  const orderText = pulseOnly
+    ? " · 按板块类型、名称和编号排序"
+    : state.d0Result.board_selection?.precedence?.[0]
+      ? ` · ${state.d0Result.board_selection.precedence[0]}`
+      : " · 按 D0 新增成员关系数降序";
   const membershipQuality = membershipPageScopeSummary(
     state.d0Result.membership_status,
   );
+  const summary = pulseOnly
+    ? `${state.selected?.target_session || ""} · D0 ${d0ScopeStatus}（总数未知）；已存 PULSE 板块 ${pulseDirectory.total_board_count ?? boards.length} · PULSE TRUE/FALSE/UNKNOWN ${pulseDirectory.pulse_state_counts?.TRUE ?? "UNKNOWN"}/${pulseDirectory.pulse_state_counts?.FALSE ?? "UNKNOWN"}/${pulseDirectory.pulse_state_counts?.UNKNOWN ?? "UNKNOWN"} · T+1 OBSERVED/UNKNOWN/NOT_DUE ${pulseDirectory.t1_status_counts?.OBSERVED ?? 0}/${pulseDirectory.t1_status_counts?.UNKNOWN ?? 0}/${pulseDirectory.t1_status_counts?.NOT_DUE ?? 0} · NON_PIT`
+    : `${state.selected?.target_session || ""} · 已证变化板块 ${boards.length}（行业 ${industryCount} / 概念 ${conceptCount}） · 首页精选 ${state.d0Result.board_selection?.home_featured_count ?? Math.min(boards.length, 15)} · 筛选 ${filtered.length}${orderText} · ${membershipQuality} · 成员关系可重叠 · NON_PIT${missingText}`;
   message(
     "d0BoardSummary",
-    `${state.selected?.target_session || ""} · 已证变化板块 ${boards.length}（行业 ${industryCount} / 概念 ${conceptCount}） · 首页精选 ${state.d0Result.board_selection?.home_featured_count ?? Math.min(boards.length, 15)} · 筛选 ${filtered.length}${orderText} · ${membershipQuality} · 成员关系可重叠 · NON_PIT${missingText}`,
+    pulseOnly ? `${summary} · 筛选 ${filtered.length}` : summary,
   );
   if (!filtered.length) {
-    addEmptyRow("当前筛选没有匹配的已证 D0 变化板块；清除筛选可恢复完整列表。");
+    addEmptyRow(
+      pulseOnly
+        ? "当前筛选没有匹配的已存 PULSE 板块；清除筛选可恢复完整列表。"
+        : "当前筛选没有匹配的已证 D0 变化板块；清除筛选可恢复完整列表。",
+    );
   } else {
     for (const [index, board] of page.entries()) {
       const row = node("tr");
@@ -1516,15 +1574,29 @@ function renderD0Boards() {
       row.append(
         name,
         node("td", board.board_kind === "INDUSTRY" ? "行业" : "概念"),
-        node("td", format(board.new_member_count)),
-        node("td", boardPulseSummary(board)),
+        node(
+          "td",
+          pulseOnly
+            ? boardPulseFollowupSummary(board)
+            : format(board.new_member_count),
+        ),
+        node(
+          "td",
+          pulseOnly
+            ? `${boardPulseSummary(board)} · ${board.cross_period_pulse?.dq5_pp?.decimal_4dp ?? "UNKNOWN"} · breadth Δ ${board.cross_period_pulse?.breadth_delta1?.decimal_4dp ?? "UNKNOWN"}`
+            : boardPulseSummary(board),
+        ),
         node("td", board.observed_at || "UNKNOWN"),
         node("td", "NON_PIT"),
       );
       const action = node("td");
       const button = node(
         "button",
-        board.home_featured ? "首页精选 · 查看成员 →" : "完整列表 · 查看成员 →",
+        pulseOnly
+          ? "查看 T+1 与成员 →"
+          : board.home_featured
+            ? "首页精选 · 查看成员 →"
+            : "完整列表 · 查看成员 →",
         "text-button",
       );
       button.type = "button";
@@ -1538,7 +1610,7 @@ function renderD0Boards() {
   const totalPages = Math.max(1, Math.ceil(filtered.length / 15));
   message(
     "d0BoardPage",
-    `第 ${state.d0BoardPage + 1}/${totalPages} 页 · ${page.length}/${filtered.length} 个板块`,
+    `第 ${state.d0BoardPage + 1}/${totalPages} 页 · ${page.length}/${filtered.length} 个${pulseOnly ? "PULSE板块" : "板块"}`,
   );
   $("d0BoardPrev").disabled = state.d0BoardPage === 0;
   $("d0BoardNext").disabled = state.d0BoardPage >= lastPage;
@@ -1956,6 +2028,14 @@ async function loadFocusAuto(context, offset = 0) {
       result.watch_groups?.counts?.[group] ??
       results.length;
     const groups = result.watch_groups?.counts || {};
+    const d0GroupCount =
+      scope.d0 === "AVAILABLE"
+        ? format(groups.D0_NEW)
+        : `UNKNOWN（D0 ${scope.d0 || "UNKNOWN"}）`;
+    const currentGroupCount =
+      group === "D0_NEW" && scope.d0 !== "AVAILABLE"
+        ? `UNKNOWN（D0 ${scope.d0 || "UNKNOWN"}）`
+        : format(total);
     const pageMemberships = results.flatMap(
       (item) => item.also_in_sectors || [],
     );
@@ -1975,7 +2055,7 @@ async function loadFocusAuto(context, offset = 0) {
         " · 目标Raw来源池 " +
         format(result.watch_groups?.target_source_pool_denominator) +
         " · D0新增 " +
-        format(groups.D0_NEW) +
+        d0GroupCount +
         " / Seed或规则TRUE " +
         format(groups.SEED_RULE) +
         " / D1材料 " +
@@ -1985,26 +2065,28 @@ async function loadFocusAuto(context, offset = 0) {
         " / 已计算无信号 " +
         format(groups.KNOWN_NO_SIGNAL) +
         " · 当前分组 " +
-        `${groupLabels[group] || group} ${format(total)}` +
+        `${groupLabels[group] || group} ${currentGroupCount}` +
         ` · 分母闭合 ${result.watch_groups?.partition_closed ? "是" : "UNKNOWN"}` +
         ` · 本页已存PULSE ${availablePulseCount}/${pageMemberships.length}` +
         " · 来源研究 NON_PIT",
     );
     message(
       "focusAutoPage",
-      `偏移 ${result.pagination?.offset ?? offset} · 本页 ${results.length} · 总数 ${format(total)}`,
+      `偏移 ${result.pagination?.offset ?? offset} · 本页 ${results.length} · 总数 ${currentGroupCount}`,
     );
     $("focusAutoPrev").disabled = offset === 0;
     $("focusAutoNext").disabled = result.pagination?.next_offset == null;
     if (!results.length)
       root.textContent =
-        group === "KNOWN_NO_SIGNAL"
-          ? "没有已计算无观察线索的代码；这与 UNKNOWN 分组分开。"
-          : group === "UNKNOWN"
-            ? "当前范围没有待核对代码；这不表示其它来源分组为零。"
-            : state.focusAutoBoard
-              ? "所选行业/GN在当前观察分组中没有已证成员；成员关系与观察资格保持分开。"
-              : `当前日期的${groupLabels[group] || group}分组没有记录。`;
+        group === "D0_NEW" && scope.d0 !== "AVAILABLE"
+          ? `NO_STORED_FACT / D0 ${scope.d0 || "UNKNOWN"}：没有已存完整D0相邻事实；总数未知，不解释为零变化。`
+          : group === "KNOWN_NO_SIGNAL"
+            ? "没有已计算无观察线索的代码；这与 UNKNOWN 分组分开。"
+            : group === "UNKNOWN"
+              ? "当前范围没有待核对代码；这不表示其它来源分组为零。"
+              : state.focusAutoBoard
+                ? "所选行业/GN在当前观察分组中没有已证成员；成员关系与观察资格保持分开。"
+                : `当前日期的${groupLabels[group] || group}分组没有记录。`;
   } catch (error) {
     if (token === state.focusAutoRequest && state.selected === context)
       message("focusAutoStatus", `自动来源观察不可用：${error.message}`);
@@ -2267,30 +2349,50 @@ async function openD0Board(board, offset = 0) {
   message("boardTitle", displayBoardName(board));
   message(
     "boardMeta",
-    `${boardKindLabel(board.board_kind)} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · D0 新增`,
+    `${boardKindLabel(board.board_kind)} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${board.pulse_followup_only ? "已存PULSE与T+1后继" : "D0新增"}`,
   );
-  message("boardCoverage", "正在读取该板块 D0 新增成员…");
+  message(
+    "boardCoverage",
+    board.pulse_followup_only
+      ? "D0 NOT_COMPUTED；读取当前快照成员与已存PULSE后继事实…"
+      : "正在读取该板块 D0 新增成员…",
+  );
   message("memberList", "正在读取…");
   $("memberPrev").disabled = $("memberNext").disabled = true;
   if (!$("boardDialog").open) $("boardDialog").showModal();
   try {
-    const result = await api("/api/preview/source-launch-watch", {
-      before_session: c.previous_session,
-      target_session: c.target_session,
-      research_cutoff: c.research_cutoff,
-      source_package_id: c.source_package_id,
-      industry_snapshot_id: c.industry_snapshot_id,
-      concept_snapshot_id: c.concept_snapshot_id,
-      ...(Number.isInteger(c.d1_history_session_count) &&
-      c.d1_history_session_count >= 1 &&
-      c.d1_history_session_count <= 75
-        ? { d1_history_session_count: c.d1_history_session_count }
-        : {}),
-      board_kind: board.board_kind,
-      board_native_id: board.board_native_id,
-      offset: 0,
-      limit: 1,
-    });
+    let result;
+    if (board.pulse_followup_only) {
+      const comparison =
+        state.d0Result?.pulse_followup_directory?.comparison?.[
+          board.board_kind
+        ];
+      result = {
+        boards: [board],
+        sector_pulse_followup_comparison: comparison
+          ? { [board.board_kind]: comparison }
+          : {},
+        filter: { filtered_total: null, global_total: null },
+      };
+    } else {
+      result = await api("/api/preview/source-launch-watch", {
+        before_session: c.previous_session,
+        target_session: c.target_session,
+        research_cutoff: c.research_cutoff,
+        source_package_id: c.source_package_id,
+        industry_snapshot_id: c.industry_snapshot_id,
+        concept_snapshot_id: c.concept_snapshot_id,
+        ...(Number.isInteger(c.d1_history_session_count) &&
+        c.d1_history_session_count >= 1 &&
+        c.d1_history_session_count <= 75
+          ? { d1_history_session_count: c.d1_history_session_count }
+          : {}),
+        board_kind: board.board_kind,
+        board_native_id: board.board_native_id,
+        offset: 0,
+        limit: 1,
+      });
+    }
     if (
       token !== state.d0BoardRequest ||
       c !== state.selected ||
@@ -2301,9 +2403,14 @@ async function openD0Board(board, offset = 0) {
     const researchQuery = {
       target_session: c.target_session,
       source_package_id: c.source_package_id,
-      d1_history_session_count: c.d1_history_session_count,
+      d1_history_session_count: Number.isInteger(c.d1_history_session_count)
+        ? c.d1_history_session_count
+        : c.stock_history_session_count || c.source_history_session_count || 1,
       industry_snapshot_id: c.industry_snapshot_id,
       concept_snapshot_id: c.concept_snapshot_id,
+      ...(typeof c.profile_revision === "string"
+        ? { profile_revision: c.profile_revision }
+        : {}),
       board_kind: board.board_kind,
       board_native_id: board.board_native_id,
       offset,
@@ -2352,20 +2459,24 @@ async function openD0Board(board, offset = 0) {
         const label = `T+${item.horizon_sessions ?? "?"} ${item.target_session ?? ""}`;
         const denominator = item.fixed_member_denominator;
         const observed = item.observed_member_count;
+        const unknown = item.unknown_member_count;
+        const memberCoverage = `固定成员 ${denominator ?? "UNKNOWN"} · 有效 ${observed ?? "UNKNOWN"} · 未知 ${unknown ?? "UNKNOWN"}`;
         if (item.status === "OBSERVED") {
           const percent = item.equal_weight_return_percent_4dp;
           const signed = Number(percent) >= 0 ? `+${percent}` : percent;
-          return `${label} ${signed}%（${observed}/${denominator}）`;
+          return `${label} 精确回报 ${item.equal_weight_return}（${signed}%）· ${memberCoverage}`;
         }
-        if (item.status === "NOT_DUE") return `${label}尚未到期`;
-        if (item.status === "NOT_COMPUTED") return `${label}尚未生产`;
+        if (item.status === "NOT_DUE")
+          return `${label}尚未到期 · ${memberCoverage}`;
+        if (item.status === "NOT_COMPUTED")
+          return `${label}尚未生产 · ${memberCoverage}`;
         if (item.status === "UNKNOWN")
-          return `${label}未知（${observed}/${denominator}，${(item.reason_codes ?? []).join("、")}）`;
-        return `${label}${item.status ?? "INCOMPLETE"}（${(item.reason_codes ?? []).join("、")}）`;
+          return `${label}未知 · ${memberCoverage} · ${(item.reason_codes ?? []).join("、")}`;
+        return `${label}${item.status ?? "INCOMPLETE"} · ${memberCoverage} · ${(item.reason_codes ?? []).join("、")}`;
       })
       .join(" · ");
     const pulseFollowupLine = pulseFollowupSummary
-      ? `PULSE后继Raw观察（${pulseFollowup.research_mode ?? "NON_PIT_RETROSPECTIVE"}；固定成员分母）${pulseFollowupSummary}`
+      ? `PULSE后继收盘观察（${pulseFollowup.research_mode ?? "NON_PIT_RETROSPECTIVE"}；${pulseFollowup.price_coordinate ?? "RAW_UNADJUSTED"}；描述性回看，不是事前胜率）${pulseFollowupSummary}`
       : `PULSE后继Raw观察 ${pulseFollowup?.status ?? "NOT_COMPUTED"} · ${(pulseFollowup?.reason_codes ?? ["PULSE_FOLLOWUP_NOT_AVAILABLE"]).join("、")}`;
     const pulseFollowupComparison =
       result.sector_pulse_followup_comparison?.[board.board_kind];
@@ -2423,7 +2534,7 @@ async function openD0Board(board, offset = 0) {
             `${comparisonReasonLabels[item.reason_code] ?? item.reason_code} ${item.board_relation_count}`,
         )
         .join("、");
-      return `${comparisonStateLabels[group.pulse_state] ?? group.pulse_state} 完整篮子 ${coverage.observed_board_relations}/${coverage.all_board_relations}（${coverage.percent_4dp ?? "UNKNOWN"}%）；UNKNOWN ${statusCounts.UNKNOWN ?? 0}${extraStates ? `、${extraStates}` : ""}${reasons ? `，未知原因 ${reasons}` : ""}${incompleteReasons ? `，不完整原因 ${incompleteReasons}` : ""}；${comparisonDistributionText(group.distribution)}`;
+      return `${comparisonStateLabels[group.pulse_state] ?? group.pulse_state} 完整篮子 ${coverage.observed_board_relations}/${coverage.all_board_relations}（${coverage.percent_4dp ?? "UNKNOWN"}%）；OBSERVED板块 ${statusCounts.OBSERVED ?? 0} · UNKNOWN板块 ${statusCounts.UNKNOWN ?? 0} · 固定成员 ${group.fixed_member_denominator_sum ?? "UNKNOWN"} · 有效成员 ${group.observed_member_count_sum ?? "UNKNOWN"} · 未知成员 ${group.unknown_member_count_sum ?? "UNKNOWN"}${extraStates ? ` · ${extraStates}` : ""}${reasons ? `，未知原因 ${reasons}` : ""}${incompleteReasons ? `，不完整原因 ${incompleteReasons}` : ""}；${comparisonDistributionText(group.distribution)}`;
     };
     const comparisonRows = (pulseFollowupComparison?.horizons ?? []).map(
       (item) => {
@@ -2449,9 +2560,11 @@ async function openD0Board(board, offset = 0) {
     );
     message(
       "boardCoverage",
-      observation?.status === "AVAILABLE"
-        ? `当前成员 ${format(observation.snapshot_member_count)} · 来源池内/池外 ${format(observation.source_pool.inside)}/${format(observation.source_pool.outside)} · D0 TRUE/FALSE/UNKNOWN/缺事实 ${format(observation.d0.true)}/${format(observation.d0.false)}/${format(observation.d0.unknown)}/${format(observation.d0.missing)}（分母 ${format(observation.d0.target_source_pool_denominator)}） · Seed TRUE/FALSE/UNKNOWN/缺事实 ${format(observation.seed.true)}/${format(observation.seed.false)}/${format(observation.seed.unknown)}/${format(observation.seed.missing)}（分母 ${format(observation.seed.target_source_pool_denominator)}；${observation.seed.scope_status}） · D1材料变化成员 ${format(observation.d1.material_change_members)} / 锚 ${format(observation.d1.material_anchor_count)} · 目标价质量 ${JSON.stringify(observation.d1.target_price_quality_counts)} · 跨${boardKindLabel(observation.cross_kind_overlap.kind)}重叠代码 ${format(observation.cross_kind_overlap.member_count)} · D0 FALSE→TRUE本板 ${format(observation.d0.transitions?.FALSE_TO_TRUE)} / API本板 ${format(result.filter?.filtered_total)} / 全市场 ${format(result.filter?.global_total)} · 成员为当前快照NON_PIT且关系可重叠`
-        : `D0 新增成员 ${format(result.filter?.filtered_total)} · 全市场独立新增 ${format(result.filter?.global_total)} · 板块全成员观察 ${observation?.status || saved.storage_status || "UNKNOWN"}：${observation?.reason || saved.reason || "事实不可用"} · ${membershipScopeSummary(result.membership_status)} · NON_PIT`,
+      observation?.membership_only
+        ? `当前成员 ${format(observation.snapshot_member_count)} · 来源池内/池外 ${format(observation.source_pool.inside)}/${format(observation.source_pool.outside)} · D0/Seed/D1 NOT_COMPUTED · ${observation.reason} · 成员为当前快照 NON_PIT`
+        : observation?.status === "AVAILABLE"
+          ? `当前成员 ${format(observation.snapshot_member_count)} · 来源池内/池外 ${format(observation.source_pool.inside)}/${format(observation.source_pool.outside)} · D0 TRUE/FALSE/UNKNOWN/缺事实 ${format(observation.d0.true)}/${format(observation.d0.false)}/${format(observation.d0.unknown)}/${format(observation.d0.missing)}（分母 ${format(observation.d0.target_source_pool_denominator)}） · Seed TRUE/FALSE/UNKNOWN/缺事实 ${format(observation.seed.true)}/${format(observation.seed.false)}/${format(observation.seed.unknown)}/${format(observation.seed.missing)}（分母 ${format(observation.seed.target_source_pool_denominator)}；${observation.seed.scope_status}） · D1材料变化成员 ${format(observation.d1.material_change_members)} / 锚 ${format(observation.d1.material_anchor_count)} · 目标价质量 ${JSON.stringify(observation.d1.target_price_quality_counts)} · 跨${boardKindLabel(observation.cross_kind_overlap.kind)}重叠代码 ${format(observation.cross_kind_overlap.member_count)} · D0 FALSE→TRUE本板 ${format(observation.d0.transitions?.FALSE_TO_TRUE)} / API本板 ${format(result.filter?.filtered_total)} / 全市场 ${format(result.filter?.global_total)} · 成员为当前快照NON_PIT且关系可重叠`
+          : `D0 新增成员 ${format(result.filter?.filtered_total)} · 全市场独立新增 ${format(result.filter?.global_total)} · 板块全成员观察 ${observation?.status || saved.storage_status || "UNKNOWN"}：${observation?.reason || saved.reason || "事实不可用"} · ${membershipScopeSummary(result.membership_status)} · NON_PIT`,
     );
     if (observation?.status !== "AVAILABLE") {
       message(

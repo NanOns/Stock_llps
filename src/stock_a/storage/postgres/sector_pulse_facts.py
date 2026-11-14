@@ -691,6 +691,8 @@ def _pulse_payload(row: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "status": "AVAILABLE",
         "state": row["pulse_state"],
+        "board_native_id": row["board_native_id"],
+        "board_name": row["board_name"],
         "dq5_pp": _fraction_payload(row, "dq5_pp"),
         "breadth_delta1": _fraction_payload(row, "breadth_delta1"),
         "ret5_target": _fraction_payload(row, "ret5_target"),
