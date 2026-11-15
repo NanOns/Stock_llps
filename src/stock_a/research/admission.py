@@ -88,7 +88,17 @@ def admit(
     if truth is None:
         return unknown("RAW_UNKNOWN")
     gate_values = tuple(boolean(g) for g in gates)
-    if not gate_values or any(g is not True for g in gate_values):
+    if not gate_values:
+        return unknown("COMMON_ADMISSION_NOT_READY")
+    if any(g is False for g in gate_values):
+        return Admission(
+            raw,
+            FieldValue(False),
+            "BLOCKED",
+            "COMMON_ADMISSION_FALSE",
+            None,
+        )
+    if any(g is None for g in gate_values):
         return unknown("COMMON_ADMISSION_NOT_READY")
     p = number(close, positive=True)
     line, anchor = None, None

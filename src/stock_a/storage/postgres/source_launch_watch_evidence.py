@@ -31,6 +31,7 @@ _D1_STRUCTURE_TYPES = (
     "GAP_ZONE",
 )
 _VALID_STATES = frozenset({"TRUE", "FALSE", "UNKNOWN"})
+_D0_SCENARIOS = ("LAUNCH_CONFIRM", "RECOVERY_TURN")
 
 
 def _scope_status(rows: Sequence[tuple[Any, ...]], expected_count: int) -> str:
@@ -50,6 +51,90 @@ def _reasons(value: Any) -> list[str]:
     if not isinstance(value, (list, tuple)):
         return []
     return [item for item in value if isinstance(item, str) and item]
+
+
+def _decode_d0_scenarios(
+    rows_by_scenario: Mapping[str, Sequence[tuple[Any, ...]]],
+    *,
+    target_session: date,
+    expected_source_count: int,
+) -> tuple[dict[str, dict[str, Any]], dict[str, tuple[Any, ...]]]:
+    """校验并解码同一捕获内已存的单股D0原始场景事实。"""
+    facts: dict[str, dict[str, Any]] = {}
+    scopes: dict[str, tuple[Any, ...]] = {}
+    for scenario in _D0_SCENARIOS:
+        rows = rows_by_scenario.get(scenario, ())
+        if len(rows) != 1:
+            facts[scenario] = {
+                "status": "NOT_COMPUTED" if not rows else "AMBIGUOUS",
+                "state": "UNKNOWN",
+                "reasons": [
+                    "D0_SCENARIO_FACT_NOT_SAVED_FOR_EXACT_INPUT"
+                    if not rows
+                    else "D0_SCENARIO_SCOPE_AMBIGUOUS_FOR_SOURCE_SYMBOL"
+                ],
+                "reason_codes": [],
+                "predicate_details": [],
+            }
+            continue
+
+        row = rows[0]
+        scopes[scenario] = (row[12], row[13], row[14], row[15])
+        details = [
+            {
+                "predicate_id": values[0],
+                "state": _state(values[1]),
+                "quality": values[2],
+                "reason_code": values[3],
+                "value_numerator": str(values[4]) if values[4] is not None else None,
+                "value_denominator": str(values[5]) if values[5] is not None else None,
+            }
+            for values in zip(
+                row[3], row[4], row[5], row[6], row[7], row[8], strict=True
+            )
+        ]
+        predicate_states = [item["state"] for item in details]
+        reduced_state = (
+            "FALSE"
+            if "FALSE" in predicate_states
+            else "UNKNOWN"
+            if "UNKNOWN" in predicate_states
+            else "TRUE"
+        )
+        identity_ok = (
+            row[1] in _VALID_STATES
+            and row[11] == expected_source_count
+            and row[9] <= target_session
+            and row[14] == "NON_PIT_RETROSPECTIVE"
+            and row[15] == "RAW_UNADJUSTED"
+            and reduced_state == row[1]
+        )
+        reason_codes = []
+        if row[1] not in _VALID_STATES:
+            reason_codes.append("D0_SCENARIO_STATE_INVALID")
+        if row[11] != expected_source_count:
+            reason_codes.append("D0_SCENARIO_SOURCE_DENOMINATOR_MISMATCH")
+        if row[9] > target_session:
+            reason_codes.append("D0_SCENARIO_WINDOW_AFTER_TARGET")
+        if row[14] != "NON_PIT_RETROSPECTIVE" or row[15] != "RAW_UNADJUSTED":
+            reason_codes.append("D0_SCENARIO_SCOPE_MISMATCH")
+        if reduced_state != row[1]:
+            reason_codes.append("D0_SCENARIO_STATE_CONFLICT")
+        facts[scenario] = {
+            "status": "AVAILABLE" if identity_ok else "NOT_COMPARABLE",
+            "state": _state(row[1]),
+            "reasons": [row[2]] if row[2] else [],
+            "reason_codes": reason_codes,
+            "predicate_details": details,
+            "history_window_start": row[9].isoformat(),
+            "history_session_count": int(row[10]),
+            "source_count": int(row[11]),
+            "producer_version": row[12],
+            "calendar_revision": row[13],
+            "research_mode": row[14],
+            "price_coordinate": row[15],
+        }
+    return facts, scopes
 
 
 def read_source_launch_watch_evidence(
@@ -346,6 +431,33 @@ def read_source_launch_watch_evidence(
             )
             d1_rows = cursor.fetchall()
 
+        scenario_rows_by_symbol: dict[str, dict[str, list[tuple[Any, ...]]]] = (
+            defaultdict(lambda: defaultdict(list))
+        )
+        if _scope_symbol is None:
+            cursor.execute(
+                """SELECT source_symbol, scenario, scenario_state, scenario_reason,
+                          predicate_ids, predicate_states, predicate_qualities,
+                          predicate_reason_codes, predicate_value_numerators,
+                          predicate_value_denominators, history_window_start,
+                          history_session_count, source_count, producer_version,
+                          calendar_revision, research_mode, price_coordinate
+                   FROM source_d0_scenario_day_facts
+                   WHERE target_session=%s AND source_package_id=%s
+                     AND source_capture_id=%s AND source_symbol=ANY(%s)
+                     AND scenario=ANY(%s)
+                   ORDER BY source_symbol, scenario, producer_version, calendar_revision""",
+                (
+                    target_session,
+                    source_package_id,
+                    source_capture_id,
+                    list(symbols),
+                    list(_D0_SCENARIOS),
+                ),
+            )
+            for row in cursor.fetchall():
+                scenario_rows_by_symbol[row[0]][row[1]].append(row[1:])
+
         single_context: dict[str, Any] | None = None
         if _scope_symbol is not None:
             single_context = _read_single_symbol_context(
@@ -627,6 +739,26 @@ def read_source_launch_watch_evidence(
                 if "UNKNOWN" in evidence_statuses
                 else "NOT_COMPUTED"
             )
+        elif _scope_symbol is None:
+            scenario_facts, _ = _decode_d0_scenarios(
+                scenario_rows_by_symbol.get(symbol, {}),
+                target_session=target_session,
+                expected_source_count=expected_source_count,
+            )
+            scenario_statuses = [
+                scenario_facts[name]["status"] for name in _D0_SCENARIOS
+            ]
+            by_symbol[symbol]["d0"] = {
+                "status": "AVAILABLE"
+                if all(status == "AVAILABLE" for status in scenario_statuses)
+                else "PARTIAL"
+                if any(status == "AVAILABLE" for status in scenario_statuses)
+                else "NOT_COMPUTED"
+                if all(status == "NOT_COMPUTED" for status in scenario_statuses)
+                else "UNKNOWN",
+                "scenarios": scenario_facts,
+                "formal_selection_status": "NOT_EVALUATED",
+            }
 
     scope_consistent = bool(
         seed_scope is not None
@@ -726,10 +858,10 @@ def read_source_launch_watch_evidence(
                 "source_pool_seed_day_facts",
                 "source_d1_structure_day_facts",
                 "source_rule_evaluations",
+                "source_d0_scenario_day_facts",
             ]
             + (
                 [
-                    "source_d0_scenario_day_facts",
                     "source_d0_launch_day_facts",
                     "tdx_sector_source_snapshots",
                     "tdx_sector_catalog",
@@ -1301,60 +1433,11 @@ def _read_single_symbol_context(
     for row in cursor.fetchall():
         scenarios[row[0]].append(row)
 
-    scenario_facts: dict[str, dict[str, Any]] = {}
-    scenario_scopes: dict[str, tuple[Any, ...]] = {}
-    for scenario in ("LAUNCH_CONFIRM", "RECOVERY_TURN"):
-        rows = scenarios.get(scenario, [])
-        if len(rows) != 1:
-            scenario_facts[scenario] = {
-                "status": "NOT_COMPUTED" if not rows else "AMBIGUOUS",
-                "state": "UNKNOWN",
-                "reasons": [
-                    "D0_SCENARIO_FACT_NOT_SAVED_FOR_EXACT_INPUT"
-                    if not rows
-                    else "D0_SCENARIO_SCOPE_AMBIGUOUS_FOR_SOURCE_SYMBOL"
-                ],
-                "predicate_details": [],
-            }
-            continue
-        row = rows[0]
-        scenario_scopes[scenario] = (row[12], row[13], row[14], row[15])
-        identity_ok = (
-            row[11] == expected_source_count
-            and row[9] <= target_session
-            and row[14] == "NON_PIT_RETROSPECTIVE"
-            and row[15] == "RAW_UNADJUSTED"
-        )
-        scenario_facts[scenario] = {
-            "status": "AVAILABLE" if identity_ok else "NOT_COMPARABLE",
-            "state": _state(row[1]),
-            "reasons": [row[2]] if row[2] else [],
-            "reason_codes": [] if identity_ok else ["D0_SCENARIO_SCOPE_MISMATCH"],
-            "predicate_details": [
-                {
-                    "predicate_id": values[0],
-                    "state": _state(values[1]),
-                    "quality": values[2],
-                    "reason_code": values[3],
-                    "value_numerator": str(values[4])
-                    if values[4] is not None
-                    else None,
-                    "value_denominator": str(values[5])
-                    if values[5] is not None
-                    else None,
-                }
-                for values in zip(
-                    row[3], row[4], row[5], row[6], row[7], row[8], strict=True
-                )
-            ],
-            "history_window_start": row[9].isoformat(),
-            "history_session_count": int(row[10]),
-            "source_count": int(row[11]),
-            "producer_version": row[12],
-            "calendar_revision": row[13],
-            "research_mode": row[14],
-            "price_coordinate": row[15],
-        }
+    scenario_facts, scenario_scopes = _decode_d0_scenarios(
+        scenarios,
+        target_session=target_session,
+        expected_source_count=expected_source_count,
+    )
 
     launch_params: tuple[Any, ...] = (
         target_session,

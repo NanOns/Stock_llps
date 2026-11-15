@@ -2621,6 +2621,46 @@ function sourceD0SummaryText(d0) {
   return `D0相邻转移 ${d0.status || "UNKNOWN"} · LAUNCH_CONFIRM ${launch} / RECOVERY_TURN ${recovery}。`;
 }
 
+function formalD0AdmissionSummaryText(admission) {
+  if (!admission)
+    return "正式D0准入 NOT_COMPUTED · 正式episode、D2、Risk与Priority未计算。";
+  const scenarioNames = {
+    LAUNCH_CONFIRM: "LAUNCH",
+    RECOVERY_TURN: "RECOVERY",
+    STRONG_PULLBACK: "PULLBACK",
+    TREND_CONTINUE: "CONTINUE",
+  };
+  const states = admission.scenarios || {};
+  const scenarios = Object.entries(states).map(([name, item]) => {
+    const raw = item.raw_state || item.raw_status || "NOT_COMPUTED";
+    const formal = item.formal_state || "NOT_COMPUTED";
+    const reasons = [
+      item.reason_code,
+      ...(item.reason_codes || []),
+      ...(item.raw_reason_codes || []),
+    ]
+      .filter(Boolean)
+      .join("、");
+    return `${scenarioNames[name] || name} ${item.message_zh || `Raw ${raw} → 正式 ${formal}/${item.admission_status || "NOT_COMPUTED"}`}${reasons ? ` · ${reasons}` : ""}`;
+  });
+  return [
+    scenarios.join("；") || "LAUNCH / RECOVERY 原始事实 NOT_COMPUTED",
+    `Episode ${admission.formal_episode_status || "NOT_COMPUTED"} · D2 ${admission.d2_status || "NOT_COMPUTED"} · Risk ${admission.risk_status || "NOT_COMPUTED"} · Priority ${admission.priority_status || "NOT_COMPUTED"}`,
+    `准入原因 ${(admission.reason_codes || []).join("、") || "无额外原因码"}`,
+  ].join("；");
+}
+
+function formalD0AdmissionHeadline(admission) {
+  if (!admission) return "正式D0 / D2 / Risk / Priority NOT_COMPUTED";
+  const launch = admission.scenarios?.LAUNCH_CONFIRM || {};
+  const recovery = admission.scenarios?.RECOVERY_TURN || {};
+  const blockers = [launch.reason_code, ...(launch.reason_codes || [])]
+    .filter(Boolean)
+    .slice(0, 3)
+    .join("、");
+  return `正式D0 LAUNCH ${launch.raw_state || "NOT_COMPUTED"}→${launch.formal_state || "NOT_COMPUTED"}/${launch.admission_status || "NOT_COMPUTED"}；RECOVERY ${recovery.raw_state || "NOT_COMPUTED"}→${recovery.formal_state || "NOT_COMPUTED"}/${recovery.admission_status || "NOT_COMPUTED"}${blockers ? ` · ${blockers}` : ""}；Episode / D2 / Risk / Priority NOT_COMPUTED`;
+}
+
 function focusEvidenceDetails(item, context) {
   const details = node("details", null, "focus-evidence");
   details.append(node("summary", "查看规则条件、板块关系与板内比较"));
@@ -2631,6 +2671,8 @@ function focusEvidenceDetails(item, context) {
   const d1 = evidence.d1 || {};
   const version = item.source_version || {};
   const t0 = item.t0_observation || {};
+  const formalD0Admission =
+    t0.formal_d0_admission || evidence.formal_d0_admission;
   const registrations = Array.isArray(t0.enrollments) ? t0.enrollments : [];
   details.append(
     node(
@@ -2650,6 +2692,7 @@ function focusEvidenceDetails(item, context) {
         ? `D0相邻转移 NOT_COMPUTED · Raw来源质量 ${version.source_time_quality || "UNKNOWN"} / ${version.source_clock_role || "UNKNOWN"}`
         : `D0 ${item.d0_change?.before_state || "UNKNOWN"}→${item.d0_change?.after_state || "UNKNOWN"} · ${item.transition || item.seed_t1_outcome?.d0_transition_status || "UNKNOWN"} · Raw来源质量 ${version.source_time_quality || "UNKNOWN"} / ${version.source_clock_role || "UNKNOWN"}`,
     ),
+    node("p", formalD0AdmissionSummaryText(formalD0Admission)),
     node(
       "p",
       `来源形态Seed ${seed.source_seed?.state || "UNKNOWN"} · S1 ${seed.s1?.state || "UNKNOWN"} · S2 ${seed.s2?.state || "UNKNOWN"} · Safety ${seed.safety?.state || "UNKNOWN"} · 正式Seed ${item.seed_t1_outcome?.formal_seed?.state || "UNKNOWN"} · 目标收盘 ${seed.target_close_quality || "UNKNOWN"} ${seed.target_close_reason || ""}`,
@@ -2701,7 +2744,7 @@ function focusEvidenceDetails(item, context) {
     ),
     node(
       "p",
-      `后续状态 ${t0.followup_status || "NOT_COMPUTED"} / ${t0.followup_reason || "NO_STORED_LANDMARK"}；正式 Focus Episode、D2、Risk、Priority 未计算。`,
+      `来源登记后续 ${t0.followup_status || "NOT_COMPUTED"} / ${t0.followup_reason || "NO_STORED_LANDMARK"}；${formalD0AdmissionSummaryText(formalD0Admission)}`,
     ),
   );
   const memberships = item.also_in_sectors || [];
@@ -2881,6 +2924,9 @@ async function loadFocusAuto(context, offset = 0) {
         seedT1SummaryText(item.seed_t1_outcome),
         t0EarlySummary(item.t0_observation),
       ];
+      const formalAdmissionHeadline = formalD0AdmissionHeadline(
+        item.t0_observation?.formal_d0_admission,
+      );
       root.append(
         rowButton(
           displayStockName(item) === "名称未知"
@@ -2888,7 +2934,7 @@ async function loadFocusAuto(context, offset = 0) {
             : displayStockName(item),
           `第 ${item.research_reading_order?.rank || item.observation_order?.rank || offset + index + 1} 位 · ${details.join(" · ")}`,
           `T0 ${item.t0_observation?.status || "UNKNOWN"}`,
-          `${item.t0_observation?.followup_status || "NOT_COMPUTED"} · 正式 Focus Episode / Priority / D2 未计算`,
+          `${item.t0_observation?.followup_status || "NOT_COMPUTED"} · ${formalAdmissionHeadline}`,
           () => {
             state.focusAutoSelectedItem = item;
             $("cohortSymbol").value = displayStockCode(item);
@@ -5180,6 +5226,14 @@ $("focusReadStock").addEventListener("click", async () => {
           `${data.t0_observation?.status || "UNKNOWN"} · ${data.t0_observation?.reason || "NO_STORED_FACT"}`,
       ],
       ["D0来源事实", sourceD0SummaryText(data.t0_observation?.d0_context)],
+      [
+        "正式D0准入与D2 / Risk / Priority",
+        formalD0AdmissionSummaryText(
+          data.t0_observation?.formal_d0_admission ||
+            data.formal_d0_admission ||
+            data.stored_research_evidence?.formal_d0_admission,
+        ),
+      ],
       [
         "Seed / S1 / S2 / Safety",
         (() => {

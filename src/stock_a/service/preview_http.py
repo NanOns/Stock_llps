@@ -111,6 +111,9 @@ from stock_a.application.source_d0_raw import (
     _official_calendar,
     query_source_d0_raw_launch,
 )
+from stock_a.application.source_formal_admission import (
+    prepare_source_formal_d0_admission,
+)
 from stock_a.application.source_pool_factors import read_source_pool_rps
 from stock_a.application.source_tdx_sector_membership import (
     read_tdx_sector_symbol_membership,
@@ -2188,6 +2191,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "source_clock_role": after_source["source_clock_role"],
                 "parser_contract": after_source["parser_contract"],
             }
+            formal_d0_admission = prepare_source_formal_d0_admission(
+                evidence=item_evidence,
+                entity_id=symbol,
+                target_session=target_session,
+                source_package_id=source_package_id,
+                source_capture_id=after_source["source_capture_id"],
+                official_sessions=calendar_sessions,
+            )
+            item_evidence = {
+                **item_evidence,
+                "formal_d0_admission": formal_d0_admission,
+            }
             results.append(
                 {
                     **row,
@@ -2224,6 +2239,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "scope": "NON_PIT_EXPLORATORY",
                         "price_coordinate": "RAW_UNADJUSTED",
                         "research_only": True,
+                        "formal_d0_admission": formal_d0_admission,
                     },
                     "also_in_sectors": enriched_memberships,
                     "membership_status": membership_read.get("status", "UNKNOWN"),
@@ -6301,6 +6317,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "price_coordinate": "RAW_UNADJUSTED",
                     "scope": "NON_PIT_EXPLORATORY",
                 }
+                formal_d0_admission = prepare_source_formal_d0_admission(
+                    evidence=single_evidence,
+                    entity_id=symbol,
+                    target_session=target,
+                    source_package_id=source_package_id,
+                    source_capture_id=source_context["source_capture_id"],
+                    official_sessions=calendar_sessions,
+                )
+                result["formal_d0_admission"] = formal_d0_admission
+                result["t0_observation"]["formal_d0_admission"] = formal_d0_admission
+                result["stored_research_evidence"]["formal_d0_admission"] = (
+                    formal_d0_admission
+                )
             self._send_json(200, result)
         except Exception as error:
             self._handle_error(error)
