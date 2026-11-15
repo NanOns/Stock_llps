@@ -698,6 +698,32 @@ td.empty {
   min-width: 0;
   flex: 1;
 }
+.pulse-history {
+  margin-block: 1rem;
+  padding: 1rem;
+}
+.pulse-history h3 {
+  margin-block: 0 0.5rem;
+}
+.pulse-history-list {
+  display: grid;
+  gap: 0.75rem;
+  margin: 0.75rem 0;
+  padding-inline-start: 1.5rem;
+}
+.pulse-history-row {
+  border-block-start: 1px solid #e8eee9;
+  padding-block-start: 0.65rem;
+}
+.pulse-history-row p {
+  margin-block: 0.35rem;
+}
+.pulse-history-heading {
+  align-items: baseline;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
 .drawer .list-row {
   padding: 13px 5px;
 }

@@ -249,6 +249,20 @@
                 ><span id="d0BoardMode">FALSE→TRUE · 当前成员快照 NON_PIT</span>
               </div>
               <div class="filters d0-board-filters">
+                <button
+                  id="viewD0Boards"
+                  class="button primary"
+                  aria-pressed="true"
+                >
+                  D0 变化
+                </button>
+                <button
+                  id="viewPulseBoards"
+                  class="button subtle"
+                  aria-pressed="false"
+                >
+                  全部已存 PULSE
+                </button>
                 <label class="sr-only" for="d0BoardSearch">搜索板块</label>
                 <input id="d0BoardSearch" placeholder="搜索板块中文名" />
                 <button id="searchD0Boards" class="button subtle">搜索</button>
@@ -575,6 +589,14 @@
       </div>
       <div class="drawer-body">
         <div id="boardCoverage" class="coverage">—</div>
+        <section
+          id="pulseHistory"
+          class="card pulse-history"
+          aria-label="板块PULSE多会话演变"
+        >
+          <h3>板块 PULSE 多会话演变</h3>
+          <p>正在读取当前板块的既存会话事实。</p>
+        </section>
         <div class="drawer-tools" id="memberTools">
           <label class="sr-only" for="memberSearch">搜索成员代码</label
           ><input

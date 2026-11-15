@@ -32,6 +32,9 @@ const state = {
   d0Status: "NOT_LOADED",
   d0Error: null,
   d0BoardPage: 0,
+  d0BoardView: "D0",
+  d0PulseDirectory: null,
+  d0PulseRequest: 0,
   d0Board: null,
   d0BoardOffset: 0,
   d0BoardRequest: 0,
@@ -141,6 +144,173 @@ function marketBreadthReasonText(reasons) {
   return Object.entries(reasons || {})
     .map(([reason, count]) => `${labels[reason] || reason} ${count}`)
     .join(" · ");
+}
+function pulseHistoryStateText(value) {
+  return (
+    {
+      TRUE: "PULSE 成立（TRUE）",
+      FALSE: "PULSE 未成立（FALSE）",
+      UNKNOWN: "PULSE 未知（UNKNOWN）",
+      NOT_COMPUTED: "PULSE 未计算",
+      INCOMPLETE: "PULSE 输入不完整",
+    }[value] ||
+    value ||
+    "PULSE 未知（UNKNOWN）"
+  );
+}
+function pulseHistoryTransitionText(transition) {
+  if (!transition) return "相邻转移：此连续窗口的首日，没有窗口内前一会话。";
+  const labels = {
+    PULSE_APPEARED: "新出现",
+    PULSE_PERSISTED: "持续成立",
+    PULSE_CEASED: "本日不再成立",
+    PULSE_NOT_PRESENT_BOTH: "连续未成立",
+    PULSE_TRANSITION_UNKNOWN: "无法比较（含 UNKNOWN）",
+  };
+  const reasons = (transition.reason_codes || []).join("、");
+  if (transition.status === "AVAILABLE")
+    return `相邻转移 ${labels[transition.transition_state] || transition.transition_state}（${transition.previous_state}→${transition.target_state}）${reasons ? ` · ${reasons}` : ""}`;
+  return `相邻转移 ${transition.status || "NOT_COMPUTED"}${reasons ? ` · ${reasons}` : ""}`;
+}
+function pulseHistoryMarketText(market) {
+  if (!market) return "同日市场环境：UNKNOWN（没有可读取的同源事实）。";
+  const breadth = market.breadth || {};
+  const participation = market.participation || {};
+  const breadthText =
+    breadth.status === "AVAILABLE"
+      ? `宽度 ${breadth.eligible_count}/${breadth.source_count} 可比较 · 目标有价 ${breadth.target_present_count} · 缺价 ${breadth.target_missing_count} · 读取失败 ${breadth.read_failed_count} · 分类 ${Object.entries(
+          breadth.classification_counts || {},
+        )
+          .map(([name, count]) => `${name} ${count}`)
+          .join("、")}`
+      : `宽度 ${breadth.status || "NOT_COMPUTED"} · ${(breadth.reason_codes || []).join("、")}`;
+  const participationText =
+    participation.status === "AVAILABLE" ||
+    participation.status === "PARTIAL_WITH_UNKNOWN"
+      ? `成交参与 ${participation.classification || "UNKNOWN"}/${participation.status} · 可评价 ${participation.assessable_count}/${participation.source_pool_count} · UNKNOWN ${participation.profile_unknown_count} · 缺画像 ${participation.profile_missing_count} · 中位数 ${participation.median || "UNKNOWN"} · Profile ${participation.profile_revision || "UNKNOWN"}`
+      : `成交参与 ${participation.status || "NOT_COMPUTED"} · ${(participation.reason_codes || []).join("、")}`;
+  return `同日市场背景（精确来源捕获）：${breadthText}；${participationText}`;
+}
+function pulseHistoryIdentityText(session) {
+  const identity = session.identity;
+  const participationProfile =
+    session.market?.participation?.profile_revision || "UNKNOWN";
+  if (!identity)
+    return `来源包 / capture UNKNOWN · PULSE Profile UNKNOWN · 成交参与 Profile ${participationProfile}`;
+  const pulseProfile =
+    identity.profile_revision ||
+    session.pulse?.profile_revision ||
+    "NOT_COMPUTED";
+  return `来源包 ${identity.source_package_id} · capture ${identity.source_capture_id} · PULSE Profile ${pulseProfile} · 成交参与 Profile ${participationProfile}`;
+}
+function renderPulseHistory(result) {
+  const root = $("pulseHistory");
+  root.replaceChildren(node("h3", "板块 PULSE 多会话演变"));
+  root.append(
+    node(
+      "p",
+      "按官方相邻会话顺序读取最多七日的已存事实。当前成员快照回看为 NON_PIT；PULSE三态和价格描述不代表正式 Rotation 或未来预测。",
+      "muted",
+    ),
+  );
+  root.append(
+    node(
+      "p",
+      "正式 Rotation early / mature / diffusion 与阶段转移：NOT_EVALUATED。当前跨日 PULSE 事实没有历史冻结成员篮子、Seed / RPS20 分母及前一阶段状态证据，不能据 PULSE 出现或消失推导正式阶段。",
+      "inline-status",
+    ),
+  );
+  if (!result || !Array.isArray(result.sessions)) {
+    const reasons =
+      result?.reason_codes?.join("、") ||
+      result?.error ||
+      "PULSE_HISTORY_NOT_AVAILABLE";
+    root.append(
+      node(
+        "p",
+        `历史序列 ${result?.status || "NOT_COMPUTED"} · ${reasons}`,
+        "inline-status",
+      ),
+    );
+    return;
+  }
+  if (result.status !== "AVAILABLE")
+    root.append(
+      node(
+        "p",
+        `历史序列 ${result.status || "PARTIAL"} · ${(result.reason_codes || []).join("、")}`,
+        "inline-status",
+      ),
+    );
+  const items = node("ol", null, "pulse-history-list");
+  for (const session of result.sessions || []) {
+    const item = node("li", null, "pulse-history-row");
+    const pulse = session.pulse || {};
+    const heading = node("div", null, "pulse-history-heading");
+    heading.append(
+      node("strong", session.target_session),
+      node(
+        "span",
+        session.status === "AVAILABLE"
+          ? pulseHistoryStateText(pulse.state)
+          : `PULSE ${session.status || "NOT_COMPUTED"}`,
+      ),
+    );
+    item.append(heading);
+    if (session.status === "AVAILABLE") {
+      const pulseReasons = (pulse.reason_codes || []).join("、");
+      item.append(
+        node(
+          "p",
+          `dq5 ${pulse.dq5_pp?.decimal_4dp ?? "UNKNOWN"} 个百分点 · breadth Δ ${pulse.breadth_delta1?.decimal_4dp ?? "UNKNOWN"} · 成员 ${pulse.member_count ?? "UNKNOWN"}（已映射 ${pulse.mapped_count ?? "UNKNOWN"}/未映射 ${pulse.unmapped_count ?? "UNKNOWN"}）${pulseReasons ? ` · 原因 ${pulseReasons}` : ""}`,
+        ),
+        node("p", pulseHistoryTransitionText(session.transition)),
+        node("p", pulseHistoryMarketText(session.market)),
+      );
+      const outcomes = (session.followups || []).map((outcome) => {
+        const coverage = `固定 ${outcome.fixed_member_denominator ?? "UNKNOWN"} · 有效 ${outcome.observed_member_count ?? "UNKNOWN"} · UNKNOWN ${outcome.unknown_member_count ?? "UNKNOWN"}`;
+        if (outcome.status === "OBSERVED")
+          return `T+${outcome.horizon} ${outcome.target_session} 等权收盘 ${outcome.return_percent_4dp ?? "UNKNOWN"}%（精确 ${outcome.equal_weight_return ?? "UNKNOWN"}；${coverage}）`;
+        const target = outcome.target_session
+          ? ` ${outcome.target_session}`
+          : "";
+        const reasons = (outcome.reason_codes || []).join("、");
+        return `T+${outcome.horizon}${target} ${outcome.status || "UNKNOWN"}（${coverage}）${reasons ? ` · ${reasons}` : ""}`;
+      });
+      item.append(
+        node(
+          "p",
+          outcomes.length
+            ? `固定T0成员篮后继（RAW_UNADJUSTED）：${outcomes.join("；")}`
+            : "固定T0成员篮后继：NOT_COMPUTED。",
+        ),
+        node(
+          "small",
+          `${pulseHistoryIdentityText(session)} · ${session.pulse.membership_mode} · Rotation ${session.pulse.formal_rotation_state}`,
+          "muted",
+        ),
+      );
+    } else {
+      item.append(
+        node(
+          "p",
+          (session.reason_codes || []).join("、") || "精确PULSE事实不可用。",
+        ),
+        node("p", pulseHistoryTransitionText(session.transition)),
+        node("p", pulseHistoryMarketText(session.market)),
+        node("small", pulseHistoryIdentityText(session), "muted"),
+      );
+    }
+    items.append(item);
+  }
+  root.append(items);
+  root.append(
+    node(
+      "p",
+      "下方成员按同一当前快照与当前研究日展示；点击成员可继续查看个股与关注观察。",
+      "muted",
+    ),
+  );
 }
 function boardKindLabel(kind) {
   return kind === "INDUSTRY" ? "行业" : kind === "CONCEPT" ? "概念" : "板块";
@@ -801,7 +971,7 @@ function boardPulseFollowupSummary(board) {
   if (t1.status === "UNKNOWN")
     return `T+1 ${t1.target_session} UNKNOWN · ${members} · ${(t1.reason_codes || []).join("、")}`;
   if (t1.status === "NOT_DUE")
-    return `T+1 ${t1.target_session} 尚未到期 · 固定成员 ${t1.fixed_member_denominator ?? "UNKNOWN"}`;
+    return `T+1${t1.target_session ? ` ${t1.target_session}` : ""} 尚未到期 · 固定成员 ${t1.fixed_member_denominator ?? "UNKNOWN"}`;
   if (t1.status === "NOT_COMPUTED")
     return `T+1 ${t1.target_session} 尚未生产 · 固定成员 ${t1.fixed_member_denominator ?? "UNKNOWN"}`;
   return `T+1 ${t1.target_session} ${t1.status || "INCOMPLETE"} · ${(t1.reason_codes || []).join("、")}`;
@@ -1240,6 +1410,8 @@ function invalidateDate() {
     "选择两个板块后比较成员交集、独有集合、去重分母、D0新增、Seed与目标价质量。",
   );
   state.d0BoardPage = 0;
+  state.d0PulseDirectory = null;
+  ++state.d0PulseRequest;
   d1MaterialState.data = null;
   d1MaterialState.board = null;
   d1MaterialState.boardOffset =
@@ -1482,6 +1654,7 @@ async function selectDate(target_session) {
       controller.signal,
     );
     void loadD0Overview(selected);
+    if (state.d0BoardView === "PULSE") void loadD0PulseDirectoryPage();
   } catch (error) {
     if (token === state.contextRequest && error.name !== "AbortError") {
       message(
@@ -1558,6 +1731,85 @@ function provedD0Boards() {
   });
 }
 
+function setD0BoardView(view) {
+  state.d0BoardView = view === "PULSE" ? "PULSE" : "D0";
+  state.d0BoardPage = 0;
+  state.d0PulseDirectory = null;
+  $("viewD0Boards").setAttribute(
+    "aria-pressed",
+    String(state.d0BoardView === "D0"),
+  );
+  $("viewPulseBoards").setAttribute(
+    "aria-pressed",
+    String(state.d0BoardView === "PULSE"),
+  );
+  $("viewD0Boards").className =
+    state.d0BoardView === "D0" ? "button primary" : "button subtle";
+  $("viewPulseBoards").className =
+    state.d0BoardView === "PULSE" ? "button primary" : "button subtle";
+  $("d0BoardSearch").placeholder =
+    state.d0BoardView === "PULSE"
+      ? "搜索全部 PULSE 板块名称或编号"
+      : "搜索板块中文名";
+  if (state.d0BoardView === "PULSE") void loadD0PulseDirectoryPage();
+  else renderD0Boards();
+}
+
+async function loadD0PulseDirectoryPage() {
+  const context = state.selected;
+  if (!context?.contextReady) {
+    renderD0Boards();
+    return;
+  }
+  const token = ++state.d0PulseRequest;
+  state.d0PulseDirectory = { status: "LOADING" };
+  renderD0Boards();
+  try {
+    if (context.profileResolution) await context.profileResolution;
+    if (token !== state.d0PulseRequest || state.selected !== context) return;
+    if (
+      !context.profile_revision ||
+      !context.industry_snapshot_id ||
+      !context.concept_snapshot_id
+    ) {
+      state.d0PulseDirectory = {
+        status: "NOT_COMPUTED",
+        reason_codes: ["PULSE_DIRECTORY_PROFILE_OR_SNAPSHOT_NOT_BOUND"],
+      };
+      renderD0Boards();
+      return;
+    }
+    const query = new URLSearchParams({
+      target_session: context.target_session,
+      research_cutoff: context.research_cutoff,
+      source_package_id: String(context.source_package_id),
+      profile_revision: context.profile_revision,
+      industry_snapshot_id: String(context.industry_snapshot_id),
+      concept_snapshot_id: String(context.concept_snapshot_id),
+      board_kind: $("d0BoardKind").value,
+      search: $("d0BoardSearch").value.trim(),
+      offset: String(state.d0BoardPage * 15),
+      limit: "15",
+    });
+    const result = await api(`/api/product/sector-pulse-directory?${query}`);
+    if (
+      token !== state.d0PulseRequest ||
+      state.selected !== context ||
+      state.d0BoardView !== "PULSE"
+    )
+      return;
+    state.d0PulseDirectory = result;
+    renderD0Boards();
+  } catch (error) {
+    if (token !== state.d0PulseRequest || state.selected !== context) return;
+    state.d0PulseDirectory = {
+      status: "READ_FAILED",
+      error: error.message,
+    };
+    renderD0Boards();
+  }
+}
+
 function missingD0Kinds() {
   return state.d0Result?.membership_status?.missing_membership_kinds || [];
 }
@@ -1566,15 +1818,28 @@ function renderD0Boards() {
   const rows = $("d0BoardRows");
   rows.replaceChildren();
   const d0ScopeStatus = state.d0Result?.stored_evidence_status?.d0 || "UNKNOWN";
-  const pulseDirectory = state.d0Result?.pulse_followup_directory;
-  const pulseOnly =
-    d0ScopeStatus !== "AVAILABLE" && pulseDirectory?.status === "AVAILABLE";
+  const explicitPulseMode = state.d0BoardView === "PULSE";
+  const savedPulseDirectory = state.d0Result?.pulse_followup_directory;
+  const fallbackPulseMode =
+    !explicitPulseMode &&
+    d0ScopeStatus !== "AVAILABLE" &&
+    savedPulseDirectory?.status === "AVAILABLE";
+  const pulseDirectory = explicitPulseMode
+    ? state.d0PulseDirectory
+    : savedPulseDirectory;
+  const pulseOnly = explicitPulseMode || fallbackPulseMode;
+  $("viewD0Boards").setAttribute("aria-pressed", String(!pulseOnly));
+  $("viewPulseBoards").setAttribute("aria-pressed", String(pulseOnly));
+  $("viewD0Boards").className = pulseOnly ? "button subtle" : "button primary";
+  $("viewPulseBoards").className = pulseOnly
+    ? "button primary"
+    : "button subtle";
   $("d0BoardMode").textContent = pulseOnly
-    ? "T0 已存 PULSE 与后继结果 · NON_PIT 描述性回看"
+    ? "全部已存 T0 PULSE · 当前成员快照 NON_PIT"
     : "FALSE→TRUE · 当前成员快照 NON_PIT";
   $("d0BoardNameHeading").textContent = pulseOnly ? "板块" : "变化板块";
   $("d0BoardDescription").textContent = pulseOnly
-    ? "D0 未计算；下方显示当前成员快照的已存 T0 PULSE 与后继结果，均为 NON_PIT 回看。"
+    ? "按官方会话浏览全部已存行业与概念 PULSE；点击板块查看连续状态、市场背景、到期后继与成员。"
     : "先浏览同日已证 D0 新增变化；成员快照回看始终标为 NON_PIT。";
   $("d0BoardCountHeading").textContent = pulseOnly
     ? "T+1 后继结果"
@@ -1587,8 +1852,40 @@ function renderD0Boards() {
     row.append(cell);
     rows.append(row);
   };
-  const boards = pulseOnly ? pulseDirectory.boards || [] : provedD0Boards();
-  if (!state.d0Result || !Array.isArray(state.d0Result.boards)) {
+  if (
+    explicitPulseMode &&
+    (!pulseDirectory || pulseDirectory.status === "LOADING")
+  ) {
+    const status = "正在读取PG中全部已存 PULSE 板块目录…";
+    message("d0BoardSummary", status);
+    message("d0BoardPage", "—");
+    $("d0BoardPrev").disabled = $("d0BoardNext").disabled = true;
+    addEmptyRow(status);
+    return;
+  }
+  if (
+    explicitPulseMode &&
+    !["AVAILABLE", "PARTIAL"].includes(pulseDirectory?.status)
+  ) {
+    const status = `PULSE目录 ${pulseDirectory?.status || "NOT_COMPUTED"} · ${(pulseDirectory?.reason_codes || []).join("、") || pulseDirectory?.error || "NO_STORED_FACT"}`;
+    message(
+      "d0BoardSummary",
+      `${state.selected?.target_session || ""} · ${status}`,
+    );
+    message("d0BoardPage", "总数 UNKNOWN");
+    $("d0BoardPrev").disabled = $("d0BoardNext").disabled = true;
+    addEmptyRow(status);
+    return;
+  }
+  const boards = explicitPulseMode
+    ? pulseDirectory.boards || []
+    : pulseOnly
+      ? pulseDirectory?.boards || []
+      : provedD0Boards();
+  if (
+    !explicitPulseMode &&
+    (!state.d0Result || !Array.isArray(state.d0Result.boards))
+  ) {
     const status =
       state.d0Status === "LOADING"
         ? "正在读取已保存 D0 事实；来源宽度可先独立查看。"
@@ -1614,7 +1911,7 @@ function renderD0Boards() {
     return;
   }
 
-  const missing = missingD0Kinds();
+  const missing = pulseOnly ? [] : missingD0Kinds();
   if (boards.length === 0) {
     const status = pulseOnly
       ? "当前范围没有可读取的完整已存 PULSE 板块目录。"
@@ -1636,21 +1933,27 @@ function renderD0Boards() {
 
   const kind = $("d0BoardKind").value;
   const query = $("d0BoardSearch").value.trim().toLocaleLowerCase();
-  const filtered = boards.filter((board) => {
-    if (kind !== "ALL" && board.board_kind !== kind) return false;
-    const searchable = displayBoardName(board).toLocaleLowerCase();
-    return !query || searchable.includes(query);
-  });
-  const lastPage = Math.max(0, Math.ceil(filtered.length / 15) - 1);
+  const filtered = explicitPulseMode
+    ? boards
+    : boards.filter((board) => {
+        if (kind !== "ALL" && board.board_kind !== kind) return false;
+        const searchable =
+          `${displayBoardName(board)} ${board.board_native_id || ""}`.toLocaleLowerCase();
+        return !query || searchable.includes(query);
+      });
+  const filteredTotal = explicitPulseMode
+    ? Number(pulseDirectory.filtered_total || 0)
+    : filtered.length;
+  const lastPage = Math.max(0, Math.ceil(filteredTotal / 15) - 1);
   state.d0BoardPage = Math.min(state.d0BoardPage, lastPage);
   const start = state.d0BoardPage * 15;
-  const page = filtered.slice(start, start + 15);
-  const industryCount = boards.filter(
-    (item) => item.board_kind === "INDUSTRY",
-  ).length;
-  const conceptCount = boards.filter(
-    (item) => item.board_kind === "CONCEPT",
-  ).length;
+  const page = explicitPulseMode ? boards : filtered.slice(start, start + 15);
+  const industryCount = explicitPulseMode
+    ? (pulseDirectory.partitions?.INDUSTRY?.actual_board_count ?? "UNKNOWN")
+    : boards.filter((item) => item.board_kind === "INDUSTRY").length;
+  const conceptCount = explicitPulseMode
+    ? (pulseDirectory.partitions?.CONCEPT?.actual_board_count ?? "UNKNOWN")
+    : boards.filter((item) => item.board_kind === "CONCEPT").length;
   const missingText = missing.length
     ? ` · 成员关系 UNKNOWN：${missing.join("、")}`
     : "";
@@ -1660,14 +1963,14 @@ function renderD0Boards() {
       ? ` · ${state.d0Result.board_selection.precedence[0]}`
       : " · 按 D0 新增成员关系数降序";
   const membershipQuality = membershipPageScopeSummary(
-    state.d0Result.membership_status,
+    state.d0Result?.membership_status,
   );
   const summary = pulseOnly
-    ? `${state.selected?.target_session || ""} · D0 ${d0ScopeStatus}（总数未知）；已存 PULSE 板块 ${pulseDirectory.total_board_count ?? boards.length} · PULSE TRUE/FALSE/UNKNOWN ${pulseDirectory.pulse_state_counts?.TRUE ?? "UNKNOWN"}/${pulseDirectory.pulse_state_counts?.FALSE ?? "UNKNOWN"}/${pulseDirectory.pulse_state_counts?.UNKNOWN ?? "UNKNOWN"} · T+1 OBSERVED/UNKNOWN/NOT_DUE ${pulseDirectory.t1_status_counts?.OBSERVED ?? 0}/${pulseDirectory.t1_status_counts?.UNKNOWN ?? 0}/${pulseDirectory.t1_status_counts?.NOT_DUE ?? 0} · NON_PIT`
+    ? `${state.selected?.target_session || ""} · 已存 PULSE ${pulseDirectory.total_board_count ?? boards.length}（行业 ${industryCount} / 概念 ${conceptCount}） · PULSE TRUE/FALSE/UNKNOWN ${pulseDirectory.pulse_state_counts?.TRUE ?? "UNKNOWN"}/${pulseDirectory.pulse_state_counts?.FALSE ?? "UNKNOWN"}/${pulseDirectory.pulse_state_counts?.UNKNOWN ?? "UNKNOWN"} · T+1 OBSERVED/UNKNOWN/NOT_DUE ${pulseDirectory.t1_status_counts?.OBSERVED ?? 0}/${pulseDirectory.t1_status_counts?.UNKNOWN ?? 0}/${pulseDirectory.t1_status_counts?.NOT_DUE ?? 0} · NON_PIT`
     : `${state.selected?.target_session || ""} · 已证变化板块 ${boards.length}（行业 ${industryCount} / 概念 ${conceptCount}） · 首页精选 ${state.d0Result.board_selection?.home_featured_count ?? Math.min(boards.length, 15)} · 筛选 ${filtered.length}${orderText} · ${membershipQuality} · 成员关系可重叠 · NON_PIT${missingText}`;
   message(
     "d0BoardSummary",
-    pulseOnly ? `${summary} · 筛选 ${filtered.length}` : summary,
+    pulseOnly ? `${summary} · 筛选 ${filteredTotal}` : summary,
   );
   if (!filtered.length) {
     addEmptyRow(
@@ -1708,7 +2011,7 @@ function renderD0Boards() {
       const button = node(
         "button",
         pulseOnly
-          ? "查看 T+1 与成员 →"
+          ? "查看连续 PULSE 与成员 →"
           : board.home_featured
             ? "首页精选 · 查看成员 →"
             : "完整列表 · 查看成员 →",
@@ -1722,10 +2025,10 @@ function renderD0Boards() {
       row.setAttribute("data-d0-board-index", String(start + index));
     }
   }
-  const totalPages = Math.max(1, Math.ceil(filtered.length / 15));
+  const totalPages = Math.max(1, Math.ceil(filteredTotal / 15));
   message(
     "d0BoardPage",
-    `第 ${state.d0BoardPage + 1}/${totalPages} 页 · ${page.length}/${filtered.length} 个${pulseOnly ? "PULSE板块" : "板块"}`,
+    `第 ${state.d0BoardPage + 1}/${totalPages} 页 · ${page.length}/${filteredTotal} 个${pulseOnly ? "PULSE板块" : "板块"}`,
   );
   $("d0BoardPrev").disabled = state.d0BoardPage === 0;
   $("d0BoardNext").disabled = state.d0BoardPage >= lastPage;
@@ -2476,9 +2779,12 @@ $("focusAutoGroup").addEventListener("change", () => {
 
 function applyD0BoardFilters() {
   state.d0BoardPage = 0;
-  renderD0Boards();
+  if (state.d0BoardView === "PULSE") void loadD0PulseDirectoryPage();
+  else renderD0Boards();
 }
 
+$("viewD0Boards").addEventListener("click", () => setD0BoardView("D0"));
+$("viewPulseBoards").addEventListener("click", () => setD0BoardView("PULSE"));
 $("searchD0Boards").addEventListener("click", applyD0BoardFilters);
 $("d0BoardKind").addEventListener("change", applyD0BoardFilters);
 $("d0BoardSearch").addEventListener("keydown", (event) => {
@@ -2494,11 +2800,13 @@ $("clearD0BoardFilters").addEventListener("click", () => {
 });
 $("d0BoardPrev").addEventListener("click", () => {
   state.d0BoardPage = Math.max(0, state.d0BoardPage - 1);
-  renderD0Boards();
+  if (state.d0BoardView === "PULSE") void loadD0PulseDirectoryPage();
+  else renderD0Boards();
 });
 $("d0BoardNext").addEventListener("click", () => {
   state.d0BoardPage += 1;
-  renderD0Boards();
+  if (state.d0BoardView === "PULSE") void loadD0PulseDirectoryPage();
+  else renderD0Boards();
 });
 
 async function loadD0Overview(c) {
@@ -2716,7 +3024,7 @@ async function openD0Board(board, offset = 0) {
   message("boardTitle", displayBoardName(board));
   message(
     "boardMeta",
-    `${boardKindLabel(board.board_kind)} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${board.pulse_followup_only ? "已存PULSE与T+1后继" : "D0新增"}`,
+    `${boardKindLabel(board.board_kind)} · 成员快照观测 ${board.observed_at || "UNKNOWN"} · NON_PIT 回看 · ${board.pulse_followup_only ? "连续PULSE与到期T+1/T+3/T+5" : "D0新增"}`,
   );
   message(
     "boardCoverage",
@@ -2724,6 +3032,10 @@ async function openD0Board(board, offset = 0) {
       ? "D0 NOT_COMPUTED；读取当前快照成员与已存PULSE后继事实…"
       : "正在读取该板块 D0 新增成员…",
   );
+  renderPulseHistory({
+    status: "LOADING",
+    reason_codes: ["正在读取已存板块会话事实"],
+  });
   message("memberList", "正在读取…");
   $("memberPrev").disabled = $("memberNext").disabled = true;
   if (!$("boardDialog").open) $("boardDialog").showModal();
@@ -2800,8 +3112,78 @@ async function openD0Board(board, offset = 0) {
         item.board_native_id === board.board_native_id,
     );
     const pulse = pulseBoard?.cross_period_pulse ?? board.cross_period_pulse;
-    const pulseTransition = pulseBoard?.cross_period_pulse_transition;
-    const pulseFollowup = pulseBoard?.cross_period_pulse_followup;
+    let pulseTransition = pulseBoard?.cross_period_pulse_transition;
+    let pulseFollowup = pulseBoard?.cross_period_pulse_followup;
+    let pulseHistory = null;
+    try {
+      if (!pulse?.profile_revision && c.profileResolution)
+        await c.profileResolution;
+      const historyProfileRevision =
+        pulse?.profile_revision || c.profile_revision;
+      const historySnapshotId =
+        pulse?.snapshot_id ||
+        board.snapshot_id ||
+        (board.board_kind === "INDUSTRY"
+          ? c.industry_snapshot_id
+          : c.concept_snapshot_id);
+      if (
+        !historyProfileRevision ||
+        !Number.isInteger(Number(historySnapshotId)) ||
+        Number(historySnapshotId) <= 0 ||
+        !c.research_cutoff
+      ) {
+        pulseHistory = {
+          status: "NOT_COMPUTED",
+          reason_codes: ["PULSE_HISTORY_PROFILE_OR_SNAPSHOT_NOT_BOUND"],
+        };
+      } else {
+        const historyQuery = new URLSearchParams({
+          target_session: c.target_session,
+          research_cutoff: c.research_cutoff,
+          source_package_id: String(c.source_package_id),
+          profile_revision: historyProfileRevision,
+          snapshot_id: String(Number(historySnapshotId)),
+          board_kind: board.board_kind,
+          board_native_id: board.board_native_id,
+        });
+        pulseHistory = await api(
+          `/api/product/sector-pulse-history?${historyQuery}`,
+        );
+      }
+    } catch (error) {
+      pulseHistory = { status: "READ_FAILED", error: error.message };
+    }
+    if (
+      token !== state.d0BoardRequest ||
+      c !== state.selected ||
+      state.d0Board !== board ||
+      !$("boardDialog").open
+    )
+      return;
+    renderPulseHistory(pulseHistory);
+    const currentPulseHistory = pulseHistory?.sessions?.find(
+      (item) => item.target_session === c.target_session,
+    );
+    if (!pulseTransition && currentPulseHistory?.transition)
+      pulseTransition = currentPulseHistory.transition;
+    if (board.pulse_followup_only && currentPulseHistory) {
+      pulseFollowup = {
+        ...pulseFollowup,
+        horizons: (currentPulseHistory.followups || []).map((item) => ({
+          horizon_sessions: item.horizon,
+          target_session: item.target_session,
+          status: item.status,
+          fixed_member_denominator: item.fixed_member_denominator,
+          observed_member_count: item.observed_member_count,
+          unknown_member_count: item.unknown_member_count,
+          equal_weight_return: item.equal_weight_return,
+          equal_weight_return_percent_4dp: item.return_percent_4dp,
+          reason_codes: item.reason_codes || [],
+        })),
+        research_mode: pulse?.research_mode || "NON_PIT_RETROSPECTIVE",
+        price_coordinate: pulse?.price_coordinate || "RAW_UNADJUSTED",
+      };
+    }
     const pulseSummary =
       pulse?.status === "AVAILABLE"
         ? `跨日 PULSE ${pulse.state} · dq5 ${pulse.dq5_pp?.decimal_4dp ?? "UNKNOWN"} · breadth Δ ${pulse.breadth_delta1?.decimal_4dp ?? "UNKNOWN"}`
@@ -2816,6 +3198,7 @@ async function openD0Board(board, offset = 0) {
     const pulseTransitionReasons = [
       ...(pulseTransition?.previous_reason_codes ?? []),
       ...(pulseTransition?.target_reason_codes ?? []),
+      ...(pulseTransition?.reason_codes ?? []),
     ];
     const pulseTransitionSummary =
       pulseTransition?.status === "AVAILABLE"

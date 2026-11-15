@@ -161,6 +161,8 @@ _DIAGNOSTIC_ROUTES = frozenset(
         "/api/product/cohort",
         "/api/product/cohort-date-comparison",
         "/api/product/cohort-symbol-forward",
+        "/api/product/sector-pulse-history",
+        "/api/product/sector-pulse-directory",
         "/api/product/resolve-stock-code",
         "/api/product/market",
         "/api/product/d1-material",
@@ -3888,6 +3890,228 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         ),
                     },
                 )
+                return
+            if parsed.path == "/api/product/sector-pulse-history":
+                allowed = {
+                    "target_session",
+                    "research_cutoff",
+                    "source_package_id",
+                    "profile_revision",
+                    "snapshot_id",
+                    "board_kind",
+                    "board_native_id",
+                }
+                values = _query(self.path, allowed)
+                if set(values) != allowed:
+                    raise PreviewHttpError(
+                        400,
+                        "SECTOR_PULSE_HISTORY_QUERY_INVALID",
+                        "须提供目标会话、来源包、画像修订、快照与板块身份",
+                    )
+                target = _iso_date(values["target_session"])
+                cutoff = _iso_date(values["research_cutoff"])
+                configured_cutoff = self.preview_server.state.research_cutoff
+                if cutoff != configured_cutoff:
+                    raise PreviewHttpError(
+                        409,
+                        "SECTOR_PULSE_HISTORY_CUTOFF_MISMATCH",
+                        "历史PULSE研究截止必须与当前DEV配置一致",
+                    )
+                _require_research_cutoff(target, cutoff)
+                board_kind = values["board_kind"]
+                if board_kind not in {"INDUSTRY", "CONCEPT"}:
+                    raise PreviewHttpError(
+                        400,
+                        "SECTOR_PULSE_HISTORY_BOARD_KIND_INVALID",
+                        "板块类型必须为INDUSTRY或CONCEPT",
+                    )
+                board_native_id = values["board_native_id"]
+                if not board_native_id or len(board_native_id) > 64:
+                    raise PreviewHttpError(
+                        400,
+                        "SECTOR_PULSE_HISTORY_BOARD_ID_INVALID",
+                        "板块原生编号为空或超出长度范围",
+                    )
+                calendar = _official_calendar(target)
+                if target not in calendar["sessions"]:
+                    raise PreviewHttpError(
+                        409,
+                        "SECTOR_PULSE_HISTORY_TARGET_NOT_OFFICIAL",
+                        "目标会话不在当前官方交易日历中",
+                    )
+                calendar_sessions = tuple(calendar["sessions"])
+                target_index = calendar_sessions.index(target)
+                first_index = max(0, target_index - 6)
+                history_sessions = calendar_sessions[first_index : target_index + 1]
+                calendar_window = calendar_sessions[first_index : target_index + 6]
+                try:
+                    from stock_a.storage.postgres.sector_pulse_history import (
+                        read_source_sector_pulse_history,
+                    )
+
+                    result = read_source_sector_pulse_history(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        research_cutoff=cutoff,
+                        target_source_package_id=_package_id(
+                            values["source_package_id"]
+                        ),
+                        profile_revision=_profile_revision(values["profile_revision"]),
+                        snapshot_id=_positive_int(
+                            _nonnegative_int(
+                                values["snapshot_id"], "snapshot_id", 2**31 - 1
+                            ),
+                            "snapshot_id",
+                            2**31 - 1,
+                        ),
+                        board_kind=board_kind,
+                        board_native_id=board_native_id,
+                        calendar_id=calendar["calendar_id"],
+                        calendar_revision=calendar["calendar_revision"],
+                        calendar_sessions=calendar_window,
+                        history_sessions=history_sessions,
+                    )
+                except ValueError as error:
+                    raise PreviewHttpError(
+                        409,
+                        getattr(error, "code", "SECTOR_PULSE_HISTORY_UNAVAILABLE"),
+                        str(error),
+                    ) from error
+                self._send_json(200, {"ok": True, **result})
+                return
+            if parsed.path == "/api/product/sector-pulse-directory":
+                allowed = {
+                    "target_session",
+                    "research_cutoff",
+                    "source_package_id",
+                    "profile_revision",
+                    "industry_snapshot_id",
+                    "concept_snapshot_id",
+                    "board_kind",
+                    "search",
+                    "offset",
+                    "limit",
+                }
+                values = _query(self.path, allowed)
+                required = allowed - {"search", "offset", "limit"}
+                if not required.issubset(values):
+                    raise PreviewHttpError(
+                        400,
+                        "SECTOR_PULSE_DIRECTORY_QUERY_INVALID",
+                        "须提供日期、来源包、画像修订、双快照与板块类型",
+                    )
+                target = _iso_date(values["target_session"])
+                cutoff = _iso_date(values["research_cutoff"])
+                if cutoff != self.preview_server.state.research_cutoff:
+                    raise PreviewHttpError(
+                        409,
+                        "SECTOR_PULSE_DIRECTORY_CUTOFF_MISMATCH",
+                        "PULSE目录截止必须与当前DEV配置一致",
+                    )
+                _require_research_cutoff(target, cutoff)
+                board_kind = values["board_kind"]
+                if board_kind not in {"ALL", "INDUSTRY", "CONCEPT"}:
+                    raise PreviewHttpError(
+                        400,
+                        "SECTOR_PULSE_DIRECTORY_BOARD_KIND_INVALID",
+                        "板块类型须为ALL、INDUSTRY或CONCEPT",
+                    )
+                search = values.get("search", "").strip()
+                if len(search) > 80:
+                    raise PreviewHttpError(
+                        400,
+                        "SECTOR_PULSE_DIRECTORY_SEARCH_INVALID",
+                        "板块搜索最多80个字符",
+                    )
+                offset = _nonnegative_int(values.get("offset", "0"), "offset")
+                limit = _positive_int(
+                    _nonnegative_int(values.get("limit", "15"), "limit", 50),
+                    "limit",
+                    50,
+                )
+                calendar = _official_calendar(target)
+                if target not in calendar["sessions"]:
+                    raise PreviewHttpError(
+                        409,
+                        "SECTOR_PULSE_DIRECTORY_TARGET_NOT_OFFICIAL",
+                        "目标会话不在当前官方交易日历中",
+                    )
+                calendar_sessions = tuple(calendar["sessions"])
+                target_index = calendar_sessions.index(target)
+                horizon_targets = {
+                    horizon: (
+                        calendar_sessions[target_index + horizon]
+                        if target_index + horizon < len(calendar_sessions)
+                        else None
+                    )
+                    for horizon in (1, 3, 5)
+                }
+                try:
+                    source = read_source_version_context(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        source_package_id=_package_id(values["source_package_id"]),
+                    )
+                    if (
+                        source.get("status") != "AVAILABLE"
+                        or source.get("version_status") != "COMPLETE"
+                        or source.get("raw_row_count")
+                        != source.get("capture_expected_row_count")
+                    ):
+                        raise PreviewHttpError(
+                            409,
+                            "SECTOR_PULSE_DIRECTORY_SOURCE_NOT_CLOSED",
+                            "目标会话没有唯一且闭合的精确Raw来源",
+                        )
+                    from stock_a.storage.postgres.sector_pulse_directory import (
+                        read_source_sector_pulse_directory_page,
+                    )
+
+                    result = read_source_sector_pulse_directory_page(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        research_cutoff=cutoff,
+                        source_package_id=source["source_package_id"],
+                        source_capture_id=source["source_capture_id"],
+                        source_pool_count=source["raw_row_count"],
+                        profile_revision=_profile_revision(values["profile_revision"]),
+                        snapshot_ids={
+                            "INDUSTRY": _positive_int(
+                                _nonnegative_int(
+                                    values["industry_snapshot_id"],
+                                    "industry_snapshot_id",
+                                    2**31 - 1,
+                                ),
+                                "industry_snapshot_id",
+                                2**31 - 1,
+                            ),
+                            "CONCEPT": _positive_int(
+                                _nonnegative_int(
+                                    values["concept_snapshot_id"],
+                                    "concept_snapshot_id",
+                                    2**31 - 1,
+                                ),
+                                "concept_snapshot_id",
+                                2**31 - 1,
+                            ),
+                        },
+                        calendar_id=calendar["calendar_id"],
+                        calendar_revision=calendar["calendar_revision"],
+                        horizon_targets=horizon_targets,
+                        board_kind=board_kind,
+                        search=search,
+                        offset=offset,
+                        limit=limit,
+                    )
+                except PreviewHttpError:
+                    raise
+                except ValueError as error:
+                    raise PreviewHttpError(
+                        409,
+                        getattr(error, "code", "SECTOR_PULSE_DIRECTORY_UNAVAILABLE"),
+                        str(error),
+                    ) from error
+                self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/product/resolve-stock-code":
                 allowed = {"target_session", "source_package_id", "stock_code"}

@@ -561,13 +561,19 @@ def read_cohort_symbol_forward_paths(
                 for row in candidates
                 if row[1] == PATH_VERSION and row[2] == calendar_revision
             ]
-            if len(exact) != 1:
-                item["reason_codes"] = (
-                    ["FORWARD_PATH_KEY_AMBIGUOUS"]
-                    if exact
-                    else ["FORWARD_PATH_VERSION_OR_CALENDAR_MISMATCH"]
-                    if candidates
-                    else ["FORWARD_PATH_FACT_NOT_SAVED"]
+            if len(exact) > 1:
+                item.update(
+                    status="INCOMPLETE",
+                    reason_codes=["FORWARD_PATH_KEY_AMBIGUOUS"],
+                )
+            elif not exact:
+                item.update(
+                    status="NOT_COMPUTED",
+                    reason_codes=[
+                        "FORWARD_PATH_VERSION_OR_CALENDAR_MISMATCH"
+                        if candidates
+                        else "FORWARD_PATH_FACT_NOT_SAVED"
+                    ],
                 )
             else:
                 (
