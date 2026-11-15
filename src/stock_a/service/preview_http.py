@@ -2472,11 +2472,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "source_package_id",
             "source_capture_id",
         }
-        if not isinstance(body, dict) or set(body) != required:
+        history_fields = {"board_kind", "board_native_id"}
+        if not isinstance(body, dict) or frozenset(body) not in {
+            frozenset(required),
+            frozenset(required | history_fields),
+        }:
             raise PreviewHttpError(
                 400,
                 "T0_EARLY_DETAIL_FIELDS_INVALID",
-                "T0板内详情必须显式绑定来源代码、目标日、来源包和捕获ID",
+                "T0板内详情必须显式绑定来源代码、目标日、来源包和捕获ID；跨会话读取还须成对提供板类与板块ID",
             )
         symbol = _symbol(body["symbol"])
         target = _iso_date(body["target_session"])
@@ -2535,7 +2539,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         for context in contexts:
             key = str(context["enrollment_id"])
             by_enrollment.setdefault(key, []).append(context)
-        return {
+        response = {
             "ok": True,
             "symbol": symbol,
             "target_session": target.isoformat(),
@@ -2556,6 +2560,43 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "single_symbol_only": True,
             },
         }
+        if history_fields.issubset(body):
+            board_kind = body["board_kind"]
+            board_native_id = body["board_native_id"]
+            if (
+                not isinstance(board_kind, str)
+                or board_kind not in {"INDUSTRY", "CONCEPT"}
+                or not isinstance(board_native_id, str)
+                or not board_native_id
+                or len(board_native_id) > 64
+            ):
+                raise PreviewHttpError(
+                    400,
+                    "T0_EARLY_HISTORY_BOARD_INVALID",
+                    "板内跨会话读取的板类或板块ID无效",
+                )
+            from stock_a.application.source_board_relative_history import (
+                read_source_board_relative_history,
+            )
+
+            try:
+                response["relative_position_history"] = (
+                    read_source_board_relative_history(
+                        self.preview_server.state.config,
+                        target_session=target,
+                        research_cutoff=self.preview_server.state.research_cutoff,
+                        source_package_id=package,
+                        source_capture_id=capture,
+                        source_symbol=symbol,
+                        board_kind=board_kind,
+                        board_native_id=board_native_id,
+                    )
+                )
+            except ValueError as error:
+                raise PreviewHttpError(
+                    409, "T0_EARLY_HISTORY_NOT_COMPARABLE", str(error)
+                ) from error
+        return response
 
     def _source_launch_watch(self, body: Any) -> dict[str, Any]:
         """从PG按研究分型排序后读取有界D0或Focus页面。"""

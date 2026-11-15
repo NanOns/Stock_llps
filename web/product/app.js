@@ -782,6 +782,220 @@ function codeListText(codes) {
   if (!Array.isArray(codes) || !codes.length) return "无已证项目";
   return codes.map((code) => earlyCodeLabels[code] || code).join("；");
 }
+function t0HistoryValueText(value) {
+  if (Array.isArray(value)) return value.length ? value.join("、") : "未列出";
+  if (value && typeof value === "object") {
+    const entries = Object.entries(value);
+    return entries.length
+      ? entries
+          .map(([key, item]) => {
+            const state =
+              item && typeof item === "object"
+                ? (item.state ?? item.status ?? JSON.stringify(item))
+                : (item ?? "UNKNOWN");
+            const reasons =
+              item && typeof item === "object"
+                ? Array.isArray(item.reason_codes)
+                  ? item.reason_codes.join("、")
+                  : item.reason
+                : null;
+            return `${key} ${state}${reasons ? ` · ${reasons}` : ""}`;
+          })
+          .join("；")
+      : "未列出";
+  }
+  return value === undefined || value === null || value === ""
+    ? "未列出"
+    : String(value);
+}
+function t0HistoryMetricText(metric) {
+  if (!metric || typeof metric !== "object") return "UNKNOWN";
+  const firstValue = metric.rank_first;
+  const lastValue = metric.rank_last;
+  const first = Number(firstValue);
+  const last = Number(lastValue);
+  const hasFirst =
+    firstValue !== undefined && firstValue !== null && firstValue !== "";
+  const hasLast =
+    lastValue !== undefined && lastValue !== null && lastValue !== "";
+  const rank =
+    hasFirst && Number.isInteger(first)
+      ? hasLast && Number.isInteger(last) && last !== first
+        ? `${first}–${last}`
+        : String(first)
+      : "UNKNOWN";
+  const reason = metric.reason ? ` · 原因 ${metric.reason}` : "";
+  const value =
+    metric.numerator !== undefined &&
+    metric.numerator !== null &&
+    metric.denominator !== undefined &&
+    metric.denominator !== null
+      ? ` · RPS值 ${metric.numerator}/${metric.denominator}`
+      : "";
+  return `${metric.status || "UNKNOWN"} · 位次 ${rank} / 有效分母 ${metric.valid_member_count ?? "UNKNOWN"} · 未知 ${metric.unknown_member_count ?? "UNKNOWN"} · 来源池外 ${metric.out_of_source_pool_member_count ?? "UNKNOWN"} · 快照成员 ${metric.snapshot_member_count ?? "UNKNOWN"} · 位置 ${metric.position || "UNKNOWN"}${value}${reason}`;
+}
+function t0HistoryTransitionText(comparison, metric) {
+  const detail = comparison?.[metric] || {};
+  const stateLabels = {
+    IMPROVED: "前移",
+    WORSENED: "后移",
+    UNCHANGED: "未变",
+  };
+  const state = detail.state || "UNKNOWN";
+  return `${stateLabels[state] || state}${detail.reason ? `（${detail.reason}）` : ""}`;
+}
+function t0HistoryMarketText(context) {
+  if (!context || typeof context !== "object") return "UNKNOWN";
+  const statusLabels = {
+    AVAILABLE: "可用",
+    PARTIAL_WITH_UNKNOWN: "部分未知",
+    NOT_COMPUTED: "未计算",
+    AMBIGUOUS: "多版本",
+    UNKNOWN: "未知",
+  };
+  const participationLabels = {
+    NORMAL: "正常",
+    HIGH_PARTICIPATION_LOW_EFFICIENCY: "参与高、效率低",
+    HIGH_PARTICIPATION: "参与高",
+    LOW_PARTICIPATION: "参与低",
+    UNKNOWN: "未知",
+  };
+  const unitLabels = {
+    UNIT_UNVERIFIED: "金额单位未核验",
+    CNY: "金额单位 CNY",
+    CNY_VALIDATED: "金额单位已核验 CNY",
+  };
+  const status = context.breadth_status || "NOT_COMPUTED";
+  if (status !== "AVAILABLE")
+    return `市场宽度 ${statusLabels[status] || status}`;
+  const positive = context.breadth_positive_count ?? "UNKNOWN";
+  const nonpositive = context.breadth_nonpositive_count ?? "UNKNOWN";
+  const unknown = context.breadth_unknown_count ?? "UNKNOWN";
+  const participation = context.participation || {};
+  const participationStatus = context.participation_status || "NOT_COMPUTED";
+  const participationClassification = participation.classification || "UNKNOWN";
+  const amountUnit = participation.amount_unit_status || "UNKNOWN";
+  return `来源池正/非正/未知 ${positive}/${nonpositive}/${unknown} · 有价 ${context.breadth_target_present_count ?? "UNKNOWN"}/${context.breadth_source_count ?? "UNKNOWN"} · 成交参与 ${statusLabels[participationStatus] || participationStatus} / ${participationLabels[participationClassification] || participationClassification} · 可评价 ${participation.assessable_count ?? "UNKNOWN"}/${participation.source_pool_count ?? "UNKNOWN"} · ${unitLabels[amountUnit] || amountUnit}`;
+}
+function t0RelativePositionHistoryDetails(history) {
+  const root = node("div", null, "t0-relative-position-history-result");
+  const data = history && typeof history === "object" ? history : {};
+  const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  const comparisons = Array.isArray(data.comparisons) ? data.comparisons : [];
+  root.append(
+    node(
+      "p",
+      `跨会话相对位置 ${data.status || "NOT_COMPUTED"} · ${data.symbol || "UNKNOWN_SYMBOL"} · ${boardKindLabel(data.board_kind)} ${data.board_native_id || "UNKNOWN_BOARD"} · ${data.membership_mode || "UNKNOWN_MEMBERSHIP_MODE"} · ${data.research_mode || "UNKNOWN_RESEARCH_MODE"} · ${data.price_coordinate || "UNKNOWN_COORDINATE"}`,
+    ),
+    node(
+      "p",
+      "板内相对位置仅作描述性研究；历史成员为 NON_PIT，价格为 RAW_UNADJUSTED，不代表正式D2、Priority或交易建议。未保存T0/规则事实不解释为无信号。",
+    ),
+  );
+  const reasonCodes = Array.isArray(data.reason_codes) ? data.reason_codes : [];
+  if (reasonCodes.length)
+    root.append(node("p", `范围原因：${reasonCodes.join("、")}`));
+  else if (data.reason) root.append(node("p", `范围原因：${data.reason}`));
+
+  if (sessions.length) {
+    const table = node("table", undefined, "focus-s2-t1-table");
+    const head = node("thead");
+    const header = node("tr");
+    for (const label of [
+      "会话 / 捕获",
+      "RPS5位次与分母",
+      "RPS20位次与分母",
+      "PULSE / 相邻转移",
+      "市场背景",
+      "T0登记 / 案例",
+      "来源规则",
+    ])
+      header.append(node("th", label));
+    head.append(header);
+    const body = node("tbody");
+    for (const session of sessions) {
+      const row = node("tr");
+      row.append(
+        node(
+          "td",
+          `${session.target_session || "UNKNOWN_SESSION"} · capture ${session.source_capture_id ?? "UNKNOWN"}`,
+        ),
+        node("td", t0HistoryMetricText(session.rps5)),
+        node("td", t0HistoryMetricText(session.rps20)),
+        node(
+          "td",
+          `PULSE ${session.pulse_status || "UNKNOWN"} / ${session.pulse_state || "UNKNOWN"} · 转移 ${session.transition_status || "UNKNOWN"} / ${session.transition_state || "UNKNOWN"}`,
+        ),
+        node("td", t0HistoryMarketText(session.market_context)),
+        node(
+          "td",
+          session.t0_observation_status === "AVAILABLE"
+            ? `T0 ${session.t0_observation_status} · 案例 ${t0HistoryValueText(session.t0_cases)} · 相对关系 ${t0HistoryValueText(session.t0_alignment_states)}`
+            : `T0 ${session.t0_observation_status || "UNKNOWN"} · 未保存/未知（不推断无信号） · 案例 ${t0HistoryValueText(session.t0_cases)}`,
+        ),
+        node(
+          "td",
+          `规则 ${session.rule_status || "UNKNOWN"} · ${t0HistoryValueText(session.rule_states)}`,
+        ),
+      );
+      body.append(row);
+    }
+    table.append(head, body);
+    const tableScroll = node(
+      "div",
+      null,
+      "focus-s2-t1-table-scroll table-scroll",
+    );
+    tableScroll.append(table);
+    root.append(node("h5", "逐会话已存事实"), tableScroll);
+  } else {
+    root.append(
+      node(
+        "p",
+        `${data.status || "NOT_COMPUTED"} · 当前板块没有可显示的已存跨会话位次事实；这不表示无信号。`,
+      ),
+    );
+  }
+
+  if (comparisons.length) {
+    const table = node("table", undefined, "focus-s2-t1-table");
+    const head = node("thead");
+    const header = node("tr");
+    for (const label of ["比较会话", "同来源池可比", "RPS5变化", "RPS20变化"])
+      header.append(node("th", label));
+    head.append(header);
+    const body = node("tbody");
+    for (const comparison of comparisons) {
+      const comparable = comparison.source_pool_comparable;
+      const comparableText =
+        comparable === true
+          ? "是"
+          : comparable === false
+            ? "否"
+            : (comparable ?? "UNKNOWN");
+      const row = node("tr");
+      row.append(
+        node(
+          "td",
+          `${comparison.from_session || "UNKNOWN"} → ${comparison.to_session || "UNKNOWN"}`,
+        ),
+        node("td", String(comparableText)),
+        node("td", t0HistoryTransitionText(comparison, "rps5")),
+        node("td", t0HistoryTransitionText(comparison, "rps20")),
+      );
+      body.append(row);
+    }
+    table.append(head, body);
+    const tableScroll = node(
+      "div",
+      null,
+      "focus-s2-t1-table-scroll table-scroll",
+    );
+    tableScroll.append(table);
+    root.append(node("h5", "同成员池跨日比较"), tableScroll);
+  }
+  return root;
+}
 function t0EarlyObservationDetails(
   registrations,
   triageSummary = null,
@@ -957,6 +1171,55 @@ function t0EarlyObservationDetails(
           `下一步：${context.next_check_code || "WAIT_FOR_NEXT_STORED_SESSION"} · NON_PIT_EXPLORATORY · RAW_UNADJUSTED；后继未到期时仍为 NOT_DUE。`,
         ),
       );
+      if (context.board_kind && context.board_native_id) {
+        const historyPanel = node("div", null, "t0-relative-position-history");
+        const historyButton = node(
+          "button",
+          "读取本板跨会话位次",
+          "button subtle",
+        );
+        historyButton.type = "button";
+        const identityReady =
+          sourceSymbol &&
+          requestIdentity.target_session &&
+          requestIdentity.source_package_id &&
+          requestIdentity.source_capture_id;
+        historyButton.disabled = !identityReady;
+        historyButton.addEventListener("click", async () => {
+          if (!identityReady) return;
+          historyButton.disabled = true;
+          historyButton.textContent = "正在读取同一股票与板块…";
+          try {
+            const result = await api("/api/preview/t0-early-observations", {
+              symbol: sourceSymbol,
+              target_session: requestIdentity.target_session,
+              source_package_id: requestIdentity.source_package_id,
+              source_capture_id: requestIdentity.source_capture_id,
+              board_kind: context.board_kind,
+              board_native_id: context.board_native_id,
+            });
+            historyPanel
+              .querySelector(".t0-relative-position-history-result")
+              ?.remove();
+            historyPanel.append(
+              t0RelativePositionHistoryDetails(
+                result.relative_position_history,
+              ),
+            );
+            historyButton.disabled = false;
+            historyButton.textContent = "重新读取本板跨会话位次";
+          } catch (error) {
+            historyButton.disabled = false;
+            historyButton.textContent = `读取失败：${error.message}；重试跨会话位次`;
+          }
+        });
+        historyPanel.append(historyButton);
+        if (!identityReady)
+          historyPanel.append(
+            node("p", "缺少精确目标日、来源包或捕获身份，不能读取跨会话事实。"),
+          );
+        panel.append(historyPanel);
+      }
     }
   }
   return panel;

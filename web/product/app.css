@@ -442,10 +442,14 @@ button:disabled {
   font-size: 11px;
 }
 .row-value {
+  flex: 0 1 280px;
+  min-width: 0;
+  max-width: 38%;
   text-align: right;
   color: #365c49;
   font-size: 12px;
   font-weight: 700;
+  overflow-wrap: anywhere;
 }
 .row-value small {
   display: block;
