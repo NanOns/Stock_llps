@@ -2096,6 +2096,14 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         for rank, row in enumerate(page_rows, start=offset + 1):
             symbol = row["source_symbol"]
             item_evidence = evidence_by_symbol.get(symbol, {})
+            if evidence.get("rule_scope") is not None:
+                item_evidence = {
+                    **item_evidence,
+                    "rules": {
+                        **item_evidence.get("rules", {}),
+                        "scope": evidence["rule_scope"],
+                    },
+                }
             d0_change = {
                 "transition": row.get("transition"),
                 "before_state": row.get("before_state"),

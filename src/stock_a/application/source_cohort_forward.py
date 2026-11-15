@@ -158,43 +158,146 @@ def _summary(symbols, outcomes, weights):
 def _frozen_line_followup(item, facts):
     candidate = item.get("failure_line_candidate", {})
     value = candidate.get("value")
-    line = (
-        Fraction(int(value["numerator"]), int(value["denominator"])) if value else None
+    state = item.get("state") or item.get("scenario_raw") or item.get("rule_state")
+    if state == "FALSE":
+        return {
+            "status": "NOT_APPLICABLE",
+            "reason_code": "RULE_STATE_FALSE_NO_T0_SIGNAL",
+            "role": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
+        }
+    if state == "UNKNOWN":
+        return {
+            "status": "UNKNOWN",
+            "reason_code": "RULE_STATE_UNKNOWN_NO_PROVEN_T0_SIGNAL",
+            "role": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
+        }
+    try:
+        line = (
+            Fraction(int(value["numerator"]), int(value["denominator"]))
+            if value
+            else None
+        )
+    except (KeyError, TypeError, ValueError, ZeroDivisionError):
+        line = None
+    source = candidate.get("source")
+    coordinate = candidate.get("price_coordinate") or item.get(
+        "price_coordinate", "RAW_UNADJUSTED"
     )
+    scope = candidate.get("scope") or item.get("scope", "NON_PIT_EXPLORATORY")
+    if line is None or line <= 0 or not isinstance(source, str) or not source:
+        return {
+            "status": "NOT_COMPUTED",
+            "reason_code": "T0_CANDIDATE_LINE_NOT_SAVED_OR_INVALID",
+            "role": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
+        }
+    if coordinate != "RAW_UNADJUSTED" or scope != "NON_PIT_EXPLORATORY":
+        return {
+            "status": "UNKNOWN",
+            "reason_code": "T0_CANDIDATE_LINE_COORDINATE_OR_SCOPE_MISMATCH",
+            "role": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
+        }
     first = upper = None
-    unknown_before = line is None
+    unknown_before = False
     recovery = recovery_upper = None
-    recovery_unknown = line is None
+    recovery_unknown = False
     touched = False
     observations = []
     for point in facts["points"]:
         close = point["ohlc"]["close"]
-        if line is None or close["quality"] != "OBSERVED":
+        session = point.get("session")
+        if session is None and close.get("quality") == "NOT_AVAILABLE":
+            observations.append(
+                {
+                    "offset": point.get("offset"),
+                    "session": None,
+                    "state": "NOT_DUE",
+                    "close": {"value": None, "quality": "NOT_AVAILABLE"},
+                    "reason": close.get("reason")
+                    or "NO_FUTURE_SESSION_IN_SAVED_WINDOW",
+                }
+            )
+            continue
+        if close.get("quality") != "OBSERVED":
             state = "UNKNOWN"
             if upper is None:
                 unknown_before = True
             if recovery_upper is None:
                 recovery_unknown = True
+            close_result = {
+                "value": None,
+                "quality": close.get("quality") or "UNKNOWN",
+                "reason": close.get("reason") or "RAW_CLOSE_UNKNOWN",
+            }
         else:
             amount = close["value"]
-            close_value = Fraction(
-                amount["exact"] if isinstance(amount, dict) else amount
-            )
-            state = "TRUE" if close_value <= line else "FALSE"
-            if state == "TRUE" and upper is None:
-                upper = point["session"]
+            try:
+                close_value = Fraction(
+                    amount["exact"] if isinstance(amount, dict) else amount
+                )
+            except (TypeError, ValueError, ZeroDivisionError):
+                close_value = None
+            if close_value is None or close_value <= 0:
+                state = "UNKNOWN"
+                if upper is None:
+                    unknown_before = True
+                if recovery_upper is None:
+                    recovery_unknown = True
+                close_result = {
+                    "value": None,
+                    "quality": "BAD_VALUE",
+                    "reason": "RAW_CLOSE_VALUE_INVALID",
+                }
+            else:
+                close_result = {
+                    "value": str(close_value),
+                    "numerator": str(close_value.numerator),
+                    "denominator": str(close_value.denominator),
+                    "quality": "OBSERVED",
+                    "reason": None,
+                }
+                state = (
+                    "TOUCHED"
+                    if close_value <= line
+                    else "RETURNED_ABOVE"
+                    if touched
+                    else "ABOVE"
+                )
+            if state == "TOUCHED" and upper is None:
+                upper = session
                 if not unknown_before:
                     first = upper
-            if state == "TRUE":
+            if state == "TOUCHED":
                 touched = True
-            elif touched and recovery_upper is None:
-                recovery_upper = point["session"]
+            elif (
+                state in {"ABOVE", "RETURNED_ABOVE"}
+                and touched
+                and recovery_upper is None
+            ):
+                recovery_upper = session
                 if not recovery_unknown:
                     recovery = recovery_upper
-        observations.append({"session": point["session"], "state": state})
+        observations.append(
+            {
+                "offset": point.get("offset"),
+                "session": session,
+                "state": state,
+                "close": close_result,
+                "reason": close_result.get("reason"),
+            }
+        )
+    not_due = facts.get("due") is False
     return {
-        "role": "FROZEN_T0_CANDIDATE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
-        "line": candidate,
+        "status": "AVAILABLE",
+        "role": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
+        "line": {
+            "value": {
+                "numerator": str(line.numerator),
+                "denominator": str(line.denominator),
+            },
+            "source": source,
+            "price_coordinate": coordinate,
+            "scope": scope,
+        },
         "observations": observations,
         "first_proved_touch": first,
         "first_proved_touch_upper_bound": upper,
@@ -202,6 +305,8 @@ def _frozen_line_followup(item, facts):
         if first
         else "UNKNOWN"
         if unknown_before
+        else "NOT_DUE"
+        if not_due
         else "NOT_OBSERVED",
         "first_proved_return_above": recovery,
         "first_proved_return_above_upper_bound": recovery_upper,
@@ -209,8 +314,14 @@ def _frozen_line_followup(item, facts):
         if recovery
         else "UNKNOWN"
         if recovery_unknown
+        else "NOT_DUE"
+        if not_due
         else "NOT_OBSERVED",
         "return_above_scope": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_REENTRY",
+        "maturity": facts.get("maturity"),
+        "due": facts.get("due"),
+        "path_quality": facts.get("path_quality", "UNKNOWN"),
+        "path_reasons": list(facts.get("path_reasons", [])),
     }
 
 
@@ -223,30 +334,50 @@ def _anchor_window_fact(anchors, unknowns):
     return {"state": state, "reasons": reasons}
 
 
-def _anchor_lower_followups(anchors, facts):
+def _anchor_lower_followups(anchors, facts, *, target_session):
     """保留每个已绑定锚的冻结平台，后继触及只作来源诊断。"""
     followups = []
+    target_text = (
+        target_session.isoformat()
+        if hasattr(target_session, "isoformat")
+        else str(target_session)
+    )
     for anchor in anchors:
         lower = (anchor.get("platform_generation") or {}).get("lower")
         exact = lower.get("exact") if isinstance(lower, dict) else lower
         value = Fraction(exact) if exact is not None else None
+        if anchor.get("support_anchor_session") != target_text:
+            lower_followup = {
+                "status": "NOT_COMPUTED",
+                "reason_code": "ANCHOR_T0_DIFFERS_FROM_CURRENT_T0",
+                "role": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
+            }
+        elif anchor.get("support_followup_status") != "GENERATED_AND_OBSERVED":
+            lower_followup = {
+                "status": "NOT_COMPUTED",
+                "reason_code": "D1_PLATFORM_NOT_GENERATED_AND_OBSERVED",
+                "role": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
+            }
+        else:
+            lower_followup = _frozen_line_followup(
+                {
+                    "state": "TRUE",
+                    "failure_line_candidate": {
+                        "value": {
+                            "numerator": value.numerator,
+                            "denominator": value.denominator,
+                        }
+                        if value is not None
+                        else None,
+                        "source": "D1_PLATFORM_LOWER",
+                    },
+                },
+                facts,
+            )
         followups.append(
             {
                 "anchor_session": anchor["support_anchor_session"],
-                "lower_touch_followup": _frozen_line_followup(
-                    {
-                        "failure_line_candidate": {
-                            "value": {
-                                "numerator": value.numerator,
-                                "denominator": value.denominator,
-                            }
-                            if value is not None
-                            else None,
-                            "source": "D1_PLATFORM_LOWER",
-                        }
-                    },
-                    facts,
-                ),
+                "lower_touch_followup": lower_followup,
             }
         )
     return followups
@@ -505,7 +636,9 @@ def read_source_cohort_forward(
     page = []
     for code in selected[offset : offset + limit]:
         anchor_followups = _anchor_lower_followups(
-            frozen[code]["anchors"], outcomes[code][max(horizons)]
+            frozen[code]["anchors"],
+            outcomes[code][max(horizons)],
+            target_session=target,
         )
         followups = {
             rule: _frozen_line_followup(
@@ -517,6 +650,24 @@ def read_source_cohort_forward(
         frozen_shapes = []
         if shape is not None and code == symbol:
             for parent in shape["diagnostic_parent_candidates"]:
+                parent_line_followup = (
+                    _frozen_line_followup(
+                        {
+                            "failure_line_candidate": parent.get(
+                                "diagnostic_failure_line", {}
+                            ),
+                            "price_coordinate": "RAW_UNADJUSTED",
+                            "scope": "NON_PIT_EXPLORATORY",
+                        },
+                        outcomes[code][max(horizons)],
+                    )
+                    if parent.get("birth_session") == target.isoformat()
+                    else {
+                        "status": "NOT_COMPUTED",
+                        "reason_code": "PARENT_T0_DIFFERS_FROM_CURRENT_T0",
+                        "role": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
+                    }
+                )
                 frozen_shapes.append(
                     {
                         "birth_session": parent["birth_session"],
@@ -526,14 +677,7 @@ def read_source_cohort_forward(
                         "t0_source_shape_state": parent.get(
                             "source_shape_state", "UNKNOWN"
                         ),
-                        "frozen_line_followup": _frozen_line_followup(
-                            {
-                                "failure_line_candidate": parent.get(
-                                    "diagnostic_failure_line", {}
-                                )
-                            },
-                            outcomes[code][max(horizons)],
-                        ),
+                        "frozen_line_followup": parent_line_followup,
                     }
                 )
         page.append(

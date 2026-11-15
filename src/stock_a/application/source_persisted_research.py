@@ -143,7 +143,7 @@ def read_persisted_cohort(
             raise ResearchSymbolNotFound("所选代码不在冻结来源池中")
         line = (
             {"numerator": str(selected[18]), "denominator": str(selected[19])}
-            if selected[18] is not None
+            if selected[18] is not None and selected[19] is not None
             else None
         )
         days = tuple(
@@ -157,6 +157,7 @@ def read_persisted_cohort(
             sessions=days,
             research_cutoff=research_cutoff,
             source_package_id=source_package_id,
+            include_parser_contract=True,
         )
         source_rows = raw["rows_by_symbol"][symbol]
         birth = next(
@@ -172,7 +173,16 @@ def read_persisted_cohort(
             saved_through=raw["saved_through"],
         )
         followup = _frozen_line_followup(
-            {"failure_line_candidate": {"value": line, "source": selected[20]}}, path
+            {
+                "state": selected[1],
+                "failure_line_candidate": {
+                    "value": line,
+                    "source": selected[20],
+                    "price_coordinate": "RAW_UNADJUSTED",
+                    "scope": "NON_PIT_EXPLORATORY",
+                },
+            },
+            path,
         )
         followup.update(
             {
@@ -225,6 +235,31 @@ def read_persisted_cohort(
                 if event[3] is not None
                 else None
             )
+            if event[0].isoformat() != target.isoformat():
+                lower_touch_followup = {
+                    "status": "NOT_COMPUTED",
+                    "reason_code": "ANCHOR_T0_DIFFERS_FROM_CURRENT_T0",
+                    "role": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
+                }
+            elif event[2] != "GENERATED_AND_OBSERVED":
+                lower_touch_followup = {
+                    "status": "NOT_COMPUTED",
+                    "reason_code": "D1_PLATFORM_NOT_GENERATED_AND_OBSERVED",
+                    "role": "SOURCE_PRICE_DIAGNOSTIC_NOT_FORMAL_INVALIDATION",
+                }
+            else:
+                lower_touch_followup = _frozen_line_followup(
+                    {
+                        "state": "TRUE",
+                        "failure_line_candidate": {
+                            "value": lower,
+                            "source": "D1_PLATFORM_LOWER",
+                            "price_coordinate": "RAW_UNADJUSTED",
+                            "scope": "NON_PIT_EXPLORATORY",
+                        },
+                    },
+                    path,
+                )
             anchor_events.append(
                 {
                     "anchor_session": event[0].isoformat(),
@@ -241,15 +276,7 @@ def read_persisted_cohort(
                     "target_quality": event[11],
                     "change_classification": event[12],
                     "reason": event[13],
-                    "lower_touch_followup": _frozen_line_followup(
-                        {
-                            "failure_line_candidate": {
-                                "value": lower,
-                                "source": "D1_PLATFORM_LOWER",
-                            }
-                        },
-                        path,
-                    ),
+                    "lower_touch_followup": lower_touch_followup,
                 }
             )
         if include_risk:

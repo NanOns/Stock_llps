@@ -2661,6 +2661,96 @@ function formalD0AdmissionHeadline(admission) {
   return `正式D0 LAUNCH ${launch.raw_state || "NOT_COMPUTED"}→${launch.formal_state || "NOT_COMPUTED"}/${launch.admission_status || "NOT_COMPUTED"}；RECOVERY ${recovery.raw_state || "NOT_COMPUTED"}→${recovery.formal_state || "NOT_COMPUTED"}/${recovery.admission_status || "NOT_COMPUTED"}${blockers ? ` · ${blockers}` : ""}；Episode / D2 / Risk / Priority NOT_COMPUTED`;
 }
 
+function sourceCandidateCohortKey(rule, ruleScope, sourceCaptureId) {
+  if (!ruleScope || !$("cohortKey")) return null;
+  const matches = Array.from($("cohortKey").options).filter((option) => {
+    try {
+      const key = JSON.parse(option.value);
+      return (
+        key.rule === rule &&
+        key.capture_count === 1 &&
+        Number(key.source_capture_id) === Number(sourceCaptureId) &&
+        key.profile_revision === ruleScope.profile_revision &&
+        Number(key.history) === Number(ruleScope.history_session_count) &&
+        Number(key.d1_history) === Number(ruleScope.d1_history_session_count) &&
+        key.window === ruleScope.event_window_start &&
+        key.rule_version === ruleScope.rule_version &&
+        key.calendar_revision === ruleScope.calendar_revision
+      );
+    } catch {
+      return false;
+    }
+  });
+  return matches.length === 1 ? matches[0].value : null;
+}
+
+function sourceCandidateFollowupControls(
+  facts,
+  ruleScope,
+  symbol,
+  sourceCaptureId,
+) {
+  const candidates = Object.entries(facts || {}).filter(
+    ([, fact]) => fact?.state === "TRUE" && fact?.failure_line_candidate?.value,
+  );
+  if (!candidates.length) return null;
+  const controls = node("div", null, "source-followup-controls");
+  controls.append(
+    node(
+      "p",
+      "来源候选线是价格路径诊断，不表示正式D2失效、Focus退出或交易建议。",
+    ),
+  );
+  for (const [rule] of candidates) {
+    const button = node(
+      "button",
+      `查看 ${rule} 后续触线与 T+1/T+3/T+5`,
+      "text-button",
+    );
+    button.type = "button";
+    button.addEventListener("click", async () => {
+      const currentContext = state.selected;
+      const sourceCode = String(symbol || "").toUpperCase();
+      try {
+        const resolved = await resolveStockCodeInput(
+          sourceCode.split(".").pop(),
+          currentContext,
+        );
+        if (resolved.source_symbol !== sourceCode) {
+          message(
+            "focusStatus",
+            `UNKNOWN：六位代码解析到 ${resolved.source_symbol}，与候选线来源 ${sourceCode} 不一致。`,
+          );
+          return;
+        }
+      } catch (error) {
+        message(
+          "focusStatus",
+          `UNKNOWN：无法唯一核对来源代码，${error.message}`,
+        );
+        return;
+      }
+      const rawKey = sourceCandidateCohortKey(rule, ruleScope, sourceCaptureId);
+      if (!rawKey) {
+        message(
+          "focusStatus",
+          `NOT_COMPUTED：${rule} 没有唯一匹配的已存T0冻结键，未读取其它版本。`,
+        );
+        return;
+      }
+      $("cohortKey").value = rawKey;
+      $("cohortHorizon").value = "5";
+      $("cohortSymbol").value = String(symbol || "")
+        .split(".")
+        .pop();
+      cohortOffset = 0;
+      void readCohort();
+    });
+    controls.append(button);
+  }
+  return controls;
+}
+
 function focusEvidenceDetails(item, context) {
   const details = node("details", null, "focus-evidence");
   details.append(node("summary", "查看规则条件、板块关系与板内比较"));
@@ -2747,6 +2837,13 @@ function focusEvidenceDetails(item, context) {
       `来源登记后续 ${t0.followup_status || "NOT_COMPUTED"} / ${t0.followup_reason || "NO_STORED_LANDMARK"}；${formalD0AdmissionSummaryText(formalD0Admission)}`,
     ),
   );
+  const candidateFollowupControls = sourceCandidateFollowupControls(
+    facts,
+    rules.scope || evidence.rule_scope,
+    item.source_symbol || item.symbol,
+    version.source_capture_id || t0.source_capture_id,
+  );
+  if (candidateFollowupControls) details.append(candidateFollowupControls);
   const memberships = item.also_in_sectors || [];
   const boardLinks = node("div", null, "focus-board-links");
   if (memberships.length) {
@@ -4702,10 +4799,46 @@ function renderCohortDateComparison(result) {
     root.append(details);
   }
 }
-function renderCohortSymbolForward(result) {
+function renderCohortSymbolForward(result, lineFollowup) {
   const root = $("cohortSymbolForward");
   root.replaceChildren();
   root.append(node("h3", "所选代码同一 T0 的 T+1 / T+3 / T+5"));
+  if (lineFollowup) {
+    const line = lineFollowup.line || {};
+    const fraction = line.value
+      ? `${line.value.numerator}/${line.value.denominator}`
+      : "无合法候选线";
+    const touchSummary =
+      lineFollowup.status === "AVAILABLE"
+        ? `来源候选线 ${fraction} · ${line.source || "UNKNOWN_SOURCE"} · ${lineFollowup.first_touch_status || "UNKNOWN"}${lineFollowup.first_proved_touch ? ` ${lineFollowup.first_proved_touch}` : lineFollowup.first_proved_touch_upper_bound ? ` 上界 ${lineFollowup.first_proved_touch_upper_bound}` : ""} · 重新站回 ${lineFollowup.first_return_above_status || "UNKNOWN"}${lineFollowup.first_proved_return_above ? ` ${lineFollowup.first_proved_return_above}` : lineFollowup.first_proved_return_above_upper_bound ? ` 上界 ${lineFollowup.first_proved_return_above_upper_bound}` : ""} · ${lineFollowup.maturity || "UNKNOWN"} · ${lineFollowup.path_quality || "UNKNOWN"}`
+        : `${lineFollowup.status || "UNKNOWN"} · ${lineFollowup.reason_code || "无候选线或未满足TRUE风险集"}`;
+    root.append(
+      node(
+        "p",
+        `来源级候选线后续：${touchSummary}。TOUCHED/RETURNED_ABOVE不是正式D2 INVALIDATED/REENTRY，也不表示Focus退出或买卖建议。`,
+      ),
+    );
+    if (
+      Array.isArray(lineFollowup.observations) &&
+      lineFollowup.observations.length
+    ) {
+      const touchRows = node("ul");
+      for (const observation of lineFollowup.observations) {
+        const close = observation.close || {};
+        const closeText =
+          close.quality === "OBSERVED"
+            ? `${close.numerator}/${close.denominator}`
+            : `${close.quality || "UNKNOWN"}${close.reason ? ` · ${close.reason}` : ""}`;
+        touchRows.append(
+          node(
+            "li",
+            `T+${observation.offset ?? "?"} ${observation.session || ""} · ${observation.state || "UNKNOWN"} · RAW_UNADJUSTED close ${closeText}`,
+          ),
+        );
+      }
+      root.append(touchRows);
+    }
+  }
   if (result?.status !== "AVAILABLE") {
     root.append(
       node(
@@ -5041,7 +5174,7 @@ async function readCohort() {
           `/api/product/cohort-symbol-forward?${new URLSearchParams(forwardQuery)}`,
         );
         if (token !== cohortRequest || activePage !== "focus") return;
-        renderCohortSymbolForward(forward);
+        renderCohortSymbolForward(forward, d.frozen_candidate_followup);
       } catch (error) {
         if (token === cohortRequest && activePage === "focus")
           $("cohortSymbolForward").replaceChildren(
@@ -5063,6 +5196,12 @@ async function readCohort() {
       "focusStatus",
       `${d.storage_status} · ${d.scope} · ${d.target_session} → ${d.endpoint_session || "未知"} · ${d.due ? "已到期" : "未到期"}`,
     );
+    const candidateFollowup = d.frozen_candidate_followup;
+    const candidateFollowupSummary = !candidateFollowup
+      ? "未选择来源代码；T+1/T+3/T+5按已存路径读取。"
+      : candidateFollowup.status === "AVAILABLE"
+        ? `${displayStockTitle(candidateFollowup)} · 候选线 ${candidateFollowup.line?.value?.numerator || "?"}/${candidateFollowup.line?.value?.denominator || "?"} · ${candidateFollowup.path_quality || "UNKNOWN"} · 首次触及 ${candidateFollowup.first_touch_status || "UNKNOWN"} · 重新站回 ${candidateFollowup.first_return_above_status || "UNKNOWN"}；后继路径见下方。`
+        : `${candidateFollowup.status || "UNKNOWN"} · ${candidateFollowup.reason_code || "当前规则没有可用TRUE候选线"}；后继路径不进入触线风险集。`;
     detailRows($("cohortSummary"), [
       ["完整来源分母", d.source_pool_count],
       ...d.groups.map((g) => [
@@ -5076,15 +5215,10 @@ async function readCohort() {
           `原因 ${JSON.stringify(g.unevaluable_reasons)}`,
         ].join("；"),
       ]),
-      [
-        "所选代码冻结线触及诊断",
-        d.frozen_candidate_followup
-          ? `${displayStockTitle(d.frozen_candidate_followup)} · ${d.frozen_candidate_followup.maturity} · 线触及质量 ${d.frozen_candidate_followup.path_quality} · 首次触及 ${d.frozen_candidate_followup.first_touch_status}；T+1/T+3/T+5收盘路径见下方精确来源事实。`
-          : "未选择来源代码；T+1/T+3/T+5按已存路径读取。",
-      ],
+      ["所选代码冻结线触及诊断", candidateFollowupSummary],
       ...(d.selected_rules || []).map((fact) => [
         `所选代码 · ${fact.rule_id}`,
-        `${{ TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[fact.state] || fact.state} · ${format(fact.reasons)} · ${fact.enrollment ? `登记 #${fact.enrollment.id} ${enrollmentKindLabel(fact.enrollment.kind)}${enrollmentParentText(fact.enrollment)} · ${fact.enrollment.reason}` : "NO_STORED_FACT（无该规则登记）"} · 冻结线触及诊断 ${d.frozen_candidate_followup?.maturity || "NOT_COMPUTED"}；价格后继见下方`,
+        `${{ TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[fact.state] || fact.state} · ${format(fact.reasons)} · ${fact.enrollment ? `登记 #${fact.enrollment.id} ${enrollmentKindLabel(fact.enrollment.kind)}${enrollmentParentText(fact.enrollment)} · ${fact.enrollment.reason}` : "NO_STORED_FACT（无该规则登记）"} · 候选线触及诊断 ${candidateFollowup?.status || "NOT_COMPUTED"}；价格后继见下方`,
       ]),
       ...(!d.due
         ? [
@@ -5263,6 +5397,15 @@ $("focusReadStock").addEventListener("click", async () => {
         `${data.t0_observation?.followup_status || "NOT_COMPUTED"}；正式 Focus Episode、D2、Risk 与 Priority 未计算。`,
       ],
     ]);
+    const stockEvidence = data.stored_research_evidence || {};
+    const stockFollowupControls = sourceCandidateFollowupControls(
+      stockEvidence.rules?.facts,
+      stockEvidence.rules?.scope,
+      symbol,
+      data.t0_observation?.source_capture_id,
+    );
+    if (stockFollowupControls)
+      $("focusStockResult").append(stockFollowupControls);
   } catch (error) {
     if (token === focusStockRequest && activePage === "focus")
       message("focusStockStatus", `来源观察不可用：${error.message}`);
