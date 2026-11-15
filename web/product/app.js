@@ -362,6 +362,7 @@ function enrollmentFollowupHistoryDetails(entry) {
     NO_MATCH: "当前不匹配",
     NOT_DUE: "尚未到期",
     INCOMPLETE: "观察窗口不完整",
+    REENTRY_NOT_LINKED: "观察到匹配但再入父段未能证明",
   };
   const reasonLabels = {
     COMPARABLE_TRUE: "相邻可比事实为 TRUE",
@@ -376,12 +377,13 @@ function enrollmentFollowupHistoryDetails(entry) {
     MATCH_AFTER_PROVED_EXIT: "已证退出后再次匹配",
     CURRENT_STATE_FALSE: "当前事实为 FALSE",
     WAITING_FOR_FUTURE_SESSION: "等待后续官方交易会话",
+    REENTRY_PARENT_NOT_PROVED: "未保存可核验的直接父段关系",
   };
   const details = node("details", null, "focus-enrollment-history");
   details.append(
     node(
       "summary",
-      `登记 #${entry.id} 逐会话状态（${history.length} 个后继会话）`,
+      `${entry.kind === "DAILY_LANDMARK" ? "每日观察点" : "观察段"} #${entry.id} 逐会话状态（${history.length} 个后继会话）`,
     ),
   );
   if (!history.length) {
@@ -394,13 +396,24 @@ function enrollmentFollowupHistoryDetails(entry) {
   } else {
     const rows = node("ul");
     for (const item of history) {
-      const status = statusLabels[item.status] || item.status || "未知";
+      const status =
+        item.status === "REENTRY" && entry.fact_type === "D0"
+          ? "D0观察状态恢复（不是规则再入组）"
+          : statusLabels[item.status] || item.status || "未知";
       const reason = reasonLabels[item.reason] || item.reason || "原因未记录";
       const state = item.state ? ` · 规则状态 ${item.state}` : "";
+      const linkedSegment =
+        item.status === "REENTRY" &&
+        entry.fact_type === "RULE" &&
+        item.enrollment_id
+          ? ` · 新段登记 #${item.enrollment_id} · 父段 #${item.parent_enrollment_id ?? "UNKNOWN"}`
+          : item.status === "REENTRY_NOT_LINKED"
+            ? " · 没有可核验的新段父ID"
+            : "";
       rows.append(
         node(
           "li",
-          `${item.session || "日期未知"} · ${status}（${item.status || "UNKNOWN"}） · ${reason}${state}`,
+          `${item.session || "日期未知"} · ${status}（${item.status || "UNKNOWN"}） · ${reason}${state}${linkedSegment}`,
         ),
       );
     }
@@ -447,8 +460,22 @@ function enrollmentFollowupHistoryDetails(entry) {
   }
   return details;
 }
+function enrollmentKindLabel(kind) {
+  const kindLabels = {
+    ENTRY: "已证入组",
+    FIRST_OBSERVED_LEFT_CENSORED: "左截断观察段",
+    DAILY_LANDMARK: "每日观察点（不是新入组）",
+    REENTRY: "已证再入组",
+  };
+  return kindLabels[kind] || kind || "UNKNOWN";
+}
+function enrollmentParentText(entry) {
+  return entry?.parent_enrollment_id
+    ? ` · 父观察段 #${entry.parent_enrollment_id}`
+    : "";
+}
 function enrollmentSummaryText(entry) {
-  return `#${entry.id} ${entry.rule_id || entry.fact_type} ${entry.kind || "UNKNOWN"} · ${entry.reason || "UNKNOWN"} · ${enrollmentScopeText(entry)} · 后继 ${enrollmentFollowupText(entry.followup)}`;
+  return `#${entry.id} ${entry.rule_id || entry.fact_type} ${enrollmentKindLabel(entry.kind)}${enrollmentParentText(entry)} · ${entry.reason || "UNKNOWN"} · ${enrollmentScopeText(entry)} · 后继 ${enrollmentFollowupText(entry.followup)}`;
 }
 function exactRatioText(numerator, denominator, unit = "") {
   if (numerator == null || denominator == null || Number(denominator) === 0)
@@ -1925,11 +1952,24 @@ function renderPulseCohortSummary(comparison) {
             ),
           );
           if (distribution.sample_count > 0) {
+            const exact = exactPercent(
+              distribution.median_return_percent_exact,
+            );
+            const exactDetails = node(
+              "details",
+              undefined,
+              "pulse-cohort-exact",
+            );
+            exactDetails.append(
+              node("summary", "查看精确收益比"),
+              node("code", exact || "UNKNOWN"),
+            );
             cell.append(
               node(
                 "small",
-                `OBSERVED中位 ${distribution.median_return_percent_4dp}%（精确 ${exactPercent(distribution.median_return_percent_exact)}）；正/非正 ${distribution.positive_board_count}/${distribution.nonpositive_board_count}`,
+                `OBSERVED中位 ${percentText(distribution.median_return_percent_4dp)}；正/非正 ${distribution.positive_board_count}/${distribution.nonpositive_board_count}`,
               ),
+              exactDetails,
             );
           } else {
             cell.append(node("small", "无OBSERVED收益样本；不填零收益"));
@@ -4998,7 +5038,7 @@ async function readCohort() {
       ],
       ...(d.selected_rules || []).map((fact) => [
         `所选代码 · ${fact.rule_id}`,
-        `${{ TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[fact.state] || fact.state} · ${format(fact.reasons)} · ${fact.enrollment ? `登记 #${fact.enrollment.id} ${fact.enrollment.kind} / ${fact.enrollment.reason}` : "NO_STORED_FACT（无该规则登记）"} · 冻结线触及诊断 ${d.frozen_candidate_followup?.maturity || "NOT_COMPUTED"}；价格后继见下方`,
+        `${{ TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[fact.state] || fact.state} · ${format(fact.reasons)} · ${fact.enrollment ? `登记 #${fact.enrollment.id} ${enrollmentKindLabel(fact.enrollment.kind)}${enrollmentParentText(fact.enrollment)} · ${fact.enrollment.reason}` : "NO_STORED_FACT（无该规则登记）"} · 冻结线触及诊断 ${d.frozen_candidate_followup?.maturity || "NOT_COMPUTED"}；价格后继见下方`,
       ]),
       ...(!d.due
         ? [

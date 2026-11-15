@@ -414,6 +414,174 @@ def _rule_context_comparable(
     )
 
 
+def _contextual_rule_observation(
+    candidates: Sequence[tuple[Any, ...]],
+    context: Mapping[str, Any] | None,
+    *,
+    rule_id: str,
+    rule_version: str,
+) -> Observation | None:
+    """仅将唯一、完整且与当日冻结范围一致的规则行转为观察。"""
+    rule = (context or {}).get("rule") or {}
+    if (
+        not context
+        or not context.get("inputs_complete")
+        or not context.get("rules_complete")
+        or rule.get("version") != rule_version
+    ):
+        return None
+    valid = [
+        row
+        for row in candidates
+        if row[3] == rule_id
+        and row[4] == rule_version
+        and row[5] in {"TRUE", "FALSE", "UNKNOWN"}
+        and row[6] == rule.get("profile_revision")
+        and row[7] == rule.get("history_count")
+        and row[8] == rule.get("d1_history_count")
+        and row[9] == rule.get("event_window_start")
+        and row[10] == rule.get("calendar_revision")
+        and row[11] == rule.get("scope")
+        and row[12] == context.get("capture")
+    ]
+    if len(candidates) != 1 or len(valid) != 1:
+        return None
+    return Observation(valid[0][0], valid[0][5], valid[0][1])
+
+
+def _reentry_parent_ids(
+    cursor: Any,
+    *,
+    target: date,
+    before: date,
+    package: int,
+    rule_version: str,
+    candidate_rows: Sequence[tuple[int, str, str]],
+) -> dict[int, int]:
+    """只把有可比较历史且已推进至EXITED的最近来源观察段作为父段。"""
+    if not candidate_rows:
+        return {}
+    symbols = sorted({row[1] for row in candidate_rows})
+    rule_ids = sorted({row[2] for row in candidate_rows})
+    candidate_pairs = {(row[1], row[2]) for row in candidate_rows}
+    from stock_a.research.entry_context.sessions import _load_calendar
+
+    official_sessions = tuple(
+        session for session in _load_calendar(target)[3] if session <= target
+    )
+    cursor.execute(
+        """SELECT min(target_session) FROM source_rule_evaluations
+           WHERE source_package_id=%s AND target_session<=%s""",
+        (package, target),
+    )
+    first_rule_session = cursor.fetchone()[0]
+    if first_rule_session is None:
+        return {}
+    sessions = tuple(
+        session for session in official_sessions if session >= first_rule_session
+    )[-60:]
+    if not sessions or before not in sessions or target not in sessions:
+        return {}
+    contexts = _read_rule_day_contexts(cursor, sessions=sessions, package=package)
+    cursor.execute(
+        """SELECT target_session,id,source_symbol,rule_id,rule_version,state,
+                  profile_revision,history_session_count,d1_history_session_count,
+                  event_window_start,calendar_revision,scope,source_capture_id
+           FROM source_rule_evaluations
+           WHERE source_package_id=%s AND target_session=ANY(%s)
+             AND source_symbol=ANY(%s) AND rule_id=ANY(%s) AND rule_version=%s
+           ORDER BY source_symbol,rule_id,target_session,id""",
+        (package, list(sessions), symbols, rule_ids, rule_version),
+    )
+    facts_by_pair: dict[tuple[str, str], dict[date, list[tuple[Any, ...]]]] = {}
+    for row in cursor.fetchall():
+        pair = (row[2], row[3])
+        if pair in candidate_pairs:
+            facts_by_pair.setdefault(pair, {}).setdefault(row[0], []).append(row)
+    cursor.execute(
+        """SELECT e.id,r.id,r.target_session,r.source_symbol,r.rule_id
+           FROM source_research_enrollments e
+           JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
+           WHERE r.source_package_id=%s AND r.target_session=ANY(%s)
+             AND r.target_session<%s AND r.source_symbol=ANY(%s)
+             AND r.rule_id=ANY(%s) AND r.rule_version=%s AND r.state='TRUE'
+             AND e.enrollment_kind IN
+                 ('ENTRY','FIRST_OBSERVED_LEFT_CENSORED','REENTRY')
+           ORDER BY r.source_symbol,r.rule_id,r.target_session DESC,e.id DESC""",
+        (package, list(sessions), before, symbols, rule_ids, rule_version),
+    )
+    roots_by_pair: dict[tuple[str, str], list[tuple[int, int, date]]] = {}
+    for enrollment_id, fact_id, session, symbol, rule_id in cursor.fetchall():
+        pair = (symbol, rule_id)
+        if pair in candidate_pairs:
+            roots_by_pair.setdefault(pair, []).append((enrollment_id, fact_id, session))
+
+    parents: dict[int, int] = {}
+    for current_fact_id, symbol, rule_id in candidate_rows:
+        pair = (symbol, rule_id)
+        roots = roots_by_pair.get(pair, [])
+        if not roots:
+            continue
+        latest_session = roots[0][2]
+        latest_roots = [row for row in roots if row[2] == latest_session]
+        if len(latest_roots) != 1:
+            continue
+        parent_id, root_fact_id, root_session = latest_roots[0]
+        root_context = contexts.get(root_session)
+        root_observation = _contextual_rule_observation(
+            facts_by_pair.get(pair, {}).get(root_session, []),
+            root_context,
+            rule_id=rule_id,
+            rule_version=rule_version,
+        )
+        if (
+            root_observation is None
+            or root_observation.evidence_id != root_fact_id
+            or root_observation.state != "TRUE"
+        ):
+            continue
+        lifecycle = "ACTIVE"
+        previous_session = root_session
+        previous_context_available = True
+        parent_proved_exited = False
+        for session in sessions:
+            if not root_session < session <= before:
+                continue
+            current_context = contexts.get(session)
+            comparable = previous_context_available and _rule_context_comparable(
+                contexts.get(previous_session),
+                current_context,
+                before=previous_session,
+                target=session,
+            )
+            current = (
+                _contextual_rule_observation(
+                    facts_by_pair.get(pair, {}).get(session, []),
+                    current_context,
+                    rule_id=rule_id,
+                    rule_version=rule_version,
+                )
+                if comparable
+                else None
+            )
+            decision = advance_observation(
+                lifecycle=lifecycle,
+                previous_session=previous_session,
+                expected_session=session,
+                current=current,
+                research_cutoff=before,
+            )
+            lifecycle = decision.lifecycle
+            if decision.event == "EXIT_PROVED":
+                parent_proved_exited = True
+                break
+            previous_context_available = current is not None
+            previous_session = session
+        if parent_proved_exited and lifecycle == "EXITED":
+            parents[current_fact_id] = parent_id
+    return parents
+
+
 def _insert_rule_enrollments(
     cursor: Any, rows: list[tuple[Any, ...]]
 ) -> tuple[int, int]:
@@ -423,7 +591,7 @@ def _insert_rule_enrollments(
     rule_ids = [row[1] for row in rows]
     cursor.execute(
         """SELECT d0_fact_id,rule_fact_id,previous_rule_fact_id,enrollment_kind,
-                  reason_code,adjacent_d0_fact_id
+                  reason_code,adjacent_d0_fact_id,parent_enrollment_id
            FROM source_research_enrollments WHERE rule_fact_id=ANY(%s)""",
         (rule_ids,),
     )
@@ -445,16 +613,29 @@ def _insert_rule_enrollments(
             and old[3:5] == row[3:5]
             and old[2] is None
             and row[2] is not None
+            and old[6] is None
+            and row[6] is None
         )
-        if not (left_censored_correction or link_correction):
+        reentry_correction = (
+            same_parent
+            and old[2] == row[2]
+            and old[3] == "ENTRY"
+            and old[4] == "ADJACENT_FALSE_TO_TRUE"
+            and row[3] == "REENTRY"
+            and row[4] == "MATCH_AFTER_PROVED_EXIT"
+            and old[6] is None
+            and row[6] is not None
+        )
+        if not (left_censored_correction or link_correction or reentry_correction):
             raise EnrollmentConflict("既存规则登记不符合精确前态纠错边界")
         corrections.append(row)
     for row in corrections:
         cursor.execute(
             """UPDATE source_research_enrollments
-               SET previous_rule_fact_id=%s,enrollment_kind=%s,reason_code=%s
+               SET previous_rule_fact_id=%s,enrollment_kind=%s,reason_code=%s,
+                   parent_enrollment_id=%s
                WHERE rule_fact_id=%s AND d0_fact_id IS NULL""",
-            (row[2], row[3], row[4], row[1]),
+            (row[2], row[3], row[4], row[6], row[1]),
         )
         if cursor.rowcount != 1:
             raise EnrollmentConflict("规则登记纠错目标不再唯一，事务已回滚")
@@ -469,8 +650,8 @@ def _insert_enrollments(cursor: Any, rows: list[tuple[Any, ...]]) -> int:
     cursor.executemany(
         """INSERT INTO source_research_enrollments
            (d0_fact_id, rule_fact_id, previous_rule_fact_id, enrollment_kind, reason_code,
-            adjacent_d0_fact_id)
-           VALUES (%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
+            adjacent_d0_fact_id, parent_enrollment_id)
+           VALUES (%s,%s,%s,%s,%s,%s,%s) ON CONFLICT DO NOTHING""",
         rows,
     )
     inserted = cursor.rowcount
@@ -478,7 +659,7 @@ def _insert_enrollments(cursor: Any, rows: list[tuple[Any, ...]]) -> int:
     rule_ids = [row[1] for row in rows if row[1] is not None]
     cursor.execute(
         """SELECT d0_fact_id, rule_fact_id, previous_rule_fact_id, enrollment_kind, reason_code,
-                  adjacent_d0_fact_id
+                  adjacent_d0_fact_id, parent_enrollment_id
            FROM source_research_enrollments
            WHERE d0_fact_id = ANY(%s) OR rule_fact_id = ANY(%s)""",
         (d0_ids, rule_ids),
@@ -535,7 +716,7 @@ def insert_d0_enrollments(
             previous=previous,
             previous_official_session=before,
         )
-        rows.append((fact_id, None, None, decision.event, decision.reason, None))
+        rows.append((fact_id, None, None, decision.event, decision.reason, None, None))
     return {"expected": len(rows), "inserted": _insert_enrollments(cursor, rows)}
 
 
@@ -592,7 +773,8 @@ def insert_rule_enrollments(
     )
     current_event_window_start = current_context["rule"]["event_window_start"]
     cursor.execute(
-        """SELECT r.id, count(DISTINCT p.id), min(p.id), min(p.state),
+        """SELECT r.id,r.source_symbol,r.rule_id,
+                  count(DISTINCT p.id), min(p.id), min(p.state),
                   count(DISTINCT d.id), min(d.id), min(d.before_state)
            FROM source_rule_evaluations r
            LEFT JOIN source_rule_evaluations p
@@ -614,7 +796,7 @@ def insert_rule_enrollments(
              AND r.rule_version=%s AND r.profile_revision=%s AND r.history_session_count=%s
              AND r.d1_history_session_count=%s AND r.event_window_start=%s
              AND r.calendar_revision=%s AND r.state='TRUE'
-           GROUP BY r.id ORDER BY r.id""",
+           GROUP BY r.id,r.source_symbol,r.rule_id ORDER BY r.id""",
         (
             before,
             previous_capture_id,
@@ -637,8 +819,11 @@ def insert_rule_enrollments(
     )
     rule_rows = cursor.fetchall()
     rows = []
+    possible_reentries = []
     for (
         fact_id,
+        source_symbol,
+        rule_id,
         previous_count,
         previous_id,
         previous_state,
@@ -669,6 +854,13 @@ def insert_rule_enrollments(
             and d0_count != 1
         ):
             reason = "PREVIOUS_RULE_CONTEXT_NOT_COMPARABLE"
+        if (
+            decision.event == "ENTRY"
+            and previous_count == 1
+            and previous_state == "FALSE"
+            and previous_is_comparable
+        ):
+            possible_reentries.append((fact_id, source_symbol, rule_id))
         rows.append(
             (
                 None,
@@ -677,8 +869,30 @@ def insert_rule_enrollments(
                 decision.event,
                 reason,
                 d0_id if d0_count == 1 else None,
+                None,
             )
         )
+    parents = _reentry_parent_ids(
+        cursor,
+        target=target,
+        before=before,
+        package=package,
+        rule_version=rule_version,
+        candidate_rows=possible_reentries,
+    )
+    if parents:
+        rows = [
+            (
+                row[0],
+                row[1],
+                row[2],
+                "REENTRY" if row[1] in parents else row[3],
+                "MATCH_AFTER_PROVED_EXIT" if row[1] in parents else row[4],
+                row[5],
+                parents.get(row[1]),
+            )
+            for row in rows
+        ]
     inserted, corrected = _insert_rule_enrollments(cursor, rows)
     return {
         "expected": len(rows),
@@ -897,6 +1111,7 @@ def read_enrollments_for_symbols(
         if include_d0:
             cursor.execute(
                 """SELECT d.source_symbol,e.id,e.enrollment_kind,e.reason_code,
+                      e.parent_enrollment_id,
                       'D0' AS fact_type,d.id,d.algorithm_contract,d.producer_version,
                       d.source_time_quality,d.source_clock_role,d.source_available_at,
                       d.research_mode,d.price_coordinate
@@ -918,6 +1133,7 @@ def read_enrollments_for_symbols(
                 enrollment_id,
                 kind,
                 reason,
+                parent_enrollment_id,
                 fact_type,
                 fact_id,
                 contract,
@@ -933,6 +1149,7 @@ def read_enrollments_for_symbols(
                     "id": enrollment_id,
                     "kind": kind,
                     "reason": reason,
+                    "parent_enrollment_id": parent_enrollment_id,
                     "fact_type": fact_type,
                     "fact_id": fact_id,
                     "rule_contract": contract,
@@ -946,7 +1163,8 @@ def read_enrollments_for_symbols(
             )
         if rule_scope is not None:
             cursor.execute(
-                """SELECT r.source_symbol,e.id,e.enrollment_kind,e.reason_code,r.id,
+                """SELECT r.source_symbol,e.id,e.enrollment_kind,e.reason_code,
+                          e.parent_enrollment_id,r.id,
                           r.rule_id,r.rule_version,r.profile_revision,
                           r.history_session_count,r.d1_history_session_count,
                           r.event_window_start,r.calendar_revision,r.reasons,
@@ -980,6 +1198,7 @@ def read_enrollments_for_symbols(
                 enrollment_id,
                 kind,
                 reason,
+                parent_enrollment_id,
                 fact_id,
                 rule_id,
                 version,
@@ -1001,6 +1220,7 @@ def read_enrollments_for_symbols(
                         "id": enrollment_id,
                         "kind": kind,
                         "reason": reason,
+                        "parent_enrollment_id": parent_enrollment_id,
                         "fact_type": "RULE",
                         "fact_id": fact_id,
                         "rule_id": rule_id,
@@ -1074,7 +1294,8 @@ def read_enrollment_followups(
                       r.id,COALESCE(d.source_symbol,r.source_symbol),r.rule_id,r.state,r.rule_version,
                       r.profile_revision,r.history_session_count,
                       r.d1_history_session_count,r.event_window_start,
-                      COALESCE(d.calendar_revision,r.calendar_revision),r.scope
+                      COALESCE(d.calendar_revision,r.calendar_revision),r.scope,
+                      e.parent_enrollment_id,e.enrollment_kind
                FROM source_research_enrollments e
                LEFT JOIN source_d0_launch_day_facts d ON d.id=e.d0_fact_id
                LEFT JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
@@ -1103,6 +1324,8 @@ def read_enrollment_followups(
                 "calendar_revision": row[15],
                 "scope": row[16],
                 "is_rule": row[3],
+                "parent_enrollment_id": row[17],
+                "enrollment_kind": row[18],
             }
         rule_contexts: dict[int, dict[date, dict[str, Any]]] = {}
         if not invalid_anchor_scope and selected:
@@ -1136,11 +1359,13 @@ def read_enrollment_followups(
                 """SELECT e.id,n.target_session,n.id,n.state,n.source_capture_id,
                           n.rule_id,n.rule_version,n.profile_revision,
                           n.history_session_count,n.d1_history_session_count,
-                          n.event_window_start,n.calendar_revision,n.scope,n.reasons
+                          n.event_window_start,n.calendar_revision,n.scope,n.reasons,
+                          next_e.id,next_e.parent_enrollment_id,next_e.enrollment_kind
                FROM source_research_enrollments e
                JOIN source_rule_evaluations b ON b.id=e.rule_fact_id
                JOIN source_rule_evaluations n ON n.source_symbol=b.source_symbol
                  AND n.source_package_id=b.source_package_id AND n.rule_id=b.rule_id
+               LEFT JOIN source_research_enrollments next_e ON next_e.rule_fact_id=n.id
                WHERE e.id=ANY(%s) AND n.target_session=ANY(%s)""",
                 (enrollment_ids, list(selected)),
             )
@@ -1234,6 +1459,8 @@ def read_enrollment_followups(
                 ),
                 "calendar_revision": anchors_by_id[item]["calendar_revision"],
                 "scope": anchors_by_id[item]["scope"],
+                "parent_enrollment_id": anchors_by_id[item]["parent_enrollment_id"],
+                "enrollment_kind": anchors_by_id[item]["enrollment_kind"],
                 "forward_paths": _enrollment_forward_paths(
                     anchors_by_id[item],
                     forward_rows_by_key.get(
@@ -1297,6 +1524,9 @@ def read_enrollment_followups(
             calendar_revision,
             scope,
             reasons,
+            next_enrollment_id,
+            parent_enrollment_id,
+            enrollment_kind,
         ) = row
         rule_candidates.setdefault((enrollment_id, session), []).append(
             {
@@ -1312,6 +1542,9 @@ def read_enrollment_followups(
                 "calendar_revision": calendar_revision,
                 "scope": scope,
                 "reasons": list(reasons or []),
+                "enrollment_id": next_enrollment_id,
+                "parent_enrollment_id": parent_enrollment_id,
+                "enrollment_kind": enrollment_kind,
             }
         )
     output = {}
@@ -1341,6 +1574,8 @@ def read_enrollment_followups(
         previous_capture = anchor["capture"]
         last_exit = None
         detail = None
+        proved_exit_detail = None
+        linked_reentry = False
         history = []
         for session in selected:
             candidate_detail: dict[str, Any] | None = None
@@ -1458,9 +1693,28 @@ def read_enrollment_followups(
                         "scope": candidate_detail["scope"],
                         "price_coordinate": "RAW_UNADJUSTED",
                         "rule_reasons": candidate_detail["reasons"],
+                        "enrollment_id": candidate_detail["enrollment_id"],
+                        "parent_enrollment_id": candidate_detail[
+                            "parent_enrollment_id"
+                        ],
+                        "enrollment_kind": candidate_detail["enrollment_kind"],
                     }
                 )
             history.append(dict(detail))
+            if decision.event == "EXIT_PROVED" and anchor["is_rule"]:
+                proved_exit_detail = dict(detail)
+            if decision.event == "REENTRY" and anchor["is_rule"]:
+                linked_reentry = bool(
+                    candidate_detail
+                    and candidate_detail["enrollment_kind"] == "REENTRY"
+                    and candidate_detail["parent_enrollment_id"] == enrollment_id
+                )
+                if not linked_reentry:
+                    history[-1]["status"] = "REENTRY_NOT_LINKED"
+                    history[-1]["reason"] = "REENTRY_PARENT_NOT_PROVED"
+                if proved_exit_detail is not None:
+                    detail = dict(proved_exit_detail)
+                break
             previous_state = current.state if current else None
             if anchor["is_rule"]:
                 previous_capture = (
@@ -1473,11 +1727,17 @@ def read_enrollment_followups(
                 )
             previous = session
         assert detail is not None
-        history_truncated = len(successor_sessions) > len(selected)
+        if proved_exit_detail is not None and anchor["is_rule"]:
+            detail = dict(proved_exit_detail)
+        history_truncated = not linked_reentry and len(successor_sessions) > len(
+            selected
+        )
         detail = {
             **detail,
             "history": history,
             "history_truncated": history_truncated,
+            "parent_enrollment_id": anchor["parent_enrollment_id"],
+            "enrollment_kind": anchor["enrollment_kind"],
             "forward_paths": _enrollment_forward_paths(
                 anchor,
                 forward_rows_by_key.get(

@@ -47,6 +47,7 @@ _MIGRATION_FILES = (
     "0033_source_t0_early_observation.sql",
     "0034_source_s2_t1_cohort_stats.sql",
     "0035_r07_sector_pulse_cohort_outcomes.sql",
+    "0036_r07_source_enrollment_segments.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -81,6 +82,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R07_EARLY_BOARD_T0_OBSERVATION_R1": frozenset({33}),
     "R07_S2_T1_SOURCE_COHORT_R1": frozenset({34}),
     "R07_SECTOR_PULSE_COHORT_OUTCOMES_R1": frozenset({35}),
+    "R07_SOURCE_FOCUS_ENROLLMENT_SEGMENTS_R1": frozenset({36}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -225,6 +227,7 @@ _RELATIONS_BY_MIGRATION_COUNT[35] = _RELATIONS_BY_MIGRATION_COUNT[34] | {
     "source_sector_pulse_cohort_group_facts",
     "source_sector_pulse_cohort_reason_facts",
 }
+_RELATIONS_BY_MIGRATION_COUNT[36] = _RELATIONS_BY_MIGRATION_COUNT[35]
 
 
 class BindingRefused(Exception):
