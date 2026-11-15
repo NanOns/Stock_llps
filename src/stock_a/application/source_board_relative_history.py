@@ -29,7 +29,7 @@ def read_source_board_relative_history(
     board_kind: str,
     board_native_id: str,
 ) -> dict[str, Any]:
-    """读取所选T0起最多七个官方会话，逐指标核对固定比较总体。"""
+    """读取前一官方会话至T0后最多五个会话，单独标出T0前态变化。"""
     if (
         type(target_session) is not date
         or type(research_cutoff) is not date
@@ -55,12 +55,15 @@ def read_source_board_relative_history(
     )
     if target_session not in official_sessions:
         raise ValueError("所选T0日期不是内置核验日历中的官方会话")
+    target_index = official_sessions.index(target_session)
+    first_index = max(0, target_index - 1)
+    first_session = official_sessions[first_index]
     sessions = tuple(
         session
-        for session in official_sessions
-        if target_session <= session <= research_cutoff
+        for session in official_sessions[first_index:]
+        if session <= research_cutoff
     )[:_MAX_HISTORY_SESSIONS]
-    if not sessions or sessions[0] != target_session:
+    if not sessions or target_session not in sessions or sessions[0] != first_session:
         raise ValueError("所选T0日期没有可读取的官方会话范围")
 
     inputs = read_source_board_relative_history_inputs(
@@ -75,6 +78,7 @@ def read_source_board_relative_history(
     )
     base = {
         "symbol": source_symbol,
+        "target_session": target_session.isoformat(),
         "board_kind": board_kind,
         "board_native_id": board_native_id,
         "membership_mode": inputs.get(
@@ -85,6 +89,11 @@ def read_source_board_relative_history(
         "calendar_revision": calendar_revision,
         "sessions": [],
         "comparisons": [],
+        "t0_comparison": None,
+        "t0_comparison_status": "NOT_COMPUTED",
+        "t0_comparison_reason": "尚未读取到前一官方会话与目标T0的可比事实",
+        "t0_label_policy": "OFFICIAL_PREVIOUS_SESSION_TO_TARGET_ONLY",
+        "post_target_comparisons_are_t0_inputs": False,
         "execution": inputs.get(
             "execution",
             {
@@ -103,6 +112,10 @@ def read_source_board_relative_history(
             **base,
             "status": inputs.get("status", "NOT_COMPUTED"),
             "reason": inputs.get("reason", "没有唯一可用的板内成员上下文"),
+            "t0_comparison_status": inputs.get("status", "NOT_COMPUTED"),
+            "t0_comparison_reason": inputs.get(
+                "reason", "没有唯一可用的板内成员上下文"
+            ),
             "membership_snapshot_id": inputs.get("membership_snapshot_id"),
             "catalog_id": inputs.get("catalog_id"),
         }
@@ -111,6 +124,13 @@ def read_source_board_relative_history(
     for day in inputs["days"]:
         current = dict(day)
         current["target_session"] = day["target_session"].isoformat()
+        current["relative_time_role"] = (
+            "PRIOR_T0_BASELINE"
+            if day["target_session"] < target_session
+            else "T0_LABEL"
+            if day["target_session"] == target_session
+            else "POST_T0_CONTEXT"
+        )
         current["rps5"] = _unknown_metric("当日RPS5输入没有闭合Seed事实")
         current["rps20"] = _unknown_metric("当日RPS20输入没有闭合Seed事实")
         scope = day.get("seed_scope")
@@ -150,6 +170,21 @@ def read_source_board_relative_history(
     comparisons = _compare_adjacent_days(
         inputs["days"], enriched_days, official_sessions=official_sessions
     )
+    target_iso = target_session.isoformat()
+    for comparison in comparisons:
+        comparison["relative_time_role"] = (
+            "T0_LABEL_INPUT"
+            if comparison["to_session"] == target_iso
+            else "POST_T0_CONTEXT"
+        )
+    t0_comparison = next(
+        (
+            comparison
+            for comparison in comparisons
+            if comparison["to_session"] == target_iso
+        ),
+        None,
+    )
     return {
         **base,
         "status": "AVAILABLE",
@@ -159,6 +194,15 @@ def read_source_board_relative_history(
         "snapshot_member_count": inputs["snapshot_member_count"],
         "sessions": enriched_days,
         "comparisons": comparisons,
+        "t0_comparison": t0_comparison,
+        "t0_comparison_status": (
+            "AVAILABLE" if t0_comparison is not None else "NOT_COMPUTED"
+        ),
+        "t0_comparison_reason": (
+            None
+            if t0_comparison is not None
+            else "前一官方会话或目标T0缺少相邻比较事实"
+        ),
     }
 
 

@@ -46,11 +46,17 @@ def read_source_board_relative_history_inputs(
         or not board_native_id
         or len(session_days) < 1
         or len(session_days) > 7
-        or session_days[0] != target_session
         or any(type(item) is not date for item in session_days)
         or tuple(sorted(set(session_days))) != session_days
     ):
         raise SourceBoardRelativeHistoryPgError("板内RPS历史读取键无效")
+    target_index = (
+        session_days.index(target_session) if target_session in session_days else -1
+    )
+    if target_index not in (0, 1):
+        raise SourceBoardRelativeHistoryPgError(
+            "T0日期须位于单股板内历史窗口首位或紧随一个官方前态"
+        )
 
     source_versions: dict[date, dict[str, Any]] = {}
     for session in session_days:

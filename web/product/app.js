@@ -882,6 +882,8 @@ function t0RelativePositionHistoryDetails(history) {
   const data = history && typeof history === "object" ? history : {};
   const sessions = Array.isArray(data.sessions) ? data.sessions : [];
   const comparisons = Array.isArray(data.comparisons) ? data.comparisons : [];
+  const targetSession = data.target_session || "UNKNOWN_SESSION";
+  const t0Comparison = data.t0_comparison;
   root.append(
     node(
       "p",
@@ -890,6 +892,16 @@ function t0RelativePositionHistoryDetails(history) {
     node(
       "p",
       "板内相对位置仅作描述性研究；历史成员为 NON_PIT，价格为 RAW_UNADJUSTED，不代表正式D2、Priority或交易建议。未保存T0/规则事实不解释为无信号。",
+    ),
+    node(
+      "p",
+      t0Comparison
+        ? `评价 T0 ${targetSession}：${t0Comparison.from_session || "UNKNOWN"} → ${t0Comparison.to_session || "UNKNOWN"} · RPS5 ${t0HistoryTransitionText(t0Comparison, "rps5")} · RPS20 ${t0HistoryTransitionText(t0Comparison, "rps20")}。分组标签只使用这个前态到 T0 的比较及 T0/PULSE/来源登记；后继比较不回灌。`
+        : `评价 T0 ${targetSession}：前一官方会话到 T0 的变化 ${data.t0_comparison_status || "NOT_COMPUTED"}（${data.t0_comparison_reason || "没有可用的精确前态比较"}）；后继比较不回灌。`,
+    ),
+    node(
+      "p",
+      "同一选定 T0 的 Focus 逐登记区域展示 CONTINUES、EXIT_PROVED、PAUSED_UNKNOWN、REENTRY 与已存 T+1/T+3/T+5；Cohort 仍按精确 T0/规则/来源读取。",
     ),
   );
   const reasonCodes = Array.isArray(data.reason_codes) ? data.reason_codes : [];
@@ -915,10 +927,15 @@ function t0RelativePositionHistoryDetails(history) {
     const body = node("tbody");
     for (const session of sessions) {
       const row = node("tr");
+      const timeRoleLabels = {
+        PRIOR_T0_BASELINE: "前一官方会话（比较基准）",
+        T0_LABEL: "评价 T0",
+        POST_T0_CONTEXT: "T0 后继上下文",
+      };
       row.append(
         node(
           "td",
-          `${session.target_session || "UNKNOWN_SESSION"} · capture ${session.source_capture_id ?? "UNKNOWN"}`,
+          `${timeRoleLabels[session.relative_time_role] || "UNKNOWN 时点角色"} · ${session.target_session || "UNKNOWN_SESSION"} · capture ${session.source_capture_id ?? "UNKNOWN"}`,
         ),
         node("td", t0HistoryMetricText(session.rps5)),
         node("td", t0HistoryMetricText(session.rps20)),
@@ -961,7 +978,12 @@ function t0RelativePositionHistoryDetails(history) {
     const table = node("table", undefined, "focus-s2-t1-table");
     const head = node("thead");
     const header = node("tr");
-    for (const label of ["比较会话", "同来源池可比", "RPS5变化", "RPS20变化"])
+    for (const label of [
+      "时点 / 比较会话",
+      "同来源池可比",
+      "RPS5变化",
+      "RPS20变化",
+    ])
       header.append(node("th", label));
     head.append(header);
     const body = node("tbody");
@@ -974,10 +996,14 @@ function t0RelativePositionHistoryDetails(history) {
             ? "否"
             : (comparable ?? "UNKNOWN");
       const row = node("tr");
+      const roleLabel =
+        comparison.relative_time_role === "T0_LABEL_INPUT"
+          ? "T0 分组输入"
+          : "T0 后继上下文（不参与分组）";
       row.append(
         node(
           "td",
-          `${comparison.from_session || "UNKNOWN"} → ${comparison.to_session || "UNKNOWN"}`,
+          `${roleLabel} · ${comparison.from_session || "UNKNOWN"} → ${comparison.to_session || "UNKNOWN"}`,
         ),
         node("td", String(comparableText)),
         node("td", t0HistoryTransitionText(comparison, "rps5")),
@@ -992,7 +1018,7 @@ function t0RelativePositionHistoryDetails(history) {
       "focus-s2-t1-table-scroll table-scroll",
     );
     tableScroll.append(table);
-    root.append(node("h5", "同成员池跨日比较"), tableScroll);
+    root.append(node("h5", "T0 前态标签及后继描述"), tableScroll);
   }
   return root;
 }
