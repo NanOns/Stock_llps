@@ -159,6 +159,8 @@ _DIAGNOSTIC_ROUTES = frozenset(
         "/api/preview/stock",
         "/api/product/cohort-keys",
         "/api/product/cohort",
+        "/api/product/cohort-date-comparison",
+        "/api/product/cohort-symbol-forward",
         "/api/product/resolve-stock-code",
         "/api/product/market",
         "/api/product/d1-material",
@@ -384,6 +386,7 @@ def _read_enrollment_followups_page(
     cutoff: date,
     enrollment_ids: Sequence[int],
     successor_sessions: Sequence[date],
+    horizon_due_sessions: Sequence[date] = (),
 ) -> dict[int, dict[str, Any]]:
     """按现役后继Reader的300条上限分批读取当前页登记。"""
     from stock_a.storage.postgres.research_enrollment import (
@@ -400,6 +403,7 @@ def _read_enrollment_followups_page(
                 cutoff=cutoff,
                 enrollment_ids=selected,
                 successor_sessions=tuple(successor_sessions),
+                horizon_due_sessions=tuple(horizon_due_sessions),
             )
         )
     return result
@@ -2032,6 +2036,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
         successor_sessions = tuple(
             day for day in calendar_sessions if target_session < day <= research_cutoff
         )
+        horizon_due_sessions = tuple(
+            day for day in calendar_sessions if day > target_session
+        )[:20]
         if target_session not in calendar_sessions:
             raise PreviewHttpError(
                 409,
@@ -2066,6 +2073,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 cutoff=research_cutoff,
                 enrollment_ids=enrollment_ids,
                 successor_sessions=successor_sessions,
+                horizon_due_sessions=horizon_due_sessions,
             )
             if target_session in calendar_sessions
             else {
@@ -4037,6 +4045,106 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
                 self._send_json(200, {"ok": True, **result})
                 return
+            if parsed.path == "/api/product/cohort-date-comparison":
+                values = _query(
+                    self.path,
+                    {"source_package_id", "rule", "horizon"},
+                )
+                if set(values) != {"source_package_id", "rule", "horizon"}:
+                    raise PreviewHttpError(
+                        400,
+                        "COHORT_DATE_COMPARISON_QUERY_INVALID",
+                        "须提供来源包、冻结规则和期限",
+                    )
+                if values["horizon"] not in {"1", "3", "5"}:
+                    raise PreviewHttpError(
+                        400,
+                        "COHORT_DATE_COMPARISON_HORIZON_INVALID",
+                        "跨日期研究对照只读取T+1、T+3或T+5",
+                    )
+                try:
+                    from stock_a.storage.postgres.cohort_stats import (
+                        read_cohort_date_comparison,
+                    )
+
+                    result = read_cohort_date_comparison(
+                        self.preview_server.state.config,
+                        research_cutoff=self.preview_server.state.research_cutoff,
+                        source_package_id=_package_id(values["source_package_id"]),
+                        rule=values["rule"],
+                        horizon=int(values["horizon"]),
+                    )
+                except ValueError as error:
+                    raise PreviewHttpError(
+                        400, "COHORT_DATE_COMPARISON_QUERY_INVALID", str(error)
+                    ) from error
+                self._send_json(200, {"ok": True, **result})
+                return
+            if parsed.path == "/api/product/cohort-symbol-forward":
+                allowed = {
+                    "target_session",
+                    "source_package_id",
+                    "profile_revision",
+                    "history",
+                    "d1_history",
+                    "window",
+                    "rule",
+                    "symbol",
+                }
+                values = _query(self.path, allowed)
+                if set(values) != allowed:
+                    raise PreviewHttpError(
+                        400,
+                        "COHORT_SYMBOL_FORWARD_QUERY_INVALID",
+                        "须提供完整T0规则键和来源代码",
+                    )
+                target = _iso_date(values["target_session"])
+                cutoff = self.preview_server.state.research_cutoff
+                _require_research_cutoff(target, cutoff)
+                symbol = values["symbol"]
+                if not _SYMBOL.fullmatch(symbol):
+                    raise PreviewHttpError(400, "SYMBOL_INVALID", "来源代码格式无效")
+                calendar = _official_calendar(cutoff)
+                if target not in calendar["sessions"]:
+                    raise PreviewHttpError(
+                        409,
+                        "COHORT_SYMBOL_FORWARD_CALENDAR_UNAVAILABLE",
+                        "目标日不在官方日历范围内",
+                    )
+                try:
+                    from stock_a.storage.postgres.cohort_stats import (
+                        read_cohort_symbol_forward_paths,
+                    )
+
+                    result = read_cohort_symbol_forward_paths(
+                        self.preview_server.state.config,
+                        target=target,
+                        research_cutoff=cutoff,
+                        source_package_id=_package_id(values["source_package_id"]),
+                        profile_revision=_profile_revision(values["profile_revision"]),
+                        history_session_count=_positive_int(
+                            _nonnegative_int(values["history"], "history", 500),
+                            "history",
+                            500,
+                        ),
+                        d1_history_session_count=_positive_int(
+                            _nonnegative_int(values["d1_history"], "d1_history", 500),
+                            "d1_history",
+                            500,
+                        ),
+                        event_window_start=_iso_date(values["window"]),
+                        rule=values["rule"],
+                        symbol=symbol,
+                        horizon_due_sessions=tuple(
+                            day for day in calendar["sessions"] if day > target
+                        )[:20],
+                    )
+                except ValueError as error:
+                    raise PreviewHttpError(
+                        400, "COHORT_SYMBOL_FORWARD_QUERY_INVALID", str(error)
+                    ) from error
+                self._send_json(200, {"ok": True, **result})
+                return
             if parsed.path == "/api/preview/sector-change-context":
                 values = _query(self.path, {"target_session", "source_package_id"})
                 if "target_session" not in values:
@@ -5806,6 +5914,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 successor_sessions = tuple(
                     day for day in calendar_sessions if target < day <= research_cutoff
                 )
+                horizon_due_sessions = tuple(
+                    day for day in calendar_sessions if day > target
+                )[:20]
                 from stock_a.storage.postgres.source_launch_watch_evidence import (
                     read_source_seed_t1_outcomes,
                 )
@@ -5874,6 +5985,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         successor_sessions=tuple(
                             day for day in calendar if target < day <= research_cutoff
                         ),
+                        horizon_due_sessions=tuple(
+                            day for day in calendar if day > target
+                        )[:20],
                     )
                     if target in calendar
                     else {

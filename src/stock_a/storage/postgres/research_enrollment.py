@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import date
+from fractions import Fraction
 from typing import Any, Mapping, Sequence
 from urllib.parse import unquote
 
@@ -1031,8 +1032,9 @@ def read_enrollment_followups(
     cutoff: date,
     enrollment_ids: list[int],
     successor_sessions: tuple[date, ...],
+    horizon_due_sessions: tuple[date, ...] = (),
 ) -> dict[int, dict[str, Any]]:
-    """校验登记锚定目标后，按至多20个官方后继会话读取同规则事实。"""
+    """有界读取登记的逐会话状态和精确T+1/T+3/T+5来源路径。"""
     if (
         type(target) is not date
         or type(cutoff) is not date
@@ -1045,6 +1047,9 @@ def read_enrollment_followups(
             for day in successor_sessions
         )
         or tuple(sorted(set(successor_sessions))) != successor_sessions
+        or len(horizon_due_sessions) > 20
+        or any(type(day) is not date or day <= target for day in horizon_due_sessions)
+        or tuple(sorted(set(horizon_due_sessions))) != horizon_due_sessions
     ):
         raise ValueError("研究登记后继读取范围无效")
     if not enrollment_ids:
@@ -1066,10 +1071,10 @@ def read_enrollment_followups(
                       e.d0_fact_id IS NOT NULL,e.rule_fact_id IS NOT NULL,
                       COALESCE(d.source_package_id,r.source_package_id),
                       COALESCE(d.target_capture_id,r.source_capture_id),
-                      r.id,r.source_symbol,r.rule_id,r.state,r.rule_version,
+                      r.id,COALESCE(d.source_symbol,r.source_symbol),r.rule_id,r.state,r.rule_version,
                       r.profile_revision,r.history_session_count,
                       r.d1_history_session_count,r.event_window_start,
-                      r.calendar_revision,r.scope
+                      COALESCE(d.calendar_revision,r.calendar_revision),r.scope
                FROM source_research_enrollments e
                LEFT JOIN source_d0_launch_day_facts d ON d.id=e.d0_fact_id
                LEFT JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
@@ -1140,6 +1145,70 @@ def read_enrollment_followups(
                 (enrollment_ids, list(selected)),
             )
             rule_rows = list(cursor.fetchall())
+
+        forward_due_by_horizon = {
+            horizon: (
+                horizon_due_sessions[horizon - 1]
+                if len(horizon_due_sessions) >= horizon
+                else None
+            )
+            for horizon in (1, 3, 5)
+        }
+        forward_rows_by_key: dict[tuple[int, str, int], list[tuple[Any, ...]]] = {}
+        from stock_a.storage.postgres.research_facts import PATH_VERSION
+
+        for package in {
+            anchor["package"]
+            for anchor in anchors_by_id.values()
+            if anchor["package"] is not None
+        }:
+            package_anchors = [
+                (enrollment_id, anchor)
+                for enrollment_id, anchor in anchors_by_id.items()
+                if anchor["package"] == package
+                and anchor["capture"] is not None
+                and anchor["source_symbol"] is not None
+            ]
+            if not package_anchors:
+                continue
+            captures = sorted({anchor["capture"] for _, anchor in package_anchors})
+            symbols = sorted({anchor["source_symbol"] for _, anchor in package_anchors})
+            due_horizons = [
+                horizon
+                for horizon, endpoint in forward_due_by_horizon.items()
+                if endpoint is not None and endpoint <= cutoff
+            ]
+            if not due_horizons:
+                continue
+            cursor.execute(
+                """SELECT target_session,source_package_id,source_capture_id,
+                          source_symbol,horizon,path_rule_version,calendar_revision,
+                          endpoint_session,maturity,endpoint_quality,endpoint_reason,
+                          endpoint_numerator,endpoint_denominator,path_quality,
+                          path_reasons,price_coordinate,scope
+                   FROM source_forward_path_facts
+                   WHERE target_session=%s AND source_package_id=%s
+                     AND source_capture_id=ANY(%s) AND source_symbol=ANY(%s)
+                     AND horizon=ANY(%s)
+                   ORDER BY source_capture_id,source_symbol,horizon,
+                            path_rule_version,calendar_revision""",
+                (target, package, captures, symbols, due_horizons),
+            )
+            stored_paths = cursor.fetchall()
+            for enrollment_id, anchor in package_anchors:
+                key = (
+                    enrollment_id,
+                    anchor["source_symbol"],
+                    anchor["capture"],
+                )
+                matches = [
+                    row
+                    for row in stored_paths
+                    if row[1] == package
+                    and row[2] == anchor["capture"]
+                    and row[3] == anchor["source_symbol"]
+                ]
+                forward_rows_by_key[key] = matches
     if invalid_anchor_scope:
         raise ValueError("研究登记父事实与请求目标会话不一致，拒绝跨日期附着")
     if not successor_sessions:
@@ -1165,6 +1234,19 @@ def read_enrollment_followups(
                 ),
                 "calendar_revision": anchors_by_id[item]["calendar_revision"],
                 "scope": anchors_by_id[item]["scope"],
+                "forward_paths": _enrollment_forward_paths(
+                    anchors_by_id[item],
+                    forward_rows_by_key.get(
+                        (
+                            item,
+                            anchors_by_id[item]["source_symbol"],
+                            anchors_by_id[item]["capture"],
+                        ),
+                        [],
+                    ),
+                    forward_due_by_horizon,
+                    cutoff=cutoff,
+                ),
             }
             for item in enrollment_ids
         }
@@ -1396,6 +1478,15 @@ def read_enrollment_followups(
             **detail,
             "history": history,
             "history_truncated": history_truncated,
+            "forward_paths": _enrollment_forward_paths(
+                anchor,
+                forward_rows_by_key.get(
+                    (enrollment_id, anchor["source_symbol"], anchor["capture"]),
+                    [],
+                ),
+                forward_due_by_horizon,
+                cutoff=cutoff,
+            ),
         }
         if history_truncated:
             detail = {
@@ -1406,3 +1497,128 @@ def read_enrollment_followups(
             }
         output[enrollment_id] = detail
     return output
+
+
+def _enrollment_forward_paths(
+    anchor: Mapping[str, Any],
+    rows: Sequence[tuple[Any, ...]],
+    due_by_horizon: Mapping[int, date | None],
+    *,
+    cutoff: date,
+) -> list[dict[str, Any]]:
+    """按登记T0的来源捕获、日历及路径版本投影已到期收益。"""
+    from stock_a.storage.postgres.research_facts import PATH_VERSION
+
+    result = []
+    for horizon in (1, 3, 5):
+        due_session = due_by_horizon[horizon]
+        item: dict[str, Any] = {
+            "horizon": horizon,
+            "due_session": due_session.isoformat() if due_session else None,
+            "status": "UNKNOWN",
+            "reason_codes": [],
+            "path_rule_version": PATH_VERSION,
+            "calendar_revision": anchor.get("calendar_revision"),
+            "price_coordinate": "RAW_UNADJUSTED",
+            "scope": "NON_PIT_EXPLORATORY",
+            "endpoint_quality": "UNKNOWN",
+            "path_quality": "UNKNOWN",
+        }
+        if due_session is None:
+            item["reason_codes"] = ["OFFICIAL_HORIZON_SESSION_UNAVAILABLE"]
+        elif due_session > cutoff:
+            item.update(
+                status="NOT_DUE",
+                reason_codes=["WAITING_FOR_FUTURE_OFFICIAL_SESSION"],
+            )
+        else:
+            candidates = [row for row in rows if row[4] == horizon]
+            exact = [
+                row
+                for row in candidates
+                if row[5] == PATH_VERSION and row[6] == anchor.get("calendar_revision")
+            ]
+            if len(exact) != 1:
+                if exact or candidates:
+                    item["reason_codes"] = [
+                        "FORWARD_PATH_KEY_AMBIGUOUS"
+                        if exact
+                        else "FORWARD_PATH_VERSION_OR_CALENDAR_MISMATCH"
+                    ]
+                else:
+                    item.update(
+                        status="NOT_COMPUTED",
+                        reason_codes=["FORWARD_PATH_FACT_NOT_SAVED"],
+                    )
+            else:
+                row = exact[0]
+                (
+                    _target,
+                    _package,
+                    capture_id,
+                    symbol,
+                    _horizon,
+                    path_version,
+                    calendar_revision,
+                    endpoint_session,
+                    maturity,
+                    endpoint_quality,
+                    endpoint_reason,
+                    numerator,
+                    denominator,
+                    path_quality,
+                    path_reasons,
+                    price_coordinate,
+                    scope,
+                ) = row
+                valid_key = (
+                    capture_id == anchor.get("capture")
+                    and symbol == anchor.get("source_symbol")
+                    and endpoint_session == due_session
+                    and price_coordinate == "RAW_UNADJUSTED"
+                    and scope == "NON_PIT_EXPLORATORY"
+                )
+                reason_codes = list(path_reasons or [])
+                if endpoint_reason:
+                    reason_codes.insert(0, endpoint_reason)
+                if not valid_key:
+                    item["reason_codes"] = ["FORWARD_PATH_SCOPE_MISMATCH"]
+                else:
+                    observed = (
+                        maturity == "ENDPOINT_OBSERVED"
+                        and endpoint_quality == "OBSERVED"
+                        and numerator is not None
+                        and denominator is not None
+                        and denominator > 0
+                    )
+                    item.update(
+                        status="OBSERVED" if observed else "UNKNOWN",
+                        maturity=maturity,
+                        endpoint_quality=endpoint_quality,
+                        endpoint_reason=endpoint_reason,
+                        endpoint_numerator=(
+                            str(numerator) if numerator is not None else None
+                        ),
+                        endpoint_denominator=(
+                            str(denominator) if denominator is not None else None
+                        ),
+                        endpoint_return=(
+                            str(Fraction(int(numerator), int(denominator)))
+                            if observed
+                            else None
+                        ),
+                        path_quality=path_quality,
+                        reason_codes=list(dict.fromkeys(reason_codes)),
+                        path_rule_version=path_version,
+                        calendar_revision=calendar_revision,
+                        price_coordinate=price_coordinate,
+                        scope=scope,
+                    )
+                    if not observed and not item["reason_codes"]:
+                        item["reason_codes"] = [
+                            "FORWARD_ENDPOINT_NOT_OBSERVED"
+                            if maturity == "ENDPOINT_OBSERVED"
+                            else "FORWARD_PATH_MATURITY_MISMATCH"
+                        ]
+        result.append(item)
+    return result

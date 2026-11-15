@@ -221,21 +221,55 @@ function enrollmentFollowupHistoryDetails(entry) {
         `${statusLabels[followup.status] || followup.status || "未计算"} · ${reasonLabels[followup.reason] || followup.reason || "尚无后继事实"} · 暂无已到期后继会话。`,
       ),
     );
-    return details;
+  } else {
+    const rows = node("ul");
+    for (const item of history) {
+      const status = statusLabels[item.status] || item.status || "未知";
+      const reason = reasonLabels[item.reason] || item.reason || "原因未记录";
+      const state = item.state ? ` · 规则状态 ${item.state}` : "";
+      rows.append(
+        node(
+          "li",
+          `${item.session || "日期未知"} · ${status}（${item.status || "UNKNOWN"}） · ${reason}${state}`,
+        ),
+      );
+    }
+    details.append(rows);
   }
-  const rows = node("ul");
-  for (const item of history) {
-    const status = statusLabels[item.status] || item.status || "未知";
-    const reason = reasonLabels[item.reason] || item.reason || "原因未记录";
-    const state = item.state ? ` · 规则状态 ${item.state}` : "";
-    rows.append(
-      node(
-        "li",
-        `${item.session || "日期未知"} · ${status}（${item.status || "UNKNOWN"}） · ${reason}${state}`,
-      ),
+  const forwardPaths = Array.isArray(followup.forward_paths)
+    ? followup.forward_paths
+    : [];
+  details.append(node("strong", "同一登记 T0 的来源级后继价格"));
+  if (forwardPaths.length) {
+    const pathRows = node("ul");
+    const forwardStatusLabels = {
+      OBSERVED: "已观察到期端点",
+      UNKNOWN: "UNKNOWN",
+      NOT_DUE: "未到期",
+      NOT_COMPUTED: "未计算",
+    };
+    for (const path of forwardPaths) {
+      const value =
+        path.status === "OBSERVED"
+          ? exactPercentMetric({
+              quality: path.endpoint_quality,
+              numerator: path.endpoint_numerator,
+              denominator: path.endpoint_denominator,
+            })
+          : `${forwardStatusLabels[path.status] || path.status || "UNKNOWN"}（${(path.reason_codes || []).join("、") || "无原因码"}）`;
+      pathRows.append(
+        node(
+          "li",
+          `T+${path.horizon} ${path.due_session || "到期会话未知"} · ${forwardStatusLabels[path.status] || path.status || "UNKNOWN"} · RAW_UNADJUSTED 收盘变化 ${value} · 端点 ${path.endpoint_quality || "UNKNOWN"} · 路径 ${path.path_quality || "UNKNOWN"}${path.maturity ? ` · ${path.maturity}` : ""}${path.reason_codes?.length ? ` · ${path.reason_codes.join("、")}` : ""} · ${path.path_rule_version || "UNKNOWN_PATH_VERSION"} / 日历 ${path.calendar_revision || "UNKNOWN"}`,
+        ),
+      );
+    }
+    details.append(pathRows);
+  } else {
+    details.append(
+      node("p", "T+1/T+3/T+5 后继路径未读取：官方日历键或来源捕获不可用。"),
     );
   }
-  details.append(rows);
   if (followup.history_truncated) {
     details.append(
       node("p", "仅列出最早的 20 个官方后继会话；更远窗口未在本次读取。"),
@@ -1225,6 +1259,8 @@ function invalidateDate() {
     "marketResult",
     "diagnosticResult",
     "cohortSummary",
+    "cohortDateComparison",
+    "cohortSymbolForward",
     "cohortRows",
     "focusStockResult",
     "focusAutoRows",
@@ -3967,6 +4003,99 @@ function detailRows(container, entries) {
     container.append(p);
   }
 }
+function cohortGroupLabel(state) {
+  return (
+    { TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[state] || state
+  );
+}
+function renderCohortDateComparison(result) {
+  const root = $("cohortDateComparison");
+  root.replaceChildren();
+  root.append(
+    node("h3", "跨 T0 日期描述对照"),
+    node(
+      "p",
+      `${result?.rule || "UNKNOWN_RULE"} · ${result?.rule_version || "UNKNOWN_RULE_VERSION"} · T+${result?.horizon ?? "?"} · ${result?.path_rule_version || "UNKNOWN_PATH_VERSION"} · ${result?.price_coordinate || "UNKNOWN"} · ${result?.scope || "UNKNOWN"}`,
+    ),
+    node(
+      "p",
+      `${result?.comparison_status || "UNKNOWN"} · 已到期独立 T0 日期 ${format(result?.independent_t0_date_count)}。逐日展示 MATCH / NO_MATCH / UNKNOWN 与覆盖质量；不把股票数当独立日期，不计算跨日胜率、显著性或因果效果。`,
+    ),
+  );
+  if (result?.status !== "AVAILABLE" || !Array.isArray(result.dates)) {
+    root.append(
+      node(
+        "p",
+        `${result?.status || "NO_STORED_FACT"} · 没有可读取的完整冻结日期摘要。`,
+      ),
+    );
+    return;
+  }
+  for (const item of result.dates) {
+    const details = node("details", null, "evidence-details");
+    details.append(
+      node(
+        "summary",
+        `${item.target_session} · ${item.status} · 分母 ${format(item.source_pool_count)} · 捕获 ${item.source_capture_id ?? "UNKNOWN"} · Profile ${item.profile_revision || "UNKNOWN"} · 日历 ${item.calendar_revision || "UNKNOWN"}`,
+      ),
+    );
+    if (item.status !== "AVAILABLE") {
+      details.append(
+        node(
+          "p",
+          `${(item.reason_codes || []).join("、") || "该日没有可比较的唯一完整 T0 键"}；此日期未进入已到期比较。`,
+        ),
+      );
+    }
+    for (const group of item.groups || []) {
+      details.append(
+        node(
+          "p",
+          `${group.group} · 分母 ${format(group.member_count)} · 有价 ${format(group.evaluable_count)} / 未知 ${format(group.unknown_count)} · 正/非正 ${format(group.positive_count)}/${format(group.non_positive_count)} · 中位 ${formatCohortMedian(group.median)} · 到期 ${JSON.stringify(group.maturity)} · 路径质量 ${JSON.stringify(group.path_quality)} · 不可评价原因 ${JSON.stringify(group.unevaluable_reasons)}`,
+        ),
+      );
+    }
+    root.append(details);
+  }
+}
+function renderCohortSymbolForward(result) {
+  const root = $("cohortSymbolForward");
+  root.replaceChildren();
+  root.append(node("h3", "所选代码同一 T0 的 T+1 / T+3 / T+5"));
+  if (result?.status !== "AVAILABLE") {
+    root.append(
+      node(
+        "p",
+        `${result?.status || "UNKNOWN"} · ${(result?.reason_codes || []).join("、") || "没有精确T0规则事实"}`,
+      ),
+    );
+    return;
+  }
+  root.append(
+    node(
+      "p",
+      `${result.target_session} · ${result.source_symbol || "UNKNOWN_SYMBOL"} · ${cohortGroupLabel(result.rule_state)} · 规则事实 #${result.rule_fact_id} · 捕获 ${result.source_capture_id} · 日历 ${result.calendar_revision} · RAW_UNADJUSTED / NON_PIT_EXPLORATORY`,
+    ),
+  );
+  const rows = node("ul");
+  for (const path of result.paths || []) {
+    const value =
+      path.status === "OBSERVED"
+        ? exactPercentMetric({
+            quality: path.endpoint_quality,
+            numerator: path.endpoint_numerator,
+            denominator: path.endpoint_denominator,
+          })
+        : `${path.status || "UNKNOWN"}（${(path.reason_codes || []).join("、") || "无原因码"}）`;
+    rows.append(
+      node(
+        "li",
+        `T+${path.horizon} 到期 ${path.due_session || "未知"} · ${path.status || "UNKNOWN"} · 收盘变化 ${value} · 端点 ${path.endpoint_quality || "UNKNOWN"} · 路径 ${path.path_quality || "UNKNOWN"}${path.maturity ? ` · ${path.maturity}` : ""}${path.path_reasons?.length ? ` · ${path.path_reasons.join("、")}` : ""} · ${path.path_rule_version || "UNKNOWN"} / ${path.calendar_revision || "UNKNOWN_CALENDAR"}`,
+      ),
+    );
+  }
+  root.append(rows);
+}
 async function loadExtra(page) {
   const token = ++extraRequest;
   const c = state.selected;
@@ -3985,6 +4114,8 @@ async function loadExtra(page) {
       $("cohortKey").replaceChildren();
       $("cohortKey").disabled = true;
       $("cohortSummary").replaceChildren();
+      $("cohortDateComparison").replaceChildren();
+      $("cohortSymbolForward").replaceChildren();
       $("cohortRows").replaceChildren();
       $("focusStockResult").replaceChildren();
       $("focusAutoRows").replaceChildren();
@@ -4004,6 +4135,8 @@ async function loadExtra(page) {
     $("cohortKey").disabled = true;
     $("cohortKey").replaceChildren();
     $("cohortSummary").replaceChildren();
+    $("cohortDateComparison").replaceChildren();
+    $("cohortSymbolForward").replaceChildren();
     $("cohortRows").replaceChildren();
     $("cohortPrev").disabled = $("cohortNext").disabled = true;
     message("cohortPage", "—");
@@ -4207,6 +4340,8 @@ async function readCohort() {
     key = JSON.parse(raw);
   message("focusStatus", "正在读取冻结研究…");
   $("cohortSummary").replaceChildren();
+  $("cohortDateComparison").replaceChildren();
+  $("cohortSymbolForward").replaceChildren();
   $("cohortRows").replaceChildren();
   try {
     const resolved = stockCode
@@ -4228,6 +4363,49 @@ async function readCohort() {
     if (symbol) query.symbol = symbol;
     const d = await api(`/api/product/cohort?${new URLSearchParams(query)}`);
     if (token !== cohortRequest || activePage !== "focus") return;
+    try {
+      const comparisonQuery = {
+        source_package_id: c.source_package_id,
+        rule: key.rule,
+        horizon: $("cohortHorizon").value,
+      };
+      const comparison = await api(
+        `/api/product/cohort-date-comparison?${new URLSearchParams(comparisonQuery)}`,
+      );
+      if (token !== cohortRequest || activePage !== "focus") return;
+      renderCohortDateComparison(comparison);
+    } catch (error) {
+      if (token === cohortRequest && activePage === "focus")
+        $("cohortDateComparison").replaceChildren(
+          node("h3", "跨 T0 日期描述对照"),
+          node("p", `读取失败：${error.message}`),
+        );
+    }
+    if (symbol) {
+      try {
+        const forwardQuery = {
+          target_session: c.target_session,
+          source_package_id: c.source_package_id,
+          profile_revision: key.profile_revision,
+          history: key.history,
+          d1_history: key.d1_history,
+          window: key.window,
+          rule: key.rule,
+          symbol,
+        };
+        const forward = await api(
+          `/api/product/cohort-symbol-forward?${new URLSearchParams(forwardQuery)}`,
+        );
+        if (token !== cohortRequest || activePage !== "focus") return;
+        renderCohortSymbolForward(forward);
+      } catch (error) {
+        if (token === cohortRequest && activePage === "focus")
+          $("cohortSymbolForward").replaceChildren(
+            node("h3", "所选代码同一 T0 的 T+1 / T+3 / T+5"),
+            node("p", `读取失败：${error.message}`),
+          );
+      }
+    }
     if (d.storage_status === "NO_STORED_FACT") {
       message(
         "focusStatus",
@@ -4255,14 +4433,14 @@ async function readCohort() {
         ].join("；"),
       ]),
       [
-        "所选代码后继事实",
+        "所选代码冻结线触及诊断",
         d.frozen_candidate_followup
-          ? `${displayStockTitle(d.frozen_candidate_followup)} · ${d.frozen_candidate_followup.maturity} · 路径 ${d.frozen_candidate_followup.path_quality} · 收盘变化 ${format(d.frozen_candidate_followup.endpoint?.raw_close_relative_change?.value)} · 首次触及 ${d.frozen_candidate_followup.first_touch_status}`
-          : "未选择来源代码",
+          ? `${displayStockTitle(d.frozen_candidate_followup)} · ${d.frozen_candidate_followup.maturity} · 线触及质量 ${d.frozen_candidate_followup.path_quality} · 首次触及 ${d.frozen_candidate_followup.first_touch_status}；T+1/T+3/T+5收盘路径见下方精确来源事实。`
+          : "未选择来源代码；T+1/T+3/T+5按已存路径读取。",
       ],
       ...(d.selected_rules || []).map((fact) => [
         `所选代码 · ${fact.rule_id}`,
-        `${{ TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[fact.state] || fact.state} · ${format(fact.reasons)} · ${fact.enrollment ? `登记 #${fact.enrollment.id} ${fact.enrollment.kind} / ${fact.enrollment.reason}` : "NO_STORED_FACT（无该规则登记）"} · 后继 ${d.frozen_candidate_followup?.maturity || "NOT_COMPUTED"}`,
+        `${{ TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[fact.state] || fact.state} · ${format(fact.reasons)} · ${fact.enrollment ? `登记 #${fact.enrollment.id} ${fact.enrollment.kind} / ${fact.enrollment.reason}` : "NO_STORED_FACT（无该规则登记）"} · 冻结线触及诊断 ${d.frozen_candidate_followup?.maturity || "NOT_COMPUTED"}；价格后继见下方`,
       ]),
       ...(!d.due
         ? [
@@ -4443,6 +4621,8 @@ for (const id of ["cohortKey", "cohortHorizon", "cohortSymbol"]) {
     ++cohortRequest;
     ++focusStockRequest;
     $("cohortSummary").replaceChildren();
+    $("cohortDateComparison").replaceChildren();
+    $("cohortSymbolForward").replaceChildren();
     $("cohortRows").replaceChildren();
     $("cohortPrev").disabled = $("cohortNext").disabled = true;
     message("cohortPage", "—");
