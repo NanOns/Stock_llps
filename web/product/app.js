@@ -1814,6 +1814,175 @@ function missingD0Kinds() {
   return state.d0Result?.membership_status?.missing_membership_kinds || [];
 }
 
+function renderPulseCohortSummary(comparison) {
+  const root = $("pulseCohortSummary");
+  root.replaceChildren();
+  root.hidden = true;
+  if (!comparison) return;
+
+  root.hidden = false;
+  root.append(node("h3", "同一T0板块分组后继观察"));
+  root.append(
+    node(
+      "p",
+      "仅统计本页T0与同类板块关系；OBSERVED收益只来自完整固定成员篮。跨日期、行业与概念不合并。NON_PIT、RAW_UNADJUSTED；不表示预测能力或正式Rotation。",
+      "muted",
+    ),
+  );
+  if (comparison.status !== "AVAILABLE") {
+    root.append(
+      node(
+        "p",
+        `分组结果 ${comparison.status || "NOT_COMPUTED"} · ${(comparison.reason_codes || []).join("、") || "PG中尚无完整分组事实"}`,
+        "status-line",
+      ),
+    );
+  }
+
+  const stateLabels = {
+    TRUE: "T0 PULSE TRUE",
+    FALSE: "T0 PULSE FALSE",
+    UNKNOWN: "T0 PULSE UNKNOWN",
+    PULSE_APPEARED: "PULSE_APPEARED 新现",
+    PULSE_PERSISTED: "PULSE_PERSISTED 持续",
+    PULSE_CEASED: "PULSE_CEASED 消失",
+    PULSE_NOT_PRESENT_BOTH: "PULSE_NOT_PRESENT_BOTH",
+    PULSE_TRANSITION_UNKNOWN: "PULSE_TRANSITION_UNKNOWN",
+    NO_STORED_TRANSITION: "NO_STORED_TRANSITION（不推断新现）",
+  };
+  const axisStates = {
+    PULSE_STATE: ["TRUE", "FALSE", "UNKNOWN"],
+    ADJACENT_TRANSITION: [
+      "PULSE_APPEARED",
+      "PULSE_PERSISTED",
+      "PULSE_CEASED",
+      "PULSE_NOT_PRESENT_BOTH",
+      "PULSE_TRANSITION_UNKNOWN",
+      "NO_STORED_TRANSITION",
+    ],
+  };
+  const countText = (counts) =>
+    `OBSERVED/UNKNOWN/NOT_COMPUTED/NOT_DUE/INCOMPLETE ${counts.OBSERVED ?? 0}/${counts.UNKNOWN ?? 0}/${counts.NOT_COMPUTED ?? 0}/${counts.NOT_DUE ?? 0}/${counts.INCOMPLETE ?? 0}`;
+  const percentText = (value) =>
+    value === null || value === undefined ? "UNKNOWN" : `${value}%`;
+  const exactPercent = (value) => {
+    if (!value) return "";
+    const [numerator, denominator = "1"] = String(value).split("/");
+    return `${numerator}/${denominator}%`;
+  };
+
+  for (const [kind, kindSummary] of Object.entries(comparison.by_kind || {})) {
+    const section = node("section", undefined, "pulse-cohort-kind");
+    section.append(
+      node(
+        "h4",
+        `${kind === "INDUSTRY" ? "行业" : "概念"} · T0完整分母 ${kindSummary.expected_board_count ?? "UNKNOWN"} · ${kindSummary.status}`,
+      ),
+    );
+    for (const [axis, stateList] of Object.entries(axisStates)) {
+      const heading = node(
+        "h5",
+        axis === "PULSE_STATE" ? "按T0 PULSE三态" : "按已存相邻变化",
+      );
+      section.append(heading);
+      const table = node("table", undefined, "pulse-cohort-table");
+      const thead = node("thead");
+      const header = node("tr");
+      for (const label of ["T0分组", "完整组分母", "T+1", "T+3", "T+5"])
+        header.append(node("th", label));
+      thead.append(header);
+      table.append(thead);
+      const tbody = node("tbody");
+      for (const cohortState of stateList) {
+        const row = node("tr");
+        row.append(node("th", stateLabels[cohortState] || cohortState));
+        const firstHorizon = kindSummary.horizons?.[0];
+        const firstGroup = firstHorizon?.cohorts?.[axis]?.[cohortState];
+        row.append(
+          node("td", firstGroup?.total_board_relations ?? "NOT_COMPUTED"),
+        );
+        for (const horizon of [1, 3, 5]) {
+          const horizonResult = kindSummary.horizons?.find(
+            (item) => item.horizon_sessions === horizon,
+          );
+          const group = horizonResult?.cohorts?.[axis]?.[cohortState];
+          const cell = node("td", undefined, "pulse-cohort-result");
+          if (!group) {
+            cell.append(node("strong", "NOT_COMPUTED"));
+            row.append(cell);
+            continue;
+          }
+          const counts = group.outcome_status_counts || {};
+          const distribution = group.distribution || {};
+          const coverage = group.complete_basket_coverage || {};
+          const memberQuality = group.fixed_member_quality || {};
+          cell.append(
+            node("strong", group.status || "UNKNOWN"),
+            node("small", countText(counts)),
+            node(
+              "small",
+              `完整篮覆盖 ${coverage.observed_board_relations ?? 0}/${coverage.all_board_relations ?? 0}（${percentText(coverage.percent_4dp)}）`,
+            ),
+          );
+          if (distribution.sample_count > 0) {
+            cell.append(
+              node(
+                "small",
+                `OBSERVED中位 ${distribution.median_return_percent_4dp}%（精确 ${exactPercent(distribution.median_return_percent_exact)}）；正/非正 ${distribution.positive_board_count}/${distribution.nonpositive_board_count}`,
+              ),
+            );
+          } else {
+            cell.append(node("small", "无OBSERVED收益样本；不填零收益"));
+          }
+          if (memberQuality.evaluable_fixed_member_denominator_sum > 0) {
+            cell.append(
+              node(
+                "small",
+                `固定成员报价 ${memberQuality.observed_member_count_sum}/${memberQuality.evaluable_fixed_member_denominator_sum}（${percentText(memberQuality.coverage_percent_4dp)}）；固定篮成员总分母 ${memberQuality.fixed_member_denominator_sum}`,
+              ),
+            );
+          } else {
+            cell.append(
+              node(
+                "small",
+                `固定篮成员总分母 ${memberQuality.fixed_member_denominator_sum ?? 0}；报价质量 ${counts.NOT_DUE ? "NOT_DUE" : "NOT_COMPUTED"}`,
+              ),
+            );
+          }
+          const reasons = group.reason_counts || [];
+          if (reasons.length) {
+            const details = node("details", undefined, "pulse-cohort-reasons");
+            details.append(
+              node("summary", `失败/分组原因 ${reasons.length} 项`),
+            );
+            for (const reason of reasons) {
+              details.append(
+                node(
+                  "small",
+                  `${reason.reason_scope}/${reason.quality_status} · ${reason.reason_code} × ${reason.board_relation_count}`,
+                ),
+              );
+            }
+            cell.append(details);
+          }
+          row.append(cell);
+        }
+        tbody.append(row);
+      }
+      table.append(tbody);
+      section.append(table);
+    }
+    root.append(section);
+  }
+  root.append(
+    node(
+      "p",
+      "板块成员可能跨板重叠；本组为当前T0的NON_PIT描述性回看，不构成足量独立日期预测验证。价格缺失按固定篮保留 UNKNOWN。",
+      "muted pulse-cohort-caution",
+    ),
+  );
+}
+
 function renderD0Boards() {
   const rows = $("d0BoardRows");
   rows.replaceChildren();
@@ -1828,6 +1997,9 @@ function renderD0Boards() {
     ? state.d0PulseDirectory
     : savedPulseDirectory;
   const pulseOnly = explicitPulseMode || fallbackPulseMode;
+  renderPulseCohortSummary(
+    explicitPulseMode ? pulseDirectory?.cohort_comparison : null,
+  );
   $("viewD0Boards").setAttribute("aria-pressed", String(!pulseOnly));
   $("viewPulseBoards").setAttribute("aria-pressed", String(pulseOnly));
   $("viewD0Boards").className = pulseOnly ? "button subtle" : "button primary";
@@ -3043,6 +3215,9 @@ async function openD0Board(board, offset = 0) {
     let result;
     if (board.pulse_followup_only) {
       const comparison =
+        state.d0PulseDirectory?.cohort_comparison?.by_kind?.[
+          board.board_kind
+        ] ??
         state.d0Result?.pulse_followup_directory?.comparison?.[
           board.board_kind
         ];

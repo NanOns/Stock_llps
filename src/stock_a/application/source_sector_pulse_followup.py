@@ -185,69 +185,64 @@ def run_source_sector_pulse_followup_day(
                     "outcome": outcome,
                 }
             )
-    if outcomes:
-        persistence = persist_source_sector_pulse_followups(
-            config,
-            context=context,
-            outcomes=outcomes,
-            calendar_identity=calendar_identity,
+    persistence = persist_source_sector_pulse_followups(
+        config,
+        context=context,
+        outcomes=outcomes,
+        horizon_targets=all_targets,
+        calendar_identity=calendar_identity,
+    )
+    readback = read_source_sector_pulse_followups(
+        config,
+        pulse_day=_readback_pulse_day(context),
+        research_cutoff=research_cutoff,
+        horizon_targets=all_targets,
+        calendar_identity=calendar_identity,
+        target_package_ids={
+            h: v["source_package_id"]
+            for h, v in context["target_source_versions"].items()
+        },
+    )
+    for item in outcomes:
+        fact = (
+            readback.get("by_kind", {})
+            .get(item["board_kind"], {})
+            .get("facts", {})
+            .get(item["board_native_id"], {})
         )
-        readback = read_source_sector_pulse_followups(
-            config,
-            pulse_day=_readback_pulse_day(context),
-            research_cutoff=research_cutoff,
-            horizon_targets=all_targets,
-            calendar_identity=calendar_identity,
-            target_package_ids={
-                h: v["source_package_id"]
-                for h, v in context["target_source_versions"].items()
-            },
+        stored = next(
+            (
+                horizon
+                for horizon in fact.get("horizons", ())
+                if horizon.get("horizon_sessions") == item["horizon_sessions"]
+            ),
+            None,
         )
-        for item in outcomes:
-            fact = (
-                readback.get("by_kind", {})
-                .get(item["board_kind"], {})
-                .get("facts", {})
-                .get(item["board_native_id"], {})
+        expected = item["outcome"]
+        expected_fraction = expected["equal_weight_mean_return"]
+        if (
+            not isinstance(stored, Mapping)
+            or stored.get("status") != expected["outcome_status"]
+            or stored.get("fixed_member_denominator")
+            != expected["fixed_member_denominator"]
+            or stored.get("observed_member_count") != expected["observed_member_count"]
+            or stored.get("unknown_member_count") != expected["unknown_member_count"]
+            or stored.get("equal_weight_return")
+            != (str(expected_fraction) if expected_fraction is not None else None)
+        ):
+            raise SourceSectorPulseFollowupError(
+                "PULSE_FOLLOWUP_CROSS_TRANSACTION_READBACK_MISMATCH",
+                "PG独立事务读回与本次精确后继结果不一致",
             )
-            stored = next(
-                (
-                    horizon
-                    for horizon in fact.get("horizons", ())
-                    if horizon.get("horizon_sessions") == item["horizon_sessions"]
-                ),
-                None,
-            )
-            expected = item["outcome"]
-            expected_fraction = expected["equal_weight_mean_return"]
-            if (
-                not isinstance(stored, Mapping)
-                or stored.get("status") != expected["outcome_status"]
-                or stored.get("fixed_member_denominator")
-                != expected["fixed_member_denominator"]
-                or stored.get("observed_member_count")
-                != expected["observed_member_count"]
-                or stored.get("unknown_member_count")
-                != expected["unknown_member_count"]
-                or stored.get("equal_weight_return")
-                != (str(expected_fraction) if expected_fraction is not None else None)
-            ):
-                raise SourceSectorPulseFollowupError(
-                    "PULSE_FOLLOWUP_CROSS_TRANSACTION_READBACK_MISMATCH",
-                    "提交后独立PG事务读回与离线生产结果不一致",
-                )
-    else:
-        persistence = {
-            "status": "NO_DUE_CLOSED_HORIZONS"
-            if not due_targets
-            else "NO_COMPLETE_HORIZON_TO_PERSIST",
-            "rows_expected": 0,
-            "rows_inserted": 0,
-            "database_write_attempted": False,
-            "ddl_executed": False,
-            "dml_executed": False,
-        }
-        readback = None
+    if any(
+        readback.get("by_kind", {}).get(kind, {}).get("comparison", {}).get("status")
+        != "AVAILABLE"
+        for kind in ("INDUSTRY", "CONCEPT")
+    ):
+        raise SourceSectorPulseFollowupError(
+            "PULSE_COHORT_CROSS_TRANSACTION_READBACK_INCOMPLETE",
+            "PG独立事务未读回完整板块PULSE分组事实",
+        )
     summary = _summaries(outcomes)
     for horizon, target in all_targets.items():
         summary.setdefault(
@@ -267,7 +262,7 @@ def run_source_sector_pulse_followup_day(
                 }
             )
     return {
-        "status": "PERSISTED" if outcomes else persistence["status"],
+        "status": "PERSISTED",
         "target_session": target_session.isoformat(),
         "research_cutoff": research_cutoff.isoformat(),
         "source_package_id": source_package_id,
@@ -276,11 +271,9 @@ def run_source_sector_pulse_followup_day(
         "followup_summaries": summary,
         "incomplete_horizons": incomplete_horizons,
         "persistence": persistence,
-        "independent_transaction_readback": "PASS"
-        if readback is not None
-        else "NOT_RUN",
-        "readback_status": readback.get("status") if readback else None,
-        "readback_saved_through": readback.get("saved_through") if readback else None,
+        "independent_transaction_readback": "PASS",
+        "readback_status": readback.get("status"),
+        "readback_saved_through": readback.get("saved_through"),
         "input": {
             "t0_source_capture_id": context["t0_source_version"]["source_capture_id"],
             "t0_source_package_id": context["t0_source_version"]["source_package_id"],

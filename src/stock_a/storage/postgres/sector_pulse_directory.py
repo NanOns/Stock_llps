@@ -13,6 +13,9 @@ from stock_a.storage.postgres.sector_pulse_facts import (
     _pulse_payload,
     SectorPulsePgError,
 )
+from stock_a.storage.postgres.sector_pulse_cohorts import (
+    read_source_sector_pulse_cohort_groups,
+)
 
 
 def _percent(value: Fraction | None) -> str | None:
@@ -470,6 +473,24 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
                 }
             )
 
+    cohort_comparison = read_source_sector_pulse_cohort_groups(
+        config,
+        target_session=target_session,
+        research_cutoff=research_cutoff,
+        source_package_id=source_package_id,
+        source_capture_id=source_capture_id,
+        profile_revision=profile_revision,
+        snapshot_ids=snapshot_ids,
+        expected_board_counts={
+            kind: partitions[kind]["actual_board_count"]
+            for kind in ("INDUSTRY", "CONCEPT")
+        },
+        calendar_id=calendar_id,
+        calendar_revision=calendar_revision,
+        board_kind=board_kind,
+    )
+    if not partition_complete and cohort_comparison.get("status") == "AVAILABLE":
+        cohort_comparison["status"] = "INCOMPLETE"
     return {
         "status": "AVAILABLE" if partition_complete else "PARTIAL",
         "reason_codes": []
@@ -489,6 +510,7 @@ ORDER BY pulse_fact_id,horizon_sessions,target_session,id""",
         "pulse_state_counts": pulse_state_counts,
         "t1_status_counts": t1_status_counts,
         "partitions": partitions,
+        "cohort_comparison": cohort_comparison,
         "boards": boards,
         "execution": {
             "transaction": "REPEATABLE_READ_READ_ONLY",

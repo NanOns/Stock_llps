@@ -9,6 +9,11 @@ from typing import Any, Mapping, Sequence
 
 from stock_a.storage.postgres import source_raw
 from stock_a.storage.postgres.research_day_facts import _insert_rows, _row_matches
+from stock_a.storage.postgres.sector_pulse_cohorts import (
+    persist_sector_pulse_cohort_rows,
+    prepare_sector_pulse_cohort_rows,
+    read_source_sector_pulse_cohort_groups,
+)
 
 _TABLE = "source_sector_pulse_followup_facts"
 _PULSE_TABLE = "source_sector_cross_period_pulse_facts"
@@ -17,7 +22,6 @@ _PULSE_ALGORITHM = "SOURCE_CROSS_PERIOD_PULSE_R1"
 _KINDS = ("INDUSTRY", "CONCEPT")
 _HORIZONS = (1, 3, 5)
 _PULSE_STATES = ("TRUE", "FALSE", "UNKNOWN")
-_OUTCOME_STATES = ("OBSERVED", "UNKNOWN", "NOT_DUE", "NOT_COMPUTED", "INCOMPLETE")
 _PULSE_COLUMNS = (
     "id",
     "target_session",
@@ -36,6 +40,7 @@ _PULSE_COLUMNS = (
     "research_mode",
     "membership_mode",
     "price_coordinate",
+    "formal_rotation_state",
     "source_time_quality",
     "source_clock_role",
     "source_available_at",
@@ -73,6 +78,20 @@ _KEY = (
     "followup_contract",
     "calendar_id",
     "calendar_revision",
+)
+_TRANSITION_COLUMNS = (
+    "id",
+    "target_pulse_id",
+    "transition_state",
+    "transition_contract",
+    "calendar_id",
+    "calendar_revision",
+    "calculation_status",
+    "research_mode",
+    "price_coordinate",
+    "formal_rotation_state",
+    "previous_reason_codes",
+    "target_reason_codes",
 )
 
 
@@ -177,6 +196,21 @@ def _pulse_rows(
                 f"{kind}的T0 PULSE板块分区不完整",
             )
     return rows
+
+
+def _transition_rows(cursor: Any, pulse_ids: Sequence[int]) -> list[dict[str, Any]]:
+    if not pulse_ids:
+        return []
+    cursor.execute(
+        f"SELECT {', '.join(_TRANSITION_COLUMNS)} "
+        "FROM source_sector_pulse_adjacent_transitions "
+        "WHERE target_pulse_id=ANY(%s::bigint[]) "
+        "ORDER BY target_pulse_id,id",
+        (list(pulse_ids),),
+    )
+    return [
+        dict(zip(_TRANSITION_COLUMNS, row, strict=True)) for row in cursor.fetchall()
+    ]
 
 
 def _source_version(
@@ -297,6 +331,7 @@ def read_source_sector_pulse_followup_inputs(
         pulses = _pulse_rows(
             cursor, t0_session=t0_session, source_package_id=source_package_id
         )
+        transition_rows = _transition_rows(cursor, [row["id"] for row in pulses])
         identity = pulses[0]
         t0_status, t0_source = _source_version(
             cursor, session=t0_session, source_package_id=source_package_id
@@ -420,6 +455,7 @@ GROUP BY c.board_native_id,c.board_name ORDER BY c.board_native_id COLLATE "C"
         "research_cutoff": research_cutoff,
         "source_package_id": source_package_id,
         "pulse_rows": pulses,
+        "transition_rows": transition_rows,
         "pulse_by_board": pulse_by_board,
         "members_by_board": members_by_board,
         "rows_by_symbol": rows_by_symbol,
@@ -535,7 +571,7 @@ def _prepare_rows(
         for pulse in context["pulse_rows"]
         for h in context["target_source_versions"]
     }
-    if seen != expected or not rows:
+    if seen != expected:
         raise SectorPulseFollowupPgError(
             "PULSE_FOLLOWUP_BATCH_INCOMPLETE",
             "离线后继批次未覆盖每个T0板块与每个可用期限",
@@ -563,6 +599,7 @@ def _validate_write_scope(cursor: Any, context: Mapping[str, Any]) -> None:
         "pulse_reason_codes",
         "member_count",
         "source_time_quality",
+        "formal_rotation_state",
         "source_clock_role",
         "source_available_at",
     )
@@ -576,6 +613,16 @@ def _validate_write_scope(cursor: Any, context: Mapping[str, Any]) -> None:
     ):
         raise SectorPulseFollowupPgError(
             "PULSE_FOLLOWUP_T0_CHANGED", "T0 PULSE业务分区在生产期间发生变化"
+        )
+    current_transitions = _transition_rows(cursor, [row["id"] for row in current])
+    expected_transitions = sorted(
+        context.get("transition_rows", ()),
+        key=lambda row: (row["target_pulse_id"], row["id"]),
+    )
+    if current_transitions != expected_transitions:
+        raise SectorPulseFollowupPgError(
+            "PULSE_FOLLOWUP_TRANSITION_CHANGED",
+            "T0板块相邻PULSE父事实在分组计算期间发生变化",
         )
     versions = {context["t0_session"]: context["t0_source_version"]}
     versions.update(
@@ -643,11 +690,18 @@ def persist_source_sector_pulse_followups(
     *,
     context: Mapping[str, Any],
     outcomes: Sequence[Mapping[str, Any]],
+    horizon_targets: Mapping[int, date | None],
     calendar_identity: Mapping[str, str],
 ) -> dict[str, Any]:
     """以一个SERIALIZABLE事务原子写入全部行业、概念与期限结果。"""
     rows = _prepare_rows(
         context=context, outcomes=outcomes, calendar_identity=calendar_identity
+    )
+    cohort_group_rows, cohort_reason_rows = prepare_sector_pulse_cohort_rows(
+        context=context,
+        outcomes=outcomes,
+        horizon_targets=horizon_targets,
+        calendar_identity=calendar_identity,
     )
     calendar_id = _required_text(calendar_identity.get("calendar_id"), "官方日历")
     calendar_revision = _required_text(
@@ -663,10 +717,10 @@ def persist_source_sector_pulse_followups(
         _identity,
     ):
         _validate_write_scope(cursor, context)
-        cursor.execute("SELECT 1 FROM migration_ledger WHERE migration_id=23")
+        cursor.execute("SELECT 1 FROM migration_ledger WHERE migration_id=35")
         if cursor.fetchone() is None:
             raise SectorPulseFollowupPgError(
-                "PULSE_FOLLOWUP_MIGRATION_MISSING", "R06板块PULSE后继结果迁移尚未应用"
+                "PULSE_COHORT_MIGRATION_MISSING", "R07板块PULSE分组统计迁移尚未应用"
             )
         for key, group in sorted(grouped.items()):
             expected = sorted(group, key=lambda row: row[0])
@@ -703,18 +757,35 @@ def persist_source_sector_pulse_followups(
                     "PULSE_FOLLOWUP_TYPED_READBACK_MISMATCH",
                     "同一PG事务中的后继typed事实读回不匹配",
                 )
-    same = bool(already) and all(already)
+        cohort_persistence = persist_sector_pulse_cohort_rows(
+            cursor,
+            context=context,
+            group_rows=cohort_group_rows,
+            reason_rows=cohort_reason_rows,
+            calendar_identity=calendar_identity,
+        )
+    base_same = not rows or (bool(already) and all(already))
+    same = base_same and cohort_persistence["same_input_retry"]
+    any_inserted = (
+        bool(inserted)
+        or bool(cohort_persistence["group_rows_inserted"])
+        or bool(cohort_persistence["reason_rows_inserted"])
+    )
     return {
         "status": "IDEMPOTENT_ALREADY_PRESENT"
         if same
         else "WRITTEN_AND_TYPED_READBACK_VERIFIED",
         "rows_expected": len(rows),
         "rows_inserted": inserted,
+        "cohort_group_rows_expected": cohort_persistence["group_rows_expected"],
+        "cohort_group_rows_inserted": cohort_persistence["group_rows_inserted"],
+        "cohort_reason_rows_expected": cohort_persistence["reason_rows_expected"],
+        "cohort_reason_rows_inserted": cohort_persistence["reason_rows_inserted"],
         "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED" if same else None,
         "transaction": "SERIALIZABLE_ATOMIC_ALL_BOARDS_AND_DUE_HORIZONS",
-        "database_write_attempted": not same,
+        "database_write_attempted": any_inserted,
         "ddl_executed": False,
-        "dml_executed": not same,
+        "dml_executed": any_inserted,
     }
 
 
@@ -772,256 +843,6 @@ def _percent_4dp(value: Fraction) -> str:
                 Decimal("0.0001"), rounding=ROUND_HALF_UP
             )
         )
-
-
-def _followup_cohort_comparison(
-    kind_facts: Mapping[str, Mapping[str, Any]], *, expected_count: int
-) -> dict[str, Any]:
-    """按已绑定PULSE与后继事实形成板块关系级描述性分组。"""
-    horizon_groups = []
-    incomplete_reasons: dict[tuple[int, str], int] = {}
-    for horizon in _HORIZONS:
-        state_groups = {}
-        state_mean_values: dict[str, Fraction] = {}
-        for pulse_state in _PULSE_STATES:
-            items = []
-            for board in kind_facts.values():
-                if board.get("pulse_state") != pulse_state:
-                    continue
-                item = next(
-                    (
-                        row
-                        for row in board.get("horizons", ())
-                        if row.get("horizon_sessions") == horizon
-                    ),
-                    None,
-                )
-                items.append(item)
-
-            counts = {status: 0 for status in _OUTCOME_STATES}
-            unknown_reasons: dict[str, int] = {}
-            incomplete_reason_group: dict[str, int] = {}
-            values: list[Fraction] = []
-            fixed_member_denominator = 0
-            observed_member_count = 0
-            unknown_member_count = 0
-            for item in items:
-                if not isinstance(item, Mapping):
-                    counts["INCOMPLETE"] += 1
-                    reason = "FOLLOWUP_HORIZON_FACT_MISSING"
-                    incomplete_reason_group[reason] = (
-                        incomplete_reason_group.get(reason, 0) + 1
-                    )
-                    incomplete_reasons[(horizon, "FOLLOWUP_HORIZON_FACT_MISSING")] = (
-                        incomplete_reasons.get(
-                            (horizon, "FOLLOWUP_HORIZON_FACT_MISSING"), 0
-                        )
-                        + 1
-                    )
-                    continue
-                status = item.get("status")
-                if status not in counts:
-                    status = "INCOMPLETE"
-                counts[status] += 1
-                denominator = item.get("fixed_member_denominator")
-                if type(denominator) is int and denominator >= 0:
-                    fixed_member_denominator += denominator
-                observed = item.get("observed_member_count")
-                if type(observed) is int and observed >= 0:
-                    observed_member_count += observed
-                unknown = item.get("unknown_member_count")
-                if type(unknown) is int and unknown >= 0:
-                    unknown_member_count += unknown
-                if status == "UNKNOWN":
-                    for reason in set(item.get("reason_codes") or ()):
-                        if isinstance(reason, str) and reason:
-                            unknown_reasons[reason] = unknown_reasons.get(reason, 0) + 1
-                elif status == "INCOMPLETE":
-                    for reason in set(item.get("reason_codes") or ()):
-                        if isinstance(reason, str) and reason:
-                            incomplete_reason_group[reason] = (
-                                incomplete_reason_group.get(reason, 0) + 1
-                            )
-                            key = (horizon, reason)
-                            incomplete_reasons[key] = incomplete_reasons.get(key, 0) + 1
-                if status == "OBSERVED":
-                    try:
-                        exact = Fraction(str(item["equal_weight_return"]))
-                    except (KeyError, ValueError, ZeroDivisionError):
-                        counts["INCOMPLETE"] += 1
-                        counts["OBSERVED"] -= 1
-                        key = (horizon, "FOLLOWUP_EXACT_RETURN_INVALID")
-                        incomplete_reasons[key] = incomplete_reasons.get(key, 0) + 1
-                    else:
-                        values.append(exact)
-
-            total = len(items)
-            observed_count = counts["OBSERVED"]
-            incomplete_count = counts["INCOMPLETE"]
-            if total == 0:
-                status = "NOT_COMPARABLE"
-            elif incomplete_count:
-                status = "INCOMPLETE"
-            elif not observed_count and counts["NOT_DUE"] == total:
-                status = "NOT_DUE"
-            elif not observed_count and counts["NOT_COMPUTED"] == total:
-                status = "NOT_COMPUTED"
-            elif observed_count:
-                status = "AVAILABLE"
-            else:
-                status = "NOT_COMPARABLE"
-
-            distribution = {
-                "status": "NOT_COMPARABLE",
-                "sample_scope": "OBSERVED_BOARD_RELATIONS_ONLY",
-                "numeric_method": "EXACT_FRACTION_THEN_PERCENT_4DP",
-                "sample_count": 0,
-                "mean_return_percent_4dp": None,
-                "median_return_percent_4dp": None,
-                "positive_board_relation_count": None,
-                "nonpositive_board_relation_count": None,
-                "minimum_return_percent_4dp": None,
-                "maximum_return_percent_4dp": None,
-            }
-            if status == "AVAILABLE" and len(values) == observed_count:
-                ordered = sorted(values)
-                middle = len(ordered) // 2
-                median_value = (
-                    ordered[middle]
-                    if len(ordered) % 2
-                    else (ordered[middle - 1] + ordered[middle]) / 2
-                )
-                mean_value = sum(ordered, Fraction()) / len(ordered)
-                state_mean_values[pulse_state] = mean_value
-                distribution.update(
-                    {
-                        "status": "AVAILABLE",
-                        "sample_count": len(ordered),
-                        "mean_return_percent_4dp": _percent_4dp(mean_value),
-                        "median_return_percent_4dp": _percent_4dp(median_value),
-                        "positive_board_relation_count": sum(
-                            value > 0 for value in ordered
-                        ),
-                        "nonpositive_board_relation_count": sum(
-                            value <= 0 for value in ordered
-                        ),
-                        "minimum_return_percent_4dp": _percent_4dp(ordered[0]),
-                        "maximum_return_percent_4dp": _percent_4dp(ordered[-1]),
-                    }
-                )
-
-            coverage_percent = (
-                _percent_4dp(Fraction(observed_count, total)) if total else None
-            )
-            state_groups[pulse_state] = {
-                "status": status,
-                "pulse_state": pulse_state,
-                "total_board_relations": total,
-                "outcome_status_counts": counts,
-                "partition_closed": sum(counts.values()) == total,
-                "complete_basket_coverage": {
-                    "observed_board_relations": observed_count,
-                    "all_board_relations": total,
-                    "percent_4dp": coverage_percent,
-                },
-                "fixed_member_denominator_sum": fixed_member_denominator,
-                "observed_member_count_sum": observed_member_count,
-                "unknown_member_count_sum": unknown_member_count,
-                "unknown_reason_scope": "BOARD_RELATIONS_WITH_REASON; REASONS_MAY_OVERLAP",
-                "unknown_reason_counts": [
-                    {
-                        "reason_code": reason,
-                        "board_relation_count": count,
-                    }
-                    for reason, count in sorted(unknown_reasons.items())
-                ],
-                "incomplete_reason_counts": [
-                    {
-                        "reason_code": reason,
-                        "board_relation_count": count,
-                    }
-                    for reason, count in sorted(incomplete_reason_group.items())
-                ],
-                "distribution": distribution,
-            }
-
-        horizon_total = sum(
-            group["total_board_relations"] for group in state_groups.values()
-        )
-        horizon_groups.append(
-            {
-                "horizon_sessions": horizon,
-                "total_board_relations": horizon_total,
-                "pulse_state_partition_closed": (
-                    horizon_total == expected_count
-                    and all(
-                        group["partition_closed"] for group in state_groups.values()
-                    )
-                ),
-                "true_minus_false_observed_coverage_percentage_points": (
-                    _percent_4dp(
-                        Fraction(
-                            state_groups["TRUE"]["complete_basket_coverage"][
-                                "observed_board_relations"
-                            ],
-                            state_groups["TRUE"]["complete_basket_coverage"][
-                                "all_board_relations"
-                            ],
-                        )
-                        - Fraction(
-                            state_groups["FALSE"]["complete_basket_coverage"][
-                                "observed_board_relations"
-                            ],
-                            state_groups["FALSE"]["complete_basket_coverage"][
-                                "all_board_relations"
-                            ],
-                        )
-                    )
-                    if state_groups["TRUE"]["total_board_relations"]
-                    and state_groups["FALSE"]["total_board_relations"]
-                    else None
-                ),
-                "true_minus_false_mean_return_difference_percentage_points": (
-                    _percent_4dp(state_mean_values["TRUE"] - state_mean_values["FALSE"])
-                    if "TRUE" in state_mean_values and "FALSE" in state_mean_values
-                    else None
-                ),
-                "pulse_states": state_groups,
-            }
-        )
-
-    all_statuses = [
-        group["status"]
-        for item in horizon_groups
-        for group in item["pulse_states"].values()
-    ]
-    overall_status = (
-        "INCOMPLETE"
-        if any(value == "INCOMPLETE" for value in all_statuses)
-        else "AVAILABLE"
-        if any(value == "AVAILABLE" for value in all_statuses)
-        else "NOT_COMPUTED"
-        if any(value == "NOT_COMPUTED" for value in all_statuses)
-        else "NOT_DUE"
-        if any(value == "NOT_DUE" for value in all_statuses)
-        else "NOT_COMPARABLE"
-    )
-    return {
-        "status": overall_status,
-        "scope": "SAME_T0_SOURCE_SNAPSHOT_WINDOW_AND_BOARD_KIND",
-        "unit": "BOARD_RELATION; MEMBERS_MAY_OVERLAP_ACROSS_BOARDS",
-        "research_mode": "NON_PIT_EXPLORATORY",
-        "predictive_validation": "NO_PREDICTIVE_VALIDATION",
-        "reason_code_counts": [
-            {
-                "horizon_sessions": horizon,
-                "reason_code": reason,
-                "board_relation_count": count,
-            }
-            for (horizon, reason), count in sorted(incomplete_reasons.items())
-        ],
-        "horizons": horizon_groups,
-    }
 
 
 def read_source_sector_pulse_followups(
@@ -1095,6 +916,21 @@ def read_source_sector_pulse_followups(
         raise SectorPulseFollowupPgError(
             "PULSE_FOLLOWUP_SNAPSHOT_ID_INVALID", "T0成员快照必须是正BIGINT ID"
         )
+    cohort_summary = read_source_sector_pulse_cohort_groups(
+        config,
+        target_session=t0_session,
+        research_cutoff=research_cutoff,
+        source_package_id=package_id,
+        source_capture_id=capture_id,
+        profile_revision=profile_revision,
+        snapshot_ids=snapshot_ids,
+        expected_board_counts={
+            kind: pulse_day.get("by_kind", {}).get(kind, {}).get("expected_board_count")
+            for kind in _KINDS
+        },
+        calendar_id=calendar_id,
+        calendar_revision=calendar_revision,
+    )
     saved_by_board: dict[str, dict[int, dict[str, Any]]] = {kind: {} for kind in _KINDS}
     ambiguous_results: set[tuple[str, str, int]] = set()
     with source_raw._transaction(config, write=False, statement_timeout_ms=15000) as (
@@ -1290,8 +1126,12 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
                 "expected_board_count": expected_count,
                 "read_board_count": len(kind_facts),
                 "facts": kind_facts,
-                "comparison": _followup_cohort_comparison(
-                    kind_facts, expected_count=expected_count
+                "comparison": cohort_summary.get("by_kind", {}).get(
+                    kind,
+                    {
+                        "status": cohort_summary.get("status", "NOT_COMPUTED"),
+                        "horizons": [],
+                    },
                 ),
             }
     statuses = [groups[kind]["status"] for kind in _KINDS]
