@@ -48,6 +48,7 @@ _MIGRATION_FILES = (
     "0034_source_s2_t1_cohort_stats.sql",
     "0035_r07_sector_pulse_cohort_outcomes.sql",
     "0036_r07_source_enrollment_segments.sql",
+    "0037_r07_rps_pulse_t0_grouped_forward.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -83,6 +84,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R07_S2_T1_SOURCE_COHORT_R1": frozenset({34}),
     "R07_SECTOR_PULSE_COHORT_OUTCOMES_R1": frozenset({35}),
     "R07_SOURCE_FOCUS_ENROLLMENT_SEGMENTS_R1": frozenset({36}),
+    "R07_RPS_PULSE_T0_GROUPED_FORWARD_CONSUMERS_R1": frozenset({37}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -228,6 +230,9 @@ _RELATIONS_BY_MIGRATION_COUNT[35] = _RELATIONS_BY_MIGRATION_COUNT[34] | {
     "source_sector_pulse_cohort_reason_facts",
 }
 _RELATIONS_BY_MIGRATION_COUNT[36] = _RELATIONS_BY_MIGRATION_COUNT[35]
+_RELATIONS_BY_MIGRATION_COUNT[37] = _RELATIONS_BY_MIGRATION_COUNT[36] | {
+    "source_rps_pulse_t0_change_facts",
+}
 
 
 class BindingRefused(Exception):

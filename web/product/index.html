@@ -528,6 +528,50 @@
               </div>
               <div id="focusStockResult"></div>
               <div id="cohortSummary"></div>
+              <section
+                id="cohortRpsPulsePanel"
+                class="cohort-rps-pulse-panel"
+                aria-label="RPS位次变化与板块PULSE后继分组统计"
+              >
+                <h3>同一 T0：RPS 位次变化 × 板块 PULSE 后继结果</h3>
+                <p class="muted">
+                  按当前冻结规则直接读取PG关系事实与已存Forward。关系数、去重股票×板×T0、独立证券和可评价后继分别列示；板块及跨日证券可以重叠。
+                </p>
+                <div class="filters cohort-rps-pulse-filters">
+                  <label for="cohortRpsBoardKind">
+                    板块类型
+                    <select id="cohortRpsBoardKind">
+                      <option value="ALL">全部</option>
+                      <option value="INDUSTRY">行业</option>
+                      <option value="CONCEPT">概念</option>
+                    </select>
+                  </label>
+                  <label for="cohortRpsRuleState">
+                    原规则状态
+                    <select id="cohortRpsRuleState">
+                      <option value="ALL">全部状态</option>
+                      <option value="TRUE">MATCH</option>
+                      <option value="FALSE">NO_MATCH</option>
+                      <option value="UNKNOWN">UNKNOWN</option>
+                    </select>
+                  </label>
+                  <label for="cohortRpsGroup">
+                    RPS × PULSE 分组
+                    <select id="cohortRpsGroup">
+                      <option value="ALL">全部非空组合</option>
+                    </select>
+                  </label>
+                </div>
+                <p id="cohortRpsPulseStatus" role="status">
+                  选择已保存的冻结规则后读取RPS×PULSE关系统计。
+                </p>
+                <div id="cohortRpsPulseSummary"></div>
+                <p class="muted">
+                  历史成员为 CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT，收益为
+                  RAW_UNADJUSTED 描述。T+5独立T0日期不足时固定标记
+                  INSUFFICIENT_INDEPENDENT_DATES；不代表策略胜率或预测有效性。
+                </p>
+              </section>
               <div id="cohortDateComparison"></div>
               <div id="cohortSymbolForward"></div>
               <div id="cohortRows"></div>

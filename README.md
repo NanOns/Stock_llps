@@ -40,6 +40,8 @@ Git只接收业务运行必需内容、需求、设计、正式需求变更和�
 
 单日 `--view cohort` 可计算完整来源池的来源规则和后验路径；显式指定 `--persist-research-facts --persist-research-events` 时，将规则、已到期共享路径和独立D1锚放在同一PG事务中保存，同键异值拒绝。`--view persisted --rule-id 规则 --horizon 期限` 直接读取已存结果；画像修订应使用写入结果中的即时画像修订。`--view persisted-changes` 用 `--before-session` 和 `--before-event-window-start` 比较两个已存T0及当前行业/GN成员快照，非相邻日仅为不同日对照。指定 `--symbol` 可观察冻结线及逐锚结果，附加 `--risk-readiness` 查看可证风险分量和资格缺项。来源级诊断与正式D2、Priority或交易权限相互独立。
 
+`source-research-day --rps-pulse-groups-from-saved --persist` 是单日离线派生入口：必须显式提供T0、研究截止和来源包；只读取PG内相邻Seed、Raw来源目录、已存T0/成员/PULSE/登记事实，不采集行情。它幂等保存每条最新登记×股票×板块关系的RPS5/RPS20并列名次变化和独立质量状态。Focus/Cohort选择冻结规则及板类后，直接聚合该T0已存Forward并展示完整关系分母、正/非正、中位数、覆盖、失败原因与例子；普通GET不遍历跨日全池。成员回看为`CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT`、价格为`RAW_UNADJUSTED`；T+5独立日期不足时显示`INSUFFICIENT_INDEPENDENT_DATES`。
+
 使用 `--view summary` 可在完整来源池计算后查看有已证变化的板块和去重股票，分别最多展示15个板块会话和30只股票，并返回未展示数量。摘要包含原自动观察事件及D0已证转FALSE，后者不改变自动观察组和同源对照。省略 `--horizon` 时不计算后继比较，状态为 `NOT_REQUESTED`；显式指定后仍按原研究路径计算。同一组来源参数下可使用 `--symbol`，或使用 `--board-kind`、`--board-id`、`--rotation-start` 和 `--relative-position` 下钻。展示顺序仅用于描述，并非交易排序；首个请求内会话缺前态，不能推断上升沿。
 
 同时指定精确板块、Rotation窗口与 `--relative-position` 可读取市场和板块跨日原语，以及所选板块内股票的收益、全池RPS、成员中位数和名次变化；加 `--symbol` 可查看未产生观察事件的成员。等值采用中秩，字段分别披露已知与未知成员分母；板块的单日变化与共同成员双端重算分别展示，不构成新阶段或正式资格。后继价格复用本次只读结果，不能反向选择T0。

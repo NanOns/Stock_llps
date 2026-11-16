@@ -91,6 +91,39 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
             raise ValueError("板块数字快照ID只能与 --include-sector-pulse 同时使用")
         sector_snapshot_ids = snapshot_ids if args.include_sector_pulse else None
         config, config_path = load_runtime_config()
+        if args.rps_pulse_groups_from_saved:
+            if (
+                not args.persist
+                or args.start_session
+                or args.static_only
+                or args.t1_forward_from_saved
+                or args.enrollment_from_saved
+                or args.cohort_stats_from_saved
+                or args.t0_early_observations_from_saved
+                or args.d0_launch_reference_only
+                or args.include_sector_pulse
+                or snapshot_ids_supplied
+            ):
+                raise ValueError(
+                    "RPS×PULSE分组仅支持单T0已存事实生产，并须显式指定--persist"
+                )
+            from stock_a.application.source_rps_pulse_groups import (
+                persist_source_rps_pulse_t0_groups_from_saved,
+            )
+
+            report = persist_source_rps_pulse_t0_groups_from_saved(
+                config,
+                target_session=_parse_session_date(args.target_session),
+                research_cutoff=_parse_session_date(args.research_cutoff),
+                source_package_id=args.source_package_id,
+            )
+            report["configuration_path"] = str(config_path)
+            report["ok"] = report.get("status") in {
+                "PERSISTED",
+                "NO_STORED_T0_RELATIONS",
+            }
+            _emit(report, error=not report["ok"])
+            return _EXIT_OK if report["ok"] else _EXIT_UNAVAILABLE
         if args.t1_forward_from_saved:
             if (
                 not args.persist

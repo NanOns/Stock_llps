@@ -182,6 +182,11 @@ def register_commands(commands):
         help="从已存规则和路径事实离线汇总冻结Cohort，不读取价格历史",
     )
     research_day.add_argument(
+        "--rps-pulse-groups-from-saved",
+        action="store_true",
+        help="从已存相邻Seed、T0板块及登记事实生产RPS变化typed关系事实",
+    )
+    research_day.add_argument(
         "--t0-early-observations-from-saved",
         action="store_true",
         help="仅从已存T0、Seed、成员、PULSE及RPS事实生产板内观察typed结果",

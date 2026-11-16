@@ -28,9 +28,17 @@ def read_cohort_page(
     offset,
     limit,
     symbol,
+    rps_board_kind="ALL",
+    rps_scenario="ALL",
+    rps_rule_state="ALL",
+    include_rps_pulse_groups=False,
 ):
     """同一只读快照读取六组完整统计和最多一页的明细。"""
-    with _transaction(config, write=False) as (_, cursor, _):
+    with _transaction(config, write=False, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _,
+    ):
         cursor.execute(
             """SELECT source_capture_id,state,weighting,source_pool_count,member_count,
                       evaluable_count,positive_count,median_numerator,median_denominator,
@@ -143,7 +151,8 @@ def read_cohort_page(
         rules = []
         if symbol:
             cursor.execute(
-                """SELECT r.id,r.rule_id,r.state,r.reasons,e.id,e.enrollment_kind,e.reason_code
+                """SELECT r.id,r.rule_id,r.state,r.reasons,e.id,e.enrollment_kind,
+                          e.reason_code,e.parent_enrollment_id
                    FROM source_rule_evaluations r
                    LEFT JOIN source_research_enrollments e ON e.rule_fact_id=r.id
                    WHERE r.target_session=%s AND r.source_package_id=%s
@@ -172,16 +181,43 @@ def read_cohort_page(
                     "state": state,
                     "reasons": reasons,
                     "enrollment": (
-                        {"id": enrollment_id, "kind": kind, "reason": reason}
+                        {
+                            "id": enrollment_id,
+                            "kind": kind,
+                            "reason": reason,
+                            "parent_enrollment_id": parent_id,
+                        }
                         if enrollment_id is not None
                         else None
                     ),
                 }
-                for fact_id, rule_id, state, reasons, enrollment_id, kind, reason in cursor.fetchall()
+                for fact_id, rule_id, state, reasons, enrollment_id, kind, reason, parent_id in cursor.fetchall()
             ]
             if len(rules) > 9:
                 raise ResearchFactConflict("所选代码的规则事实超过现行九规则范围")
-        return total, groups, rows, rules
+        rps_pulse_groups = None
+        if include_rps_pulse_groups:
+            from stock_a.storage.postgres.source_rps_pulse_groups import (
+                read_rps_pulse_forward_groups_cursor,
+            )
+
+            rps_pulse_groups = read_rps_pulse_forward_groups_cursor(
+                cursor,
+                target=target,
+                research_cutoff=research_cutoff,
+                source_package_id=source_package_id,
+                source_capture_id=next(iter(captures)),
+                profile_revision=profile_revision,
+                history_session_count=history_session_count,
+                d1_history_session_count=d1_history_session_count,
+                event_window_start=event_window_start,
+                calendar_revision=calendar_revision,
+                rule_id=rule,
+                board_kind=rps_board_kind,
+                scenario_id=rps_scenario,
+                rule_state_filter=rps_rule_state,
+            )
+        return total, groups, rows, rules, rps_pulse_groups
 
 
 def read_cohort_date_comparison(

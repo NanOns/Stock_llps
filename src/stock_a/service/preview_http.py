@@ -4263,9 +4263,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "horizon",
                     "offset",
                     "symbol",
+                    "rps_board_kind",
+                    "rps_scenario",
+                    "rps_rule_state",
                 }
                 values = _query(self.path, allowed)
-                required = allowed - {"offset", "symbol"}
+                required = allowed - {
+                    "offset",
+                    "symbol",
+                    "rps_board_kind",
+                    "rps_scenario",
+                    "rps_rule_state",
+                }
                 if not required.issubset(values):
                     raise PreviewHttpError(
                         400, "QUERY_REQUIRED", "须提供完整冻结研究键"
@@ -4279,6 +4288,34 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 if values["horizon"] not in {"1", "3", "5", "10", "20"}:
                     raise PreviewHttpError(
                         400, "HORIZON_INVALID", "后继会话数须为1、3、5、10或20"
+                    )
+                rps_board_kind = values.get("rps_board_kind", "ALL")
+                if rps_board_kind not in {"ALL", "INDUSTRY", "CONCEPT"}:
+                    raise PreviewHttpError(
+                        400,
+                        "COHORT_RPS_BOARD_KIND_INVALID",
+                        "RPS×PULSE分组板块类型须为全部、行业或概念",
+                    )
+                rps_scenario = values.get("rps_scenario", "ALL")
+                if rps_scenario not in {
+                    "ALL",
+                    "DOUBLE_IMPROVED_PULSE_FALSE",
+                    "DOUBLE_IMPROVED_PULSE_TRUE",
+                    "RPS5_UP_RPS20_DOWN_PULSE_TRUE",
+                    "DOUBLE_WORSENED_PULSE_TRUE",
+                    "QUALITY_UNKNOWN",
+                }:
+                    raise PreviewHttpError(
+                        400,
+                        "COHORT_RPS_SCENARIO_INVALID",
+                        "RPS×PULSE分组筛选无效",
+                    )
+                rps_rule_state = values.get("rps_rule_state", "ALL")
+                if rps_rule_state not in {"ALL", "TRUE", "FALSE", "UNKNOWN"}:
+                    raise PreviewHttpError(
+                        400,
+                        "COHORT_RPS_RULE_STATE_INVALID",
+                        "原来源规则状态筛选无效",
                     )
                 try:
                     result = read_persisted_cohort(
@@ -4307,6 +4344,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         offset=_nonnegative_int(values.get("offset", "0"), "offset"),
                         limit=30,
                         symbol=symbol,
+                        rps_board_kind=rps_board_kind,
+                        rps_scenario=rps_scenario,
+                        rps_rule_state=rps_rule_state,
                     )
                 except ResearchFactConflict as error:
                     raise PreviewHttpError(

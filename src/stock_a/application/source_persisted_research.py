@@ -106,6 +106,9 @@ def read_persisted_cohort(
     limit=30,
     symbol=None,
     include_risk=False,
+    rps_board_kind="ALL",
+    rps_scenario="ALL",
+    rps_rule_state="ALL",
 ):
     """精确版本只读；未到期与已到期但未保存的事实分别表达。"""
     if target > research_cutoff or offset < 0 or not 1 <= limit <= 100:
@@ -127,9 +130,19 @@ def read_persisted_cohort(
         calendar_revision=revision,
         horizon=horizon,
         research_cutoff=research_cutoff,
+        rps_board_kind=rps_board_kind,
+        rps_scenario=rps_scenario,
+        rps_rule_state=rps_rule_state,
     )
-    source_pool_count, groups, rows, selected_rules = read_cohort_page(
-        **common, rule=rule, offset=offset, limit=limit, symbol=symbol
+    source_pool_count, groups, rows, selected_rules, rps_pulse_groups = (
+        read_cohort_page(
+            **common,
+            rule=rule,
+            offset=offset,
+            limit=limit,
+            symbol=symbol,
+            include_rps_pulse_groups=True,
+        )
     )
     if include_risk and symbol is None:
         raise ValueError("风险分量需要指定来源代码")
@@ -319,6 +332,7 @@ def read_persisted_cohort(
         "due": due,
         "source_pool_count": source_pool_count,
         "groups": groups,
+        "rps_pulse_groups": rps_pulse_groups,
         "selected_rules": selected_rules,
         "frozen_candidate_followup": followup,
         "frozen_rule_followup": rule_followup,

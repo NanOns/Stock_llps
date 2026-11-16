@@ -1648,6 +1648,7 @@ let cohortRequest = 0;
 let focusStockRequest = 0;
 let focusKeysLoading = false;
 let cohortOffset = 0;
+let cohortRpsPulseData = null;
 let currentStockSymbol = null;
 let currentStockSource = null;
 function gotoPage(page) {
@@ -2744,6 +2745,260 @@ function formatCohortMedian(value) {
     return `${sign}${whole}.${decimal}%（原始比值 ${value}）`;
   } catch {
     return `原始比值 ${value}`;
+  }
+}
+
+function rpsChangeLabel(value) {
+  return (
+    {
+      IMPROVED: "前移",
+      WORSENED: "后退",
+      UNCHANGED: "不变",
+      UNKNOWN: "UNKNOWN",
+      NOT_COMPARABLE: "NOT_COMPARABLE",
+      NOT_COMPUTED: "NOT_COMPUTED",
+    }[value] ||
+    value ||
+    "UNKNOWN"
+  );
+}
+
+function pulseGroupLabel(group) {
+  const board = group.board_kind === "INDUSTRY" ? "行业" : "概念";
+  return `${board} · RPS5 ${rpsChangeLabel(group.rps5_change_state)} × RPS20 ${rpsChangeLabel(group.rps20_change_state)} × PULSE ${group.pulse_status}:${group.pulse_state} · ${cohortGroupLabel(group.rule_state)}`;
+}
+
+const cohortRpsScenarios = [
+  {
+    id: "DOUBLE_IMPROVED_PULSE_FALSE",
+    label: "RPS5/RPS20双前移 · PULSE FALSE",
+    matches: (group) =>
+      group.rps5_change_state === "IMPROVED" &&
+      group.rps20_change_state === "IMPROVED" &&
+      group.pulse_status === "AVAILABLE" &&
+      group.pulse_state === "FALSE",
+  },
+  {
+    id: "DOUBLE_IMPROVED_PULSE_TRUE",
+    label: "RPS5/RPS20双前移 · PULSE TRUE",
+    matches: (group) =>
+      group.rps5_change_state === "IMPROVED" &&
+      group.rps20_change_state === "IMPROVED" &&
+      group.pulse_status === "AVAILABLE" &&
+      group.pulse_state === "TRUE",
+  },
+  {
+    id: "RPS5_UP_RPS20_DOWN_PULSE_TRUE",
+    label: "RPS5前移、RPS20后退 · PULSE TRUE",
+    matches: (group) =>
+      group.rps5_change_state === "IMPROVED" &&
+      group.rps20_change_state === "WORSENED" &&
+      group.pulse_status === "AVAILABLE" &&
+      group.pulse_state === "TRUE",
+  },
+  {
+    id: "DOUBLE_WORSENED_PULSE_TRUE",
+    label: "RPS5/RPS20双后退 · PULSE TRUE",
+    matches: (group) =>
+      group.rps5_change_state === "WORSENED" &&
+      group.rps20_change_state === "WORSENED" &&
+      group.pulse_status === "AVAILABLE" &&
+      group.pulse_state === "TRUE",
+  },
+  {
+    id: "QUALITY_UNKNOWN",
+    label: "不可比 / UNKNOWN / NOT_COMPUTED 质量分母",
+    matches: (group) =>
+      !["IMPROVED", "WORSENED", "UNCHANGED"].includes(
+        group.rps5_change_state,
+      ) ||
+      !["IMPROVED", "WORSENED", "UNCHANGED"].includes(
+        group.rps20_change_state,
+      ) ||
+      group.pulse_status !== "AVAILABLE" ||
+      !["TRUE", "FALSE"].includes(group.pulse_state),
+  },
+];
+
+function appendCohortRpsExamples(list, examples, type) {
+  if (!Array.isArray(examples) || !examples.length) return;
+  for (const example of examples) {
+    const item = node("li");
+    const button = node("button", example.source_symbol, "text-button");
+    button.title = "在当前Focus/Cohort中打开该来源代码";
+    button.addEventListener("click", () => {
+      $("cohortSymbol").value = example.source_symbol.slice(3);
+      cohortOffset = 0;
+      void readCohort();
+    });
+    const detail =
+      type === "return"
+        ? ` · ${example.board_native_id} · ${formatCohortMedian(example.return_fraction)} · ${example.endpoint_session}`
+        : ` · ${example.board_native_id} · ${example.outcome_state} · ${example.endpoint_reason || (example.path_reasons || []).join("、") || "无失败原因"}`;
+    item.append(button, node("span", detail));
+    list.append(item);
+  }
+}
+
+function renderCohortRpsPulse(summary) {
+  const root = $("cohortRpsPulseSummary");
+  const status = $("cohortRpsPulseStatus");
+  const groupSelect = $("cohortRpsGroup");
+  root.replaceChildren();
+  if (!summary) {
+    status.textContent =
+      "NOT_COMPUTED：当前冻结规则没有可读取的RPS×PULSE分组结果。";
+    groupSelect.replaceChildren(new Option("全部非空组合", "ALL"));
+    return;
+  }
+  const priorGroup = groupSelect.value;
+  const groups = Array.isArray(summary.groups) ? summary.groups : [];
+  groupSelect.replaceChildren(new Option("全部非空组合", "ALL"));
+  const availableScenarios = cohortRpsScenarios.filter((scenario) =>
+    groups.some(scenario.matches),
+  );
+  for (const scenario of availableScenarios)
+    groupSelect.add(new Option(scenario.label, scenario.id));
+  if (availableScenarios.some((scenario) => scenario.id === priorGroup))
+    groupSelect.value = priorGroup;
+  else if (availableScenarios.length)
+    groupSelect.value = availableScenarios[0].id;
+  else groupSelect.value = "ALL";
+
+  const groupedRelations = groups.reduce(
+    (total, group) => total + group.relation_count,
+    0,
+  );
+  const rps5Distribution = {};
+  const rps20Distribution = {};
+  const pulseDistribution = {};
+  for (const group of groups) {
+    const count = group.relation_count;
+    rps5Distribution[group.rps5_change_state] =
+      (rps5Distribution[group.rps5_change_state] || 0) + count;
+    rps20Distribution[group.rps20_change_state] =
+      (rps20Distribution[group.rps20_change_state] || 0) + count;
+    const pulseKey = `${group.pulse_status}:${group.pulse_state}`;
+    pulseDistribution[pulseKey] = (pulseDistribution[pulseKey] || 0) + count;
+  }
+
+  const rootSummary = `${summary.status || "UNKNOWN"} · ${summary.target_session || "UNKNOWN_T0"} · 捕获 ${summary.source_capture_id ?? "UNKNOWN"} · 来源登记 ${format(summary.source_registration_count)} · T0观察关系 ${format(summary.t0_observation_relation_rows)} · 缺T0观察登记 ${format(summary.registration_without_t0_observation_count)} · 全板类映射关系 ${format(summary.mapped_board_relation_count)} · 当前筛选关系 ${format(summary.selected_board_relation_count)} · 未知成员 ${format(summary.unknown_membership_relation_count)} · 无成员记录 ${format(summary.no_stored_membership_relation_count)} · 当前板类非空组合 ${format(groups.length)}`;
+  const closure = `${format(groupedRelations)}/${format(summary.selected_board_relation_count)} 关系`;
+  status.textContent = `${rootSummary} · 组内完整分母 ${closure}${summary.change_fact_status === "INCOMPLETE" ? ` · RPS关系事实未闭合 ${summary.missing_change_fact_count}` : ""}`;
+  if (!groups.length) {
+    root.append(
+      node(
+        "p",
+        `${summary.status || "NO_NONEMPTY_GROUPS"} · 此冻结规则、日期和板类没有非空RPS×PULSE关系组合。`,
+      ),
+    );
+    return;
+  }
+
+  root.append(
+    node(
+      "p",
+      `完整状态分布 · RPS5 ${JSON.stringify(rps5Distribution)} · RPS20 ${JSON.stringify(rps20Distribution)} · PULSE ${JSON.stringify(pulseDistribution)} · 分组关系合计 ${closure}。分组表之间的关系数可因同一股票的不同板块或登记而重复。`,
+    ),
+  );
+
+  const selectedGroup = groupSelect.value;
+  const selectedRuleState = $("cohortRpsRuleState").value;
+  const visibleGroups = groups.filter(
+    (group) =>
+      (selectedGroup === "ALL" ||
+        cohortRpsScenarios
+          .find((scenario) => scenario.id === selectedGroup)
+          ?.matches(group)) &&
+      (selectedRuleState === "ALL" || group.rule_state === selectedRuleState),
+  );
+  if (!visibleGroups.length) {
+    root.append(node("p", "当前筛选下没有已存非空组；不会创建零样本分组。"));
+    return;
+  }
+
+  for (const group of visibleGroups) {
+    const section = node("section", null, "cohort-rps-pulse-group");
+    section.append(
+      node("h4", pulseGroupLabel(group)),
+      node(
+        "p",
+        `完整登记×股票×板块×T0关系 ${format(group.relation_count)} · 去重股票×板×T0 ${format(group.unique_stock_board_t0_count)} · 独立证券 ${format(group.independent_security_count)} · 本组独立T0日期 ${format(group.independent_t0_date_count)} · 来源原因 ${JSON.stringify(group.source_pool_reasons || {})} · RPS5原因 ${JSON.stringify(group.rps5_reasons || {})} · RPS20原因 ${JSON.stringify(group.rps20_reasons || {})}`,
+      ),
+    );
+    const scroll = node("div", null, "cohort-rps-pulse-table-scroll");
+    const table = node("table", null, "cohort-rps-pulse-table");
+    const head = node("thead");
+    const header = node("tr");
+    for (const label of [
+      "期限",
+      "到期 / T+5日期质量",
+      "完整关系分母",
+      "Path已存 / 缺失",
+      "端点OBSERVED / UNKNOWN / INCOMPLETE",
+      "正 / 非正",
+      "中位收益",
+      "覆盖（全部 / 已到期）",
+      "失败原因与真实例子",
+    ])
+      header.append(node("th", label));
+    head.append(header);
+    const body = node("tbody");
+    for (const horizon of [1, 3, 5]) {
+      const outcome = group.outcomes?.[String(horizon)];
+      if (!outcome) continue;
+      const row = node("tr");
+      const maturity = outcome.due
+        ? `到期 ${outcome.endpoint_session}`
+        : "NOT_DUE";
+      const independentDates =
+        horizon === 5 ? " · INSUFFICIENT_INDEPENDENT_DATES" : "";
+      const pathSummary = `${format(outcome.path_stored_count)} / ${format(outcome.path_missing_count)} · 未到期 ${format(outcome.not_due_count)}`;
+      const endpointSummary = `${format(outcome.endpoint_observed_count)} / ${format(outcome.endpoint_unknown_count)} / ${format(outcome.incomplete_count)}`;
+      row.append(
+        node("td", `T+${horizon}`),
+        node("td", `${maturity}${independentDates}`),
+        node("td", format(outcome.relation_denominator)),
+        node("td", pathSummary),
+        node("td", endpointSummary),
+        node(
+          "td",
+          `${format(outcome.positive_count)} / ${format(outcome.non_positive_count)}`,
+        ),
+        node("td", formatCohortMedian(outcome.median_return)),
+        node(
+          "td",
+          `${outcome.coverage_fraction || "—"} · ${outcome.coverage_of_due || "—"}`,
+        ),
+      );
+      const reasonCell = node("td");
+      const reasons = Object.entries(outcome.reason_counts || {})
+        .map(([reason, count]) => `${reason} ${count}`)
+        .join("；");
+      reasonCell.append(node("span", reasons || "无已存失败原因"));
+      if (outcome.examples?.length) {
+        const details = node("details");
+        details.append(node("summary", "负收益关系例子"));
+        const list = node("ul", null, "cohort-rps-pulse-examples");
+        appendCohortRpsExamples(list, outcome.examples, "return");
+        details.append(list);
+        reasonCell.append(details);
+      }
+      if (outcome.failure_examples?.length) {
+        const details = node("details");
+        details.append(node("summary", "未知 / 缺失关系例子"));
+        const list = node("ul", null, "cohort-rps-pulse-examples");
+        appendCohortRpsExamples(list, outcome.failure_examples, "failure");
+        details.append(list);
+        reasonCell.append(details);
+      }
+      row.append(reasonCell);
+      body.append(row);
+    }
+    table.append(head, body);
+    scroll.append(table);
+    section.append(scroll);
+    root.append(section);
   }
 }
 
@@ -5180,6 +5435,8 @@ async function loadExtra(page) {
       $("cohortKey").replaceChildren();
       $("cohortKey").disabled = true;
       $("cohortSummary").replaceChildren();
+      cohortRpsPulseData = null;
+      renderCohortRpsPulse(null);
       $("cohortDateComparison").replaceChildren();
       $("cohortSymbolForward").replaceChildren();
       $("cohortRows").replaceChildren();
@@ -5201,6 +5458,8 @@ async function loadExtra(page) {
     $("cohortKey").disabled = true;
     $("cohortKey").replaceChildren();
     $("cohortSummary").replaceChildren();
+    cohortRpsPulseData = null;
+    renderCohortRpsPulse(null);
     $("cohortDateComparison").replaceChildren();
     $("cohortSymbolForward").replaceChildren();
     $("cohortRows").replaceChildren();
@@ -5406,6 +5665,11 @@ async function readCohort() {
     key = JSON.parse(raw);
   message("focusStatus", "正在读取冻结研究…");
   $("cohortSummary").replaceChildren();
+  $("cohortRpsPulseSummary").replaceChildren();
+  message(
+    "cohortRpsPulseStatus",
+    "正在读取当前T0和冻结规则下的已存RPS×PULSE结果。",
+  );
   $("cohortDateComparison").replaceChildren();
   $("cohortSymbolForward").replaceChildren();
   $("cohortRows").replaceChildren();
@@ -5425,10 +5689,13 @@ async function readCohort() {
       window: key.window,
       horizon: $("cohortHorizon").value,
       offset: cohortOffset,
+      rps_board_kind: $("cohortRpsBoardKind").value,
     };
     if (symbol) query.symbol = symbol;
     const d = await api(`/api/product/cohort?${new URLSearchParams(query)}`);
     if (token !== cohortRequest || activePage !== "focus") return;
+    cohortRpsPulseData = d.rps_pulse_groups ?? null;
+    renderCohortRpsPulse(cohortRpsPulseData);
     try {
       const comparisonQuery = {
         source_package_id: c.source_package_id,
@@ -5705,6 +5972,8 @@ for (const id of ["cohortKey", "cohortHorizon", "cohortSymbol"]) {
     ++cohortRequest;
     ++focusStockRequest;
     $("cohortSummary").replaceChildren();
+    cohortRpsPulseData = null;
+    renderCohortRpsPulse(null);
     $("cohortDateComparison").replaceChildren();
     $("cohortSymbolForward").replaceChildren();
     $("cohortRows").replaceChildren();
@@ -5725,3 +5994,14 @@ for (const id of ["cohortKey", "cohortHorizon", "cohortSymbol"]) {
     );
   });
 }
+$("cohortRpsBoardKind").addEventListener("change", () => {
+  cohortOffset = 0;
+  $("cohortRpsGroup").value = "ALL";
+  void readCohort();
+});
+$("cohortRpsRuleState").addEventListener("change", () => {
+  renderCohortRpsPulse(cohortRpsPulseData);
+});
+$("cohortRpsGroup").addEventListener("change", () => {
+  renderCohortRpsPulse(cohortRpsPulseData);
+});
