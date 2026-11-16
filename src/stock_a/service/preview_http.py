@@ -42,6 +42,7 @@ from stock_a.application.source_persisted_research import (
     read_persisted_cohort,
     read_persisted_cohort_keys,
 )
+from stock_a.application.source_enrollment_cohort import read_source_enrollment_cohort
 from stock_a.application.source_symbol_display_names import (
     decorate_api_source_symbols,
 )
@@ -162,6 +163,7 @@ _DIAGNOSTIC_ROUTES = frozenset(
         "/api/preview/stock",
         "/api/product/cohort-keys",
         "/api/product/cohort",
+        "/api/product/cohort-enrollment-lifecycle",
         "/api/product/cohort-date-comparison",
         "/api/product/cohort-symbol-forward",
         "/api/product/sector-pulse-history",
@@ -4386,6 +4388,56 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 result["storage_status"] = (
                     "SAVED" if result["source_pool_count"] else "NO_STORED_FACT"
                 )
+                self._send_json(200, {"ok": True, **result})
+                return
+            if parsed.path == "/api/product/cohort-enrollment-lifecycle":
+                allowed = {
+                    "target_session",
+                    "source_package_id",
+                    "profile_revision",
+                    "history",
+                    "d1_history",
+                    "window",
+                    "rule",
+                }
+                values = _query(self.path, allowed)
+                if set(values) != allowed:
+                    raise PreviewHttpError(
+                        400,
+                        "COHORT_ENROLLMENT_QUERY_INVALID",
+                        "须提供完整T0、来源包、画像窗口及冻结规则键",
+                    )
+                target = _iso_date(values["target_session"])
+                cutoff = self.preview_server.state.research_cutoff
+                _require_research_cutoff(target, cutoff)
+                try:
+                    result = read_source_enrollment_cohort(
+                        self.preview_server.state.config,
+                        target=target,
+                        research_cutoff=cutoff,
+                        source_package_id=_package_id(values["source_package_id"]),
+                        profile_revision=_profile_revision(values["profile_revision"]),
+                        history_session_count=_positive_int(
+                            _nonnegative_int(values["history"], "history", 500),
+                            "history",
+                            500,
+                        ),
+                        d1_history_session_count=_positive_int(
+                            _nonnegative_int(values["d1_history"], "d1_history", 500),
+                            "d1_history",
+                            500,
+                        ),
+                        event_window_start=_iso_date(values["window"]),
+                        rule=values["rule"],
+                    )
+                except ResearchFactConflict as error:
+                    raise PreviewHttpError(
+                        409, "COHORT_ENROLLMENT_FACT_CONFLICT", str(error)
+                    ) from error
+                except ValueError as error:
+                    raise PreviewHttpError(
+                        400, "COHORT_ENROLLMENT_QUERY_INVALID", str(error)
+                    ) from error
                 self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/product/cohort-date-comparison":

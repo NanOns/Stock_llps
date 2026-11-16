@@ -529,6 +529,24 @@
               <div id="focusStockResult"></div>
               <div id="cohortSummary"></div>
               <section
+                id="cohortEnrollmentPanel"
+                class="cohort-rps-pulse-panel"
+                aria-label="同一T0来源登记类别与后继结果"
+              >
+                <h3>同一 T0：来源登记类别与后继结果</h3>
+                <p class="muted">
+                  按当前日期和冻结规则，对照 ENTRY、已证退出后的
+                  REENTRY、左截断观察与每日观察点。完整保留登记风险集；只读取已存后继，不跨日期合并。
+                </p>
+                <button id="readCohortEnrollment" class="button subtle">
+                  读取来源登记类别对照
+                </button>
+                <p id="cohortEnrollmentStatus" role="status">
+                  普通Cohort读取不会加载该分组；需要时按需读取。
+                </p>
+                <div id="cohortEnrollmentSummary"></div>
+              </section>
+              <section
                 id="cohortRpsPulsePanel"
                 class="cohort-rps-pulse-panel"
                 aria-label="RPS位次变化与板块PULSE后继分组统计"

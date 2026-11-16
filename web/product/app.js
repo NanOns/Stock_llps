@@ -5293,6 +5293,159 @@ function detailRows(container, entries) {
     container.append(p);
   }
 }
+
+function renderCohortEnrollmentGroups(result) {
+  const root = $("cohortEnrollmentSummary");
+  root.replaceChildren();
+  if (result.status !== "AVAILABLE") {
+    root.append(
+      node(
+        "p",
+        `${result.status || "NO_STORED_FACT"} · ${result.reason_codes?.join("、") || "当前精确T0规则没有可读取的登记事实。"}`,
+      ),
+    );
+    return;
+  }
+  const risk = result.risk_set || {};
+  const stateCounts = risk.rule_state_counts || {};
+  const enrollmentCounts = risk.enrollment_counts || {};
+  const unregistered = risk.unregistered_counts || {};
+  root.append(
+    node(
+      "p",
+      `${result.target_session} · ${result.rule} · 来源捕获 ${result.source_capture_id} · ${result.scope} · ${result.price_coordinate} · ${result.identity_status} · 截止 ${result.research_cutoff}`,
+    ),
+    node(
+      "p",
+      `${result.comparison_status} · 当前配对只含同一T0和规则，不跨日合并；独立T0日期 ${result.independent_t0_date_count} · ${result.independent_date_status}`,
+    ),
+    node(
+      "p",
+      `完整来源规则分母 ${format(risk.source_pool_count)}（TRUE ${format(stateCounts.TRUE)} / FALSE ${format(stateCounts.FALSE)} / UNKNOWN ${format(stateCounts.UNKNOWN)}）；登记 ENTRY ${format(enrollmentCounts.ENTRY)}、REENTRY ${format(enrollmentCounts.REENTRY)}、左截断 ${format(enrollmentCounts.FIRST_OBSERVED_LEFT_CENSORED)}、DAILY_LANDMARK ${format(enrollmentCounts.DAILY_LANDMARK)}。DAILY_LANDMARK是观察点，不是新增入组。`,
+    ),
+    node(
+      "p",
+      `无登记类别：PAUSED_UNKNOWN ${format(unregistered.PAUSED_UNKNOWN)}（仅计前一官方会话可比TRUE且有活动登记者）；UNKNOWN生命周期未证 ${format(unregistered.UNKNOWN_LIFECYCLE_UNPROVED)}；FALSE无登记 ${format(unregistered.FALSE_NO_ENROLLMENT)}；TRUE无登记 ${format(unregistered.TRUE_WITHOUT_ENROLLMENT)}。`,
+    ),
+  );
+
+  const labels = {
+    ENTRY: "ENTRY · 已证相邻FALSE→TRUE",
+    REENTRY: "REENTRY · 已证退出后再次匹配",
+    FIRST_OBSERVED_LEFT_CENSORED: "FIRST_OBSERVED_LEFT_CENSORED · 左截断",
+    DAILY_LANDMARK: "DAILY_LANDMARK · 活动段每日观察点",
+  };
+  for (const group of result.groups || []) {
+    const details = node("details", undefined, "evidence-details");
+    details.open = group.kind === "ENTRY" || group.kind === "REENTRY";
+    details.append(
+      node(
+        "summary",
+        `${labels[group.kind] || group.kind} · 完整登记分母 ${format(group.enrollment_count)} · 去重来源证券 ${format(group.independent_security_count)}${group.kind === "REENTRY" ? ` · 已核父段 ${format(group.parent_proved_count)}` : ""}`,
+      ),
+    );
+    const table = node(
+      "table",
+      undefined,
+      "compact-table cohort-enrollment-table",
+    );
+    const thead = node("thead");
+    const header = node("tr");
+    for (const title of [
+      "期限",
+      "到期 / 有价 / 缺失",
+      "正 / 非正",
+      "中位收益",
+      "冻结候选线后继",
+    ]) {
+      header.append(node("th", title));
+    }
+    thead.append(header);
+    table.append(thead);
+    const tbody = node("tbody");
+    for (const outcome of group.forward || []) {
+      const line = group.candidate_line_followup?.find(
+        (item) => item.horizon === outcome.horizon,
+      );
+      const row = node("tr");
+      row.append(
+        node(
+          "th",
+          `T+${outcome.horizon}${outcome.endpoint_session ? ` · ${outcome.endpoint_session}` : ""} · ${outcome.status}`,
+        ),
+        node(
+          "td",
+          `分母 ${format(outcome.risk_denominator)}；有价 ${format(outcome.observed_count)}；UNKNOWN ${format(outcome.unknown_count)}；未计算 ${format(outcome.not_computed_count)}；未到期 ${format(outcome.not_due_count)}`,
+        ),
+        node(
+          "td",
+          `${format(outcome.positive_count)} / ${format(outcome.non_positive_count)}`,
+        ),
+        node("td", formatCohortMedian(outcome.median_exact_return)),
+      );
+      const lineCell = node("td");
+      if (group.line_scope === "NOT_APPLICABLE" || !line) {
+        lineCell.append(node("span", "NOT_APPLICABLE"));
+      } else if (!line.candidate_line_count) {
+        lineCell.append(node("span", "无合法冻结线；不纳入触线分母。"));
+      } else {
+        const touch = line.touch_status_counts || {};
+        const returned = line.return_status_counts || {};
+        const complete =
+          touch.UNKNOWN === 0 &&
+          touch.NOT_DUE === 0 &&
+          returned.UNKNOWN === 0 &&
+          returned.NOT_DUE === 0;
+        const touchRate = complete
+          ? ` · 已证触线 ${format(touch.OBSERVED)}/${format(line.candidate_line_count)}（${((touch.OBSERVED / line.candidate_line_count) * 100).toFixed(2)}%）`
+          : ` · 已证触线 ${format(touch.OBSERVED)}/${format(line.candidate_line_count)}`;
+        const returnRate = complete
+          ? ` · 已证触线后站回 ${format(returned.OBSERVED)}/${format(line.candidate_line_count)}（${((returned.OBSERVED / line.candidate_line_count) * 100).toFixed(2)}%）`
+          : ` · 已证触线后站回 ${format(returned.OBSERVED)}/${format(line.candidate_line_count)}`;
+        lineCell.append(
+          node(
+            "span",
+            `合法冻结线 ${format(line.candidate_line_count)}${touchRate}；UNKNOWN ${format(touch.UNKNOWN)}、未到期 ${format(touch.NOT_DUE)}、未触 ${format(touch.NOT_OBSERVED)}${returnRate}；UNKNOWN ${format(returned.UNKNOWN)}、未到期 ${format(returned.NOT_DUE)}、未站回 ${format(returned.NOT_OBSERVED)}。SOURCE_PRICE_DIAGNOSTIC，不是正式失效或重入。`,
+          ),
+        );
+      }
+      row.append(lineCell);
+      tbody.append(row);
+
+      const examples = outcome.examples || {};
+      for (const [label, example] of [
+        ["实际正收益样例", examples.positive],
+        ["实际非正收益样例", examples.non_positive],
+      ]) {
+        if (!example?.source_symbol) continue;
+        const sample = node("p", undefined, "muted");
+        const code = displayStockCode({ source_symbol: example.source_symbol });
+        const button = node(
+          "button",
+          `${label} ${code} · ${formatCohortMedian(example.exact_return)}`,
+          "text-button",
+        );
+        button.addEventListener("click", () => {
+          $("cohortSymbol").value = code;
+          $("focusBackStock").click();
+        });
+        sample.append(button);
+        lineCell.append(sample);
+      }
+    }
+    table.append(tbody);
+    details.append(table);
+    root.append(details);
+  }
+  root.append(
+    node(
+      "p",
+      "每组T+N分母闭合为有价 + UNKNOWN + NOT_COMPUTED + NOT_DUE；正/非正只在有价端点中划分。中位数按精确有理数计算。T+5已到期范围最多两个独立T0，当前每次仅展示所选日期，状态为 INSUFFICIENT_INDEPENDENT_DATES。收益是SOURCE_SYMBOL_ONLY、RAW_UNADJUSTED、NON_PIT描述，不表示Focus Episode、D2、Priority、预测或策略有效性。",
+      "muted",
+    ),
+  );
+}
+
 function cohortGroupLabel(state) {
   return (
     { TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[state] || state
@@ -5446,6 +5599,8 @@ async function loadExtra(page) {
       $("cohortDateComparison").replaceChildren();
       $("cohortSymbolForward").replaceChildren();
       $("cohortRows").replaceChildren();
+      $("cohortEnrollmentSummary").replaceChildren();
+      message("cohortEnrollmentStatus", "当前日期尚未就绪。");
       $("focusStockResult").replaceChildren();
       $("focusAutoRows").replaceChildren();
       message("focusAutoStatus", "当前日期尚未就绪。");
@@ -5470,6 +5625,8 @@ async function loadExtra(page) {
     $("cohortDateComparison").replaceChildren();
     $("cohortSymbolForward").replaceChildren();
     $("cohortRows").replaceChildren();
+    $("cohortEnrollmentSummary").replaceChildren();
+    message("cohortEnrollmentStatus", "选择冻结规则后可按需读取。");
     $("cohortPrev").disabled = $("cohortNext").disabled = true;
     message("cohortPage", "—");
     $("focusStockResult").replaceChildren();
@@ -5673,6 +5830,8 @@ async function readCohort(includeRpsPulseGroups = cohortRpsPulseRequested) {
     key = JSON.parse(raw);
   message("focusStatus", "正在读取冻结研究…");
   $("cohortSummary").replaceChildren();
+  $("cohortEnrollmentSummary").replaceChildren();
+  message("cohortEnrollmentStatus", "选择冻结规则后可按需读取。");
   $("cohortRpsPulseSummary").replaceChildren();
   if (cohortRpsPulseRequested)
     message(
@@ -5831,6 +5990,44 @@ async function readCohort(includeRpsPulseGroups = cohortRpsPulseRequested) {
       message("focusStatus", `读取失败：${error.message}`);
   }
 }
+$("readCohortEnrollment").addEventListener("click", async () => {
+  const c = state.selected;
+  const raw = $("cohortKey").value;
+  if (!c || !raw) {
+    message("cohortEnrollmentStatus", "先选择已保存的T0日期和冻结规则。");
+    return;
+  }
+  const token = cohortRequest;
+  const key = JSON.parse(raw);
+  message(
+    "cohortEnrollmentStatus",
+    "正在读取同T0登记、PG Forward和冻结候选线分组…",
+  );
+  $("cohortEnrollmentSummary").replaceChildren();
+  try {
+    const query = {
+      target_session: c.target_session,
+      source_package_id: c.source_package_id,
+      profile_revision: key.profile_revision,
+      history: key.history,
+      d1_history: key.d1_history,
+      window: key.window,
+      rule: key.rule,
+    };
+    const result = await api(
+      `/api/product/cohort-enrollment-lifecycle?${new URLSearchParams(query)}`,
+    );
+    if (token !== cohortRequest || activePage !== "focus") return;
+    renderCohortEnrollmentGroups(result);
+    message(
+      "cohortEnrollmentStatus",
+      `${result.status || "UNKNOWN"} · ${result.target_session || c.target_session} · ${result.rule || key.rule} · READ_ONLY`,
+    );
+  } catch (error) {
+    if (token === cohortRequest && activePage === "focus")
+      message("cohortEnrollmentStatus", `读取失败：${error.message}`);
+  }
+});
 $("readCohort").addEventListener("click", () => {
   cohortOffset = 0;
   void readCohort();
