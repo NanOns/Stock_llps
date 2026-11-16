@@ -106,6 +106,7 @@ def read_persisted_cohort(
     limit=30,
     symbol=None,
     include_risk=False,
+    include_rps_pulse_groups=False,
     rps_board_kind="ALL",
     rps_scenario="ALL",
     rps_rule_state="ALL",
@@ -141,7 +142,7 @@ def read_persisted_cohort(
             offset=offset,
             limit=limit,
             symbol=symbol,
-            include_rps_pulse_groups=True,
+            include_rps_pulse_groups=include_rps_pulse_groups,
         )
     )
     if include_risk and symbol is None:

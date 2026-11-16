@@ -1649,6 +1649,7 @@ let focusStockRequest = 0;
 let focusKeysLoading = false;
 let cohortOffset = 0;
 let cohortRpsPulseData = null;
+let cohortRpsPulseRequested = false;
 let currentStockSymbol = null;
 let currentStockSource = null;
 function gotoPage(page) {
@@ -2847,7 +2848,7 @@ function renderCohortRpsPulse(summary) {
   root.replaceChildren();
   if (!summary) {
     status.textContent =
-      "NOT_COMPUTED：当前冻结规则没有可读取的RPS×PULSE分组结果。";
+      "分组统计尚未读取；普通Cohort不会触发RPS×PULSE分组聚合。";
     groupSelect.replaceChildren(new Option("全部非空组合", "ALL"));
     return;
   }
@@ -2923,7 +2924,7 @@ function renderCohortRpsPulse(summary) {
       node("h4", pulseGroupLabel(group)),
       node(
         "p",
-        `完整登记×股票×板块×T0关系 ${format(group.relation_count)} · 去重股票×板×T0 ${format(group.unique_stock_board_t0_count)} · 独立证券 ${format(group.independent_security_count)} · 本组独立T0日期 ${format(group.independent_t0_date_count)} · 来源原因 ${JSON.stringify(group.source_pool_reasons || {})} · RPS5原因 ${JSON.stringify(group.rps5_reasons || {})} · RPS20原因 ${JSON.stringify(group.rps20_reasons || {})}`,
+        `完整登记×股票×板块×T0关系 ${format(group.relation_count)} · 去重股票×板×T0 ${format(group.unique_stock_board_t0_count)} · 独立证券 ${format(group.independent_security_count)} · T+5已到期独立T0 ${format(group.independent_t0_date_count)} / 已存同组T0 ${format(group.independent_t0_saved_date_count)}（未到期 ${format(group.independent_t0_not_due_date_count)}）· ${group.independent_t0_date_status || "NOT_COMPUTED"} · 来源原因 ${JSON.stringify(group.source_pool_reasons || {})} · RPS5原因 ${JSON.stringify(group.rps5_reasons || {})} · RPS20原因 ${JSON.stringify(group.rps20_reasons || {})}`,
       ),
     );
     const scroll = node("div", null, "cohort-rps-pulse-table-scroll");
@@ -2952,7 +2953,11 @@ function renderCohortRpsPulse(summary) {
         ? `到期 ${outcome.endpoint_session}`
         : "NOT_DUE";
       const independentDates =
-        horizon === 5 ? " · INSUFFICIENT_INDEPENDENT_DATES" : "";
+        horizon === 5
+          ? outcome.independent_t0_date_status === "NOT_COMPUTED"
+            ? " · 同组独立T0日期 NOT_COMPUTED"
+            : ` · 同组T+5已到期独立T0 ${format(outcome.independent_t0_date_count)}日 / 已存同组T0 ${format(outcome.independent_t0_saved_date_count)}（未到期 ${format(outcome.independent_t0_not_due_date_count)}）· ${outcome.independent_t0_date_status}`
+          : "";
       const pathSummary = `${format(outcome.path_stored_count)} / ${format(outcome.path_missing_count)} · 未到期 ${format(outcome.not_due_count)}`;
       const endpointSummary = `${format(outcome.endpoint_observed_count)} / ${format(outcome.endpoint_unknown_count)} / ${format(outcome.incomplete_count)}`;
       row.append(
@@ -5436,6 +5441,7 @@ async function loadExtra(page) {
       $("cohortKey").disabled = true;
       $("cohortSummary").replaceChildren();
       cohortRpsPulseData = null;
+      cohortRpsPulseRequested = false;
       renderCohortRpsPulse(null);
       $("cohortDateComparison").replaceChildren();
       $("cohortSymbolForward").replaceChildren();
@@ -5459,6 +5465,7 @@ async function loadExtra(page) {
     $("cohortKey").replaceChildren();
     $("cohortSummary").replaceChildren();
     cohortRpsPulseData = null;
+    cohortRpsPulseRequested = false;
     renderCohortRpsPulse(null);
     $("cohortDateComparison").replaceChildren();
     $("cohortSymbolForward").replaceChildren();
@@ -5656,7 +5663,8 @@ async function loadExtra(page) {
     }
   }
 }
-async function readCohort() {
+async function readCohort(includeRpsPulseGroups = cohortRpsPulseRequested) {
+  cohortRpsPulseRequested = includeRpsPulseGroups === true;
   const c = state.selected,
     raw = $("cohortKey").value,
     stockCode = $("cohortSymbol").value.trim().toUpperCase();
@@ -5666,10 +5674,12 @@ async function readCohort() {
   message("focusStatus", "正在读取冻结研究…");
   $("cohortSummary").replaceChildren();
   $("cohortRpsPulseSummary").replaceChildren();
-  message(
-    "cohortRpsPulseStatus",
-    "正在读取当前T0和冻结规则下的已存RPS×PULSE结果。",
-  );
+  if (cohortRpsPulseRequested)
+    message(
+      "cohortRpsPulseStatus",
+      "正在读取当前T0、冻结规则及同组独立日期的已存RPS×PULSE结果。",
+    );
+  else renderCohortRpsPulse(null);
   $("cohortDateComparison").replaceChildren();
   $("cohortSymbolForward").replaceChildren();
   $("cohortRows").replaceChildren();
@@ -5691,6 +5701,7 @@ async function readCohort() {
       offset: cohortOffset,
       rps_board_kind: $("cohortRpsBoardKind").value,
     };
+    if (cohortRpsPulseRequested) query.include_rps_pulse_groups = "true";
     if (symbol) query.symbol = symbol;
     const d = await api(`/api/product/cohort?${new URLSearchParams(query)}`);
     if (token !== cohortRequest || activePage !== "focus") return;
@@ -5973,6 +5984,7 @@ for (const id of ["cohortKey", "cohortHorizon", "cohortSymbol"]) {
     ++focusStockRequest;
     $("cohortSummary").replaceChildren();
     cohortRpsPulseData = null;
+    cohortRpsPulseRequested = false;
     renderCohortRpsPulse(null);
     $("cohortDateComparison").replaceChildren();
     $("cohortSymbolForward").replaceChildren();
@@ -5994,6 +6006,10 @@ for (const id of ["cohortKey", "cohortHorizon", "cohortSymbol"]) {
     );
   });
 }
+$("readCohortRpsPulse").addEventListener("click", () => {
+  cohortRpsPulseRequested = true;
+  void readCohort(true);
+});
 $("cohortRpsBoardKind").addEventListener("change", () => {
   cohortOffset = 0;
   $("cohortRpsGroup").value = "ALL";

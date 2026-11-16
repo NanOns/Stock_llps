@@ -4266,6 +4266,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "rps_board_kind",
                     "rps_scenario",
                     "rps_rule_state",
+                    "include_rps_pulse_groups",
                 }
                 values = _query(self.path, allowed)
                 required = allowed - {
@@ -4274,6 +4275,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "rps_board_kind",
                     "rps_scenario",
                     "rps_rule_state",
+                    "include_rps_pulse_groups",
                 }
                 if not required.issubset(values):
                     raise PreviewHttpError(
@@ -4317,6 +4319,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "COHORT_RPS_RULE_STATE_INVALID",
                         "原来源规则状态筛选无效",
                     )
+                include_rps_pulse_groups_value = values.get(
+                    "include_rps_pulse_groups", "false"
+                )
+                if include_rps_pulse_groups_value not in {"true", "false"}:
+                    raise PreviewHttpError(
+                        400,
+                        "COHORT_RPS_GROUPS_FLAG_INVALID",
+                        "RPS×PULSE分组读取标记须为true或false",
+                    )
                 try:
                     result = read_persisted_cohort(
                         self.preview_server.state.config,
@@ -4344,6 +4355,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         offset=_nonnegative_int(values.get("offset", "0"), "offset"),
                         limit=30,
                         symbol=symbol,
+                        include_rps_pulse_groups=(
+                            include_rps_pulse_groups_value == "true"
+                        ),
                         rps_board_kind=rps_board_kind,
                         rps_scenario=rps_scenario,
                         rps_rule_state=rps_rule_state,

@@ -887,6 +887,163 @@ def _median_fraction(values: list[Fraction]) -> Fraction | None:
     return (ordered[middle - 1] + ordered[middle]) / 2
 
 
+def _read_saved_rps_pulse_t0_date_counts_cursor(
+    cursor: Any,
+    *,
+    research_cutoff: date,
+    source_package_id: int,
+    rule_id: str,
+    sessions: list[date],
+):
+    """统计同一已存RPS×PULSE组拥有多少个已到期独立T0日期。"""
+    from stock_a.storage.postgres.cohort_stats import (
+        _MINIMUM_INDEPENDENT_T0_DATES,
+    )
+    from stock_a.storage.postgres.research_facts import PATH_VERSION, RULE_VERSION
+
+    cursor.execute(
+        """WITH cohort_scope_candidates AS MATERIALIZED (
+               SELECT s.target_session,s.source_capture_id,s.profile_revision,
+                      s.history_session_count,s.d1_history_session_count,
+                      s.event_window_start,s.calendar_revision
+               FROM source_cohort_group_stats s
+               WHERE s.research_cutoff=%s AND s.source_package_id=%s
+                 AND s.rule_id=%s AND s.rule_version=%s
+                 AND s.path_rule_version=%s AND s.horizon=%s
+                 AND s.target_session<=%s
+               GROUP BY s.target_session,s.source_capture_id,s.profile_revision,
+                        s.history_session_count,s.d1_history_session_count,
+                        s.event_window_start,s.calendar_revision
+               HAVING count(*)=6
+                  AND count(DISTINCT (s.state,s.weighting))=6
+                  AND count(DISTINCT s.source_pool_count)=1
+           ), cohort_scopes AS MATERIALIZED (
+               SELECT target_session,source_capture_id,profile_revision,
+                      history_session_count,d1_history_session_count,
+                      event_window_start,calendar_revision
+               FROM (
+                   SELECT c.*,
+                          count(*) OVER (PARTITION BY c.target_session) AS scope_count
+                   FROM cohort_scope_candidates c
+               ) scoped
+               WHERE scope_count=1
+           ), latest AS MATERIALIZED (
+               SELECT DISTINCT ON (
+                          o.target_session,o.enrollment_id,o.board_context_key
+                      )
+                      o.id,o.target_session,o.source_capture_id,
+                      o.source_package_id,o.enrollment_id,o.board_context_key,
+                      o.rule_fact_id,o.membership_status,o.board_kind,
+                      o.pulse_status,o.pulse_state
+               FROM source_t0_early_observation_facts o
+               WHERE o.source_package_id=%s
+                 AND o.target_session IN (
+                     SELECT target_session FROM cohort_scopes
+                 )
+               ORDER BY o.target_session,o.enrollment_id,o.board_context_key,
+                        o.recorded_at DESC,o.id DESC
+           )
+           SELECT o.target_session,o.board_kind,c.rps5_change_state,
+                  c.rps20_change_state,o.pulse_status,o.pulse_state,
+                  r.state,r.rule_id,r.rule_version,count(*)::integer
+           FROM latest o
+           JOIN cohort_scopes s
+             ON s.target_session=o.target_session
+            AND s.source_capture_id=o.source_capture_id
+           JOIN source_rule_evaluations r
+             ON r.id=o.rule_fact_id
+            AND r.target_session=o.target_session
+            AND r.source_package_id=o.source_package_id
+            AND r.source_capture_id=o.source_capture_id
+            AND r.rule_version=%s AND r.rule_id=%s
+            AND r.profile_revision=s.profile_revision
+            AND r.history_session_count=s.history_session_count
+            AND r.d1_history_session_count=s.d1_history_session_count
+            AND r.event_window_start=s.event_window_start
+            AND r.calendar_revision=s.calendar_revision
+           JOIN source_rps_pulse_t0_change_facts c
+             ON c.source_t0_fact_id=o.id
+            AND c.target_session=o.target_session
+            AND c.source_package_id=o.source_package_id
+            AND c.source_capture_id=o.source_capture_id
+            AND c.rule_fact_id=r.id
+            AND c.rule_id=r.rule_id AND c.rule_version=r.rule_version
+            AND c.rule_state=r.state
+            AND c.calculation_version=%s
+           WHERE o.membership_status='MAPPED'
+             AND o.board_kind IN ('INDUSTRY','CONCEPT')
+           GROUP BY o.target_session,o.board_kind,c.rps5_change_state,
+                    c.rps20_change_state,o.pulse_status,o.pulse_state,
+                    r.state,r.rule_id,r.rule_version""",
+        (
+            research_cutoff,
+            source_package_id,
+            rule_id,
+            RULE_VERSION,
+            PATH_VERSION,
+            5,
+            research_cutoff,
+            source_package_id,
+            RULE_VERSION,
+            rule_id,
+            _CALCULATION_VERSION,
+        ),
+    )
+    session_indexes = {session: index for index, session in enumerate(sessions)}
+    counts: dict[tuple, dict[str, int | str]] = {}
+    for (
+        target_session,
+        board_kind,
+        rps5_state,
+        rps20_state,
+        pulse_status,
+        pulse_state,
+        rule_state,
+        stored_rule_id,
+        stored_rule_version,
+        _relation_count,
+    ) in cursor.fetchall():
+        key = (
+            board_kind,
+            rps5_state,
+            rps20_state,
+            pulse_status,
+            pulse_state,
+            rule_state,
+            stored_rule_id,
+            stored_rule_version,
+        )
+        current = counts.setdefault(
+            key,
+            {
+                "saved_t0_date_count": 0,
+                "due_t0_date_count": 0,
+                "not_due_t0_date_count": 0,
+            },
+        )
+        current["saved_t0_date_count"] += 1
+        session_index = session_indexes.get(target_session)
+        endpoint_index = (
+            session_index + 5 if session_index is not None else len(sessions)
+        )
+        if (
+            endpoint_index < len(sessions)
+            and sessions[endpoint_index] <= research_cutoff
+        ):
+            current["due_t0_date_count"] += 1
+        else:
+            current["not_due_t0_date_count"] += 1
+
+    for values in counts.values():
+        values["date_status"] = (
+            "INSUFFICIENT_INDEPENDENT_DATES"
+            if values["due_t0_date_count"] < _MINIMUM_INDEPENDENT_T0_DATES
+            else "DESCRIPTIVE_BY_T0_DATE"
+        )
+        values["date_scope"] = "SAVED_SAME_RPS_PULSE_GROUP_T0_DATES"
+    return counts
+
+
 def read_rps_pulse_forward_groups_cursor(
     cursor: Any,
     *,
@@ -1154,7 +1311,7 @@ def read_rps_pulse_forward_groups_cursor(
 
     # 精确规则分母及未映射登记单独核对，不用有价Forward行反推总体。
     cursor.execute(
-        f"""WITH latest AS (
+        f"""WITH latest AS MATERIALIZED (
                SELECT DISTINCT ON (o.enrollment_id,o.board_context_key) o.*
                FROM source_t0_early_observation_facts o
                WHERE o.target_session=%s AND o.source_package_id=%s
@@ -1200,6 +1357,13 @@ def read_rps_pulse_forward_groups_cursor(
         ),
     )
     root_counts = cursor.fetchone()
+    independent_t0_date_counts = _read_saved_rps_pulse_t0_date_counts_cursor(
+        cursor,
+        research_cutoff=research_cutoff,
+        source_package_id=source_package_id,
+        rule_id=rule_id,
+        sessions=sessions,
+    )
 
     groups: dict[tuple, dict[str, Any]] = {}
     for row in rows:
@@ -1419,11 +1583,42 @@ def read_rps_pulse_forward_groups_cursor(
     for key, group in sorted(groups.items()):
         group["unique_stock_board_t0_count"] = len(group.pop("_relation_keys"))
         group["independent_security_count"] = len(group.pop("_symbols"))
-        group["independent_t0_date_count"] = 1
+        date_counts = independent_t0_date_counts.get(key)
+        group["independent_t0_date_count"] = (
+            date_counts["due_t0_date_count"] if date_counts else None
+        )
+        group["independent_t0_saved_date_count"] = (
+            date_counts["saved_t0_date_count"] if date_counts else None
+        )
+        group["independent_t0_not_due_date_count"] = (
+            date_counts["not_due_t0_date_count"] if date_counts else None
+        )
+        group["independent_t0_date_status"] = (
+            date_counts["date_status"] if date_counts else "NOT_COMPUTED"
+        )
+        group["independent_t0_date_scope"] = (
+            date_counts["date_scope"] if date_counts else "NO_SAVED_SAME_GROUP_T0_DATE"
+        )
         group["rps5_reasons"] = dict(group["rps5_reasons"])
         group["rps20_reasons"] = dict(group["rps20_reasons"])
         group["source_pool_reasons"] = dict(group["source_pool_reasons"])
         for horizon, outcome in sorted(group["outcomes"].items()):
+            if horizon == 5:
+                outcome["independent_t0_date_count"] = group[
+                    "independent_t0_date_count"
+                ]
+                outcome["independent_t0_saved_date_count"] = group[
+                    "independent_t0_saved_date_count"
+                ]
+                outcome["independent_t0_not_due_date_count"] = group[
+                    "independent_t0_not_due_date_count"
+                ]
+                outcome["independent_t0_date_status"] = group[
+                    "independent_t0_date_status"
+                ]
+                outcome["independent_t0_date_scope"] = group[
+                    "independent_t0_date_scope"
+                ]
             outcome["median_return"] = (
                 str(_median_fraction(outcome.pop("returns")))
                 if outcome["returns"]

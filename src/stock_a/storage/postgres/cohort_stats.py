@@ -11,6 +11,8 @@ from stock_a.storage.postgres.research_facts import (
 )
 from stock_a.storage.postgres.source_raw import _transaction
 
+_MINIMUM_INDEPENDENT_T0_DATES = 3
+
 
 def read_cohort_page(
     config,
@@ -452,7 +454,7 @@ def read_cohort_date_comparison(
         "independent_t0_date_count": due_date_count,
         "comparison_status": (
             "INSUFFICIENT_INDEPENDENT_DATES"
-            if due_date_count < 3
+            if due_date_count < _MINIMUM_INDEPENDENT_T0_DATES
             else "DESCRIPTIVE_BY_T0_DATE"
         ),
         "aggregation": "NO_CROSS_DATE_AGGREGATE; each eligible T0 session is one descriptive row",
