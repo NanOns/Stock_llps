@@ -937,6 +937,7 @@ def import_verified_vipdata_target(
 
     before = prior_state["row_count"] if prior_state is not None else 0
     committed = 0
+    # 捕获元数据先于Raw分块独立提交；首块失败仍已产生数据库写入。
     try:
         for start in range(0, len(staged), chunk_size):
             committed += _insert_raw_batch(
@@ -950,7 +951,7 @@ def import_verified_vipdata_target(
             error.code,
             str(error),
             committed_rows=count,
-            metadata_committed=prior_capture is not None or count > 0,
+            metadata_committed=True,
         ) from error
     except Exception as error:
         count = _existing_count(config, target_session, source_package_id)
@@ -958,7 +959,7 @@ def import_verified_vipdata_target(
             "PG_WRITE_FAILED",
             f"Raw分块写入中断（{type(error).__name__}）",
             committed_rows=count,
-            metadata_committed=prior_capture is not None or count > 0,
+            metadata_committed=True,
         ) from error
 
     after = _existing_count(config, target_session, source_package_id)
@@ -1303,6 +1304,7 @@ def import_verified_vipdata_history(
 
         before = prior_state["row_count"] if prior_state is not None else 0
         if before < total:
+            # 当前会话捕获记录已单独提交，Raw首块失败时仍应报告已写库。
             try:
                 for start in range(0, len(staged), chunk_size):
                     committed_total += _insert_raw_batch(
@@ -1322,7 +1324,7 @@ def import_verified_vipdata_history(
                     f"历史会话{session.isoformat()}写入失败；此前已完成会话={len(committed_sessions)}；"
                     f"本会话PG现存行={committed_rows}/{total}；可按同包同窗幂等重试",
                     committed_rows=committed_rows,
-                    metadata_committed=prior_capture is not None or committed_rows > 0,
+                    metadata_committed=True,
                 ) from error
         after = _existing_count(config, session, source_package_id)
         if after != total:

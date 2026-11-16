@@ -85,6 +85,26 @@ function format(value) {
     );
   return String(value);
 }
+function marketLookbackSessionsText(sessions) {
+  if (!sessions || typeof sessions !== "object" || Array.isArray(sessions))
+    return "官方会话窗口不可用";
+  const entries = Object.entries(sessions)
+    .map(([key, session]) => {
+      const match = /^t_minus_(\d+)$/.exec(key);
+      const offset = key === "t" ? 0 : match ? Number(match[1]) : null;
+      return typeof session === "string" && Number.isInteger(offset)
+        ? { offset, session }
+        : null;
+    })
+    .filter((item) => item !== null)
+    .sort((left, right) => right.offset - left.offset);
+  if (!entries.length) return "官方会话窗口不可用";
+  return entries
+    .map(({ offset, session }) =>
+      offset === 0 ? `目标日 ${session}` : `T-${offset} ${session}`,
+    )
+    .join(" · ");
+}
 function marketClassText(value) {
   return (
     {
@@ -1582,16 +1602,6 @@ async function api(path, body, signal) {
             },
       );
       const result = await response.json();
-      if (result.display_name_context) {
-        state.displayNameContext = result.display_name_context;
-        const context = state.displayNameContext;
-        message(
-          "displayNameObservation",
-          context.status === "AVAILABLE"
-            ? `中文名为本机TDX观察标签（NON_PIT，${context.captured_at || "观察时钟未知"}）；不是稳定证券身份。`
-            : "中文名来源暂无可用观察；以名称未知和来源代码展示。",
-        );
-      }
       if (result.code === "PREVIEW_CONCURRENCY_LIMIT" && attempt < 10) {
         await delayWithAbort(2000, signal);
         continue;
@@ -1616,6 +1626,16 @@ async function api(path, body, signal) {
   } finally {
     releaseRequest();
   }
+}
+function applyDisplayNameContext(context) {
+  if (!context) return;
+  state.displayNameContext = context;
+  message(
+    "displayNameObservation",
+    context.status === "AVAILABLE"
+      ? `中文名为本机TDX观察标签（NON_PIT，${context.captured_at || "观察时钟未知"}）；不是稳定证券身份。`
+      : "中文名来源暂无可用观察；以名称未知和来源代码展示。",
+  );
 }
 function delayWithAbort(milliseconds, signal) {
   return new Promise((resolve, reject) => {
@@ -1930,6 +1950,7 @@ async function selectDate(target_session) {
       controller.signal,
     );
     if (token !== state.contextRequest || state.selected !== selected) return;
+    applyDisplayNameContext(c.display_name_context);
     state.context = c;
     const uniqueSnapshot = (kind) => {
       const matches = (c.snapshots || []).filter((s) => s.source_kind === kind);
@@ -2301,7 +2322,19 @@ function renderPulseCohortSummary(comparison) {
         tbody.append(row);
       }
       table.append(tbody);
-      section.append(table);
+      const tableScroll = node(
+        "div",
+        undefined,
+        "table-scroll pulse-cohort-table-scroll",
+      );
+      tableScroll.tabIndex = 0;
+      tableScroll.setAttribute("role", "region");
+      tableScroll.setAttribute(
+        "aria-label",
+        `${kind === "INDUSTRY" ? "行业" : "概念"}${axis === "PULSE_STATE" ? "PULSE状态" : "相邻变化"}期限表，可横向滚动`,
+      );
+      tableScroll.append(table);
+      section.append(tableScroll);
     }
     root.append(section);
   }
@@ -2743,10 +2776,36 @@ function formatCohortMedian(value) {
     const whole = scaled / 10000n;
     const decimal = String(scaled % 10000n).padStart(4, "0");
     const sign = negative && scaled !== 0n ? "-" : "";
-    return `${sign}${whole}.${decimal}%（原始比值 ${value}）`;
+    return `${sign}${whole}.${decimal}%`;
   } catch {
-    return `原始比值 ${value}`;
+    return "不可评价";
   }
+}
+
+const cohortMetricKey = Symbol("cohortMetric");
+
+function cohortMetricValue(value, kind = "return") {
+  return { [cohortMetricKey]: true, value, kind };
+}
+
+function appendCohortMetric(container, value, kind = "return") {
+  const metric = node("span", undefined, "cohort-fraction");
+  const percentage = formatCohortMedian(value);
+  metric.append(
+    node("span", kind === "coverage" ? `覆盖率 ${percentage}` : percentage),
+  );
+  if (typeof value === "string") {
+    const exact = node("details", undefined, "cohort-exact-value");
+    exact.append(
+      node(
+        "summary",
+        kind === "coverage" ? "查看精确覆盖率比" : "查看精确收益比",
+      ),
+      node("code", value),
+    );
+    metric.append(exact);
+  }
+  container.append(metric);
 }
 
 function rpsChangeLabel(value) {
@@ -2832,11 +2891,14 @@ function appendCohortRpsExamples(list, examples, type) {
       cohortOffset = 0;
       void readCohort();
     });
-    const detail =
-      type === "return"
-        ? ` · ${example.board_native_id} · ${formatCohortMedian(example.return_fraction)} · ${example.endpoint_session}`
-        : ` · ${example.board_native_id} · ${example.outcome_state} · ${example.endpoint_reason || (example.path_reasons || []).join("、") || "无失败原因"}`;
-    item.append(button, node("span", detail));
+    if (type === "return") {
+      item.append(button, node("span", ` · ${example.board_native_id} · `));
+      appendCohortMetric(item, example.return_fraction);
+      item.append(node("span", ` · ${example.endpoint_session}`));
+    } else {
+      const detail = ` · ${example.board_native_id} · ${example.outcome_state} · ${example.endpoint_reason || (example.path_reasons || []).join("、") || "无失败原因"}`;
+      item.append(button, node("span", detail));
+    }
     list.append(item);
   }
 }
@@ -2970,7 +3032,11 @@ function renderCohortRpsPulse(summary) {
           "td",
           `${format(outcome.positive_count)} / ${format(outcome.non_positive_count)}`,
         ),
-        node("td", formatCohortMedian(outcome.median_return)),
+        (() => {
+          const cell = node("td");
+          appendCohortMetric(cell, outcome.median_return);
+          return cell;
+        })(),
         node(
           "td",
           `${outcome.coverage_fraction || "—"} · ${outcome.coverage_of_due || "—"}`,
@@ -5288,9 +5354,12 @@ init();
 function detailRows(container, entries) {
   container.replaceChildren();
   for (const [label, value] of entries) {
-    const p = node("p");
-    p.append(node("strong", `${label}：`), node("span", format(value)));
-    container.append(p);
+    const row = node("div", undefined, "cohort-detail-row");
+    row.append(node("strong", `${label}：`));
+    if (value?.[cohortMetricKey])
+      appendCohortMetric(row, value.value, value.kind);
+    else row.append(node("span", format(value)));
+    container.append(row);
   }
 }
 
@@ -5336,8 +5405,11 @@ function renderCohortEnrollmentGroups(result) {
     DAILY_LANDMARK: "DAILY_LANDMARK · 活动段每日观察点",
   };
   for (const group of result.groups || []) {
-    const details = node("details", undefined, "evidence-details");
-    details.open = group.kind === "ENTRY" || group.kind === "REENTRY";
+    const details = node(
+      "details",
+      undefined,
+      "evidence-details cohort-enrollment-group",
+    );
     details.append(
       node(
         "summary",
@@ -5381,7 +5453,11 @@ function renderCohortEnrollmentGroups(result) {
           "td",
           `${format(outcome.positive_count)} / ${format(outcome.non_positive_count)}`,
         ),
-        node("td", formatCohortMedian(outcome.median_exact_return)),
+        (() => {
+          const cell = node("td");
+          appendCohortMetric(cell, outcome.median_exact_return);
+          return cell;
+        })(),
       );
       const lineCell = node("td");
       if (group.line_scope === "NOT_APPLICABLE" || !line) {
@@ -5418,23 +5494,29 @@ function renderCohortEnrollmentGroups(result) {
         ["实际非正收益样例", examples.non_positive],
       ]) {
         if (!example?.source_symbol) continue;
-        const sample = node("p", undefined, "muted");
+        const sample = node("div", undefined, "muted cohort-example-metric");
         const code = displayStockCode({ source_symbol: example.source_symbol });
-        const button = node(
-          "button",
-          `${label} ${code} · ${formatCohortMedian(example.exact_return)}`,
-          "text-button",
-        );
+        const button = node("button", `${label} ${code}`, "text-button");
+        button.title = "在Focus/Cohort中打开该来源代码";
         button.addEventListener("click", () => {
           $("cohortSymbol").value = code;
           $("focusBackStock").click();
         });
-        sample.append(button);
+        sample.append(button, node("span", " · "));
+        appendCohortMetric(sample, example.exact_return);
         lineCell.append(sample);
       }
     }
     table.append(tbody);
-    details.append(table);
+    const tableScroll = node("div", undefined, "cohort-enrollment-scroll");
+    tableScroll.tabIndex = 0;
+    tableScroll.setAttribute("role", "region");
+    tableScroll.setAttribute(
+      "aria-label",
+      `${labels[group.kind] || group.kind}期限和冻结线后继表，可横向滚动`,
+    );
+    tableScroll.append(table);
+    details.append(tableScroll);
     root.append(details);
   }
   root.append(
@@ -5488,8 +5570,7 @@ function renderEnrollmentDatewiseComparison(root, result) {
     return;
   }
   for (const item of comparison.dates) {
-    const details = node("details", null, "evidence-details");
-    details.open = item.status === "PAIRED_RISK_SET";
+    const details = node("details", null, "evidence-details cohort-date-group");
     const counts = item.enrollment_counts || {};
     const horizonHeads = (item.horizons || []).map((horizon) => {
       const status = enrollmentDatewiseDifferenceLabel(horizon.comparison);
@@ -5519,15 +5600,24 @@ function renderEnrollmentDatewiseComparison(root, result) {
       );
       for (const group of horizon.groups || []) {
         const outcomes = group.outcomes || {};
-        const coverage = group.coverage_exact
-          ? formatCohortMedian(group.coverage_exact)
-          : "无登记分母";
-        section.append(
+        const groupSummary = node("div", undefined, "cohort-result-summary");
+        groupSummary.append(
           node(
-            "p",
-            `${group.kind} · 风险集 ${format(group.risk_denominator)} / 去重证券 ${format(group.independent_security_count)} · 有价 ${format(outcomes.OBSERVED)}（覆盖 ${coverage}） / UNKNOWN ${format(outcomes.UNKNOWN)} / NOT_COMPUTED ${format(outcomes.NOT_COMPUTED)} / NOT_DUE ${format(outcomes.NOT_DUE)} · 正/非正 ${format(group.positive_count)}/${format(group.non_positive_count)} · 有价中位 ${formatCohortMedian(group.median_exact_return)}`,
+            "span",
+            `${group.kind} · 风险集 ${format(group.risk_denominator)} / 去重证券 ${format(group.independent_security_count)} · 有价 ${format(outcomes.OBSERVED)}（`,
           ),
         );
+        if (group.coverage_exact)
+          appendCohortMetric(groupSummary, group.coverage_exact, "coverage");
+        else groupSummary.append(node("span", "无登记分母"));
+        groupSummary.append(
+          node(
+            "span",
+            `） / UNKNOWN ${format(outcomes.UNKNOWN)} / NOT_COMPUTED ${format(outcomes.NOT_COMPUTED)} / NOT_DUE ${format(outcomes.NOT_DUE)} · 正/非正 ${format(group.positive_count)}/${format(group.non_positive_count)} · 有价中位 `,
+          ),
+        );
+        appendCohortMetric(groupSummary, group.median_exact_return);
+        section.append(groupSummary);
         for (const [label, example] of [
           [`${group.kind} 正例`, group.examples?.positive],
           [`${group.kind} 非正例`, group.examples?.non_positive],
@@ -5536,32 +5626,43 @@ function renderEnrollmentDatewiseComparison(root, result) {
           const code = displayStockCode({
             source_symbol: example.source_symbol,
           });
-          const button = node(
-            "button",
-            `${label} ${code} · ${formatCohortMedian(example.exact_return)}`,
-            "text-button",
-          );
+          const button = node("button", `${label} ${code}`, "text-button");
+          button.title = "在Focus/Cohort中打开该来源代码";
           button.type = "button";
           button.addEventListener("click", () => {
             $("cohortSymbol").value = code;
             $("focusBackStock").click();
           });
-          section.append(button);
+          const sample = node("div", undefined, "cohort-example-metric");
+          sample.append(button, node("span", " · "));
+          appendCohortMetric(sample, example.exact_return);
+          section.append(sample);
         }
       }
       const difference = horizon.comparison || {};
-      const differenceText =
-        difference.status === "DESCRIPTIVE_OBSERVED_SUBSETS"
-          ? `${enrollmentDatewiseDifferenceLabel(difference)} · ENTRY−REENTRY 有价中位差 ${formatCohortMedian(difference.median_difference_exact)}`
-          : `${difference.status || "不可比较"} · 未生成两组中位差`;
-      section.append(node("p", differenceText, "muted"));
+      const differenceText = node(
+        "div",
+        undefined,
+        "muted cohort-result-summary",
+      );
+      if (difference.status === "DESCRIPTIVE_OBSERVED_SUBSETS") {
+        differenceText.append(
+          node(
+            "span",
+            `${enrollmentDatewiseDifferenceLabel(difference)} · ENTRY−REENTRY 有价中位差 `,
+          ),
+        );
+        appendCohortMetric(differenceText, difference.median_difference_exact);
+      } else {
+        differenceText.textContent = `${difference.status || "不可比较"} · 未生成两组中位差`;
+      }
+      section.append(differenceText);
       details.append(section);
     }
     root.append(details);
   }
 }
-function renderCohortDateComparison(result) {
-  const root = $("cohortDateComparison");
+function renderCohortDateComparison(root, result) {
   root.replaceChildren();
   root.append(
     node("h3", "跨 T0 日期描述对照"),
@@ -5585,7 +5686,7 @@ function renderCohortDateComparison(result) {
     return;
   }
   for (const item of result.dates) {
-    const details = node("details", null, "evidence-details");
+    const details = node("details", null, "evidence-details cohort-date-group");
     details.append(
       node(
         "summary",
@@ -5601,15 +5702,77 @@ function renderCohortDateComparison(result) {
       );
     }
     for (const group of item.groups || []) {
-      details.append(
+      const groupSummary = node("div", undefined, "cohort-result-summary");
+      groupSummary.append(
         node(
-          "p",
-          `${group.group} · 分母 ${format(group.member_count)} · 有价 ${format(group.evaluable_count)} / 未知 ${format(group.unknown_count)} · 正/非正 ${format(group.positive_count)}/${format(group.non_positive_count)} · 中位 ${formatCohortMedian(group.median)} · 到期 ${JSON.stringify(group.maturity)} · 路径质量 ${JSON.stringify(group.path_quality)} · 不可评价原因 ${JSON.stringify(group.unevaluable_reasons)}`,
+          "span",
+          `${group.group} · 分母 ${format(group.member_count)} · 有价 ${format(group.evaluable_count)} / 未知 ${format(group.unknown_count)} · 正/非正 ${format(group.positive_count)}/${format(group.non_positive_count)} · 中位 `,
         ),
       );
+      appendCohortMetric(groupSummary, group.median);
+      groupSummary.append(
+        node(
+          "span",
+          ` · 到期 ${JSON.stringify(group.maturity)} · 路径质量 ${JSON.stringify(group.path_quality)} · 不可评价原因 ${JSON.stringify(group.unevaluable_reasons)}`,
+        ),
+      );
+      details.append(groupSummary);
     }
     root.append(details);
   }
+}
+
+function cohortDateComparisonDisclosure(context, key, token) {
+  const details = node(
+    "details",
+    undefined,
+    "cohort-date-comparison-disclosure",
+  );
+  details.append(node("summary", "按需读取跨 T0 ENTRY / REENTRY 逐日对照"));
+  const content = node("div", undefined, "cohort-date-comparison-content");
+  content.append(
+    node(
+      "p",
+      "普通 Cohort 读取不请求跨 T0 聚合；展开此项后才读取当前冻结规则的已存逐日对照。",
+      "muted",
+    ),
+  );
+  details.append(content);
+  let requested = false;
+  details.addEventListener("toggle", async () => {
+    if (!details.open || requested) return;
+    requested = true;
+    content.replaceChildren(node("p", "正在读取跨 T0 对照…", "muted"));
+    try {
+      const comparisonQuery = {
+        source_package_id: context.source_package_id,
+        rule: key.rule,
+        horizon: $("cohortHorizon").value,
+      };
+      const comparison = await api(
+        `/api/product/cohort-date-comparison?${new URLSearchParams(comparisonQuery)}`,
+      );
+      if (
+        token !== cohortRequest ||
+        activePage !== "focus" ||
+        state.selected !== context ||
+        !details.isConnected
+      )
+        return;
+      renderCohortDateComparison(content, comparison);
+    } catch (error) {
+      if (
+        token !== cohortRequest ||
+        activePage !== "focus" ||
+        state.selected !== context ||
+        !details.isConnected
+      )
+        return;
+      content.replaceChildren(node("p", `读取失败：${error.message}`));
+      requested = false;
+    }
+  });
+  return details;
 }
 function renderCohortSymbolForward(result, lineFollowup) {
   const root = $("cohortSymbolForward");
@@ -5837,7 +6000,10 @@ async function loadExtra(page) {
           "来源质量 / 可得时间",
           `${data.source_cohort.source_time_quality} / ${data.source_cohort.source_available_at}`,
         ],
-        ["窗口", data.official_calendar.lookback_sessions],
+        [
+          "窗口",
+          marketLookbackSessionsText(data.official_calendar?.lookback_sessions),
+        ],
       ]);
     } else if (page === "focus") {
       const data = await api(
@@ -5974,26 +6140,11 @@ async function readCohort(includeRpsPulseGroups = cohortRpsPulseRequested) {
     if (symbol) query.symbol = symbol;
     const d = await api(`/api/product/cohort?${new URLSearchParams(query)}`);
     if (token !== cohortRequest || activePage !== "focus") return;
+    $("cohortDateComparison").append(
+      cohortDateComparisonDisclosure(c, key, token),
+    );
     cohortRpsPulseData = d.rps_pulse_groups ?? null;
     renderCohortRpsPulse(cohortRpsPulseData);
-    try {
-      const comparisonQuery = {
-        source_package_id: c.source_package_id,
-        rule: key.rule,
-        horizon: $("cohortHorizon").value,
-      };
-      const comparison = await api(
-        `/api/product/cohort-date-comparison?${new URLSearchParams(comparisonQuery)}`,
-      );
-      if (token !== cohortRequest || activePage !== "focus") return;
-      renderCohortDateComparison(comparison);
-    } catch (error) {
-      if (token === cohortRequest && activePage === "focus")
-        $("cohortDateComparison").replaceChildren(
-          node("h3", "跨 T0 日期描述对照"),
-          node("p", `读取失败：${error.message}`),
-        );
-    }
     if (symbol) {
       try {
         const forwardQuery = {
@@ -6040,16 +6191,18 @@ async function readCohort(includeRpsPulseGroups = cohortRpsPulseRequested) {
         : `${candidateFollowup.status || "UNKNOWN"} · ${candidateFollowup.reason_code || "当前规则没有可用TRUE候选线"}；后继路径不进入触线风险集。`;
     detailRows($("cohortSummary"), [
       ["完整来源分母", d.source_pool_count],
-      ...d.groups.map((g) => [
-        `${g.group} · ${g.weighting === "stock" ? "按代码" : "按事件"}`,
+      ...d.groups.flatMap((g) => [
         [
-          `总数 ${g.count}；可评价 ${g.evaluable}；未知 ${g.unknown}`,
-          `正/非正 ${g.positive}/${g.non_positive}`,
-          `中位收益 ${formatCohortMedian(g.median)}`,
-          `路径质量 ${JSON.stringify(g.path_quality)}`,
-          `到期状态 ${JSON.stringify(g.maturity)}`,
-          `原因 ${JSON.stringify(g.unevaluable_reasons)}`,
-        ].join("；"),
+          `${g.group} · ${g.weighting === "stock" ? "按代码" : "按事件"}`,
+          [
+            `总数 ${g.count}；可评价 ${g.evaluable}；未知 ${g.unknown}`,
+            `正/非正 ${g.positive}/${g.non_positive}`,
+            `路径质量 ${JSON.stringify(g.path_quality)}`,
+            `到期状态 ${JSON.stringify(g.maturity)}`,
+            `原因 ${JSON.stringify(g.unevaluable_reasons)}`,
+          ].join("；"),
+        ],
+        [`${g.group} 中位收益`, cohortMetricValue(g.median)],
       ]),
       ["所选代码冻结线触及诊断", candidateFollowupSummary],
       ...(d.selected_rules || []).map((fact) => [

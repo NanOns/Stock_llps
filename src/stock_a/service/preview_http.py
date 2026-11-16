@@ -147,6 +147,7 @@ _PORT = 28766
 _MAX_BODY_BYTES = 8192
 _MAX_PAGE_SIZE = 50
 _MAX_OFFSET = 2**31 - 1
+_D1_MATERIAL_FACTS_CACHE_TTL_SECONDS = 30
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _SYMBOL_SEARCH = re.compile(r"^[A-Za-z0-9.]{1,9}$")
 _DATE = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
@@ -798,6 +799,7 @@ class _PreviewState:
         self.d1_material_cache_lock = threading.Lock()
         self.d1_material_cache_key: tuple[Any, ...] | None = None
         self.d1_material_cache_facts: dict[str, Any] | None = None
+        self.d1_material_cache_expires_at = 0.0
         self.d1_material_inflight: threading.Event | None = None
         self.d0_watch_cache_lock = threading.Lock()
         self.d0_watch_cache_key: tuple[Any, ...] | None = None
@@ -841,12 +843,13 @@ class _PreviewState:
     def source_d1_material_facts(
         self, cache_key: tuple[Any, ...], factory: Any
     ) -> tuple[dict[str, Any], bool]:
-        """串行准备并复用一份精确绑定的D1全池材料事实。"""
+        """串行复用精确绑定的D1全池材料事实，并定期刷新PG投影。"""
         while True:
             with self.d1_material_cache_lock:
                 if (
                     self.d1_material_cache_key == cache_key
                     and self.d1_material_cache_facts is not None
+                    and time.monotonic() < self.d1_material_cache_expires_at
                 ):
                     return self.d1_material_cache_facts, True
                 event = self.d1_material_inflight
@@ -873,6 +876,9 @@ class _PreviewState:
             with self.d1_material_cache_lock:
                 self.d1_material_cache_key = cache_key
                 self.d1_material_cache_facts = facts
+                self.d1_material_cache_expires_at = (
+                    time.monotonic() + _D1_MATERIAL_FACTS_CACHE_TTL_SECONDS
+                )
                 if self.d1_material_inflight is event:
                     self.d1_material_inflight = None
                 event.set()
