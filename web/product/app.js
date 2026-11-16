@@ -270,7 +270,7 @@ function renderPulseHistory(result) {
       const outcomes = (session.followups || []).map((outcome) => {
         const coverage = `固定 ${outcome.fixed_member_denominator ?? "UNKNOWN"} · 有效 ${outcome.observed_member_count ?? "UNKNOWN"} · UNKNOWN ${outcome.unknown_member_count ?? "UNKNOWN"}`;
         if (outcome.status === "OBSERVED")
-          return `T+${outcome.horizon} ${outcome.target_session} 等权收盘 ${outcome.return_percent_4dp ?? "UNKNOWN"}%（精确 ${outcome.equal_weight_return ?? "UNKNOWN"}；${coverage}）`;
+          return `T+${outcome.horizon} ${outcome.target_session} 等权收盘 ${outcome.return_percent_4dp ?? "UNKNOWN"}%（${coverage}）`;
         const target = outcome.target_session
           ? ` ${outcome.target_session}`
           : "";
@@ -4121,7 +4121,7 @@ async function openD0Board(board, offset = 0) {
         if (item.status === "OBSERVED") {
           const percent = item.equal_weight_return_percent_4dp;
           const signed = Number(percent) >= 0 ? `+${percent}` : percent;
-          return `${label} 精确回报 ${item.equal_weight_return}（${signed}%）· ${memberCoverage}`;
+          return `${label} 等权收盘 ${signed}% · ${memberCoverage}`;
         }
         if (item.status === "NOT_DUE")
           return `${label}尚未到期 · ${memberCoverage}`;
