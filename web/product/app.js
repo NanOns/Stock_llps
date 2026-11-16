@@ -5325,7 +5325,7 @@ function renderCohortEnrollmentGroups(result) {
     ),
     node(
       "p",
-      `无登记类别：PAUSED_UNKNOWN ${format(unregistered.PAUSED_UNKNOWN)}（仅计前一官方会话可比TRUE且有活动登记者）；UNKNOWN生命周期未证 ${format(unregistered.UNKNOWN_LIFECYCLE_UNPROVED)}；FALSE无登记 ${format(unregistered.FALSE_NO_ENROLLMENT)}；TRUE无登记 ${format(unregistered.TRUE_WITHOUT_ENROLLMENT)}。`,
+      `无登记类别：PAUSED_UNKNOWN ${format(unregistered.PAUSED_UNKNOWN)}（最近已知规则状态为TRUE且该事实有活动登记者）；UNKNOWN生命周期未证 ${format(unregistered.UNKNOWN_LIFECYCLE_UNPROVED)}；FALSE无登记 ${format(unregistered.FALSE_NO_ENROLLMENT)}；TRUE无登记 ${format(unregistered.TRUE_WITHOUT_ENROLLMENT)}。`,
     ),
   );
 

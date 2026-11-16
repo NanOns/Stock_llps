@@ -82,11 +82,6 @@ def read_cohort_enrollment_lifecycle_groups(
     ):
         raise ValueError("来源登记分组的T0、版本或有界后继范围无效")
 
-    from stock_a.storage.postgres.research_enrollment import (
-        _read_rule_day_contexts,
-        _rule_context_comparable,
-    )
-
     key = (
         target,
         source_package_id,
@@ -254,40 +249,32 @@ def read_cohort_enrollment_lifecycle_groups(
         if enrolled_by_state.get("FALSE", 0) or enrolled_by_state.get("UNKNOWN", 0):
             raise ResearchFactConflict("非TRUE规则事实被持久化为来源登记")
 
-        pause_context_comparable = False
-        paused_unknown_count = 0
-        if previous_session is not None:
-            contexts = _read_rule_day_contexts(
-                cursor,
-                sessions=(previous_session, target),
-                package=source_package_id,
-            )
-            pause_context_comparable = _rule_context_comparable(
-                contexts.get(previous_session),
-                contexts.get(target),
-                before=previous_session,
-                target=target,
-            )
-            if pause_context_comparable:
-                cursor.execute(
-                    """SELECT count(DISTINCT r.id)::bigint
-                       FROM source_rule_evaluations r
-                       JOIN source_rule_evaluations p
-                         ON p.target_session=%s
-                        AND p.source_package_id=r.source_package_id
-                        AND p.source_symbol=r.source_symbol AND p.rule_id=r.rule_id
-                        AND p.rule_version=r.rule_version AND p.scope=r.scope
-                       JOIN source_research_enrollments pe ON pe.rule_fact_id=p.id
-                       WHERE r.target_session=%s AND r.source_package_id=%s
-                         AND r.rule_id=%s AND r.rule_version=%s
-                         AND r.profile_revision=%s AND r.history_session_count=%s
-                         AND r.d1_history_session_count=%s
-                         AND r.event_window_start=%s AND r.calendar_revision=%s
-                         AND r.scope=%s AND r.state='UNKNOWN' AND p.state='TRUE'
-                         AND pe.enrollment_kind=ANY(%s::text[])""",
-                    (previous_session, *key, list(_ACTIVE_KINDS)),
-                )
-                paused_unknown_count = int(cursor.fetchone()[0])
+        cursor.execute(
+            """SELECT count(DISTINCT r.id)::bigint
+               FROM source_rule_evaluations r
+               JOIN LATERAL (
+                 SELECT h.id,h.state
+                 FROM source_rule_evaluations h
+                 WHERE h.source_package_id=r.source_package_id
+                   AND h.source_symbol=r.source_symbol AND h.rule_id=r.rule_id
+                   AND h.rule_version=r.rule_version AND h.scope=r.scope
+                   AND h.target_session<r.target_session
+                   AND h.state IN ('TRUE','FALSE')
+                 ORDER BY h.target_session DESC,h.id DESC LIMIT 1
+               ) latest ON TRUE
+               JOIN source_research_enrollments active_e
+                 ON active_e.rule_fact_id=latest.id
+               WHERE r.target_session=%s AND r.source_package_id=%s
+                 AND r.rule_id=%s AND r.rule_version=%s
+                 AND r.profile_revision=%s AND r.history_session_count=%s
+                 AND r.d1_history_session_count=%s
+                 AND r.event_window_start=%s AND r.calendar_revision=%s
+                 AND r.scope=%s AND r.state='UNKNOWN'
+                 AND latest.state='TRUE'
+                 AND active_e.enrollment_kind=ANY(%s::text[])""",
+            (*key, list(_ACTIVE_KINDS)),
+        )
+        paused_unknown_count = int(cursor.fetchone()[0])
 
         risk_set = {
             "source_pool_count": pool_count,
@@ -311,7 +298,7 @@ def read_cohort_enrollment_lifecycle_groups(
                     state_counts.get("TRUE", 0) - enrolled_by_state.get("TRUE", 0),
                 ),
             },
-            "pause_context_comparable": pause_context_comparable,
+            "paused_unknown_basis": "LATEST_KNOWN_TRUE_WITH_ACTIVE_ENROLLMENT",
         }
 
         cursor.execute(
