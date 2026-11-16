@@ -35,6 +35,554 @@ _ACTIVE_KINDS = (
 )
 
 
+def read_cohort_enrollment_datewise_comparison(
+    config,
+    *,
+    dates: list[dict[str, Any]],
+    research_cutoff: date,
+    source_package_id: int,
+    rule: str,
+) -> dict[str, Any]:
+    """对已保存T0范围一次批量读取ENTRY/REENTRY及其Forward事实。"""
+    from stock_a.research.entry_context.sessions import _load_calendar
+
+    if (
+        type(research_cutoff) is not date
+        or type(source_package_id) is not int
+        or source_package_id <= 0
+        or rule not in RULES
+        or not isinstance(dates, list)
+        or len(dates) > 20
+    ):
+        raise ValueError("跨T0登记对照的截止日、规则、来源包或日期范围无效")
+
+    _, _, calendar_revision, calendar = _load_calendar(research_cutoff)
+    sessions = tuple(session for session in calendar if session <= research_cutoff)
+    session_indexes = {session: index for index, session in enumerate(sessions)}
+    contexts: list[dict[str, Any]] = []
+    results_by_session: dict[date, dict[str, Any]] = {}
+    for item in dates:
+        try:
+            target = date.fromisoformat(item["target_session"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise ValueError("跨T0登记对照日期无效") from error
+        result = {
+            "target_session": target.isoformat(),
+            "status": "SCOPE_NOT_COMPARABLE",
+            "reason_codes": [],
+            "source_capture_id": item.get("source_capture_id"),
+            "profile_revision": item.get("profile_revision"),
+            "history_session_count": item.get("history_session_count"),
+            "d1_history_session_count": item.get("d1_history_session_count"),
+            "event_window_start": item.get("event_window_start"),
+            "calendar_revision": item.get("calendar_revision"),
+            "source_pool_count": item.get("source_pool_count"),
+            "enrollment_counts": {},
+            "excluded_from_entry_reentry": {},
+            "horizons": [],
+        }
+        results_by_session[target] = result
+        if item.get("status") not in {"AVAILABLE", "NOT_DUE"}:
+            result["reason_codes"] = item.get("reason_codes") or [
+                "COHORT_T0_SCOPE_NOT_CLOSED"
+            ]
+            continue
+        if target not in session_indexes:
+            result["reason_codes"] = ["T0_NOT_IN_CUTOFF_OFFICIAL_CALENDAR"]
+            continue
+        if item.get("calendar_revision") != calendar_revision:
+            result["reason_codes"] = ["OFFICIAL_CALENDAR_REVISION_MISMATCH"]
+            continue
+        try:
+            context = {
+                "target_session": target,
+                "source_capture_id": int(item["source_capture_id"]),
+                "profile_revision": str(item["profile_revision"]),
+                "history_session_count": int(item["history_session_count"]),
+                "d1_history_session_count": int(item["d1_history_session_count"]),
+                "event_window_start": date.fromisoformat(item["event_window_start"]),
+                "calendar_revision": str(item["calendar_revision"]),
+                "source_pool_count": int(item["source_pool_count"]),
+            }
+        except (KeyError, TypeError, ValueError) as error:
+            raise ResearchFactConflict("跨T0登记对照的精确来源上下文缺失") from error
+        if (
+            context["source_capture_id"] <= 0
+            or not context["profile_revision"]
+            or context["history_session_count"] < 0
+            or context["d1_history_session_count"] < 0
+            or context["source_pool_count"] <= 0
+        ):
+            raise ResearchFactConflict("跨T0登记对照的精确来源上下文无效")
+        context["result"] = result
+        contexts.append(context)
+
+    if contexts:
+        targets = [item["target_session"] for item in contexts]
+        captures = [item["source_capture_id"] for item in contexts]
+        profiles = [item["profile_revision"] for item in contexts]
+        histories = [item["history_session_count"] for item in contexts]
+        d1_histories = [item["d1_history_session_count"] for item in contexts]
+        windows = [item["event_window_start"] for item in contexts]
+        calendars = [item["calendar_revision"] for item in contexts]
+        pool_counts = [item["source_pool_count"] for item in contexts]
+        with _transaction(config, write=False, statement_timeout_ms=15000) as (
+            _,
+            cursor,
+            _,
+        ):
+            cursor.execute(
+                """WITH selected AS (
+                       SELECT * FROM unnest(
+                           %s::date[],%s::bigint[],%s::text[],%s::integer[],
+                           %s::integer[],%s::date[],%s::text[],%s::bigint[]
+                       ) AS s(target_session,source_capture_id,profile_revision,
+                              history_session_count,d1_history_session_count,
+                              event_window_start,calendar_revision,source_pool_count)
+                   )
+                   SELECT s.target_session,s.source_capture_id,s.profile_revision,
+                          s.history_session_count,s.d1_history_session_count,
+                          s.event_window_start,s.calendar_revision,s.source_pool_count,
+                          r.id,r.source_symbol,r.state,r.source_capture_id,
+                          e.id,e.enrollment_kind,e.reason_code,e.parent_enrollment_id,
+                          e.previous_rule_fact_id,parent_e.id,parent_e.enrollment_kind,
+                          parent_r.target_session,parent_r.source_symbol,parent_r.rule_id,
+                          parent_r.state,parent_r.rule_version,parent_r.source_package_id,
+                          previous_r.target_session,previous_r.source_symbol,
+                          previous_r.rule_id,previous_r.state,previous_r.rule_version,
+                          previous_r.source_package_id,
+                          f.horizon,f.endpoint_session,f.maturity,f.endpoint_quality,
+                          f.endpoint_reason,f.endpoint_numerator::text,
+                          f.endpoint_denominator::text,f.path_quality,f.path_reasons,
+                          f.price_coordinate,f.scope
+                   FROM selected s
+                   JOIN source_rule_evaluations r
+                     ON r.target_session=s.target_session
+                    AND r.source_package_id=%s AND r.source_capture_id=s.source_capture_id
+                    AND r.rule_id=%s AND r.rule_version=%s
+                    AND r.profile_revision=s.profile_revision
+                    AND r.history_session_count=s.history_session_count
+                    AND r.d1_history_session_count=s.d1_history_session_count
+                    AND r.event_window_start=s.event_window_start
+                    AND r.calendar_revision=s.calendar_revision AND r.scope=%s
+                   JOIN source_research_enrollments e ON e.rule_fact_id=r.id
+                   LEFT JOIN source_research_enrollments parent_e
+                     ON parent_e.id=e.parent_enrollment_id
+                   LEFT JOIN source_rule_evaluations parent_r
+                     ON parent_r.id=parent_e.rule_fact_id
+                   LEFT JOIN source_rule_evaluations previous_r
+                     ON previous_r.id=e.previous_rule_fact_id
+                   LEFT JOIN source_forward_path_facts f
+                     ON f.target_session=r.target_session
+                    AND f.source_package_id=r.source_package_id
+                    AND f.source_capture_id=r.source_capture_id
+                    AND f.source_symbol=r.source_symbol
+                    AND f.horizon=ANY(%s::smallint[])
+                    AND f.path_rule_version=%s
+                    AND f.calendar_revision=r.calendar_revision
+                    AND f.price_coordinate='RAW_UNADJUSTED' AND f.scope=%s
+                    AND f.endpoint_session<=%s
+                   ORDER BY s.target_session,e.enrollment_kind,r.source_symbol,
+                            e.id,f.horizon
+                   LIMIT 20001""",
+                (
+                    targets,
+                    captures,
+                    profiles,
+                    histories,
+                    d1_histories,
+                    windows,
+                    calendars,
+                    pool_counts,
+                    source_package_id,
+                    rule,
+                    RULE_VERSION,
+                    SCOPE,
+                    [1, 3, 5],
+                    PATH_VERSION,
+                    SCOPE,
+                    research_cutoff,
+                ),
+            )
+            rows = cursor.fetchall()
+        if len(rows) > 20000:
+            raise ResearchFactConflict("跨T0登记对照超出固定已存事实行数预算")
+
+        enrollments_by_session: dict[date, dict[str, dict[int, dict[str, Any]]]] = {
+            item["target_session"]: {kind: {} for kind in _KINDS} for item in contexts
+        }
+        symbols_by_session: dict[date, dict[str, set[str]]] = {
+            item["target_session"]: {kind: set() for kind in _KINDS}
+            for item in contexts
+        }
+        for row in rows:
+            (
+                target,
+                source_capture_id,
+                profile_revision,
+                history_session_count,
+                d1_history_session_count,
+                event_window_start,
+                selected_calendar_revision,
+                source_pool_count,
+                rule_fact_id,
+                symbol,
+                state,
+                fact_capture_id,
+                enrollment_id,
+                kind,
+                reason_code,
+                parent_id,
+                previous_rule_fact_id,
+                parent_record_id,
+                parent_kind,
+                parent_session,
+                parent_symbol,
+                parent_rule,
+                parent_state,
+                parent_version,
+                parent_package,
+                previous_target,
+                previous_symbol,
+                previous_rule,
+                previous_state,
+                previous_version,
+                previous_package,
+                horizon,
+                endpoint_session,
+                maturity,
+                endpoint_quality,
+                endpoint_reason,
+                numerator_text,
+                denominator_text,
+                path_quality,
+                path_reasons,
+                coordinate,
+                scope,
+            ) = row
+            context = next(
+                item for item in contexts if item["target_session"] == target
+            )
+            if (
+                context["source_capture_id"] != source_capture_id
+                or context["profile_revision"] != profile_revision
+                or context["history_session_count"] != history_session_count
+                or context["d1_history_session_count"] != d1_history_session_count
+                or context["event_window_start"] != event_window_start
+                or context["calendar_revision"] != selected_calendar_revision
+                or context["source_pool_count"] != source_pool_count
+            ):
+                raise ResearchFactConflict("跨T0登记查询返回了不匹配的来源上下文")
+            if (
+                kind not in _KINDS
+                or state != "TRUE"
+                or fact_capture_id != source_capture_id
+            ):
+                raise ResearchFactConflict(
+                    "跨T0登记类别含未知类别、非TRUE事实或捕获错配"
+                )
+            by_kind = enrollments_by_session[target][kind]
+            entry = by_kind.get(int(enrollment_id))
+            if entry is None:
+                if symbol in symbols_by_session[target][kind]:
+                    raise ResearchFactConflict("跨T0登记包含同类重复证券代码")
+                entry = {
+                    "id": int(enrollment_id),
+                    "symbol": symbol,
+                    "reason_code": reason_code,
+                    "parent_id": parent_id,
+                    "previous_rule_fact_id": previous_rule_fact_id,
+                    "forward": {},
+                }
+                by_kind[int(enrollment_id)] = entry
+                symbols_by_session[target][kind].add(symbol)
+            elif (
+                entry["symbol"] != symbol
+                or entry["reason_code"] != reason_code
+                or entry["parent_id"] != parent_id
+                or entry["previous_rule_fact_id"] != previous_rule_fact_id
+            ):
+                raise ResearchFactConflict("跨T0登记与Forward分行上下文不一致")
+            if kind == "REENTRY":
+                proved = (
+                    parent_id is not None
+                    and parent_record_id == parent_id
+                    and parent_kind
+                    in {"ENTRY", "FIRST_OBSERVED_LEFT_CENSORED", "REENTRY"}
+                    and parent_session is not None
+                    and parent_session < target
+                    and parent_symbol == symbol
+                    and parent_rule == rule
+                    and parent_state == "TRUE"
+                    and parent_version == RULE_VERSION
+                    and parent_package == source_package_id
+                    and reason_code == "MATCH_AFTER_PROVED_EXIT"
+                    and previous_rule_fact_id is not None
+                    and previous_target is not None
+                    and previous_symbol == symbol
+                    and previous_rule == rule
+                    and previous_state == "FALSE"
+                    and previous_version == RULE_VERSION
+                    and previous_package == source_package_id
+                    and parent_session < previous_target < target
+                )
+                if not proved:
+                    raise ResearchFactConflict(
+                        "跨T0 REENTRY缺少同证券、同规则的父登记或已证退出前态"
+                    )
+            if horizon is not None:
+                if horizon not in (1, 3, 5):
+                    raise ResearchFactConflict("跨T0 Forward期限超出冻结范围")
+                if horizon in entry["forward"]:
+                    raise ResearchFactConflict("同一T0登记与期限存在多个Forward事实")
+                entry["forward"][horizon] = {
+                    "endpoint_session": endpoint_session,
+                    "maturity": maturity,
+                    "endpoint_quality": endpoint_quality,
+                    "endpoint_reason": endpoint_reason,
+                    "numerator": numerator_text,
+                    "denominator": denominator_text,
+                    "path_quality": path_quality,
+                    "path_reasons": path_reasons,
+                    "coordinate": coordinate,
+                    "scope": scope,
+                }
+
+        for context in contexts:
+            target = context["target_session"]
+            result = context["result"]
+            by_kind = enrollments_by_session[target]
+            result["enrollment_counts"] = {kind: len(by_kind[kind]) for kind in _KINDS}
+            result["excluded_from_entry_reentry"] = {
+                kind: len(by_kind[kind])
+                for kind in ("FIRST_OBSERVED_LEFT_CENSORED", "DAILY_LANDMARK")
+            }
+            result["status"] = (
+                "PAIRED_RISK_SET"
+                if by_kind["ENTRY"] and by_kind["REENTRY"]
+                else "NO_SAME_DAY_ENTRY_REENTRY_PAIR"
+            )
+            result["reason_codes"] = (
+                []
+                if result["status"] == "PAIRED_RISK_SET"
+                else ["ENTRY_AND_REENTRY_NOT_BOTH_NONEMPTY"]
+            )
+            for horizon in (1, 3, 5):
+                index = session_indexes[target]
+                endpoint = (
+                    sessions[index + horizon]
+                    if index + horizon < len(sessions)
+                    else None
+                )
+                groups = []
+                group_by_kind: dict[str, dict[str, Any]] = {}
+                for kind in ("ENTRY", "REENTRY"):
+                    entries = list(by_kind[kind].values())
+                    outcome_counts = Counter()
+                    maturity_counts = Counter()
+                    endpoint_quality_counts = Counter()
+                    path_quality_counts = Counter()
+                    reason_counts = Counter()
+                    values: list[tuple[Fraction, str, int]] = []
+                    for entry in entries:
+                        if endpoint is None:
+                            outcome_counts["NOT_DUE"] += 1
+                            maturity_counts["NOT_DUE"] += 1
+                            reason_counts["WAITING_FOR_FUTURE_OFFICIAL_SESSION"] += 1
+                            continue
+                        fact = entry["forward"].get(horizon)
+                        if fact is None:
+                            outcome_counts["NOT_COMPUTED"] += 1
+                            maturity_counts["MISSING_FACT"] += 1
+                            reason_counts["MISSING_FORWARD_FACT"] += 1
+                            continue
+                        if fact["endpoint_session"] != endpoint:
+                            raise ResearchFactConflict(
+                                "跨T0 Forward端点与截止内官方交易会话错位"
+                            )
+                        maturity_counts[fact["maturity"] or "UNKNOWN"] += 1
+                        endpoint_quality_counts[
+                            fact["endpoint_quality"] or "UNKNOWN"
+                        ] += 1
+                        path_quality_counts[fact["path_quality"] or "UNKNOWN"] += 1
+                        numerator = fact["numerator"]
+                        denominator = fact["denominator"]
+                        if (
+                            fact["maturity"] == "ENDPOINT_OBSERVED"
+                            and fact["endpoint_quality"] == "OBSERVED"
+                            and numerator is not None
+                            and denominator is not None
+                            and int(denominator) > 0
+                            and fact["coordinate"] == "RAW_UNADJUSTED"
+                            and fact["scope"] == SCOPE
+                        ):
+                            value = Fraction(int(numerator), int(denominator))
+                            values.append((value, entry["symbol"], entry["id"]))
+                            outcome_counts["OBSERVED"] += 1
+                        else:
+                            outcome_counts["UNKNOWN"] += 1
+                            reason = (
+                                fact["endpoint_reason"]
+                                or fact["maturity"]
+                                or fact["endpoint_quality"]
+                                or "UNKNOWN"
+                            )
+                            reason_counts[str(reason)] += 1
+                            for path_reason in fact["path_reasons"] or ():
+                                reason_counts[str(path_reason)] += 1
+
+                    values.sort(key=lambda item: (item[0], item[1], item[2]))
+                    positive = [value for value in values if value[0] > 0]
+                    non_positive = [value for value in values if value[0] <= 0]
+
+                    def example(item):
+                        if item is None:
+                            return None
+                        return {
+                            "source_symbol": item[1],
+                            "enrollment_id": item[2],
+                            "exact_return": str(item[0]),
+                        }
+
+                    risk_denominator = len(entries)
+                    outcomes = {
+                        state: outcome_counts[state]
+                        for state in ("OBSERVED", "UNKNOWN", "NOT_COMPUTED", "NOT_DUE")
+                    }
+                    if sum(outcomes.values()) != risk_denominator:
+                        raise ResearchFactConflict("跨T0 Forward质量状态未闭合登记分母")
+                    if endpoint is None and risk_denominator:
+                        status = "NOT_DUE"
+                    elif risk_denominator == 0:
+                        status = "EMPTY_RISK_SET"
+                    elif outcomes["NOT_COMPUTED"]:
+                        status = "INCOMPLETE"
+                    elif outcomes["UNKNOWN"]:
+                        status = "AVAILABLE_WITH_UNKNOWN"
+                    else:
+                        status = "AVAILABLE"
+                    group = {
+                        "kind": kind,
+                        "status": status,
+                        "risk_denominator": risk_denominator,
+                        "independent_security_count": len(
+                            symbols_by_session[target][kind]
+                        ),
+                        "outcomes": outcomes,
+                        "observed_count": outcomes["OBSERVED"],
+                        "unknown_count": outcomes["UNKNOWN"],
+                        "not_computed_count": outcomes["NOT_COMPUTED"],
+                        "not_due_count": outcomes["NOT_DUE"],
+                        "positive_count": len(positive),
+                        "non_positive_count": len(non_positive),
+                        "coverage_exact": (
+                            str(Fraction(outcomes["OBSERVED"], risk_denominator))
+                            if risk_denominator
+                            else None
+                        ),
+                        "median_exact_return": (
+                            str(median([value[0] for value in values]))
+                            if values
+                            else None
+                        ),
+                        "maturity_counts": dict(sorted(maturity_counts.items())),
+                        "endpoint_quality_counts": dict(
+                            sorted(endpoint_quality_counts.items())
+                        ),
+                        "path_quality_counts": dict(
+                            sorted(path_quality_counts.items())
+                        ),
+                        "unevaluable_reasons": dict(sorted(reason_counts.items())),
+                        "examples": {
+                            "positive": example(positive[-1] if positive else None),
+                            "non_positive": example(
+                                non_positive[0] if non_positive else None
+                            ),
+                        },
+                    }
+                    if group["risk_denominator"] != group["independent_security_count"]:
+                        raise ResearchFactConflict("跨T0登记数与去重证券数不一致")
+                    groups.append(group)
+                    group_by_kind[kind] = group
+
+                entry = group_by_kind["ENTRY"]
+                reentry = group_by_kind["REENTRY"]
+                entry_median = entry["median_exact_return"]
+                reentry_median = reentry["median_exact_return"]
+                if entry_median is None or reentry_median is None:
+                    difference = {
+                        "status": "NO_COMPARABLE_OBSERVED_MEDIANS",
+                        "definition": "ENTRY中位数−REENTRY中位数",
+                        "median_difference_exact": None,
+                        "direction": None,
+                    }
+                else:
+                    median_difference = Fraction(entry_median) - Fraction(
+                        reentry_median
+                    )
+                    difference = {
+                        "status": "DESCRIPTIVE_OBSERVED_SUBSETS",
+                        "definition": "ENTRY中位数−REENTRY中位数",
+                        "median_difference_exact": str(median_difference),
+                        "direction": (
+                            "ENTRY_MEDIAN_HIGHER"
+                            if median_difference > 0
+                            else "REENTRY_MEDIAN_HIGHER"
+                            if median_difference < 0
+                            else "MEDIANS_EQUAL"
+                        ),
+                    }
+                result["horizons"].append(
+                    {
+                        "horizon": horizon,
+                        "endpoint_session": endpoint.isoformat() if endpoint else None,
+                        "status": (
+                            "NOT_DUE"
+                            if endpoint is None
+                            else "AVAILABLE"
+                            if all(
+                                group["status"] in {"AVAILABLE", "EMPTY_RISK_SET"}
+                                for group in groups
+                            )
+                            else "AVAILABLE_WITH_QUALITY_GAPS"
+                        ),
+                        "groups": groups,
+                        "comparison": difference,
+                    }
+                )
+
+    paired_t0_count = sum(
+        item["status"] == "PAIRED_RISK_SET" for item in results_by_session.values()
+    )
+    comparable_by_horizon = {
+        str(horizon): sum(
+            any(
+                item["horizon"] == horizon
+                and item["comparison"]["status"] == "DESCRIPTIVE_OBSERVED_SUBSETS"
+                for item in result["horizons"]
+            )
+            for result in results_by_session.values()
+        )
+        for horizon in (1, 3, 5)
+    }
+    ordered = [
+        results_by_session[key] for key in sorted(results_by_session, reverse=True)
+    ]
+    return {
+        "status": "AVAILABLE" if contexts else "NO_COMPARABLE_STORED_SCOPE",
+        "rule": rule,
+        "rule_version": RULE_VERSION,
+        "path_rule_version": PATH_VERSION,
+        "scope": SCOPE,
+        "price_coordinate": "RAW_UNADJUSTED",
+        "research_cutoff": research_cutoff.isoformat(),
+        "paired_t0_date_count": paired_t0_count,
+        "comparable_t0_date_count_by_horizon": comparable_by_horizon,
+        "aggregation": "NO_CROSS_DATE_AGGREGATE; each T0 date remains independent",
+        "dates": ordered,
+    }
+
+
 def read_cohort_enrollment_lifecycle_groups(
     config,
     *,

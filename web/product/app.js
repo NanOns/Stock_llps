@@ -5451,6 +5451,115 @@ function cohortGroupLabel(state) {
     { TRUE: "MATCH", FALSE: "NO_MATCH", UNKNOWN: "UNKNOWN" }[state] || state
   );
 }
+function enrollmentDatewiseDifferenceLabel(comparison) {
+  if (comparison?.status !== "DESCRIPTIVE_OBSERVED_SUBSETS")
+    return comparison?.status || "不可比较";
+  return (
+    {
+      ENTRY_MEDIAN_HIGHER: "ENTRY 中位更高",
+      REENTRY_MEDIAN_HIGHER: "REENTRY 中位更高",
+      MEDIANS_EQUAL: "两组中位相同",
+    }[comparison.direction] ||
+    comparison.direction ||
+    "已计算描述差异"
+  );
+}
+function renderEnrollmentDatewiseComparison(root, result) {
+  const comparison = result?.enrollment_datewise;
+  root.append(
+    node("h3", "同规则 ENTRY / REENTRY 按 T0 日期对照"),
+    node(
+      "p",
+      `${comparison?.status || "NO_STORED_FACT"} · 有同日两类登记的 T0 ${format(comparison?.paired_t0_date_count)} · ${comparison?.rule_version || "UNKNOWN_RULE_VERSION"} / ${comparison?.path_rule_version || "UNKNOWN_PATH_VERSION"} · ${comparison?.price_coordinate || "UNKNOWN"} / ${comparison?.scope || "UNKNOWN"}`,
+    ),
+    node(
+      "p",
+      "每个 T0 和期限独立展示完整 ENTRY、REENTRY 风险集；左截断与 DAILY_LANDMARK 单列，不并入两组。状态按 OBSERVED、UNKNOWN、NOT_COMPUTED、NOT_DUE 闭合。中位差定义为 ENTRY−REENTRY，仅比较各组已观察有价子样本；不合并不同日期，不计算总体胜率、显著性或策略效果。",
+      "muted",
+    ),
+  );
+  if (!Array.isArray(comparison?.dates) || !comparison.dates.length) {
+    root.append(
+      node(
+        "p",
+        `${comparison?.status || "NO_COMPARABLE_STORED_SCOPE"} · 当前规则没有可读取的唯一完整 T0 范围。`,
+      ),
+    );
+    return;
+  }
+  for (const item of comparison.dates) {
+    const details = node("details", null, "evidence-details");
+    details.open = item.status === "PAIRED_RISK_SET";
+    const counts = item.enrollment_counts || {};
+    const horizonHeads = (item.horizons || []).map((horizon) => {
+      const status = enrollmentDatewiseDifferenceLabel(horizon.comparison);
+      return `T+${horizon.horizon} ${horizon.status} ${status}`;
+    });
+    details.append(
+      node(
+        "summary",
+        `${item.target_session} · ${item.status} · ENTRY ${format(counts.ENTRY)} / REENTRY ${format(counts.REENTRY)} · 左截断 ${format(counts.FIRST_OBSERVED_LEFT_CENSORED)} / 每日观察 ${format(counts.DAILY_LANDMARK)} · ${horizonHeads.join("；")}`,
+      ),
+    );
+    if (item.status !== "PAIRED_RISK_SET") {
+      details.append(
+        node(
+          "p",
+          `${(item.reason_codes || []).join("、") || "无同日ENTRY与REENTRY配对"}；该日期不生成两组差异。`,
+        ),
+      );
+    }
+    for (const horizon of item.horizons || []) {
+      const section = node("section", null, "evidence-details");
+      section.append(
+        node(
+          "h4",
+          `T+${horizon.horizon} · 到期 ${horizon.endpoint_session || "未知"} · ${horizon.status}`,
+        ),
+      );
+      for (const group of horizon.groups || []) {
+        const outcomes = group.outcomes || {};
+        const coverage = group.coverage_exact
+          ? formatCohortMedian(group.coverage_exact)
+          : "无登记分母";
+        section.append(
+          node(
+            "p",
+            `${group.kind} · 风险集 ${format(group.risk_denominator)} / 去重证券 ${format(group.independent_security_count)} · 有价 ${format(outcomes.OBSERVED)}（覆盖 ${coverage}） / UNKNOWN ${format(outcomes.UNKNOWN)} / NOT_COMPUTED ${format(outcomes.NOT_COMPUTED)} / NOT_DUE ${format(outcomes.NOT_DUE)} · 正/非正 ${format(group.positive_count)}/${format(group.non_positive_count)} · 有价中位 ${formatCohortMedian(group.median_exact_return)}`,
+          ),
+        );
+        for (const [label, example] of [
+          [`${group.kind} 正例`, group.examples?.positive],
+          [`${group.kind} 非正例`, group.examples?.non_positive],
+        ]) {
+          if (!example?.source_symbol) continue;
+          const code = displayStockCode({
+            source_symbol: example.source_symbol,
+          });
+          const button = node(
+            "button",
+            `${label} ${code} · ${formatCohortMedian(example.exact_return)}`,
+            "text-button",
+          );
+          button.type = "button";
+          button.addEventListener("click", () => {
+            $("cohortSymbol").value = code;
+            $("focusBackStock").click();
+          });
+          section.append(button);
+        }
+      }
+      const difference = horizon.comparison || {};
+      const differenceText =
+        difference.status === "DESCRIPTIVE_OBSERVED_SUBSETS"
+          ? `${enrollmentDatewiseDifferenceLabel(difference)} · ENTRY−REENTRY 有价中位差 ${formatCohortMedian(difference.median_difference_exact)}`
+          : `${difference.status || "不可比较"} · 未生成两组中位差`;
+      section.append(node("p", differenceText, "muted"));
+      details.append(section);
+    }
+    root.append(details);
+  }
+}
 function renderCohortDateComparison(result) {
   const root = $("cohortDateComparison");
   root.replaceChildren();
@@ -5465,6 +5574,7 @@ function renderCohortDateComparison(result) {
       `${result?.comparison_status || "UNKNOWN"} · 已到期独立 T0 日期 ${format(result?.independent_t0_date_count)}。逐日展示 MATCH / NO_MATCH / UNKNOWN 与覆盖质量；不把股票数当独立日期，不计算跨日胜率、显著性或因果效果。`,
     ),
   );
+  renderEnrollmentDatewiseComparison(root, result);
   if (result?.status !== "AVAILABLE" || !Array.isArray(result.dates)) {
     root.append(
       node(
@@ -6180,6 +6290,11 @@ for (const id of ["cohortKey", "cohortHorizon", "cohortSymbol"]) {
     ++cohortRequest;
     ++focusStockRequest;
     $("cohortSummary").replaceChildren();
+    $("cohortEnrollmentSummary").replaceChildren();
+    message(
+      "cohortEnrollmentStatus",
+      "所选范围已改变，旧登记结果已清除；请重新读取。",
+    );
     cohortRpsPulseData = null;
     cohortRpsPulseRequested = false;
     renderCohortRpsPulse(null);

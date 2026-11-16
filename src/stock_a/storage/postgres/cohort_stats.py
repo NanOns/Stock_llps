@@ -441,6 +441,17 @@ def read_cohort_date_comparison(
         )
 
     due_date_count = sum(item["status"] == "AVAILABLE" for item in dates)
+    from stock_a.storage.postgres.cohort_enrollment import (
+        read_cohort_enrollment_datewise_comparison,
+    )
+
+    enrollment_datewise = read_cohort_enrollment_datewise_comparison(
+        config,
+        dates=dates,
+        research_cutoff=research_cutoff,
+        source_package_id=source_package_id,
+        rule=rule,
+    )
     return {
         "status": "AVAILABLE" if dates else "NO_STORED_FACT",
         "scope": "NON_PIT_EXPLORATORY",
@@ -459,6 +470,7 @@ def read_cohort_date_comparison(
         ),
         "aggregation": "NO_CROSS_DATE_AGGREGATE; each eligible T0 session is one descriptive row",
         "dates": dates,
+        "enrollment_datewise": enrollment_datewise,
     }
 
 
