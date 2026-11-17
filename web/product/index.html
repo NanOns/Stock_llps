@@ -512,6 +512,27 @@
                   读取已存观察段
                 </button>
               </div>
+              <div class="focus-segment-outcome-controls">
+                <label class="inline-filter"
+                  >原始T0后继观察期限
+                  <select id="focusSegmentOutcomeHorizon">
+                    <option value="1">T+1</option>
+                    <option value="3">T+3</option>
+                    <option value="5">T+5</option>
+                  </select>
+                </label>
+                <p>
+                  以所选研究日作为原T0，仅读取PG已存的ENTRY/REENTRY逐官方会话事实和原T0
+                  Forward；截至研究截止的未来状态是后验描述，不属于T0当时可见信息。
+                </p>
+              </div>
+              <p id="focusSegmentOutcomeStatus" role="status">
+                等待读取原T0观察期限结局。
+              </p>
+              <div
+                id="focusSegmentOutcomeSummary"
+                class="focus-segment-outcome-summary"
+              ></div>
               <p id="focusSegmentStatus" role="status">
                 等待读取已保存的跨日观察事实。
               </p>

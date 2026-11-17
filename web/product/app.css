@@ -1429,6 +1429,50 @@ td.empty {
   font-size: 0.86rem;
 }
 
+.focus-segment-outcome-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+  margin: 1rem 0 0.5rem;
+}
+
+.focus-segment-outcome-controls > p {
+  flex-basis: 100%;
+  margin: 0;
+  color: var(--muted);
+}
+
+.focus-segment-outcome-summary {
+  overflow-x: auto;
+  margin: 0.75rem 0 1rem;
+}
+
+.focus-segment-outcome-lane {
+  margin: 1rem 0 0.4rem;
+  font-weight: 600;
+}
+
+.focus-segment-outcome-table {
+  min-width: 900px;
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.82rem;
+}
+
+.focus-segment-outcome-table th,
+.focus-segment-outcome-table td {
+  padding: 0.45rem;
+  border: 1px solid #dce8e1;
+  text-align: left;
+  vertical-align: top;
+}
+
+.focus-segment-outcome-table th {
+  color: #536960;
+  font-weight: 600;
+}
+
 .focus-observation-segment {
   min-width: 0;
   padding: 0.85rem 1rem;

@@ -4456,6 +4456,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "limit",
                     "event_offset",
                     "event_limit",
+                    "outcome_horizon",
                 }
                 values = _query(self.path, allowed)
                 if not {
@@ -4515,6 +4516,15 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                             ),
                             "event_limit",
                             100,
+                        ),
+                        outcome_horizon=_positive_int(
+                            _nonnegative_int(
+                                values.get("outcome_horizon", "1"),
+                                "outcome_horizon",
+                                5,
+                            ),
+                            "outcome_horizon",
+                            5,
                         ),
                     )
                 except ValueError as error:

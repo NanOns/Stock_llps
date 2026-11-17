@@ -14,6 +14,9 @@ from stock_a.storage.postgres.research_enrollment import (
     _rule_context_comparable,
     _enrollment_forward_paths,
 )
+from stock_a.storage.postgres.source_observation_outcomes import (
+    read_source_observation_outcomes_cursor,
+)
 from stock_a.storage.postgres.source_raw import _transaction
 
 
@@ -710,6 +713,7 @@ def _validate_read_arguments(
     limit: int,
     event_offset: int,
     event_limit: int,
+    outcome_horizon: int,
 ) -> None:
     allowed_statuses = {
         "ACTIVE",
@@ -737,6 +741,8 @@ def _validate_read_arguments(
         or event_offset < 0
         or type(event_limit) is not int
         or not 1 <= event_limit <= 100
+        or type(outcome_horizon) is not int
+        or outcome_horizon not in {1, 3, 5}
     ):
         raise ValueError("来源观察段只读分页参数无效")
 
@@ -754,6 +760,7 @@ def read_source_observation_segments(
     limit: int = 20,
     event_offset: int = 0,
     event_limit: int = 20,
+    outcome_horizon: int = 1,
 ) -> dict[str, Any]:
     """同一只读快照内读取状态、日期事件、历史与原T0后继。"""
     _validate_read_arguments(
@@ -767,6 +774,7 @@ def read_source_observation_segments(
         limit=limit,
         event_offset=event_offset,
         event_limit=event_limit,
+        outcome_horizon=outcome_horizon,
     )
     official_sessions = _load_calendar(research_cutoff)[3]
     if as_of not in official_sessions:
@@ -826,6 +834,17 @@ def read_source_observation_segments(
         cursor,
         _,
     ):
+        outcome_summary, outcome_by_enrollment = (
+            read_source_observation_outcomes_cursor(
+                cursor,
+                source_package_id=source_package_id,
+                t0_session=as_of,
+                research_cutoff=research_cutoff,
+                rule_id=rule_id,
+                horizon=outcome_horizon,
+                official_sessions=official_sessions,
+            )
+        )
         cursor.execute(
             """SELECT r.rule_id,count(*) AS enrollment_count,
                       count(DISTINCT r.source_symbol) AS source_symbol_count
@@ -1161,6 +1180,7 @@ def read_source_observation_segments(
                 "latest_evidence_fact_id": row[23],
                 "latest_capture_id": row[24],
                 "latest_linked_enrollment_id": row[25],
+                "horizon_outcome": outcome_by_enrollment.get(row[0]),
                 "status": status_value,
                 "next_official_session_status": next_status,
                 "history": history,
@@ -1330,6 +1350,7 @@ def read_source_observation_segments(
                 else None,
             },
             "results": items,
+            "observation_outcomes": outcome_summary,
             "daily_events": {
                 "status": daily_event_status,
                 "as_of": as_of.isoformat(),

@@ -3879,6 +3879,156 @@ function sourceObservationStatusLabel(status) {
   );
 }
 
+function sourceObservationOutcomeLabel(status) {
+  return (
+    {
+      CONTINUOUS_MATCH_THROUGH_HORIZON: "持续TRUE至期限",
+      CONTINUOUS_THROUGH_CUTOFF: "截止前持续TRUE（期限未到）",
+      FIRST_EXIT_PROVED: "首次已证退出",
+      PAUSED_UNKNOWN: "期限内未知暂停",
+      INCOMPARABLE_OR_INCOMPLETE: "不可比或事实不完整",
+      NOT_COMPUTED: "未计算",
+      NOT_DUE: "未到期",
+    }[status] ||
+    status ||
+    "UNKNOWN"
+  );
+}
+
+function renderSourceObservationOutcomeSummary(summary) {
+  const root = $("focusSegmentOutcomeSummary");
+  root.replaceChildren();
+  if (!summary) {
+    message("focusSegmentOutcomeStatus", "观察期限结局 UNKNOWN。");
+    return;
+  }
+  const denominator = summary.denominator || {};
+  const riskSet = denominator.enrollment_kind_counts || {};
+  const excluded = ["FIRST_OBSERVED_LEFT_CENSORED", "DAILY_LANDMARK"]
+    .map((kind) => `${kind} ${riskSet[kind]?.enrollment_count ?? 0}段`)
+    .join(" · ");
+  const dueLabel = summary.horizon_session || "官方期限日期未提供";
+  const statusLabel =
+    summary.status === "NO_OBSERVED_SAMPLE"
+      ? "NO_OBSERVED_SAMPLE"
+      : summary.aggregate_status || summary.status;
+  message(
+    "focusSegmentOutcomeStatus",
+    `${summary.t0_session} · T+${summary.horizon}目标 ${dueLabel} · 研究截止 ${summary.research_cutoff} · ${statusLabel} · RETROSPECTIVE_OUTCOME_STRATIFICATION_NON_PIT`,
+  );
+  root.append(
+    node(
+      "p",
+      `完整T0登记 ${denominator.full_t0_enrollment_count ?? 0} 段 / ${denominator.full_t0_independent_source_symbol_count ?? 0} 个来源代码；ENTRY/REENTRY风险集 ${denominator.primary_entry_reentry_risk_set_count ?? 0} 段 / ${denominator.primary_entry_reentry_source_symbol_count ?? 0} 个来源代码。另列且不混作首次入组：${excluded}。每个结局组保留独立T0日期支持和Forward可评价数。`,
+    ),
+  );
+  const groups = Array.isArray(summary.groups) ? summary.groups : [];
+  if (!groups.length) {
+    root.append(
+      node(
+        "p",
+        summary.status === "NO_OBSERVED_SAMPLE"
+          ? "所选T0没有已登记ENTRY/REENTRY观察段；这不代表来源池为零。"
+          : "当前T0没有可显示的观察结局分组。",
+      ),
+    );
+    return;
+  }
+  const laneKeys = [
+    ...new Set(groups.map((group) => `${group.rule_id}\t${group.lane}`)),
+  ];
+  for (const laneKey of laneKeys) {
+    const [rule, lane] = laneKey.split("\t");
+    const laneGroups = groups.filter(
+      (group) => group.rule_id === rule && group.lane === lane,
+    );
+    const first = laneGroups[0];
+    const counts = laneGroups
+      .map(
+        (group) =>
+          `${sourceObservationOutcomeLabel(group.outcome_status)} ${group.enrollment_count ?? 0}`,
+      )
+      .join(" · ");
+    root.append(
+      node(
+        "p",
+        `${rule} · ${lane} · 完整风险集 ${first?.risk_set_enrollment_count ?? 0}段 / ${first?.risk_set_independent_source_symbol_count ?? 0}个代码 · ${counts}`,
+        "focus-segment-outcome-lane",
+      ),
+    );
+    const table = node("table", undefined, "focus-segment-outcome-table");
+    const head = node("thead");
+    const header = node("tr");
+    for (const title of [
+      "期限结局",
+      "登记段 / 去重代码 / 闭合段",
+      "Forward端点",
+      "RAW_CLOSE_RETURN",
+      "RAW_MFE",
+      "RAW_MAE",
+      "RAW_MDD_CLOSE",
+      "登记T0日期支持",
+    ])
+      header.append(node("th", title));
+    head.append(header);
+    table.append(head);
+    const body = node("tbody");
+    for (const group of laneGroups.filter(
+      (item) => item.enrollment_count > 0,
+    )) {
+      const row = node("tr");
+      row.append(
+        node("td", sourceObservationOutcomeLabel(group.outcome_status)),
+        node(
+          "td",
+          `${group.enrollment_count} / ${group.independent_source_symbol_count} / ${group.evidence_closed_count}`,
+        ),
+        node(
+          "td",
+          `OBSERVED ${group.forward_status_counts?.OBSERVED ?? 0} · UNKNOWN ${group.forward_status_counts?.UNKNOWN ?? 0} · 未算 ${group.forward_status_counts?.NOT_COMPUTED ?? 0} · 未到期 ${group.forward_status_counts?.NOT_DUE ?? 0}${group.pre_due_status_counts ? ` · 截止前退出 ${group.pre_due_status_counts.FIRST_EXIT_PROVED ?? 0} / 未知 ${group.pre_due_status_counts.PAUSED_UNKNOWN ?? 0} / 持续 ${group.pre_due_status_counts.CONTINUOUS_THROUGH_CUTOFF ?? 0}` : ""}`,
+        ),
+      );
+      for (const metric of [
+        "RAW_CLOSE_RETURN",
+        "RAW_MFE",
+        "RAW_MAE",
+        "RAW_MDD_CLOSE",
+      ]) {
+        const value = group.metrics?.[metric] || {};
+        row.append(
+          node(
+            "td",
+            `n=${value.evaluated_count ?? 0} / ${value.independent_t0_date_count ?? 0}日 · p50 ${value.p50_nearest_rank ?? "—"} · ${value.minimum ?? "—"}…${value.maximum ?? "—"}`,
+          ),
+        );
+      }
+      row.append(
+        node(
+          "td",
+          `${group.independent_t0_date_count ?? 0} · 最近秩分位 / 后验描述`,
+        ),
+      );
+      body.append(row);
+      const reasons = [
+        ...Object.keys(group.observation_reason_counts || {}),
+        ...Object.keys(group.forward_reason_counts || {}),
+      ];
+      if (reasons.length) {
+        const reasonRow = node("tr");
+        const reasonCell = node(
+          "td",
+          `质量原因：${[...new Set(reasons)].join("、")}`,
+        );
+        reasonCell.colSpan = 8;
+        reasonRow.append(reasonCell);
+        body.append(reasonRow);
+      }
+    }
+    table.append(body);
+    root.append(table);
+  }
+}
+
 function renderSourceObservationSegment(item, context) {
   const card = node("article", undefined, "focus-observation-segment");
   const code = item.source_symbol || "UNKNOWN_SYMBOL";
@@ -3912,6 +4062,56 @@ function renderSourceObservationSegment(item, context) {
     );
   } else {
     card.append(node("p", `登记原因：${item.enrollment_reason || "UNKNOWN"}`));
+  }
+  if (item.horizon_outcome) {
+    const outcome = item.horizon_outcome;
+    const forward = outcome.forward || {};
+    card.append(
+      node(
+        "p",
+        `T+${outcome.horizon}后验观察结局：${sourceObservationOutcomeLabel(outcome.status)} · 目标 ${outcome.horizon_session || "UNKNOWN"} · 截止 ${context.research_cutoff} · ${outcome.reason_code || "无质量原因"}`,
+      ),
+    );
+    if (outcome.status === "NOT_DUE" && outcome.pre_due_status !== "NOT_DUE") {
+      card.append(
+        node(
+          "p",
+          `期限尚未成熟；截至 ${outcome.pre_due_observed_through || context.research_cutoff} 的已存状态：${sourceObservationOutcomeLabel(outcome.pre_due_status)} · ${outcome.pre_due_reason_code || "无质量原因"}`,
+        ),
+      );
+    }
+    const firstExit = outcome.first_exit || outcome.pre_due_first_exit;
+    if (firstExit) {
+      card.append(
+        node(
+          "p",
+          `首次已证退出 ${firstExit.session} · 观察事实 #${firstExit.observation_fact_id ?? "UNKNOWN"} / 规则证据 #${firstExit.evidence_rule_fact_id ?? "UNKNOWN"} · 捕获 ${firstExit.capture_id ?? "UNKNOWN"} · ${firstExit.reason_code || "无原因码"}`,
+        ),
+      );
+    }
+    const unknownSessions =
+      outcome.unknown_sessions?.length > 0
+        ? outcome.unknown_sessions
+        : outcome.pre_due_unknown_sessions || [];
+    if (unknownSessions.length) {
+      card.append(
+        node(
+          "p",
+          `期限内未知/左截断会话：${unknownSessions
+            .map(
+              (entry) => `${entry.session} · ${entry.reason_code || "UNKNOWN"}`,
+            )
+            .join("；")}`,
+        ),
+      );
+    }
+    card.append(
+      node(
+        "p",
+        `原T0已存Forward：端点 ${forward.status || "UNKNOWN"} ${forward.endpoint_return || "—"} · MFE ${forward.mfe || "—"} · MAE ${forward.mae || "—"} · MDD_CLOSE ${forward.mdd_close || "—"} · 原因 ${(forward.reason_codes || []).join("、") || "无"} · RETROSPECTIVE_OUTCOME_STRATIFICATION_NON_PIT，不回写T0特征。`,
+        "muted",
+      ),
+    );
   }
   if (Array.isArray(item.child_enrollments) && item.child_enrollments.length) {
     card.append(
@@ -4235,6 +4435,8 @@ async function loadFocusObservationSegments(context, offset = 0) {
   state.focusSegmentOffset = offset;
   const root = $("focusSegmentRows");
   const eventRoot = $("focusSegmentEventRows");
+  $("focusSegmentOutcomeSummary").replaceChildren();
+  message("focusSegmentOutcomeStatus", "正在读取所选T0的后验期限结局…");
   root.replaceChildren();
   eventRoot.replaceChildren();
   $("focusSegmentEventCounts").replaceChildren();
@@ -4244,6 +4446,10 @@ async function loadFocusObservationSegments(context, offset = 0) {
   message("focusSegmentPage", "—");
   message("focusSegmentEventPage", "—");
   if (!context?.contextReady || !context?.source_package_id) {
+    message(
+      "focusSegmentOutcomeStatus",
+      "T0日期或来源包不可用；观察结局 UNKNOWN。",
+    );
     message(
       "focusSegmentStatus",
       "研究日期或来源包不可用；观察段状态 UNKNOWN。",
@@ -4270,6 +4476,7 @@ async function loadFocusObservationSegments(context, offset = 0) {
     limit: 20,
     event_offset: eventOffset,
     event_limit: 20,
+    outcome_horizon: $("focusSegmentOutcomeHorizon").value,
   };
   try {
     const result = await api(
@@ -4281,6 +4488,7 @@ async function loadFocusObservationSegments(context, offset = 0) {
       activePage !== "focus"
     )
       return;
+    renderSourceObservationOutcomeSummary(result.observation_outcomes);
     const options = result.available_rules || [];
     const selectedRule =
       requestedRule === "ALL" ||
@@ -4399,6 +4607,11 @@ async function loadFocusObservationSegments(context, offset = 0) {
     }
   } catch (error) {
     if (token === state.focusSegmentRequest && state.selected === context) {
+      message(
+        "focusSegmentOutcomeStatus",
+        `后验观察期限只读失败：${error.message}`,
+      );
+      $("focusSegmentOutcomeSummary").replaceChildren();
       message("focusSegmentStatus", `来源观察段只读失败：${error.message}`);
       root.textContent = "读取失败；没有触发重算或写入。";
       message("focusSegmentEventStatus", `当日事件只读失败：${error.message}`);
@@ -4432,6 +4645,11 @@ $("focusSegmentStatusFilter").addEventListener("change", () => {
   if (state.selected) void loadFocusObservationSegments(state.selected, 0);
 });
 $("focusSegmentRefresh").addEventListener("click", () => {
+  state.focusSegmentOffset = 0;
+  state.focusSegmentEventOffset = 0;
+  if (state.selected) void loadFocusObservationSegments(state.selected, 0);
+});
+$("focusSegmentOutcomeHorizon").addEventListener("change", () => {
   state.focusSegmentOffset = 0;
   state.focusSegmentEventOffset = 0;
   if (state.selected) void loadFocusObservationSegments(state.selected, 0);
