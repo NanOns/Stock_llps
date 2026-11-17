@@ -47,6 +47,7 @@ const state = {
   focusAutoBoard: null,
   focusAutoSelectedItem: null,
   focusSegmentOffset: 0,
+  focusSegmentEventOffset: 0,
   focusSegmentRule: null,
   focusSegmentRequest: 0,
   focusMarketKey: null,
@@ -1728,6 +1729,8 @@ function invalidateDate() {
   ++state.contextRequest;
   ++state.focusAutoRequest;
   ++state.focusSegmentRequest;
+  state.focusSegmentOffset = 0;
+  state.focusSegmentEventOffset = 0;
   ++state.stockRequest;
   ++state.profileChangeRequest;
   ++state.focusMarketRequest;
@@ -1836,6 +1839,12 @@ function invalidateDate() {
   message("focusSegmentPage", "—");
   $("focusSegmentRows").replaceChildren();
   $("focusSegmentPrev").disabled = $("focusSegmentNext").disabled = true;
+  message("focusSegmentEventStatus", "研究日期已切换，正在读取当日事件事实。");
+  message("focusSegmentEventPage", "—");
+  $("focusSegmentEventCounts").replaceChildren();
+  $("focusSegmentEventRows").replaceChildren();
+  $("focusSegmentEventPrev").disabled = $("focusSegmentEventNext").disabled =
+    true;
   message("focusAutoBoardFilter", "当前未按板块筛选；等待当前日期。");
   message("stockSearchStatus", "");
   $("focusAutoPrev").disabled = $("focusAutoNext").disabled = true;
@@ -3834,17 +3843,19 @@ async function loadFocusAuto(context, offset = 0) {
 function sourceObservationEventLabel(event) {
   return (
     {
-      ENTRY: "相邻 FALSE→TRUE 入组",
-      FIRST_OBSERVED_LEFT_CENSORED: "左截断首次观察",
+      ENTRY: "新登记",
+      FIRST_OBSERVED_LEFT_CENSORED: "左截断首观",
       DAILY_LANDMARK: "活动段每日观察点",
-      REENTRY: "已证退出后合法重入",
-      CONTINUES: "持续符合",
+      REENTRY: "合法重入",
+      CONTINUES: "持续观察",
       EXIT_PROVED: "已证退出",
       PAUSED_UNKNOWN: "未知暂停",
-      LEFT_CENSORED: "未知间隔后恢复匹配",
-      NO_MATCH: "退出后仍未匹配",
+      LEFT_CENSORED: "未知后恢复匹配",
+      NO_MATCH: "终止后未重入",
       UNKNOWN: "状态未知",
-      REENTRY_NOT_LINKED: "重现但父段未证明",
+      REENTRY_NOT_LINKED: "重入父段未证",
+      INCOMPLETE: "事实不完整",
+      NOT_COMPUTED: "未计算",
     }[event] ||
     event ||
     "UNKNOWN"
@@ -3872,11 +3883,13 @@ function renderSourceObservationSegment(item, context) {
   const card = node("article", undefined, "focus-observation-segment");
   const code = item.source_symbol || "UNKNOWN_SYMBOL";
   const history = Array.isArray(item.history) ? item.history : [];
+  const eventMode = Boolean(item.daily_event_code);
+  const shownEvent = eventMode ? item.daily_event_code : item.latest_event;
   card.append(
     node("h3", `${code} · ${item.rule_id} · 登记 #${item.enrollment_id}`),
     node(
       "p",
-      `${item.t0_session} · ${item.enrollment_kind} · ${sourceObservationStatusLabel(item.status)} · ${item.latest_event ? sourceObservationEventLabel(item.latest_event) : "当前状态未计算"}`,
+      `${item.t0_session} · ${item.enrollment_kind} · ${sourceObservationStatusLabel(item.status)} · ${shownEvent ? sourceObservationEventLabel(shownEvent) : "当前状态未计算"}`,
     ),
     node(
       "p",
@@ -3885,7 +3898,9 @@ function renderSourceObservationSegment(item, context) {
     ),
     node(
       "p",
-      `${item.latest_observation_session || "无已存观察日"} · 三态 ${item.latest_state || "UNKNOWN"} · 生命周期 ${item.latest_lifecycle || "NOT_COMPUTED"} · 捕获 ${item.latest_capture_id ?? "UNKNOWN"} · 事实 #${item.latest_evidence_fact_id ?? "UNKNOWN"} · ${item.latest_reason || "无原因码"}`,
+      eventMode
+        ? `${item.daily_event_session} · 当日${sourceObservationEventLabel(item.daily_event_code)} · 三态 ${item.daily_event_state || "UNKNOWN"} · 生命周期 ${item.daily_event_lifecycle || "NOT_COMPUTED"} · 质量 ${item.daily_event_quality_status} · 捕获 ${item.daily_event_capture_id ?? "UNKNOWN"} · 事实 #${item.daily_event_evidence_fact_id ?? "UNKNOWN"} · ${item.daily_event_reason || "无原因码"}`
+        : `${item.latest_observation_session || "无已存观察日"} · 三态 ${item.latest_state || "UNKNOWN"} · 生命周期 ${item.latest_lifecycle || "NOT_COMPUTED"} · 捕获 ${item.latest_capture_id ?? "UNKNOWN"} · 事实 #${item.latest_evidence_fact_id ?? "UNKNOWN"} · ${item.latest_reason || "无原因码"}`,
     ),
   );
   if (item.parent_enrollment_id) {
@@ -3897,6 +3912,19 @@ function renderSourceObservationSegment(item, context) {
     );
   } else {
     card.append(node("p", `登记原因：${item.enrollment_reason || "UNKNOWN"}`));
+  }
+  if (Array.isArray(item.child_enrollments) && item.child_enrollments.length) {
+    card.append(
+      node(
+        "p",
+        `截至 ${context.target_session} 已证子观察段：${item.child_enrollments
+          .map(
+            (child) =>
+              `#${child.enrollment_id} · ${child.t0_session} · 事实 #${child.rule_fact_id}`,
+          )
+          .join("；")}`,
+      ),
+    );
   }
 
   const timeline = node("details", undefined, "focus-observation-timeline");
@@ -3926,6 +3954,30 @@ function renderSourceObservationSegment(item, context) {
     timeline.append(rows);
   }
   card.append(timeline);
+  if (Array.isArray(item.parent_history) && item.parent_enrollment_id) {
+    const parentTimeline = node(
+      "details",
+      undefined,
+      "focus-observation-timeline",
+    );
+    parentTimeline.append(
+      node(
+        "summary",
+        `父观察段 #${item.parent_enrollment_id} 历史 · ${item.parent_history.length} 条事实`,
+      ),
+    );
+    const rows = node("ol");
+    for (const row of item.parent_history) {
+      rows.append(
+        node(
+          "li",
+          `${row.session} · ${sourceObservationEventLabel(row.event)} / ${row.lifecycle} · ${row.state || "无已存三态"} · 捕获 ${row.source_capture_id ?? "UNKNOWN"} · 事实 #${row.fact_id ?? "UNKNOWN"} · ${row.reason}`,
+        ),
+      );
+    }
+    parentTimeline.append(rows);
+    card.append(parentTimeline);
+  }
 
   const drilldown = node("details", undefined, "focus-observation-drilldown");
   drilldown.append(node("summary", "查看同一 T0 的 Cohort / Forward"));
@@ -3968,39 +4020,139 @@ function renderSourceObservationSegment(item, context) {
       detail.append(
         node(
           "p",
-          `Cohort ${cohort.storage_status || cohort.status || "UNKNOWN"} · ${cohort.target_session || item.t0_session} · 登记分母 ${cohort.source_pool_count ?? "UNKNOWN"} · ${cohort.scope || "NON_PIT_EXPLORATORY"}`,
+          `Cohort ${cohort.storage_status || cohort.status || "UNKNOWN"} · ${cohort.target_session || item.t0_session} · 来源规则全集 ${cohort.source_pool_count ?? "UNKNOWN"} 条事实 · ${cohort.scope || "NON_PIT_EXPLORATORY"} · RETROSPECTIVE_DESCRIPTIVE_NON_PIT`,
         ),
       );
-      for (const fact of cohort.selected_rules || []) {
-        if (fact.rule_id !== item.rule_id) continue;
+      const exactFact = (cohort.selected_rules || []).find(
+        (fact) =>
+          fact.rule_id === item.rule_id &&
+          String(fact.rule_fact_id ?? fact.id) ===
+            String(item.anchor_rule_fact_id) &&
+          String(fact.source_capture_id) === String(item.anchor_capture_id),
+      );
+      if (exactFact) {
         detail.append(
           node(
             "p",
-            `${fact.rule_id} ${fact.state || "UNKNOWN"} · 事实 #${fact.rule_fact_id ?? fact.id ?? item.anchor_rule_fact_id} · 捕获 ${fact.source_capture_id ?? item.anchor_capture_id} · 登记 ${fact.enrollment ? `${fact.enrollment.kind} #${fact.enrollment.id}` : `${item.enrollment_kind} #${item.enrollment_id}`}`,
+            `原始登记 T0 ${exactFact.rule_id} ${exactFact.state || "UNKNOWN"} · 事实 #${item.anchor_rule_fact_id} · 捕获 ${item.anchor_capture_id} · ${item.enrollment_kind} 登记 #${item.enrollment_id}`,
+          ),
+        );
+      } else {
+        detail.append(
+          node(
+            "p",
+            `Cohort未返回与原始登记事实 #${item.anchor_rule_fact_id}、捕获 ${item.anchor_capture_id} 完全一致的记录；该登记的Cohort状态为 UNKNOWN。`,
           ),
         );
       }
-      const forwardQuery = { ...key };
-      const forward = await api(
-        `/api/product/cohort-symbol-forward?${new URLSearchParams(forwardQuery)}`,
-      );
-      if (!card.isConnected || state.selected !== context) return;
+      const forwardPaths = Array.isArray(item.forward_paths)
+        ? item.forward_paths
+        : [];
       detail.append(
         node(
           "p",
-          `同 T0 Forward ${forward.status || "UNKNOWN"} · ${forward.target_session || item.t0_session} · RAW_UNADJUSTED / NON_PIT_EXPLORATORY`,
+          `原登记 #${item.enrollment_id} 的 T0→Forward · 截至 ${item.forward_as_of || context.research_cutoff} · ${item.forward_classification || "RETROSPECTIVE_DESCRIPTIVE_NON_PIT"} · RAW_UNADJUSTED`,
         ),
       );
       const paths = node("ul");
-      for (const path of forward.paths || []) {
+      for (const path of forwardPaths) {
         paths.append(
           node(
             "li",
-            `T+${path.horizon} · ${path.due_session || "官方到期日未知"} · ${path.status || "UNKNOWN"} · 端点 ${path.endpoint_quality || "UNKNOWN"} · 路径 ${path.path_quality || "UNKNOWN"} · ${(path.reason_codes || []).join("、")}`,
+            `T+${path.horizon} · ${path.due_session || "官方到期日未知"} · ${path.status || "UNKNOWN"} · 端点 ${path.endpoint_quality || "UNKNOWN"} · 收盘回撤 ${path.mdd_close ?? path.path_metrics_status ?? "UNKNOWN"} · MFE ${path.mfe ?? path.path_metrics_status ?? "UNKNOWN"} · MAE ${path.mae ?? path.path_metrics_status ?? "UNKNOWN"} · 路径 ${path.path_quality || "UNKNOWN"} · ${(path.reason_codes || []).join("、")}`,
           ),
         );
       }
       detail.append(paths);
+      const fepSection = node(
+        "section",
+        undefined,
+        "focus-observation-drilldown-result",
+      );
+      fepSection.append(
+        node(
+          "p",
+          `FEP 已存队列为描述性分组，不属于单条登记预测；目标 T0 ${item.t0_session} · RETROSPECTIVE_DESCRIPTIVE_NON_PIT。`,
+        ),
+      );
+      const fepLane =
+        item.enrollment_kind === "ENTRY"
+          ? "ENTRY"
+          : item.enrollment_kind === "DAILY_LANDMARK"
+            ? "DAILY_LANDMARK"
+            : null;
+      if (!fepLane) {
+        fepSection.append(
+          node(
+            "p",
+            `${item.enrollment_kind} 没有独立的现役 FEP lane；不将 ENTRY 或 DAILY_LANDMARK 分母套到此登记。`,
+          ),
+        );
+      } else {
+        try {
+          const fepResults = await Promise.all(
+            [1, 3, 5].map(async (horizon) => {
+              const query = new URLSearchParams({
+                source_package_id: String(item.source_package_id),
+                rule: item.rule_id,
+                horizon: String(horizon),
+                lane: fepLane,
+              });
+              return {
+                horizon,
+                result: await api(`/api/product/fep-baseline?${query}`),
+              };
+            }),
+          );
+          if (!card.isConnected || state.selected !== context) return;
+          for (const entry of fepResults) {
+            const groups = (entry.result.rows || []).filter(
+              (fact) =>
+                fact.target_session === item.t0_session &&
+                fact.rule_id === item.rule_id &&
+                String(fact.source_capture_id) ===
+                  String(item.anchor_capture_id) &&
+                fact.profile_revision === item.profile_revision &&
+                fact.history_session_count === item.history_session_count &&
+                fact.d1_history_session_count ===
+                  item.d1_history_session_count &&
+                fact.event_window_start === item.event_window_start &&
+                fact.calendar_revision === item.calendar_revision &&
+                fact.summary_scope === "T0" &&
+                fact.metric_code === "RAW_CLOSE_RETURN" &&
+                fact.condition_code === "ALL" &&
+                ["MATCH", "NO_MATCH", "UNKNOWN"].includes(fact.group_code),
+            );
+            fepSection.append(
+              node(
+                "p",
+                `T+${entry.horizon} · lane ${fepLane} · ${entry.result.status || "UNKNOWN"} · 同日 T0 描述性分组 ${groups.length} 项 · ${entry.result.capability || "DESCRIPTIVE_ONLY"}`,
+              ),
+            );
+            for (const fact of groups) {
+              const groupLabel =
+                {
+                  MATCH: "T0匹配",
+                  NO_MATCH: "T0未匹配",
+                  UNKNOWN: "T0未知",
+                }[fact.group_code] || fact.group_code;
+              fepSection.append(
+                node(
+                  "p",
+                  `${groupLabel} ${fact.status} · 成员 ${fact.member_count ?? "UNKNOWN"} · 到期 ${fact.due_count ?? "UNKNOWN"} · 已观察 ${fact.observed_count ?? "UNKNOWN"} · 未知 ${fact.unknown_count ?? "UNKNOWN"} · 未计算 ${fact.not_computed_count ?? "UNKNOWN"} · 未到期 ${fact.not_due_count ?? "UNKNOWN"} · 中位数 ${fact.p50 ?? "UNKNOWN"}`,
+                ),
+              );
+            }
+          }
+        } catch (error) {
+          if (card.isConnected && state.selected === context) {
+            fepSection.append(
+              node("p", `FEP描述统计读取为 UNKNOWN：${error.message}`),
+            );
+          }
+        }
+      }
+      detail.append(fepSection);
       result.replaceChildren(detail);
     } catch (error) {
       if (card.isConnected && state.selected === context)
@@ -4032,27 +4184,42 @@ async function loadFocusObservationSegments(context, offset = 0) {
   const token = ++state.focusSegmentRequest;
   state.focusSegmentOffset = offset;
   const root = $("focusSegmentRows");
+  const eventRoot = $("focusSegmentEventRows");
   root.replaceChildren();
+  eventRoot.replaceChildren();
+  $("focusSegmentEventCounts").replaceChildren();
   $("focusSegmentPrev").disabled = $("focusSegmentNext").disabled = true;
+  $("focusSegmentEventPrev").disabled = $("focusSegmentEventNext").disabled =
+    true;
   message("focusSegmentPage", "—");
+  message("focusSegmentEventPage", "—");
   if (!context?.contextReady || !context?.source_package_id) {
     message(
       "focusSegmentStatus",
       "研究日期或来源包不可用；观察段状态 UNKNOWN。",
+    );
+    message(
+      "focusSegmentEventStatus",
+      "事件日期或来源包不可用；事件状态 UNKNOWN。",
     );
     return;
   }
   message("focusSegmentStatus", "正在读取已完成的PG来源观察段…");
   const requestedRule = state.focusSegmentRule;
   const status = $("focusSegmentStatusFilter").value;
+  const selectedEvent = $("focusSegmentEventFilter").value;
+  const eventOffset = state.focusSegmentEventOffset;
   const query = {
     as_of: context.target_session,
     research_cutoff: context.research_cutoff,
     source_package_id: context.source_package_id,
     rule: requestedRule || "ALL",
     status,
+    event: selectedEvent,
     offset,
     limit: 20,
+    event_offset: eventOffset,
+    event_limit: 20,
   };
   try {
     const result = await api(
@@ -4109,6 +4276,64 @@ async function loadFocusObservationSegments(context, offset = 0) {
     const items = Array.isArray(result.results) ? result.results : [];
     for (const item of items)
       root.append(renderSourceObservationSegment(item, context));
+    const daily = result.daily_events || {};
+    const dailyDenominator = daily.denominator || {};
+    const statusFilterLabel =
+      status === "ALL" ? "全部当前状态" : sourceObservationStatusLabel(status);
+    const eventFilterLabel =
+      selectedEvent === "ALL"
+        ? "全部当日事件"
+        : sourceObservationEventLabel(selectedEvent);
+    const dailyStatusLabel =
+      {
+        AVAILABLE: "日事件数据可用",
+        INCOMPLETE: "日事件事实不完整",
+        NOT_COMPUTED: "当日来源规则事实未计算",
+      }[daily.status] ||
+      daily.status ||
+      "UNKNOWN";
+    const incompleteLabel =
+      daily.status === "AVAILABLE"
+        ? "已存来源段范围内可报告真实0值"
+        : "缺失或不完整事实不能解释为0变化";
+    message(
+      "focusSegmentEventStatus",
+      `${context.target_session} · ${dailyStatusLabel} · 列表筛选：${statusFilterLabel} / ${eventFilterLabel} · 当日已存观察事实 ${dailyDenominator.observed_segment_count ?? 0} 段 / ${dailyDenominator.independent_source_symbol_count ?? 0} 个独立来源代码 · 应观察 ${dailyDenominator.due_segment_count ?? 0} 段（已存 ${dailyDenominator.due_observed_segment_count ?? 0}，缺失 ${dailyDenominator.missing_due_segment_count ?? 0}） · 输入规则事实 ${dailyDenominator.input_rule_fact_count ?? 0} 条 / ${dailyDenominator.input_rule_source_symbol_count ?? 0} 个代码 · 当前风险集 ${dailyDenominator.current_risk_set_segment_count ?? 0} 段 / ${dailyDenominator.current_risk_set_source_symbol_count ?? 0} 个代码 · ${incompleteLabel}`,
+    );
+    const eventCounts = daily.event_counts || {};
+    const countNodes = Object.entries(eventCounts).map(([event, value]) =>
+      node(
+        "span",
+        `${sourceObservationEventLabel(event)} ${value.segment_count ?? 0} 段 / ${value.source_symbol_count ?? 0} 个来源代码`,
+      ),
+    );
+    const qualityCounts = daily.quality_counts || {};
+    for (const quality of ["UNKNOWN", "INCOMPLETE", "NOT_COMPUTED"]) {
+      const count = qualityCounts[quality] ?? 0;
+      if (count)
+        countNodes.push(
+          node("span", `${sourceObservationStatusLabel(quality)} ${count} 段`),
+        );
+    }
+    $("focusSegmentEventCounts").replaceChildren(...countNodes);
+    const eventItems = Array.isArray(daily.results) ? daily.results : [];
+    for (const item of eventItems)
+      eventRoot.append(renderSourceObservationSegment(item, context));
+    const eventPage = daily.pagination || {};
+    message(
+      "focusSegmentEventPage",
+      `偏移 ${eventPage.offset ?? eventOffset} · 本页 ${eventItems.length} · 总事件/数据状态 ${eventPage.total_count ?? 0}`,
+    );
+    $("focusSegmentEventPrev").disabled = eventOffset === 0;
+    $("focusSegmentEventNext").disabled = eventPage.next_offset == null;
+    if (!eventItems.length) {
+      eventRoot.textContent =
+        daily.status === "AVAILABLE"
+          ? selectedEvent === "ALL"
+            ? "该日期在已登记来源段范围内没有应观察的状态事实。"
+            : `所选事件在已存来源段范围内为 0 条（${sourceObservationEventLabel(selectedEvent)}）。`
+          : `当日事实状态为 ${dailyStatusLabel}；当前没有可列出的事件记录，不能据此视为零变化。`;
+    }
     const page = result.pagination || {};
     message(
       "focusSegmentPage",
@@ -4126,6 +4351,8 @@ async function loadFocusObservationSegments(context, offset = 0) {
     if (token === state.focusSegmentRequest && state.selected === context) {
       message("focusSegmentStatus", `来源观察段只读失败：${error.message}`);
       root.textContent = "读取失败；没有触发重算或写入。";
+      message("focusSegmentEventStatus", `当日事件只读失败：${error.message}`);
+      eventRoot.textContent = "事件读取失败；没有触发重算或写入。";
     }
   }
 }
@@ -4146,14 +4373,17 @@ $("focusAutoGroup").addEventListener("change", () => {
 $("focusSegmentRule").addEventListener("change", () => {
   state.focusSegmentRule = $("focusSegmentRule").value;
   state.focusSegmentOffset = 0;
+  state.focusSegmentEventOffset = 0;
   if (state.selected) void loadFocusObservationSegments(state.selected, 0);
 });
 $("focusSegmentStatusFilter").addEventListener("change", () => {
   state.focusSegmentOffset = 0;
+  state.focusSegmentEventOffset = 0;
   if (state.selected) void loadFocusObservationSegments(state.selected, 0);
 });
 $("focusSegmentRefresh").addEventListener("click", () => {
   state.focusSegmentOffset = 0;
+  state.focusSegmentEventOffset = 0;
   if (state.selected) void loadFocusObservationSegments(state.selected, 0);
 });
 $("focusSegmentPrev").addEventListener("click", () => {
@@ -4165,6 +4395,21 @@ $("focusSegmentNext").addEventListener("click", () => {
   state.focusSegmentOffset += 20;
   if (state.selected)
     void loadFocusObservationSegments(state.selected, state.focusSegmentOffset);
+});
+$("focusSegmentEventFilter").addEventListener("change", () => {
+  state.focusSegmentEventOffset = 0;
+  if (state.selected) void loadFocusObservationSegments(state.selected, 0);
+});
+$("focusSegmentEventPrev").addEventListener("click", () => {
+  state.focusSegmentEventOffset = Math.max(
+    0,
+    state.focusSegmentEventOffset - 20,
+  );
+  if (state.selected) void loadFocusObservationSegments(state.selected, 0);
+});
+$("focusSegmentEventNext").addEventListener("click", () => {
+  state.focusSegmentEventOffset += 20;
+  if (state.selected) void loadFocusObservationSegments(state.selected, 0);
 });
 
 function applyD0BoardFilters() {

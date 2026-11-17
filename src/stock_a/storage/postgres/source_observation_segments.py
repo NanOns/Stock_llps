@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import date
 from typing import Any, Mapping, Sequence
 
@@ -22,6 +22,21 @@ PRODUCER_VERSION = "R1"
 PRICE_COORDINATE = "RAW_UNADJUSTED"
 IDENTITY_STATUS = "SOURCE_SYMBOL_ONLY"
 RESEARCH_SCOPE = "NON_PIT_EXPLORATORY"
+
+_EVENT_FILTERS = {
+    "ENTRY",
+    "FIRST_OBSERVED_LEFT_CENSORED",
+    "CONTINUES",
+    "EXIT_PROVED",
+    "PAUSED_UNKNOWN",
+    "REENTRY",
+    "LEFT_CENSORED",
+    "NO_MATCH",
+    "UNKNOWN",
+    "REENTRY_NOT_LINKED",
+    "INCOMPLETE",
+    "NOT_COMPUTED",
+}
 
 _SEGMENT_COLUMNS = (
     "source_enrollment_id",
@@ -238,6 +253,18 @@ def _compute_segment_rows(
         }
         for row in anchors
     }
+    children_by_parent_session: dict[tuple[int, date], list[dict[str, Any]]] = (
+        defaultdict(list)
+    )
+    for row in anchors:
+        if row[15] == "REENTRY" and row[17] is not None:
+            children_by_parent_session[(row[17], row[1])].append(
+                {
+                    "enrollment_id": row[0],
+                    "fact_id": row[2],
+                    "parent_enrollment_id": row[17],
+                }
+            )
     rows: list[tuple[Any, ...]] = []
     for anchor in anchors:
         (
@@ -414,18 +441,33 @@ def _compute_segment_rows(
             event_code = decision.event
             reason_code = invalid_reason or decision.reason
             linked_enrollment_id = None
+            children_on_session = children_by_parent_session.get(
+                (enrollment_id, session), []
+            )
             if decision.event == "REENTRY" and current is not None:
                 child = by_fact_id.get(current.evidence_id)
                 if (
                     child
                     and child["enrollment_kind"] == "REENTRY"
                     and child["parent_enrollment_id"] == enrollment_id
+                    and len(children_on_session) == 1
+                    and children_on_session[0]["enrollment_id"]
+                    == child["enrollment_id"]
+                    and children_on_session[0]["fact_id"] == current.evidence_id
                 ):
                     linked_enrollment_id = child["enrollment_id"]
                 else:
                     event_code = "REENTRY_NOT_LINKED"
                     quality_status = "INCOMPLETE"
                     reason_code = "REENTRY_PARENT_NOT_PROVED"
+            elif children_on_session:
+                event_code = "REENTRY_NOT_LINKED"
+                quality_status = "INCOMPLETE"
+                reason_code = "REENTRY_PARENT_NOT_PROVED"
+            if linked_enrollment_id is not None:
+                # 重入登记自身是唯一的新段事件；旧父段保留此前的EXIT_PROVED终态。
+                # 父子关系由子登记的parent_enrollment_id表达，避免重入日生成第二条事件。
+                break
             rows.append(
                 _rule_observation_row(
                     enrollment_id=enrollment_id,
@@ -526,7 +568,91 @@ def persist_source_observation_segments(
             source_package_id=source_package_id,
             research_cutoff=research_cutoff,
         )
+        expected_by_key = {(row[0], row[10]): row for row in rows}
+        if len(expected_by_key) != len(rows):
+            raise ObservationSegmentConflict("观察段生产结果包含重复业务键")
         column_sql = ", ".join(_SEGMENT_COLUMNS)
+        enrollment_ids = sorted({row[0] for row in anchors})
+        cursor.execute(
+            f"""SELECT {column_sql}
+                FROM source_research_observation_segment_days
+                WHERE source_enrollment_id=ANY(%s) AND observation_session<=%s
+                ORDER BY source_enrollment_id,observation_session""",
+            (enrollment_ids, research_cutoff),
+        )
+        existing_rows = list(cursor.fetchall())
+        existing_by_key = {(row[0], row[10]): row for row in existing_rows}
+        if len(existing_by_key) != len(existing_rows):
+            raise ObservationSegmentConflict("现有观察日事实存在重复业务键")
+
+        children_by_parent: dict[int, list[tuple[Any, ...]]] = defaultdict(list)
+        for anchor in anchors:
+            if anchor[15] == "REENTRY" and anchor[17] is not None:
+                children_by_parent[anchor[17]].append(anchor)
+        repair_boundaries: dict[int, date] = {}
+        for parent_id, children in children_by_parent.items():
+            if len(children) != 1:
+                raise ObservationSegmentConflict(
+                    "一个父观察段关联多个直接REENTRY子段，拒绝自动纠正"
+                )
+            child = children[0]
+            child_id, child_session, child_fact_id = child[0], child[1], child[2]
+            parent_tail_keys = [
+                key
+                for key in existing_by_key
+                if key[0] == parent_id and key[1] >= child_session
+            ]
+            if not parent_tail_keys:
+                continue
+            link_row = existing_by_key.get((parent_id, child_session))
+            proved_old_link = bool(
+                link_row
+                and link_row[1] == source_package_id
+                and link_row[2] == child[3]
+                and link_row[3] == child[4]
+                and link_row[4] == child[5]
+                and link_row[10] == child_session
+                and link_row[12] == child[13]
+                and link_row[13] == child_fact_id
+                and link_row[14] == child_id
+                and link_row[15] == "TRUE"
+                and link_row[17] == "REENTRY"
+                and link_row[18] == "OBSERVED"
+            )
+            if not proved_old_link:
+                raise ObservationSegmentConflict(
+                    "父段重入后事实缺少同键已证REENTRY链接，拒绝删除"
+                )
+            repair_boundaries[parent_id] = child_session
+
+        stale_keys = set(existing_by_key) - set(expected_by_key)
+        unproved_stale_keys = {
+            key
+            for key in stale_keys
+            if key[0] not in repair_boundaries or key[1] < repair_boundaries[key[0]]
+        }
+        if unproved_stale_keys:
+            raise ObservationSegmentConflict(
+                "现有观察日事实含无法由已证REENTRY边界解释的额外业务键"
+            )
+        for key, actual_row in existing_by_key.items():
+            expected_row = expected_by_key.get(key)
+            if expected_row is not None and actual_row != expected_row:
+                raise ObservationSegmentConflict(
+                    "现有观察日事实与修正生产结果同键异内容，拒绝覆盖"
+                )
+        corrected_deleted_count = 0
+        if stale_keys:
+            cursor.executemany(
+                """DELETE FROM source_research_observation_segment_days
+                   WHERE source_enrollment_id=%s AND observation_session=%s""",
+                sorted(stale_keys),
+            )
+            corrected_deleted_count = max(0, cursor.rowcount)
+            if corrected_deleted_count != len(stale_keys):
+                raise ObservationSegmentConflict(
+                    "父段边界纠正删除数量与预核验业务键不一致"
+                )
         placeholders = ", ".join(["%s"] * len(_SEGMENT_COLUMNS))
         cursor.executemany(
             f"""INSERT INTO source_research_observation_segment_days
@@ -535,7 +661,6 @@ def persist_source_observation_segments(
             rows,
         )
         inserted_count = max(0, cursor.rowcount)
-        enrollment_ids = sorted({row[0] for row in anchors})
         cursor.execute(
             f"""SELECT {column_sql}
                 FROM source_research_observation_segment_days
@@ -560,6 +685,7 @@ def persist_source_observation_segments(
             "source_symbol_count": len({row[3] for row in anchors}),
             "observation_count": len(rows),
             "inserted_count": inserted_count,
+            "corrected_deleted_count": corrected_deleted_count,
             "rule_counts": dict(sorted(rule_counts.items())),
             "event_counts": dict(sorted(event_counts.items())),
             "quality_counts": dict(sorted(quality_counts.items())),
@@ -579,8 +705,11 @@ def _validate_read_arguments(
     source_package_id: int,
     rule_id: str | None,
     status: str | None,
+    event_code: str | None,
     offset: int,
     limit: int,
+    event_offset: int,
+    event_limit: int,
 ) -> None:
     allowed_statuses = {
         "ACTIVE",
@@ -599,10 +728,15 @@ def _validate_read_arguments(
         or source_package_id <= 0
         or (rule_id is not None and (not isinstance(rule_id, str) or not rule_id))
         or (status is not None and status not in allowed_statuses)
+        or (event_code is not None and event_code not in _EVENT_FILTERS)
         or type(offset) is not int
         or offset < 0
         or type(limit) is not int
         or not 1 <= limit <= 100
+        or type(event_offset) is not int
+        or event_offset < 0
+        or type(event_limit) is not int
+        or not 1 <= event_limit <= 100
     ):
         raise ValueError("来源观察段只读分页参数无效")
 
@@ -615,20 +749,28 @@ def read_source_observation_segments(
     source_package_id: int,
     rule_id: str | None = None,
     status: str | None = None,
+    event_code: str | None = None,
     offset: int = 0,
     limit: int = 20,
+    event_offset: int = 0,
+    event_limit: int = 20,
 ) -> dict[str, Any]:
-    """同一只读快照内读取计数、稳定分页和已保存的逐会话历史。"""
+    """同一只读快照内读取状态、日期事件、历史与原T0后继。"""
     _validate_read_arguments(
         as_of=as_of,
         research_cutoff=research_cutoff,
         source_package_id=source_package_id,
         rule_id=rule_id,
         status=status,
+        event_code=event_code,
         offset=offset,
         limit=limit,
+        event_offset=event_offset,
+        event_limit=event_limit,
     )
     official_sessions = _load_calendar(research_cutoff)[3]
+    if as_of not in official_sessions:
+        raise ValueError("来源观察段查询日期必须是官方交易会话")
     next_official_session = next(
         (session for session in official_sessions if session > research_cutoff), None
     )
@@ -652,12 +794,13 @@ def read_source_observation_segments(
                latest.linked_enrollment_id AS latest_linked_enrollment_id,
                CASE
                  WHEN latest.id IS NULL THEN 'NOT_COMPUTED'
-                 WHEN latest.observation_session < %s THEN 'INCOMPLETE'
                  WHEN latest.quality_status = 'INCOMPLETE' THEN 'INCOMPLETE'
                  WHEN latest.quality_status = 'NOT_COMPUTED' THEN 'NOT_COMPUTED'
                  WHEN latest.lifecycle = 'PAUSED' THEN 'PAUSED'
                  WHEN latest.lifecycle = 'EXITED_UNKNOWN' THEN 'EXITED_UNKNOWN'
                  WHEN latest.quality_status = 'UNKNOWN' THEN 'UNKNOWN'
+                 WHEN latest.lifecycle = 'EXITED' THEN 'EXITED'
+                 WHEN latest.observation_session < %s THEN 'INCOMPLETE'
                  ELSE latest.lifecycle
                END AS current_status
         FROM source_research_enrollments e
@@ -753,7 +896,176 @@ def read_source_observation_segments(
             selected_params + ((status,) if status else ()) + (limit, offset),
         )
         page_rows = cursor.fetchall()
-        enrollment_ids = [row[0] for row in page_rows]
+        event_rule_clause = " AND s.rule_id=%s" if rule_id else ""
+        event_base = f"""{base}, actual AS (
+          SELECT o.source_enrollment_id AS enrollment_id,s.source_symbol,s.rule_id,
+                 o.event_code AS event_type,o.id AS event_fact_id,
+                 o.evidence_rule_fact_id AS event_evidence_fact_id,
+                 o.quality_status AS event_quality_status,o.reason_code AS event_reason,
+                 o.target_capture_id AS event_capture_id,
+                 o.observation_state AS event_state,o.lifecycle AS event_lifecycle,
+                 o.comparability_status AS event_comparability,
+                 o.previous_session AS event_previous_session
+          FROM segments s
+          JOIN source_research_observation_segment_days o
+            ON o.source_enrollment_id=s.enrollment_id
+          WHERE o.source_package_id=%s AND o.observation_session=%s
+            AND NOT (o.event_code='REENTRY' AND o.linked_enrollment_id IS NOT NULL
+                     AND s.enrollment_kind<>'REENTRY') {event_rule_clause}
+        ), expected AS (
+          SELECT s.enrollment_id,s.source_symbol,s.rule_id,s.t0_session,
+                 previous.id AS previous_fact_id,
+                 previous.observation_session AS previous_session,
+                 previous.observation_state AS previous_state,
+                 previous.lifecycle AS previous_lifecycle
+          FROM segments s
+          LEFT JOIN LATERAL (
+            SELECT o.id,o.observation_session,o.observation_state,o.lifecycle
+            FROM source_research_observation_segment_days o
+            WHERE o.source_enrollment_id=s.enrollment_id
+              AND o.observation_session<%s
+            ORDER BY o.observation_session DESC,o.id DESC LIMIT 1
+          ) previous ON TRUE
+          WHERE (s.t0_session=%s OR previous.id IS NULL
+                 OR previous.lifecycle<>'EXITED') {event_rule_clause}
+        ), missing AS (
+          SELECT e.enrollment_id,e.source_symbol,e.rule_id,
+                 CASE WHEN e.previous_fact_id IS NULL
+                      THEN 'NOT_COMPUTED' ELSE 'INCOMPLETE' END AS event_type,
+                 NULL::bigint AS event_fact_id,
+                 NULL::bigint AS event_evidence_fact_id,
+                 CASE WHEN e.previous_fact_id IS NULL
+                      THEN 'NOT_COMPUTED' ELSE 'INCOMPLETE' END
+                      AS event_quality_status,
+                 CASE WHEN e.previous_fact_id IS NULL
+                      THEN 'OBSERVATION_SEGMENT_NOT_COMPUTED'
+                      ELSE 'DUE_OBSERVATION_FACT_MISSING' END AS event_reason,
+                 NULL::bigint AS event_capture_id,e.previous_state AS event_state,
+                 e.previous_lifecycle AS event_lifecycle,
+                 'INCOMPLETE'::text AS event_comparability,
+                 e.previous_session AS event_previous_session
+          FROM expected e
+          WHERE NOT EXISTS (
+            SELECT 1 FROM actual a WHERE a.enrollment_id=e.enrollment_id
+          )
+        ), event_rows AS (
+          SELECT * FROM actual
+          UNION ALL
+          SELECT * FROM missing
+        )"""
+        event_base_params = params + (source_package_id, as_of)
+        event_base_params += (rule_id,) if rule_id else ()
+        event_base_params += (as_of, as_of)
+        event_base_params += (rule_id,) if rule_id else ()
+        cursor.execute(
+            f"""{event_base}
+                SELECT event_type,count(DISTINCT enrollment_id),
+                       count(DISTINCT source_symbol)
+                FROM event_rows
+                GROUP BY event_type ORDER BY event_type""",
+            event_base_params,
+        )
+        daily_event_counts = {
+            row[0]: {"segment_count": row[1], "source_symbol_count": row[2]}
+            for row in cursor.fetchall()
+        }
+        cursor.execute(
+            f"""{event_base}
+                SELECT (SELECT count(*) FROM actual),
+                       (SELECT count(DISTINCT source_symbol) FROM actual),
+                       (SELECT count(*) FROM expected),
+                       (SELECT count(*) FROM missing),
+                       (SELECT count(*) FROM actual
+                         WHERE event_quality_status='UNKNOWN'),
+                       (SELECT count(*) FROM actual
+                         WHERE event_quality_status='INCOMPLETE'),
+                       (SELECT count(*) FROM missing
+                         WHERE event_type='NOT_COMPUTED')""",
+            event_base_params,
+        )
+        (
+            observed_day_segment_count,
+            observed_day_symbol_count,
+            due_segment_count,
+            missing_due_segment_count,
+            unknown_day_count,
+            incomplete_day_count,
+            not_computed_day_count,
+        ) = cursor.fetchone()
+        cursor.execute(
+            """SELECT count(*),count(DISTINCT source_symbol)
+               FROM source_rule_evaluations
+               WHERE source_package_id=%s AND target_session=%s
+                 AND (%s::text IS NULL OR rule_id=%s)""",
+            (source_package_id, as_of, rule_id, rule_id),
+        )
+        input_rule_fact_count, input_rule_symbol_count = cursor.fetchone()
+        cursor.execute(
+            f"""{base}
+                SELECT count(*),count(DISTINCT source_symbol)
+                FROM segments WHERE current_status IN ('ACTIVE','PAUSED')
+                  {rule_clause}""",
+            selected_params,
+        )
+        risk_set_segment_count, risk_set_symbol_count = cursor.fetchone()
+        event_filter_conditions = []
+        event_filter_params: list[Any] = []
+        if event_code == "INCOMPLETE":
+            event_filter_conditions.append(
+                "(event_type='INCOMPLETE' OR event_quality_status='INCOMPLETE')"
+            )
+        elif event_code is not None:
+            event_filter_conditions.append("event_type=%s")
+            event_filter_params.append(event_code)
+        if status is not None:
+            event_filter_conditions.append("s.current_status=%s")
+            event_filter_params.append(status)
+        event_filter_clause = (
+            "WHERE " + " AND ".join(event_filter_conditions)
+            if event_filter_conditions
+            else ""
+        )
+        cursor.execute(
+            f"""{event_base}
+                SELECT count(*)
+                FROM event_rows er JOIN segments s ON s.enrollment_id=er.enrollment_id
+                {event_filter_clause}""",
+            event_base_params + tuple(event_filter_params),
+        )
+        total_event_count = cursor.fetchone()[0]
+        cursor.execute(
+            f"""{event_base}
+                SELECT s.enrollment_id,s.source_package_id,s.source_symbol,s.rule_id,
+                       s.rule_version,s.t0_session,s.anchor_rule_fact_id,
+                       s.anchor_capture_id,s.enrollment_kind,s.enrollment_reason,
+                       s.parent_enrollment_id,s.anchor_profile_revision,
+                       s.anchor_history_session_count,s.anchor_d1_history_session_count,
+                       s.anchor_event_window_start,s.anchor_calendar_revision,s.scope,
+                       s.latest_observation_session,s.latest_observation_state,
+                       s.latest_lifecycle,s.latest_event_code,s.latest_quality_status,
+                       s.latest_reason_code,s.latest_evidence_rule_fact_id,
+                       s.latest_capture_id,s.latest_linked_enrollment_id,s.current_status,
+                       er.event_type,er.event_fact_id,er.event_evidence_fact_id,
+                       er.event_quality_status,er.event_reason,er.event_capture_id,
+                       er.event_state,er.event_lifecycle,er.event_comparability,
+                       er.event_previous_session
+                FROM event_rows er JOIN segments s ON s.enrollment_id=er.enrollment_id
+                {event_filter_clause}
+                ORDER BY er.event_type,s.source_symbol,s.enrollment_id
+                LIMIT %s OFFSET %s""",
+            event_base_params
+            + tuple(event_filter_params)
+            + (event_limit, event_offset),
+        )
+        event_page_rows = cursor.fetchall()
+        related_parent_ids = {
+            row[10] for row in page_rows + event_page_rows if row[10] is not None
+        }
+        enrollment_ids = sorted(
+            {row[0] for row in page_rows}
+            | {row[0] for row in event_page_rows}
+            | related_parent_ids
+        )
         history_by_id: dict[int, list[dict[str, Any]]] = {
             enrollment_id: [] for enrollment_id in enrollment_ids
         }
@@ -795,12 +1107,16 @@ def read_source_observation_segments(
                         "identity_status": row[19],
                     }
                 )
-        items = []
-        for row in page_rows:
+
+        def build_item(row: tuple[Any, ...]) -> dict[str, Any]:
             history = history_by_id[row[0]]
             current = history[-1] if history else None
             status_value = row[26]
-            if current and current["session"] != as_of.isoformat():
+            if (
+                current
+                and current["session"] != as_of.isoformat()
+                and current["lifecycle"] != "EXITED"
+            ):
                 status_value = "INCOMPLETE"
             next_status = None
             if (
@@ -816,41 +1132,177 @@ def read_source_observation_segments(
                     current=None,
                     research_cutoff=research_cutoff,
                 ).event
-            items.append(
+            return {
+                "enrollment_id": row[0],
+                "source_package_id": row[1],
+                "source_symbol": row[2],
+                "rule_id": row[3],
+                "rule_version": row[4],
+                "t0_session": row[5].isoformat(),
+                "anchor_rule_fact_id": row[6],
+                "anchor_capture_id": row[7],
+                "enrollment_kind": row[8],
+                "enrollment_reason": row[9],
+                "parent_enrollment_id": row[10],
+                "profile_revision": row[11],
+                "history_session_count": row[12],
+                "d1_history_session_count": row[13],
+                "event_window_start": row[14].isoformat() if row[14] else None,
+                "calendar_revision": row[15],
+                "scope": row[16],
+                "latest_observation_session": (
+                    row[17].isoformat() if row[17] else None
+                ),
+                "latest_state": row[18],
+                "latest_lifecycle": row[19],
+                "latest_event": row[20],
+                "latest_quality_status": row[21],
+                "latest_reason": row[22],
+                "latest_evidence_fact_id": row[23],
+                "latest_capture_id": row[24],
+                "latest_linked_enrollment_id": row[25],
+                "status": status_value,
+                "next_official_session_status": next_status,
+                "history": history,
+            }
+
+        items = [build_item(row) for row in page_rows]
+        event_items = []
+        for row in event_page_rows:
+            item = build_item(row[:27])
+            item.update(
                 {
-                    "enrollment_id": row[0],
-                    "source_package_id": row[1],
-                    "source_symbol": row[2],
-                    "rule_id": row[3],
-                    "rule_version": row[4],
-                    "t0_session": row[5].isoformat(),
-                    "anchor_rule_fact_id": row[6],
-                    "anchor_capture_id": row[7],
-                    "enrollment_kind": row[8],
-                    "enrollment_reason": row[9],
-                    "parent_enrollment_id": row[10],
-                    "profile_revision": row[11],
-                    "history_session_count": row[12],
-                    "d1_history_session_count": row[13],
-                    "event_window_start": row[14].isoformat() if row[14] else None,
-                    "calendar_revision": row[15],
-                    "scope": row[16],
-                    "latest_observation_session": (
-                        row[17].isoformat() if row[17] else None
+                    "daily_event_code": row[27],
+                    "daily_event_fact_id": row[28],
+                    "daily_event_evidence_fact_id": row[29],
+                    "daily_event_quality_status": row[30],
+                    "daily_event_reason": row[31],
+                    "daily_event_capture_id": row[32],
+                    "daily_event_state": row[33],
+                    "daily_event_lifecycle": row[34],
+                    "daily_event_comparability_status": row[35],
+                    "daily_event_previous_session": (
+                        row[36].isoformat() if row[36] else None
                     ),
-                    "latest_state": row[18],
-                    "latest_lifecycle": row[19],
-                    "latest_event": row[20],
-                    "latest_quality_status": row[21],
-                    "latest_reason": row[22],
-                    "latest_evidence_fact_id": row[23],
-                    "latest_capture_id": row[24],
-                    "latest_linked_enrollment_id": row[25],
-                    "status": status_value,
-                    "next_official_session_status": next_status,
-                    "history": history,
+                    "daily_event_session": as_of.isoformat(),
                 }
             )
+            event_items.append(item)
+
+        displayed_items_by_id = {
+            item["enrollment_id"]: item for item in items + event_items
+        }
+        if displayed_items_by_id:
+            cursor.execute(
+                """SELECT c.parent_enrollment_id,c.id,cr.target_session,cr.id,
+                          cr.source_capture_id,cr.source_package_id,cr.source_symbol,
+                          cr.rule_id,cr.rule_version
+                   FROM source_research_enrollments c
+                   JOIN source_rule_evaluations cr ON cr.id=c.rule_fact_id
+                   JOIN source_research_enrollments p ON p.id=c.parent_enrollment_id
+                   JOIN source_rule_evaluations pr ON pr.id=p.rule_fact_id
+                   WHERE c.parent_enrollment_id=ANY(%s)
+                     AND c.enrollment_kind='REENTRY' AND cr.target_session<=%s
+                     AND cr.source_package_id=pr.source_package_id
+                     AND cr.source_symbol=pr.source_symbol
+                     AND cr.rule_id=pr.rule_id AND cr.rule_version=pr.rule_version
+                   ORDER BY c.parent_enrollment_id,cr.target_session,c.id""",
+                (sorted(displayed_items_by_id), as_of),
+            )
+            for row in cursor.fetchall():
+                parent_item = displayed_items_by_id.get(row[0])
+                if parent_item is not None:
+                    parent_item.setdefault("child_enrollments", []).append(
+                        {
+                            "enrollment_id": row[1],
+                            "t0_session": row[2].isoformat(),
+                            "rule_fact_id": row[3],
+                            "capture_id": row[4],
+                        }
+                    )
+                child_item = displayed_items_by_id.get(row[1])
+                if child_item is not None:
+                    child_item["child_t0_session"] = row[2].isoformat()
+
+        for item in displayed_items_by_id.values():
+            if item.get("parent_enrollment_id") in history_by_id:
+                item["parent_history"] = history_by_id[item["parent_enrollment_id"]]
+
+        if displayed_items_by_id:
+            displayed_ids = sorted(displayed_items_by_id)
+            cursor.execute(
+                """SELECT e.id,f.target_session,f.source_package_id,
+                          f.source_capture_id,f.source_symbol,f.horizon,
+                          f.path_rule_version,f.calendar_revision,f.endpoint_session,
+                          f.maturity,f.endpoint_quality,f.endpoint_reason,
+                          f.endpoint_numerator,f.endpoint_denominator,f.path_quality,
+                          f.path_reasons,f.price_coordinate,f.scope,
+                          f.mfe_numerator,f.mfe_denominator,f.mae_numerator,
+                          f.mae_denominator,f.mdd_numerator,f.mdd_denominator
+                   FROM source_research_enrollments e
+                   JOIN source_rule_evaluations r ON r.id=e.rule_fact_id
+                   JOIN source_forward_path_facts f
+                     ON f.target_session=r.target_session
+                    AND f.source_package_id=r.source_package_id
+                    AND f.source_capture_id=r.source_capture_id
+                    AND f.source_symbol=r.source_symbol
+                   WHERE e.id=ANY(%s) AND r.target_session<=%s
+                     AND f.horizon IN (1,3,5) AND f.endpoint_session<=%s
+                   ORDER BY e.id,f.horizon,f.path_rule_version,f.calendar_revision""",
+                (displayed_ids, as_of, research_cutoff),
+            )
+            forward_rows_by_id: dict[int, list[tuple[Any, ...]]] = defaultdict(list)
+            for row in cursor.fetchall():
+                forward_rows_by_id[row[0]].append(row[1:])
+            calendar_sessions = tuple(official_sessions)
+            for enrollment_id, item in displayed_items_by_id.items():
+                target = date.fromisoformat(item["t0_session"])
+                try:
+                    target_index = calendar_sessions.index(target)
+                except ValueError:
+                    due_by_horizon = {horizon: None for horizon in (1, 3, 5)}
+                else:
+                    due_by_horizon = {
+                        horizon: (
+                            calendar_sessions[target_index + horizon]
+                            if target_index + horizon < len(calendar_sessions)
+                            else None
+                        )
+                        for horizon in (1, 3, 5)
+                    }
+                item["forward_paths"] = _enrollment_forward_paths(
+                    {
+                        "package": item["source_package_id"],
+                        "capture": item["anchor_capture_id"],
+                        "source_symbol": item["source_symbol"],
+                        "calendar_revision": item["calendar_revision"],
+                        "scope": item["scope"],
+                    },
+                    forward_rows_by_id.get(enrollment_id, []),
+                    due_by_horizon,
+                    cutoff=research_cutoff,
+                )
+                item["forward_as_of"] = research_cutoff.isoformat()
+                item["forward_classification"] = "RETROSPECTIVE_DESCRIPTIVE_NON_PIT"
+        for item in items + event_items:
+            details = displayed_items_by_id.get(item["enrollment_id"], {})
+            for key in (
+                "child_enrollments",
+                "parent_history",
+                "child_t0_session",
+                "forward_paths",
+                "forward_as_of",
+                "forward_classification",
+            ):
+                if key in details:
+                    item[key] = details[key]
+        daily_event_status = (
+            "NOT_COMPUTED"
+            if input_rule_fact_count == 0
+            else "INCOMPLETE"
+            if missing_due_segment_count or incomplete_day_count
+            else "AVAILABLE"
+        )
         return {
             "status": "AVAILABLE" if total_count else "NO_OBSERVED_SAMPLE",
             "as_of": as_of.isoformat(),
@@ -878,6 +1330,44 @@ def read_source_observation_segments(
                 else None,
             },
             "results": items,
+            "daily_events": {
+                "status": daily_event_status,
+                "as_of": as_of.isoformat(),
+                "event_filter": event_code or "ALL",
+                "status_filter": status or "ALL",
+                "event_counts": daily_event_counts,
+                "quality_counts": {
+                    "UNKNOWN": unknown_day_count,
+                    "INCOMPLETE": incomplete_day_count
+                    + missing_due_segment_count
+                    - not_computed_day_count,
+                    "NOT_COMPUTED": not_computed_day_count,
+                },
+                "denominator": {
+                    "kind": "PERSISTED_SOURCE_OBSERVATION_DAY_FACTS",
+                    "observed_segment_count": observed_day_segment_count,
+                    "independent_source_symbol_count": observed_day_symbol_count,
+                    "due_segment_count": due_segment_count,
+                    "due_observed_segment_count": (
+                        due_segment_count - missing_due_segment_count
+                    ),
+                    "missing_due_segment_count": missing_due_segment_count,
+                    "input_rule_fact_count": input_rule_fact_count,
+                    "input_rule_source_symbol_count": input_rule_symbol_count,
+                    "current_risk_set_segment_count": risk_set_segment_count,
+                    "current_risk_set_source_symbol_count": risk_set_symbol_count,
+                },
+                "pagination": {
+                    "offset": event_offset,
+                    "limit": event_limit,
+                    "total_count": total_event_count,
+                    "next_offset": event_offset + len(event_items)
+                    if event_offset + len(event_items) < total_event_count
+                    else None,
+                },
+                "results": event_items,
+                "classification": "SOURCE_SYMBOL_ONLY / RAW_UNADJUSTED / NON_PIT_EXPLORATORY",
+            },
             "scope": RESEARCH_SCOPE,
             "identity_status": IDENTITY_STATUS,
             "price_coordinate": PRICE_COORDINATE,
@@ -1022,7 +1512,9 @@ def read_source_observation_segment_followups(
                           source_symbol,horizon,path_rule_version,calendar_revision,
                           endpoint_session,maturity,endpoint_quality,endpoint_reason,
                           endpoint_numerator,endpoint_denominator,path_quality,
-                          path_reasons,price_coordinate,scope
+                          path_reasons,price_coordinate,scope,mfe_numerator,
+                          mfe_denominator,mae_numerator,mae_denominator,
+                          mdd_numerator,mdd_denominator
                    FROM source_forward_path_facts
                    WHERE target_session=%s AND source_package_id=%s
                      AND source_capture_id=ANY(%s) AND source_symbol=ANY(%s)
@@ -1072,7 +1564,11 @@ def read_source_observation_segment_followups(
                     "INCOMPLETE" if latest[9] == "INCOMPLETE" else latest[8]
                 )
                 reason = latest[11]
-                if latest[1] != cutoff:
+                if latest[9] == "INCOMPLETE":
+                    current_status = "INCOMPLETE"
+                elif latest[7] == "EXITED":
+                    current_status = "EXITED"
+                elif latest[1] != cutoff:
                     current_status = "INCOMPLETE"
                     reason = "OBSERVATION_SEGMENT_NOT_COMPLETE_THROUGH_CUTOFF"
             elif timeline_id and timeline_id in initial_rows:

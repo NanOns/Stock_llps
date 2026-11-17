@@ -4451,8 +4451,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "source_package_id",
                     "rule",
                     "status",
+                    "event",
                     "offset",
                     "limit",
+                    "event_offset",
+                    "event_limit",
                 }
                 values = _query(self.path, allowed)
                 if not {
@@ -4481,6 +4484,9 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 status = values.get("status")
                 if status in {None, "", "ALL"}:
                     status = None
+                event_code = values.get("event")
+                if event_code in {None, "", "ALL"}:
+                    event_code = None
                 from stock_a.storage.postgres.source_observation_segments import (
                     read_source_observation_segments,
                 )
@@ -4493,10 +4499,21 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         source_package_id=_package_id(values["source_package_id"]),
                         rule_id=rule_id,
                         status=status,
+                        event_code=event_code,
                         offset=_nonnegative_int(values.get("offset", "0"), "offset"),
                         limit=_positive_int(
                             _nonnegative_int(values.get("limit", "20"), "limit", 100),
                             "limit",
+                            100,
+                        ),
+                        event_offset=_nonnegative_int(
+                            values.get("event_offset", "0"), "event_offset"
+                        ),
+                        event_limit=_positive_int(
+                            _nonnegative_int(
+                                values.get("event_limit", "20"), "event_limit", 100
+                            ),
+                            "event_limit",
                             100,
                         ),
                     )

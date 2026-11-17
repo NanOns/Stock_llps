@@ -1385,6 +1385,50 @@ td.empty {
   gap: 0.75rem;
 }
 
+.focus-segment-day-events {
+  margin-top: 1.25rem;
+  padding-top: 1rem;
+  border-top: 1px solid #dce8e1;
+}
+
+.focus-segment-day-events > h3 {
+  margin: 0.1rem 0 0.45rem;
+  color: #25463a;
+  font-size: 1rem;
+}
+
+.focus-segment-day-events > p {
+  line-height: 1.55;
+}
+
+.focus-segment-day-events label {
+  display: grid;
+  width: fit-content;
+  gap: 0.35rem;
+  color: #536960;
+  font-size: 0.9rem;
+}
+
+.focus-segment-day-events select {
+  min-width: 220px;
+}
+
+.focus-segment-event-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin: 0.65rem 0;
+}
+
+.focus-segment-event-counts span {
+  padding: 0.3rem 0.55rem;
+  border: 1px solid #dce8e1;
+  border-radius: 999px;
+  background: #fbfdfb;
+  color: #365249;
+  font-size: 0.86rem;
+}
+
 .focus-observation-segment {
   min-width: 0;
   padding: 0.85rem 1rem;

@@ -525,6 +525,61 @@
                   下一页
                 </button>
               </div>
+              <div class="focus-segment-day-events">
+                <h3>所选日期实际状态变化</h3>
+                <p>
+                  事件按已存观察日事实统计；段数、来源代码数、应观察分母和当前风险集分别展示。缺少计算不表示零变化。
+                  上方事件分布包含全部当前状态，下面列表同时受状态与事件筛选。
+                </p>
+                <label class="inline-filter"
+                  >当日事件
+                  <select id="focusSegmentEventFilter">
+                    <option value="ALL">全部事实与缺口</option>
+                    <option value="ENTRY">新登记</option>
+                    <option value="FIRST_OBSERVED_LEFT_CENSORED">
+                      左截断首观
+                    </option>
+                    <option value="CONTINUES">持续观察</option>
+                    <option value="PAUSED_UNKNOWN">未知暂停</option>
+                    <option value="EXIT_PROVED">已证退出</option>
+                    <option value="REENTRY">合法重入</option>
+                    <option value="LEFT_CENSORED">未知后恢复</option>
+                    <option value="UNKNOWN">仍未知</option>
+                    <option value="NO_MATCH">终止后未重入</option>
+                    <option value="REENTRY_NOT_LINKED">重入未证</option>
+                    <option value="INCOMPLETE">事实不完整</option>
+                    <option value="NOT_COMPUTED">未计算</option>
+                  </select>
+                </label>
+                <p id="focusSegmentEventStatus" role="status">
+                  等待读取所选日期的事件事实。
+                </p>
+                <div
+                  id="focusSegmentEventCounts"
+                  class="focus-segment-event-counts"
+                ></div>
+                <div
+                  id="focusSegmentEventRows"
+                  class="focus-segment-rows"
+                ></div>
+                <div class="pagination">
+                  <button
+                    id="focusSegmentEventPrev"
+                    class="button subtle"
+                    disabled
+                  >
+                    上一页
+                  </button>
+                  <span id="focusSegmentEventPage">—</span>
+                  <button
+                    id="focusSegmentEventNext"
+                    class="button subtle"
+                    disabled
+                  >
+                    下一页
+                  </button>
+                </div>
+              </div>
             </section>
             <section class="card">
               <div class="card-head">

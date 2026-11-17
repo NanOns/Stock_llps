@@ -1783,12 +1783,14 @@ def _enrollment_forward_paths(
             "scope": "NON_PIT_EXPLORATORY",
             "endpoint_quality": "UNKNOWN",
             "path_quality": "UNKNOWN",
+            "path_metrics_status": "UNKNOWN",
         }
         if due_session is None:
             item["reason_codes"] = ["OFFICIAL_HORIZON_SESSION_UNAVAILABLE"]
         elif due_session > cutoff:
             item.update(
                 status="NOT_DUE",
+                path_metrics_status="NOT_DUE",
                 reason_codes=["WAITING_FOR_FUTURE_OFFICIAL_SESSION"],
             )
         else:
@@ -1808,6 +1810,7 @@ def _enrollment_forward_paths(
                 else:
                     item.update(
                         status="NOT_COMPUTED",
+                        path_metrics_status="NOT_COMPUTED",
                         reason_codes=["FORWARD_PATH_FACT_NOT_SAVED"],
                     )
             else:
@@ -1830,7 +1833,7 @@ def _enrollment_forward_paths(
                     path_reasons,
                     price_coordinate,
                     scope,
-                ) = row
+                ) = row[:17]
                 valid_key = (
                     capture_id == anchor.get("capture")
                     and symbol == anchor.get("source_symbol")
@@ -1850,6 +1853,40 @@ def _enrollment_forward_paths(
                         and numerator is not None
                         and denominator is not None
                         and denominator > 0
+                    )
+                    metrics = {}
+                    metric_pairs = {}
+                    if len(row) >= 23:
+                        metric_pairs = {
+                            "mfe": (row[17], row[18]),
+                            "mae": (row[19], row[20]),
+                            "mdd_close": (row[21], row[22]),
+                        }
+                    for metric, (
+                        metric_numerator,
+                        metric_denominator,
+                    ) in metric_pairs.items():
+                        valid_metric = (
+                            metric_numerator is not None
+                            and metric_denominator is not None
+                            and metric_denominator > 0
+                        )
+                        metrics[f"{metric}_numerator"] = (
+                            str(metric_numerator) if valid_metric else None
+                        )
+                        metrics[f"{metric}_denominator"] = (
+                            str(metric_denominator) if valid_metric else None
+                        )
+                        metrics[metric] = (
+                            str(
+                                Fraction(int(metric_numerator), int(metric_denominator))
+                            )
+                            if valid_metric
+                            else None
+                        )
+                    metrics_observed = bool(metric_pairs) and all(
+                        metrics.get(metric) is not None
+                        for metric in ("mfe", "mae", "mdd_close")
                     )
                     item.update(
                         status="OBSERVED" if observed else "UNKNOWN",
@@ -1873,6 +1910,12 @@ def _enrollment_forward_paths(
                         calendar_revision=calendar_revision,
                         price_coordinate=price_coordinate,
                         scope=scope,
+                        path_metrics_status=(
+                            "OBSERVED"
+                            if metrics_observed and path_quality == "OBSERVED"
+                            else "UNKNOWN"
+                        ),
+                        **metrics,
                     )
                     if not observed and not item["reason_codes"]:
                         item["reason_codes"] = [
