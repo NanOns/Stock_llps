@@ -709,6 +709,27 @@ def register_commands(commands):
         required=True,
         help="显式授权本次离线typed结果写入唯一PG",
     )
+    observation_segments = commands.add_parser(
+        "source-observation-segments",
+        help="从已存来源登记离线持久化逐官方会话观察段",
+    )
+    observation_segments.add_argument(
+        "--research-cutoff", required=True, help="显式最晚可读官方会话"
+    )
+    observation_segments.add_argument(
+        "--source-package-id", type=int, required=True, help="精确来源包数字ID"
+    )
+    observation_segments.add_argument(
+        "--rule-id",
+        action="append",
+        help="精确来源规则；可重复指定；缺省时处理截止日内所有已有规则登记",
+    )
+    observation_segments.add_argument(
+        "--persist",
+        action="store_true",
+        required=True,
+        help="显式启用单事务幂等typed写入",
+    )
     preview_serve = commands.add_parser(
         "product-serve",
         aliases=["preview-serve"],

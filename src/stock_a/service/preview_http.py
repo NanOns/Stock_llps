@@ -387,36 +387,6 @@ def _membership_only_board_observation(
     }
 
 
-def _read_enrollment_followups_page(
-    config: Mapping[str, Any],
-    *,
-    target: date,
-    cutoff: date,
-    enrollment_ids: Sequence[int],
-    successor_sessions: Sequence[date],
-    horizon_due_sessions: Sequence[date] = (),
-) -> dict[int, dict[str, Any]]:
-    """按现役后继Reader的300条上限分批读取当前页登记。"""
-    from stock_a.storage.postgres.research_enrollment import (
-        read_enrollment_followups,
-    )
-
-    result: dict[int, dict[str, Any]] = {}
-    for start in range(0, len(enrollment_ids), 300):
-        selected = list(enrollment_ids[start : start + 300])
-        result.update(
-            read_enrollment_followups(
-                config,
-                target=target,
-                cutoff=cutoff,
-                enrollment_ids=selected,
-                successor_sessions=tuple(successor_sessions),
-                horizon_due_sessions=tuple(horizon_due_sessions),
-            )
-        )
-    return result
-
-
 def _source_context_preview_error(error: Exception) -> PreviewHttpError | None:
     """保留来源上下文读者的稳定错误码，并映射为可解释的HTTP状态。"""
     code = getattr(error, "code", None)
@@ -2076,24 +2046,52 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             seed_t1["d0_transition_status"] = page_result["scope_status"]["d0"]
             seed_t1["rule_status"] = page_result["scope_status"]["rules"]
             seed_t1["d1_status"] = page_result["scope_status"]["d1"]
-        enrollment_ids = [
-            item["id"] for entries in enrollment_by_symbol.values() for item in entries
+        rule_enrollment_ids = [
+            item["id"]
+            for entries in enrollment_by_symbol.values()
+            for item in entries
+            if item.get("fact_type") == "RULE"
         ]
-        followups = (
-            read_enrollment_followups(
-                config,
-                target=target_session,
-                cutoff=research_cutoff,
-                enrollment_ids=enrollment_ids,
-                successor_sessions=successor_sessions,
-                horizon_due_sessions=horizon_due_sessions,
+        d0_enrollment_ids = [
+            item["id"]
+            for entries in enrollment_by_symbol.values()
+            for item in entries
+            if item.get("fact_type") == "D0"
+        ]
+        followups = {}
+        if rule_enrollment_ids:
+            from stock_a.storage.postgres.source_observation_segments import (
+                read_source_observation_segment_followups,
             )
-            if target_session in calendar_sessions
-            else {
-                item: {"status": "UNKNOWN", "reason": "CALENDAR_WINDOW_UNAVAILABLE"}
-                for item in enrollment_ids
-            }
-        )
+
+            followups.update(
+                read_source_observation_segment_followups(
+                    config,
+                    target=target_session,
+                    cutoff=research_cutoff,
+                    enrollment_ids=rule_enrollment_ids,
+                    horizon_due_sessions=horizon_due_sessions,
+                )
+            )
+        if d0_enrollment_ids:
+            followups.update(
+                read_enrollment_followups(
+                    config,
+                    target=target_session,
+                    cutoff=research_cutoff,
+                    enrollment_ids=d0_enrollment_ids,
+                    successor_sessions=successor_sessions,
+                    horizon_due_sessions=horizon_due_sessions,
+                )
+                if target_session in calendar_sessions
+                else {
+                    item: {
+                        "status": "UNKNOWN",
+                        "reason": "CALENDAR_WINDOW_UNAVAILABLE",
+                    }
+                    for item in d0_enrollment_ids
+                }
+            )
         group_counts = page_result["group_counts"]
         global_total = (
             group_counts.get("D0_NEW", 0)
@@ -4446,6 +4444,70 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     ) from error
                 self._send_json(200, {"ok": True, **result})
                 return
+            if parsed.path == "/api/product/source-observation-segments":
+                allowed = {
+                    "as_of",
+                    "research_cutoff",
+                    "source_package_id",
+                    "rule",
+                    "status",
+                    "offset",
+                    "limit",
+                }
+                values = _query(self.path, allowed)
+                if not {
+                    "as_of",
+                    "research_cutoff",
+                    "source_package_id",
+                }.issubset(values):
+                    raise PreviewHttpError(
+                        400,
+                        "SOURCE_OBSERVATION_SEGMENT_QUERY_INVALID",
+                        "须提供明确观察日期、研究截止和来源包ID",
+                    )
+                as_of = _iso_date(values["as_of"])
+                cutoff = _iso_date(values["research_cutoff"])
+                configured_cutoff = self.preview_server.state.research_cutoff
+                if cutoff != configured_cutoff:
+                    raise PreviewHttpError(
+                        409,
+                        "SOURCE_OBSERVATION_SEGMENT_CUTOFF_MISMATCH",
+                        "请求研究截止必须与本机DEV固定截止一致",
+                    )
+                _require_research_cutoff(as_of, cutoff)
+                rule_id = values.get("rule")
+                if rule_id in {None, "", "ALL"}:
+                    rule_id = None
+                status = values.get("status")
+                if status in {None, "", "ALL"}:
+                    status = None
+                from stock_a.storage.postgres.source_observation_segments import (
+                    read_source_observation_segments,
+                )
+
+                try:
+                    result = read_source_observation_segments(
+                        self.preview_server.state.config,
+                        as_of=as_of,
+                        research_cutoff=cutoff,
+                        source_package_id=_package_id(values["source_package_id"]),
+                        rule_id=rule_id,
+                        status=status,
+                        offset=_nonnegative_int(values.get("offset", "0"), "offset"),
+                        limit=_positive_int(
+                            _nonnegative_int(values.get("limit", "20"), "limit", 100),
+                            "limit",
+                            100,
+                        ),
+                    )
+                except ValueError as error:
+                    raise PreviewHttpError(
+                        400,
+                        "SOURCE_OBSERVATION_SEGMENT_QUERY_INVALID",
+                        str(error),
+                    ) from error
+                self._send_json(200, {"ok": True, **result})
+                return
             if parsed.path == "/api/product/cohort-date-comparison":
                 values = _query(
                     self.path,
@@ -6418,29 +6480,54 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         ),
                     ).get(symbol, [])
                 calendar = calendar_sessions
-                ids = [entry["id"] for entry in entries]
-                followups = (
-                    read_enrollment_followups(
-                        config,
-                        target=target,
-                        cutoff=research_cutoff,
-                        enrollment_ids=ids,
-                        successor_sessions=tuple(
-                            day for day in calendar if target < day <= research_cutoff
-                        ),
-                        horizon_due_sessions=tuple(
-                            day for day in calendar if day > target
-                        )[:20],
+                rule_ids = [
+                    entry["id"] for entry in entries if entry.get("fact_type") == "RULE"
+                ]
+                d0_ids = [
+                    entry["id"] for entry in entries if entry.get("fact_type") == "D0"
+                ]
+                followups = {}
+                if rule_ids:
+                    from stock_a.storage.postgres.source_observation_segments import (
+                        read_source_observation_segment_followups,
                     )
-                    if target in calendar
-                    else {
-                        item: {
-                            "status": "UNKNOWN",
-                            "reason": "CALENDAR_WINDOW_UNAVAILABLE",
+
+                    followups.update(
+                        read_source_observation_segment_followups(
+                            config,
+                            target=target,
+                            cutoff=research_cutoff,
+                            enrollment_ids=rule_ids,
+                            horizon_due_sessions=tuple(
+                                day for day in calendar if day > target
+                            )[:20],
+                        )
+                    )
+                if d0_ids:
+                    followups.update(
+                        read_enrollment_followups(
+                            config,
+                            target=target,
+                            cutoff=research_cutoff,
+                            enrollment_ids=d0_ids,
+                            successor_sessions=tuple(
+                                day
+                                for day in calendar
+                                if target < day <= research_cutoff
+                            ),
+                            horizon_due_sessions=tuple(
+                                day for day in calendar if day > target
+                            )[:20],
+                        )
+                        if target in calendar
+                        else {
+                            item: {
+                                "status": "UNKNOWN",
+                                "reason": "CALENDAR_WINDOW_UNAVAILABLE",
+                            }
+                            for item in d0_ids
                         }
-                        for item in ids
-                    }
-                )
+                    )
                 for entry in entries:
                     entry["followup"] = followups[entry["id"]]
                 _attach_t0_early_contexts(config, entries)

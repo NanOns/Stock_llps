@@ -26,6 +26,9 @@ from stock_a.application.cli_commands.research.fep_baseline import (
 from stock_a.application.cli_commands.research.market_observation import (
     _run_source_market_observation,
 )
+from stock_a.application.cli_commands.research.observation_segments import (
+    _run_source_observation_segments,
+)
 from stock_a.application.cli_commands.research.research_day import (
     _run_source_research_day,
 )
@@ -122,6 +125,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_market_observation(args)
         if args.command == "source-fep-baseline":
             return _run_source_fep_baseline(args)
+        if args.command == "source-observation-segments":
+            return _run_source_observation_segments(args)
         if args.command == "source-research-day":
             return _run_source_research_day(args)
         if args.command == "source-sector-pulse-transition-day":

@@ -479,6 +479,53 @@
                 </button>
               </div>
             </section>
+            <section class="card" aria-label="来源级跨日观察段">
+              <div class="card-head">
+                <div>
+                  <h2>来源级跨日观察段</h2>
+                  <p>
+                    按所选研究日期读取离线保存的来源登记状态、退出与合法重入；只读PG已完成事实，不在切日或翻页时重算。
+                  </p>
+                </div>
+              </div>
+              <div class="focus-segment-filters">
+                <label class="inline-filter"
+                  >规则
+                  <select id="focusSegmentRule" disabled>
+                    <option value="">读取可用规则…</option>
+                  </select>
+                </label>
+                <label class="inline-filter"
+                  >状态
+                  <select id="focusSegmentStatusFilter">
+                    <option value="ALL">全部状态</option>
+                    <option value="ACTIVE">持续观察</option>
+                    <option value="PAUSED">未知暂停</option>
+                    <option value="EXITED">已证退出</option>
+                    <option value="EXITED_UNKNOWN">退出后未知</option>
+                    <option value="UNKNOWN">状态未知</option>
+                    <option value="INCOMPLETE">事实不完整</option>
+                    <option value="NOT_COMPUTED">未计算</option>
+                  </select>
+                </label>
+                <button id="focusSegmentRefresh" class="button subtle">
+                  读取已存观察段
+                </button>
+              </div>
+              <p id="focusSegmentStatus" role="status">
+                等待读取已保存的跨日观察事实。
+              </p>
+              <div id="focusSegmentRows" class="focus-segment-rows"></div>
+              <div class="pagination">
+                <button id="focusSegmentPrev" class="button subtle" disabled>
+                  上一页
+                </button>
+                <span id="focusSegmentPage">—</span>
+                <button id="focusSegmentNext" class="button subtle" disabled>
+                  下一页
+                </button>
+              </div>
+            </section>
             <section class="card">
               <div class="card-head">
                 <div>

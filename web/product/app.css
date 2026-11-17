@@ -1360,3 +1360,73 @@ td.empty {
   color: #365249;
   font-size: 0.9em;
 }
+
+.focus-segment-filters {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: end;
+  gap: 0.75rem 1rem;
+  margin: 0.8rem 0;
+}
+
+.focus-segment-filters label {
+  display: grid;
+  gap: 0.35rem;
+  color: #536960;
+  font-size: 0.9rem;
+}
+
+.focus-segment-filters select {
+  min-width: 180px;
+}
+
+.focus-segment-rows {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.focus-observation-segment {
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  border: 1px solid #dce8e1;
+  border-radius: 0.75rem;
+  background: #fbfdfb;
+}
+
+.focus-observation-segment h3 {
+  margin: 0.1rem 0 0.45rem;
+  color: #25463a;
+  font-size: 1rem;
+}
+
+.focus-observation-segment p {
+  margin: 0.35rem 0;
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+
+.focus-observation-timeline,
+.focus-observation-drilldown {
+  margin-top: 0.55rem;
+}
+
+.focus-observation-timeline summary,
+.focus-observation-drilldown summary {
+  color: #176248;
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.focus-observation-timeline ol {
+  padding-left: 1.5rem;
+  line-height: 1.6;
+}
+
+.focus-observation-timeline li {
+  margin: 0.35rem 0;
+  overflow-wrap: anywhere;
+}
+
+.focus-observation-drilldown-result {
+  margin-top: 0.5rem;
+}

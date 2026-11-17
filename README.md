@@ -44,6 +44,8 @@ python -m stock_a source-fep-baseline --research-cutoff $researchCutoff --source
 
 ENTRY和DAILY_LANDMARK独立计算；REENTRY及FIRST_OBSERVED_LEFT_CENSORED不计入ENTRY。RAW_CLOSE_RETURN分位采用离散最近秩`ceil(n*p)`，偶数样本p50不取两项平均；日期间对比按可评价的独立T0日期等权。MFE、MAE和MDD_CLOSE在现存Forward路径值与冻结字段合同完成逐值一致性核验前标记`NOT_COMPUTED`；本批不把未闭合路径算法混入Baseline。未到期只由官方日历判定，不读取截止外行情。所有结果标记`NON_PIT_EXPLORATORY / DESCRIPTIVE_ONLY`，不足独立日期、质量未知、到期未计算与未来未到期分别披露，不输出预测概率或模型资格。
 
+来源规则登记的跨日状态由`source-observation-segments`离线生产：必须提供研究截止、数字来源包并显式指定`--persist`；可重复指定`--rule-id`，省略时只处理截止日前已有的ENTRY、左截断及REENTRY根登记。DAILY_LANDMARK复用为根段的持续事实，不创建每日新段。生产器只读已存PG登记、规则事实和相邻上下文，以单个序列化事务幂等保存typed逐会话状态；Focus观察段API只读已完成结果。未知事实不推断为FALSE；截止后状态仅以官方日历标记`NOT_DUE`，不读取截止外行情。
+
 单日 `--view cohort` 可计算完整来源池的来源规则和后验路径；显式指定 `--persist-research-facts --persist-research-events` 时，将规则、已到期共享路径和独立D1锚放在同一PG事务中保存，同键异值拒绝。`--view persisted --rule-id 规则 --horizon 期限` 直接读取已存结果；画像修订应使用写入结果中的即时画像修订。`--view persisted-changes` 用 `--before-session` 和 `--before-event-window-start` 比较两个已存T0及当前行业/GN成员快照，非相邻日仅为不同日对照。指定 `--symbol` 可观察冻结线及逐锚结果，附加 `--risk-readiness` 查看可证风险分量和资格缺项。来源级诊断与正式D2、Priority或交易权限相互独立。
 
 `source-research-day --rps-pulse-groups-from-saved --persist` 是单日离线派生入口：必须显式提供T0、研究截止和来源包；只读取PG内相邻Seed、Raw来源目录、已存T0/成员/PULSE/登记事实，不采集行情。它幂等保存每条最新登记×股票×板块关系的RPS5/RPS20并列名次变化和独立质量状态。Focus/Cohort选择冻结规则及板类后，直接聚合该T0已存Forward并展示完整关系分母、正/非正、中位数、覆盖、失败原因与例子；普通GET不遍历跨日全池。成员回看为`CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT`、价格为`RAW_UNADJUSTED`；T+5独立日期不足时显示`INSUFFICIENT_INDEPENDENT_DATES`。
