@@ -4481,6 +4481,48 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     ) from error
                 self._send_json(200, {"ok": True, **result})
                 return
+            if parsed.path == "/api/product/fep-baseline":
+                values = _query(
+                    self.path,
+                    {"source_package_id", "rule", "horizon", "lane"},
+                )
+                if set(values) != {"source_package_id", "rule", "horizon", "lane"}:
+                    raise PreviewHttpError(
+                        400,
+                        "FEP_BASELINE_QUERY_INVALID",
+                        "须提供来源包、冻结规则、期限及ENTRY或DAILY_LANDMARK lane",
+                    )
+                if values["horizon"] not in {"1", "3", "5"}:
+                    raise PreviewHttpError(
+                        400,
+                        "FEP_BASELINE_HORIZON_INVALID",
+                        "FEP描述统计仅读取T+1、T+3或T+5已存事实",
+                    )
+                if values["lane"] not in {"ENTRY", "DAILY_LANDMARK"}:
+                    raise PreviewHttpError(
+                        400,
+                        "FEP_BASELINE_LANE_INVALID",
+                        "FEP lane只接受ENTRY或DAILY_LANDMARK",
+                    )
+                try:
+                    from stock_a.storage.postgres.fep_baseline import (
+                        read_fep_baseline,
+                    )
+
+                    result = read_fep_baseline(
+                        self.preview_server.state.config,
+                        research_cutoff=self.preview_server.state.research_cutoff,
+                        source_package_id=_package_id(values["source_package_id"]),
+                        rule_id=values["rule"],
+                        horizon=int(values["horizon"]),
+                        lane=values["lane"],
+                    )
+                except ValueError as error:
+                    raise PreviewHttpError(
+                        400, "FEP_BASELINE_QUERY_INVALID", str(error)
+                    ) from error
+                self._send_json(200, {"ok": True, **result})
+                return
             if parsed.path == "/api/product/cohort-symbol-forward":
                 allowed = {
                     "target_session",

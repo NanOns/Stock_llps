@@ -34,6 +34,8 @@ def summarize_day(
     rules,
     horizons,
     market,
+    lane=None,
+    enrollment_kinds=None,
 ):
     """读取调用方在后继读取前冻结的三态及同日市场条件。"""
     symbols = sorted(frozen)
@@ -50,6 +52,31 @@ def summarize_day(
         for rule in rules
     ):
         raise ValueError("规则三态无效，拒绝丢失来源分母")
+    if lane not in {None, "ENTRY", "DAILY_LANDMARK"}:
+        raise ValueError("FEP lane只接受ENTRY或DAILY_LANDMARK")
+    enrollment_kinds = enrollment_kinds or {}
+    lane_counts = {}
+    for rule in rules:
+        true_symbols = {
+            symbol
+            for symbol in symbols
+            if frozen[symbol]["rules"][rule]["state"] == "TRUE"
+        }
+        kinds = enrollment_kinds.get(rule, {})
+        if lane is not None and set(kinds) != true_symbols:
+            raise ValueError("T0 TRUE来源与登记lane未精确闭合")
+        if lane is not None and any(
+            kind
+            not in {
+                "ENTRY",
+                "DAILY_LANDMARK",
+                "REENTRY",
+                "FIRST_OBSERVED_LEFT_CENSORED",
+            }
+            for kind in kinds.values()
+        ):
+            raise ValueError("来源登记包含未知lane")
+        lane_counts[rule] = dict(Counter(kinds.values()))
     d1_identity = (
         next(iter(frozen.values())).get("d1_t0_predicate", {}) if symbols else {}
     )
@@ -63,7 +90,14 @@ def summarize_day(
                 ("UNKNOWN", "UNKNOWN"),
             ):
                 members = [
-                    s for s in symbols if frozen[s]["rules"][rule]["state"] == state
+                    s
+                    for s in symbols
+                    if frozen[s]["rules"][rule]["state"] == state
+                    and (
+                        state != "TRUE"
+                        or lane is None
+                        or enrollment_kinds[rule][s] == lane
+                    )
                 ]
                 maturity, quality, endpoint_reasons, path_reasons = (
                     Counter(),
@@ -194,6 +228,15 @@ def summarize_day(
                         "horizon": horizon,
                         "group": label,
                         "source_count": len(symbols),
+                        "rule_true_count": sum(
+                            frozen[s]["rules"][rule]["state"] == "TRUE" for s in symbols
+                        ),
+                        "lane_true_count": lane_counts[rule].get(lane, 0)
+                        if lane is not None
+                        else sum(
+                            frozen[s]["rules"][rule]["state"] == "TRUE" for s in symbols
+                        ),
+                        "lane_enrollment_counts": lane_counts[rule],
                         "count": len(members),
                         "due_count": due_count,
                         "not_due_count": len(members) - due_count,
@@ -239,7 +282,7 @@ def summarize_day(
                 if r["rule"] == rule and r["horizon"] == horizon
             }
             a, b = selected["MATCH"]["endpoint"], selected["NO_MATCH"]["endpoint"]
-            comparable = bool(a["count"] and b["count"])
+            comparable = a["median"] is not None and b["median"] is not None
             comparisons.append(
                 {
                     "rule": rule,
@@ -260,6 +303,7 @@ def summarize_day(
             )
     return {
         "target_session": target.isoformat(),
+        "lane": lane or "ALL_MATCHES",
         "source_version": source,
         "calendar_revision": calendar_revision,
         "forward_session_versions": session_versions,
@@ -310,6 +354,7 @@ def aggregate_days(days):
             d["source_version"].get("source_time_quality"),
             d["calendar_revision"],
             d.get("runtime_profile_revision"),
+            d.get("lane", "ALL_MATCHES"),
             json.dumps(d.get("rule_versions"), sort_keys=True, ensure_ascii=False),
             json.dumps(
                 d.get("d1_producer_identity"), sort_keys=True, ensure_ascii=False
@@ -394,6 +439,9 @@ def aggregate_days(days):
                 {
                     "rule": rule,
                     "horizon": horizon,
+                    "lane": days[0].get("lane", "ALL_MATCHES")
+                    if days
+                    else "ALL_MATCHES",
                     "condition": condition,
                     "condition_scope": "完整来源描述基线，包含市场条件未知日；不代表已知市场环境"
                     if condition == "ALL"

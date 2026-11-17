@@ -5832,6 +5832,183 @@ function renderCohortDateComparison(root, result) {
   }
 }
 
+function formatFepPercent(value) {
+  if (value == null) return "未计算";
+  const [numeratorText, denominatorText] = String(value).split("/");
+  const numerator = BigInt(numeratorText);
+  const denominator = denominatorText ? BigInt(denominatorText) : 1n;
+  if (denominator === 0n) return "UNKNOWN";
+  const scale = 1000000n;
+  const absolute = numerator < 0n ? -numerator : numerator;
+  const scaled = (absolute * 100n * scale) / denominator;
+  const sign = numerator < 0n ? "−" : "";
+  return `${sign}${scaled / scale}.${String(scaled % scale).padStart(6, "0")}%`;
+}
+
+function renderFepLaneBaseline(root, result, lane) {
+  root.replaceChildren();
+  root.append(node("h4", `FEP 条件统计（描述性）· ${lane}`));
+  root.append(
+    node(
+      "p",
+      "SOURCE_STOCK · RAW_CLOSE_RETURN · NON_PIT_EXPLORATORY · RAW_UNADJUSTED · DESCRIPTIVE_ONLY。这里只读已存PG统计，不输出预测概率、模型支持或Priority资格。",
+      "muted",
+    ),
+  );
+  if (result?.status !== "AVAILABLE" || !Array.isArray(result.rows)) {
+    root.append(
+      node(
+        "p",
+        `${result?.status || "UNKNOWN"} · ${(result?.reason_codes || []).join("、") || "当前来源、规则、期限和lane没有唯一已存FEP结果。"} · 模型状态 ${result?.model_capability || "NOT_ENABLED"}`,
+      ),
+    );
+    return;
+  }
+
+  const rows = result.rows;
+  const equalDate = rows.find(
+    (row) =>
+      row.summary_scope === "EQUAL_DATE" &&
+      row.group_code === "MATCH_VS_NO_MATCH" &&
+      row.metric_code === "RAW_CLOSE_RETURN" &&
+      row.condition_code === "ALL",
+  );
+  const dateRows = rows.filter(
+    (row) =>
+      row.summary_scope === "T0" &&
+      row.metric_code === "RAW_CLOSE_RETURN" &&
+      ["MATCH", "NO_MATCH", "UNKNOWN"].includes(row.group_code),
+  );
+  const t0Contexts = [
+    ...new Map(
+      dateRows
+        .filter((row) => row.group_code === "MATCH")
+        .map((row) => [row.target_session, row]),
+    ).values(),
+  ];
+  if (t0Contexts.length) {
+    const totals = t0Contexts.reduce(
+      (sum, row) => ({
+        sourcePool: sum.sourcePool + (row.source_pool_count || 0),
+        match: sum.match + (row.t0_match_count || 0),
+        noMatch: sum.noMatch + (row.t0_no_match_count || 0),
+        unknown: sum.unknown + (row.t0_unknown_count || 0),
+        entry: sum.entry + (row.entry_count || 0),
+        daily: sum.daily + (row.daily_landmark_count || 0),
+        reentry: sum.reentry + (row.reentry_count || 0),
+        leftCensored: sum.leftCensored + (row.left_censored_count || 0),
+      }),
+      {
+        sourcePool: 0,
+        match: 0,
+        noMatch: 0,
+        unknown: 0,
+        entry: 0,
+        daily: 0,
+        reentry: 0,
+        leftCensored: 0,
+      },
+    );
+    root.append(
+      node(
+        "p",
+        `${t0Contexts.length}个独立T0 · 完整来源池 ${format(totals.sourcePool)}（每T0约${format(Math.round(totals.sourcePool / t0Contexts.length))}） · 三态 TRUE/FALSE/UNKNOWN ${format(totals.match)}/${format(totals.noMatch)}/${format(totals.unknown)} · ENTRY/DAILY_LANDMARK/REENTRY/左截断 ${format(totals.entry)}/${format(totals.daily)}/${format(totals.reentry)}/${format(totals.leftCensored)}。REENTRY与左截断不计入ENTRY。`,
+      ),
+    );
+  }
+  if (equalDate) {
+    root.append(
+      node(
+        "p",
+        `T+${result.horizon} · ${equalDate.period_start_session}–${equalDate.period_end_session} · ${equalDate.status} · 可比较独立日期 ${format(equalDate.valid_date_count)} / ${format(equalDate.requested_date_count)} · 日期等权的同日最近秩p50差 ` +
+          `${formatFepPercent(equalDate.equal_date_mean_median_difference)} · 日期等权观察样本正收益占比差 ${formatFepPercent(equalDate.equal_date_mean_positive_fraction_difference)} · ${result.rule_id} ${result.rule_version}`,
+        "cohort-result-summary",
+      ),
+    );
+    root.append(
+      node(
+        "p",
+        `后继日期未到期 ${format(equalDate.not_due_date_count)} · 质量未知 ${format(equalDate.unknown_date_count)} · 到期未计算 ${format(equalDate.not_computed_date_count)} · 模型 ${result.model_capability || "NOT_ENABLED"}。这些数值是事后描述，不是未来个股概率。`,
+        "muted",
+      ),
+    );
+  }
+  const pathRows = rows.filter(
+    (row) =>
+      row.summary_scope === "T0" &&
+      ["RAW_MFE", "RAW_MAE", "RAW_MDD_CLOSE"].includes(row.metric_code),
+  );
+  if (pathRows.length) {
+    const pathReasons = [
+      ...new Set(pathRows.flatMap((row) => row.reason_codes || [])),
+    ];
+    root.append(
+      node(
+        "p",
+        `MFE / MAE / MDD_CLOSE：${pathRows.some((row) => row.status === "NOT_COMPUTED") ? "NOT_COMPUTED" : "NOT_DUE"} · ${pathReasons.join("、") || "官方后继尚未到期"}。`,
+        "muted",
+      ),
+    );
+  }
+
+  const conditions = rows.filter(
+    (row) =>
+      row.summary_scope === "EQUAL_DATE" &&
+      row.group_code === "MATCH_VS_NO_MATCH" &&
+      row.metric_code === "RAW_CLOSE_RETURN" &&
+      row.condition_code !== "ALL",
+  );
+  if (conditions.length) {
+    root.append(
+      node("p", "固定来源宽度条件（质量不闭合的日期保留 UNKNOWN）："),
+    );
+    for (const condition of conditions) {
+      root.append(
+        node(
+          "p",
+          `${condition.condition_code} · ${condition.status} · 独立日期 ${format(condition.valid_date_count)} / ${format(condition.condition_date_count)} · 日期等权p50差 ${formatFepPercent(condition.equal_date_mean_median_difference)}`,
+          "muted",
+        ),
+      );
+    }
+  }
+
+  const dates = [...new Set(dateRows.map((row) => row.target_session))].sort();
+  for (const session of dates) {
+    const sessionRows = dateRows.filter(
+      (row) => row.target_session === session,
+    );
+    const match = sessionRows.find((row) => row.group_code === "MATCH");
+    const noMatch = sessionRows.find((row) => row.group_code === "NO_MATCH");
+    const unknown = sessionRows.find((row) => row.group_code === "UNKNOWN");
+    const details = node("details", null, "evidence-details cohort-date-group");
+    details.append(
+      node(
+        "summary",
+        `${session} · ${match?.market_condition_code || "B_FIXED_UNKNOWN"} · ${match?.profile_family || "UNKNOWN_PROFILE"} · 历史窗 ${match?.history_session_count ?? "?"}/${match?.d1_history_session_count ?? "?"} · 捕获 ${match?.source_capture_id ?? "UNKNOWN"} · ${match?.source_time_quality || "UNKNOWN"}`,
+      ),
+    );
+    for (const group of [match, noMatch, unknown].filter(Boolean)) {
+      details.append(
+        node(
+          "p",
+          `${group.group_code} · 样本 ${format(group.member_count)} · 有价 ${format(group.observed_count)} · 未到期 ${format(group.not_due_count)} · 未知 ${format(group.unknown_count)} · 未计算 ${format(group.not_computed_count)} · p25/p50/p75 ${formatFepPercent(group.p25)} / ${formatFepPercent(group.p50)} / ${formatFepPercent(group.p75)} · 正/非正 ${format(group.positive_count)}/${format(group.non_positive_count)}${group.reason_codes?.length ? ` · 原因 ${group.reason_codes.join("、")}` : ""}`,
+        ),
+      );
+    }
+    if (match) {
+      details.append(
+        node(
+          "p",
+          `精确Profile ${match.profile_revision} · 规则 ${match.rule_version} · 日历 ${match.calendar_revision} · Forward ${match.path_rule_version} · 市场宽度 ${match.market_metric || "UNKNOWN"} (${format(match.market_eligible_count)}/${format(match.market_source_count)})`,
+          "muted",
+        ),
+      );
+    }
+    root.append(details);
+  }
+}
+
 function cohortDateComparisonDisclosure(context, key, token) {
   const details = node(
     "details",
@@ -5849,6 +6026,56 @@ function cohortDateComparisonDisclosure(context, key, token) {
   );
   details.append(content);
   let requested = false;
+  let fepRequested = false;
+  const loadFep = async (container, horizon) => {
+    if (fepRequested) return;
+    fepRequested = true;
+    container.replaceChildren(node("p", "正在读取已存FEP描述统计…", "muted"));
+    try {
+      const results = await Promise.all(
+        ["ENTRY", "DAILY_LANDMARK"].map(async (lane) => {
+          const query = new URLSearchParams({
+            source_package_id: context.source_package_id,
+            rule: key.rule,
+            horizon,
+            lane,
+          });
+          return {
+            lane,
+            result: await api(`/api/product/fep-baseline?${query}`),
+          };
+        }),
+      );
+      if (
+        token !== cohortRequest ||
+        activePage !== "focus" ||
+        state.selected !== context ||
+        !details.isConnected ||
+        $("cohortHorizon").value !== horizon
+      )
+        return;
+      container.replaceChildren();
+      for (const item of results) {
+        const section = node("section", undefined, "cohort-result-summary");
+        renderFepLaneBaseline(section, item.result, item.lane);
+        container.append(section);
+      }
+    } catch (error) {
+      if (
+        token !== cohortRequest ||
+        activePage !== "focus" ||
+        state.selected !== context ||
+        !details.isConnected
+      )
+        return;
+      fepRequested = false;
+      container.replaceChildren(node("p", `FEP读取失败：${error.message}`));
+      const retry = node("button", "重试读取FEP描述统计", "button subtle");
+      retry.type = "button";
+      retry.addEventListener("click", () => loadFep(container, horizon));
+      container.append(retry);
+    }
+  };
   details.addEventListener("toggle", async () => {
     if (!details.open || requested) return;
     requested = true;
@@ -5880,6 +6107,13 @@ function cohortDateComparisonDisclosure(context, key, token) {
       )
         return;
       renderCohortDateComparison(content, comparison);
+      const fepContent = node(
+        "div",
+        undefined,
+        "cohort-date-comparison-content",
+      );
+      content.append(fepContent);
+      void loadFep(fepContent, horizon);
     } catch (error) {
       if (
         token !== cohortRequest ||

@@ -20,6 +20,9 @@ from stock_a.application.cli_commands.research.d1_preview import (
     _run_source_d1_breakout_preview,
 )
 from stock_a.application.cli_commands.research.d0_raw import _run_source_d0_raw
+from stock_a.application.cli_commands.research.fep_baseline import (
+    _run_source_fep_baseline,
+)
 from stock_a.application.cli_commands.research.market_observation import (
     _run_source_market_observation,
 )
@@ -117,6 +120,8 @@ def main(argv: list[str] | None = None) -> int:
             return _run_source_d0_raw(args)
         if args.command == "source-market-observation":
             return _run_source_market_observation(args)
+        if args.command == "source-fep-baseline":
+            return _run_source_fep_baseline(args)
         if args.command == "source-research-day":
             return _run_source_research_day(args)
         if args.command == "source-sector-pulse-transition-day":

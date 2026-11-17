@@ -672,6 +672,43 @@ def register_commands(commands):
         default="json",
         help="输出摘要或完整JSON",
     )
+    fep_baseline = commands.add_parser(
+        "source-fep-baseline",
+        help="从已存来源T0与Forward typed事实离线生成FEP描述统计",
+    )
+    fep_baseline.add_argument(
+        "--research-cutoff", required=True, help="显式最晚可读官方会话"
+    )
+    fep_baseline.add_argument(
+        "--source-package-id", type=int, required=True, help="数字来源包身份"
+    )
+    fep_baseline.add_argument(
+        "--rule-id",
+        action="append",
+        required=True,
+        help="精确来源规则，可重复指定；按每条规则版本分区保存",
+    )
+    fep_baseline.add_argument(
+        "--horizon",
+        type=int,
+        choices=(1, 3, 5),
+        action="append",
+        required=True,
+        help="T0后的官方会话数，可重复指定",
+    )
+    fep_baseline.add_argument(
+        "--lane",
+        choices=("ENTRY", "DAILY_LANDMARK"),
+        action="append",
+        required=True,
+        help="独立FEP观察lane，可重复指定；REENTRY/左截断不并入ENTRY",
+    )
+    fep_baseline.add_argument(
+        "--persist",
+        action="store_true",
+        required=True,
+        help="显式授权本次离线typed结果写入唯一PG",
+    )
     preview_serve = commands.add_parser(
         "product-serve",
         aliases=["preview-serve"],

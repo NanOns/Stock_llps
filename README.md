@@ -36,7 +36,13 @@ Git只接收业务运行必需内容、需求、设计、正式需求变更和�
 
 来源级历史观察可用 `python -m stock_a source-market-observation --help` 查看参数。调用时显式提供连续官方会话、研究截止、精确来源包、画像修订、行业/GN成员快照、D1事件窗及一个或多个后继会话数；可按来源代码、信号类别或板块筛选，并对观察明细分页。命令先计算完整来源池与观察组，再筛选输出；每页关联的同股同日摘要保留不同信号和D1锚点，比较结果分别给出事件计权与同日股票去重的价格分布。事件逐会话显示已知状态、UNKNOWN原因及候选线触及；信号转FALSE、候选线触及和正式D2退出是不同含义。指定板块和Rotation窗口可读取该板块的Native、LOO及后验轮动事实。普通观察只读PG；当前成员回看和未复权原始价格后继均为NON_PIT描述，不代表正式事件、可交易收益或持久Focus。
 
-同一命令的 `--view fep` 按日期、规则和期限输出完整来源池的 MATCH／NO_MATCH／UNKNOWN、同日端点与路径质量、组差和市场宽度条件；`--rule-id` 选择规则，`--fep-condition` 限定日期条件。端点为T+N原始收盘相对T0收盘的变化；MFE和MAE为后继窗口高低价相对T0收盘的极值，MDD为包含T0的逐日收盘先峰后谷跌幅。分位采用离散最近秩，跨日汇总按有效日期平权；日期不足、来源质量和NON_PIT限制须随结果阅读。此视图只读，不生成预测概率，也不改变现有信号和Priority。
+同一命令的 `--view fep` 是只读即时研究预览：按日期、规则和期限输出完整来源池的 MATCH／NO_MATCH／UNKNOWN、同日端点与路径质量、组差和市场宽度条件。它不写FEP业务事实，也不是产品页面的数据源。FEP正式描述性Baseline由`source-fep-baseline`显式离线生产，复用`source_fep_baseline.py`的同一最近秩和按日期平权数学，从PG已存T0登记、完整三态来源池、Forward与合法市场宽度事实读取输入；Reader/API和Focus/Cohort页面只消费已完成typed行。举例：
+
+```powershell
+python -m stock_a source-fep-baseline --research-cutoff $researchCutoff --source-package-id $sourcePackageId --rule-id D1_T0 --horizon 1 --horizon 3 --horizon 5 --lane ENTRY --lane DAILY_LANDMARK --persist
+```
+
+ENTRY和DAILY_LANDMARK独立计算；REENTRY及FIRST_OBSERVED_LEFT_CENSORED不计入ENTRY。RAW_CLOSE_RETURN分位采用离散最近秩`ceil(n*p)`，偶数样本p50不取两项平均；日期间对比按可评价的独立T0日期等权。MFE、MAE和MDD_CLOSE在现存Forward路径值与冻结字段合同完成逐值一致性核验前标记`NOT_COMPUTED`；本批不把未闭合路径算法混入Baseline。未到期只由官方日历判定，不读取截止外行情。所有结果标记`NON_PIT_EXPLORATORY / DESCRIPTIVE_ONLY`，不足独立日期、质量未知、到期未计算与未来未到期分别披露，不输出预测概率或模型资格。
 
 单日 `--view cohort` 可计算完整来源池的来源规则和后验路径；显式指定 `--persist-research-facts --persist-research-events` 时，将规则、已到期共享路径和独立D1锚放在同一PG事务中保存，同键异值拒绝。`--view persisted --rule-id 规则 --horizon 期限` 直接读取已存结果；画像修订应使用写入结果中的即时画像修订。`--view persisted-changes` 用 `--before-session` 和 `--before-event-window-start` 比较两个已存T0及当前行业/GN成员快照，非相邻日仅为不同日对照。指定 `--symbol` 可观察冻结线及逐锚结果，附加 `--risk-readiness` 查看可证风险分量和资格缺项。来源级诊断与正式D2、Priority或交易权限相互独立。
 
