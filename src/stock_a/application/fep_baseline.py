@@ -9,12 +9,18 @@ from fractions import Fraction
 from typing import Any
 
 from stock_a.research.entry_context.sessions import _load_calendar
+from stock_a.research.source_forward_path import exploratory_raw_path
 from stock_a.research.source_fep_baseline import aggregate_days, summarize_day
 from stock_a.storage.postgres.fep_baseline import (
     persist_fep_baseline_rows,
     read_fep_source_contexts,
 )
-from stock_a.storage.postgres.research_facts import PATH_VERSION
+from stock_a.storage.postgres.research_facts import (
+    PATH_VERSION,
+    ResearchFactConflict,
+    restate_forward_path_metrics,
+)
+from stock_a.storage.postgres.source_raw import read_raw_daily_forward_pool
 
 _LANES = ("ENTRY", "DAILY_LANDMARK")
 _METRICS = (
@@ -30,6 +36,14 @@ def _fraction_pair(value: str | None) -> tuple[int | None, int | None]:
         return None, None
     fraction = Fraction(value)
     return fraction.numerator, fraction.denominator
+
+
+def _stored_fraction(numerator: Any, denominator: Any) -> str | None:
+    if numerator is None and denominator is None:
+        return None
+    if numerator is None or denominator is None or int(denominator) <= 0:
+        raise ResearchFactConflict("Forward精确路径分数不完整")
+    return str(Fraction(int(numerator), int(denominator)))
 
 
 def _reason_arrays(values: Mapping[str, int]) -> tuple[list[str], list[int]]:
@@ -133,6 +147,21 @@ def _endpoint_fact(forward: Mapping[str, Any] | None, *, due: bool) -> dict[str,
             raise ValueError("OBSERVED Forward端点缺少精确分数")
         endpoint_value = {"exact": str(Fraction(int(numerator), int(denominator)))}
     endpoint_reason = forward["endpoint_reason"] or endpoint_quality
+    if forward["path_quality"] not in {"OBSERVED", "UNKNOWN", "NOT_COMPUTED"}:
+        raise ResearchFactConflict("Forward路径质量状态不在现役合同内")
+    path_values = {
+        "mfe": _stored_fraction(forward["mfe_numerator"], forward["mfe_denominator"]),
+        "mae": _stored_fraction(forward["mae_numerator"], forward["mae_denominator"]),
+        "mdd": _stored_fraction(forward["mdd_numerator"], forward["mdd_denominator"]),
+    }
+    if forward["path_quality"] == "OBSERVED" and any(
+        value is None for value in path_values.values()
+    ):
+        raise ResearchFactConflict("OBSERVED Forward路径缺少MFE/MAE/MDD数值")
+    if forward["path_quality"] != "OBSERVED" and any(
+        value is not None for value in path_values.values()
+    ):
+        raise ResearchFactConflict("非OBSERVED Forward路径携带可评价路径数值")
     return {
         "maturity": forward["maturity"],
         "due": True,
@@ -143,9 +172,9 @@ def _endpoint_fact(forward: Mapping[str, Any] | None, *, due: bool) -> dict[str,
                 "reason": endpoint_reason,
             }
         },
-        "path_quality": "NOT_COMPUTED",
-        "path_reasons": ["FORWARD_PATH_METRIC_CONTRACT_MISMATCH"],
-        "path_values": {},
+        "path_quality": forward["path_quality"],
+        "path_reasons": list(forward["path_reasons"] or ()),
+        "path_values": path_values if forward["path_quality"] == "OBSERVED" else {},
     }
 
 
@@ -194,11 +223,7 @@ def _daily_rows(
             continue
         group_code = group["group"]
         for metric_code, key in _METRICS:
-            metric = (
-                group["endpoint"]
-                if key == "endpoint"
-                else {"count": 0, "p25": None, "median": None, "p75": None}
-            )
+            metric = group["endpoint"] if key == "endpoint" else group["path"][key]
             observed_count = int(metric["count"])
             member_count = int(group["count"])
             not_due_count = int(group["not_due_count"])
@@ -207,8 +232,8 @@ def _daily_rows(
                 reasons = group["endpoint_reasons"]
                 not_computed_count = sum(
                     count
-                    for reason, count in reasons.items()
-                    if "NOT_COMPUTED" in reason or "MISSING" in reason
+                    for quality, count in group["endpoint_quality"].items()
+                    if quality in {"NOT_COMPUTED", "INCOMPLETE"}
                 )
                 unknown_count = max(
                     0,
@@ -217,24 +242,29 @@ def _daily_rows(
                 positive_count = int(metric["positive"])
                 non_positive_count = int(metric["non_positive"])
             else:
-                not_computed_count = member_count if due_count else 0
-                unknown_count = 0
-                reasons = (
-                    {"FORWARD_PATH_METRIC_CONTRACT_MISMATCH": member_count}
-                    if due_count
-                    else {"OFFICIAL_ENDPOINT_AFTER_RESEARCH_CUTOFF": member_count}
-                    if not_due_count
-                    else {}
+                reasons = group["path_reasons"]
+                not_computed_count = sum(
+                    count
+                    for quality, count in group["path_quality"].items()
+                    if quality in {"NOT_COMPUTED", "INCOMPLETE"}
+                )
+                unknown_count = max(
+                    0,
+                    member_count - observed_count - not_due_count - not_computed_count,
                 )
                 positive_count = None
                 non_positive_count = None
-            status = _status_for_group(
-                member_count=member_count,
-                due_count=due_count,
-                not_due_count=not_due_count,
-                observed_count=observed_count,
-                unknown_count=unknown_count,
-                not_computed_count=not_computed_count,
+            status = (
+                "NOT_EVALUABLE"
+                if member_count == 0
+                else _status_for_group(
+                    member_count=member_count,
+                    due_count=due_count,
+                    not_due_count=not_due_count,
+                    observed_count=observed_count,
+                    unknown_count=unknown_count,
+                    not_computed_count=not_computed_count,
+                )
             )
             row = _base_row(
                 context=context,
@@ -308,12 +338,34 @@ def _daily_rows(
         for item in day_summary["comparisons"]
         if item["rule"] == context["rule_id"] and item["horizon"] == horizon
     )
+    comparison_groups = [
+        item
+        for item in day_summary["groups"]
+        if item["rule"] == context["rule_id"]
+        and item["horizon"] == horizon
+        and item["group"] in {"MATCH", "NO_MATCH"}
+    ]
+    comparison_quality = Counter(
+        quality
+        for group in comparison_groups
+        for quality, count in group["endpoint_quality"].items()
+        for _ in range(count)
+    )
     comparison_status = (
         "OBSERVED"
         if comparison["status"] == "COMPUTED"
         else "NOT_DUE"
         if not due
+        else "INCOMPLETE"
+        if day_summary["input_status_by_horizon"][horizon] == "INCOMPLETE"
         else "NOT_COMPUTED"
+        if comparison_quality["NOT_COMPUTED"] or comparison_quality["INCOMPLETE"]
+        else "UNKNOWN"
+        if any(
+            quality not in {"OBSERVED", "NOT_DUE", "NOT_COMPUTED", "INCOMPLETE"}
+            for quality in comparison_quality
+        )
+        else "NOT_EVALUABLE"
     )
     row = _base_row(
         context=context,
@@ -403,6 +455,8 @@ def _equal_date_rows(
         )
         if contexts[0]["source_time_quality"] == "UNKNOWN":
             status = "UNKNOWN"
+        elif result["status"] == "NOT_EVALUABLE" and condition != "B_FIXED_UNKNOWN":
+            status = "NOT_EVALUABLE"
         base = _base_row(
             context=contexts[0],
             research_cutoff=research_cutoff,
@@ -443,11 +497,26 @@ def _equal_date_rows(
                 and group["group"] in {"MATCH", "NO_MATCH"}
             ]
             has_unknown_metric = any(
-                bool(group["endpoint_reasons"]) for group in match_groups
+                any(
+                    quality not in {"OBSERVED", "NOT_DUE", "NOT_COMPUTED", "INCOMPLETE"}
+                    and count > 0
+                    for quality, count in group["endpoint_quality"].items()
+                )
+                for group in match_groups
+            )
+            has_not_computed_metric = any(
+                any(
+                    quality in {"NOT_COMPUTED", "INCOMPLETE"} and count > 0
+                    for quality, count in group["endpoint_quality"].items()
+                )
+                for group in match_groups
             )
             if has_unknown_metric or context["source_time_quality"] == "UNKNOWN":
                 unknown_date_count += 1
-            if comparison["status"] != "COMPUTED" and not has_unknown_metric:
+            elif (
+                has_not_computed_metric
+                or summary["input_status_by_horizon"][horizon] == "INCOMPLETE"
+            ):
                 not_computed_date_count += 1
         direction_counts = result["median_difference_direction_counts"]
         base.update(
@@ -553,11 +622,9 @@ def prepare_fep_baseline(
             state_counts = Counter(
                 fact["state"] for fact in context["rule_facts"].values()
             )
-            if sum(state_counts.values()) != len(symbols) or set(state_counts) != {
-                "TRUE",
-                "FALSE",
-                "UNKNOWN",
-            }:
+            if sum(state_counts.values()) != len(symbols) or not set(
+                state_counts
+            ).issubset({"TRUE", "FALSE", "UNKNOWN"}):
                 raise ValueError("FEP T0的MATCH/NO_MATCH/UNKNOWN分母未闭合")
             frozen = {
                 symbol: {
@@ -752,6 +819,35 @@ def produce_fep_baseline(
     lanes: tuple[str, ...] = _LANES,
 ) -> dict[str, Any]:
     """离线生产并在一个PG事务中保存完整FEP typed结果。"""
+    source_contexts = read_fep_source_contexts(
+        config,
+        research_cutoff=research_cutoff,
+        source_package_id=source_package_id,
+        rule_ids=rule_ids,
+        horizons=horizons,
+    )
+    path_corrections, correction_scope = _prepare_forward_path_corrections(
+        config,
+        contexts=source_contexts,
+        research_cutoff=research_cutoff,
+        horizons=horizons,
+    )
+    path_write = (
+        restate_forward_path_metrics(
+            config,
+            corrections=path_corrections,
+            research_cutoff=research_cutoff,
+        )
+        if path_corrections
+        else {
+            "status": "NO_COMPLETE_DUE_FORWARD_SCOPES",
+            "target_scope_count": 0,
+            "verified_before_count": 0,
+            "updated_path_row_count": 0,
+            "unchanged_path_row_count": 0,
+            "independent_read_back_count": 0,
+        }
+    )
     prepared = prepare_fep_baseline(
         config,
         research_cutoff=research_cutoff,
@@ -760,8 +856,248 @@ def produce_fep_baseline(
         horizons=horizons,
         lanes=lanes,
     )
-    write_result = persist_fep_baseline_rows(config, prepared["typed_rows"])
+    write_result = persist_fep_baseline_rows(
+        config, prepared["typed_rows"], allow_statistical_restatement=True
+    )
     return {key: value for key, value in prepared.items() if key != "typed_rows"} | {
         "status": "PERSISTED",
+        "forward_path_correction": path_write | correction_scope,
         "write": write_result,
+    }
+
+
+def _path_pair(value: str | None) -> tuple[int | None, int | None]:
+    return _fraction_pair(value)
+
+
+def _prepare_forward_path_corrections(
+    config: Mapping[str, Any],
+    *,
+    contexts: list[Mapping[str, Any]],
+    research_cutoff: date,
+    horizons: tuple[int, ...],
+) -> tuple[list[tuple[tuple[Any, ...], tuple[Any, ...]]], dict[str, Any]]:
+    """复用现存Raw和唯一Forward算法，纠正FEP及现役Forward消费者读取的同键行。"""
+    _, _, calendar_revision, calendar_sessions = _load_calendar(research_cutoff)
+    if any(context["calendar_revision"] != calendar_revision for context in contexts):
+        raise ValueError("Forward纠错的T0日历修订与随包官方日历不一致")
+    session_index = {session: index for index, session in enumerate(calendar_sessions)}
+    corrections = []
+    target_dates = set()
+    selected_scope_count = 0
+    formula_checked_count = 0
+    preserved_non_observed_count = 0
+    degraded_scope_count = 0
+    calendar_mismatch_count = 0
+    for context in contexts:
+        target = context["target_session"]
+        if target > research_cutoff or target not in session_index:
+            raise ValueError("Forward纠错T0超出截止内官方日历")
+        due_horizons = [
+            horizon
+            for horizon in horizons
+            if session_index[target] + horizon < len(calendar_sessions)
+            and calendar_sessions[session_index[target] + horizon] <= research_cutoff
+        ]
+        if not due_horizons:
+            continue
+        symbols = set(context["rule_facts"])
+        path_scopes: dict[str, dict[int, dict[str, Mapping[str, Any]]]] = {}
+        for (scope_calendar, horizon), rows_by_symbol in context[
+            "forward_path_scopes"
+        ].items():
+            if horizon in due_horizons and set(rows_by_symbol) == symbols:
+                path_scopes.setdefault(scope_calendar, {})[horizon] = rows_by_symbol
+        if not path_scopes:
+            continue
+        calendar_valid_horizons = {
+            (scope_calendar, horizon)
+            for scope_calendar, horizon_rows in path_scopes.items()
+            for horizon, rows_by_symbol in horizon_rows.items()
+            if all(
+                row["endpoint_session"]
+                == calendar_sessions[session_index[target] + horizon]
+                for row in rows_by_symbol.values()
+            )
+        }
+        max_read_horizon = max(
+            (horizon for _, horizon in calendar_valid_horizons), default=0
+        )
+        sessions = (
+            tuple(
+                calendar_sessions[
+                    session_index[target] : session_index[target] + max_read_horizon + 1
+                ]
+            )
+            if max_read_horizon
+            else ()
+        )
+        if sessions and sessions[-1] > research_cutoff:
+            raise ValueError("Forward纠错尝试读取截止后的行情会话")
+        raw_pool = (
+            read_raw_daily_forward_pool(
+                config,
+                source_symbols=tuple(sorted(symbols)),
+                sessions=sessions,
+                research_cutoff=research_cutoff,
+                source_package_id=context["source_package_id"],
+                include_parser_contract=True,
+            )
+            if sessions
+            else None
+        )
+        incomplete_sessions = (
+            {
+                day.isoformat()
+                for day in sessions
+                if raw_pool["session_versions"][day.isoformat()]["status"] != "CLOSED"
+                or raw_pool["session_versions"][day.isoformat()]["row_count"]
+                != context["raw_count"]
+            }
+            if raw_pool
+            else set()
+        )
+        scope_rows = [
+            (scope_calendar, horizon, rows_by_symbol)
+            for scope_calendar, horizon_rows in path_scopes.items()
+            for horizon, rows_by_symbol in horizon_rows.items()
+        ]
+        selected_scope_count += len(scope_rows)
+        target_dates.add(target.isoformat())
+        for scope_calendar, horizon, existing_by_symbol in scope_rows:
+            endpoint_session = calendar_sessions[session_index[target] + horizon]
+            calendar_matches = (scope_calendar, horizon) in calendar_valid_horizons
+            if not calendar_matches:
+                calendar_mismatch_count += len(existing_by_symbol)
+            for symbol in sorted(symbols):
+                forward = existing_by_symbol[symbol]
+                expected = (
+                    target,
+                    symbol,
+                    context["source_package_id"],
+                    context["source_capture_id"],
+                    horizon,
+                    PATH_VERSION,
+                    scope_calendar,
+                    forward["endpoint_session"],
+                    forward["maturity"],
+                    forward["endpoint_quality"],
+                    forward["endpoint_reason"],
+                    forward["endpoint_numerator"],
+                    forward["endpoint_denominator"],
+                    forward["path_quality"],
+                    list(forward["path_reasons"]),
+                    forward["mfe_numerator"],
+                    forward["mfe_denominator"],
+                    forward["mae_numerator"],
+                    forward["mae_denominator"],
+                    forward["mdd_numerator"],
+                    forward["mdd_denominator"],
+                    "RAW_UNADJUSTED",
+                    "NON_PIT_EXPLORATORY",
+                )
+                desired = expected[13:21]
+                if forward["path_quality"] == "OBSERVED":
+                    if not calendar_matches:
+                        desired = (
+                            "UNKNOWN",
+                            ["FORWARD_CALENDAR_ENDPOINT_MISMATCH"],
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        degraded_scope_count += 1
+                    elif not raw_pool or any(
+                        day.isoformat() in incomplete_sessions
+                        for day in sessions[: horizon + 1]
+                    ):
+                        desired = (
+                            "UNKNOWN",
+                            ["RAW_FORWARD_SESSION_POOL_INCOMPLETE"],
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                            None,
+                        )
+                        degraded_scope_count += 1
+                    else:
+                        formula_checked_count += 1
+                        path_sessions = tuple(sessions[: horizon + 1])
+                        path_session_set = set(path_sessions)
+                        outcome = exploratory_raw_path(
+                            path_sessions,
+                            [
+                                row
+                                for row in raw_pool["rows_by_symbol"][symbol]
+                                if row["session_date"] in path_session_set
+                            ],
+                            horizon,
+                            target_session=endpoint_session,
+                            saved_through=raw_pool["saved_through"],
+                        )
+                        endpoint = outcome["endpoint"]["raw_close_relative_change"]
+                        stored_endpoint = (
+                            Fraction(
+                                int(forward["endpoint_numerator"]),
+                                int(forward["endpoint_denominator"]),
+                            )
+                            if forward["endpoint_numerator"] is not None
+                            and forward["endpoint_denominator"] is not None
+                            else None
+                        )
+                        computed_endpoint = (
+                            Fraction(endpoint["value"]["exact"])
+                            if endpoint["quality"] == "OBSERVED"
+                            else None
+                        )
+                        comparable = (
+                            outcome["target_session"] == endpoint_session.isoformat()
+                            and outcome["maturity"] == forward["maturity"]
+                            and endpoint["quality"] == forward["endpoint_quality"]
+                            and computed_endpoint == stored_endpoint
+                        )
+                        if comparable and outcome["path_quality"] == "OBSERVED":
+                            path_values = outcome["path_values"]
+                            pairs = [
+                                _path_pair(path_values[key])
+                                for key in ("mfe", "mae", "mdd")
+                            ]
+                            desired = (
+                                "OBSERVED",
+                                list(outcome["path_reasons"]),
+                                pairs[0][0],
+                                pairs[0][1],
+                                pairs[1][0],
+                                pairs[1][1],
+                                pairs[2][0],
+                                pairs[2][1],
+                            )
+                        else:
+                            desired = (
+                                "UNKNOWN",
+                                ["RAW_FORWARD_SCOPE_NOT_COMPARABLE"],
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                                None,
+                            )
+                            degraded_scope_count += 1
+                else:
+                    preserved_non_observed_count += 1
+                corrections.append((expected, desired))
+    return corrections, {
+        "target_date_count": len(target_dates),
+        "selected_due_scope_count": selected_scope_count,
+        "formula_checked_observed_path_count": formula_checked_count,
+        "preserved_non_observed_path_count": preserved_non_observed_count,
+        "degraded_path_scope_count": degraded_scope_count,
+        "calendar_mismatch_path_count": calendar_mismatch_count,
+        "metrics": ["RAW_MFE", "RAW_MAE", "RAW_MDD_CLOSE"],
     }

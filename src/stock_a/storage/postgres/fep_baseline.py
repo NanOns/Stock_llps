@@ -90,6 +90,41 @@ _COLUMNS = (
     "reason_codes",
     "reason_counts",
 )
+_RESTATABLE_COLUMNS = (
+    "status",
+    "due_count",
+    "not_due_count",
+    "observed_count",
+    "unknown_count",
+    "not_computed_count",
+    "positive_count",
+    "non_positive_count",
+    "p25_numerator",
+    "p25_denominator",
+    "p50_numerator",
+    "p50_denominator",
+    "p75_numerator",
+    "p75_denominator",
+    "median_difference_numerator",
+    "median_difference_denominator",
+    "positive_fraction_difference_numerator",
+    "positive_fraction_difference_denominator",
+    "requested_date_count",
+    "condition_date_count",
+    "valid_date_count",
+    "not_due_date_count",
+    "unknown_date_count",
+    "not_computed_date_count",
+    "equal_date_mean_median_difference_numerator",
+    "equal_date_mean_median_difference_denominator",
+    "equal_date_mean_positive_fraction_difference_numerator",
+    "equal_date_mean_positive_fraction_difference_denominator",
+    "positive_direction_date_count",
+    "negative_direction_date_count",
+    "zero_direction_date_count",
+    "reason_codes",
+    "reason_counts",
+)
 
 
 def read_fep_source_contexts(
@@ -236,23 +271,24 @@ def read_fep_source_contexts(
             cursor.execute(
                 """SELECT source_symbol,horizon,endpoint_session,maturity,
                           endpoint_quality,endpoint_reason,endpoint_numerator,
-                          endpoint_denominator,price_coordinate,scope,
+                          endpoint_denominator,path_quality,path_reasons,
+                          mfe_numerator,mfe_denominator,mae_numerator,mae_denominator,
+                          mdd_numerator,mdd_denominator,price_coordinate,scope,
                           path_rule_version,calendar_revision
                    FROM source_forward_path_facts
                    WHERE target_session=%s AND source_package_id=%s
                      AND source_capture_id=%s AND horizon=ANY(%s)
-                     AND path_rule_version=%s AND calendar_revision=%s
+                     AND path_rule_version=%s
                      AND price_coordinate='RAW_UNADJUSTED'
                      AND scope='NON_PIT_EXPLORATORY'
                      AND target_session<=%s AND endpoint_session<=%s
-                   ORDER BY horizon,source_symbol""",
+                   ORDER BY horizon,calendar_revision,source_symbol""",
                 (
                     target,
                     package,
                     capture,
                     list(horizons),
                     PATH_VERSION,
-                    calendar_revision,
                     research_cutoff,
                     research_cutoff,
                 ),
@@ -260,6 +296,7 @@ def read_fep_source_contexts(
             forward_by_horizon: dict[int, dict[str, dict[str, Any]]] = {
                 horizon: {} for horizon in horizons
             }
+            forward_path_scopes: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
             forward_rows = cursor.fetchall()
             for row in forward_rows:
                 (
@@ -271,20 +308,39 @@ def read_fep_source_contexts(
                     endpoint_reason,
                     endpoint_numerator,
                     endpoint_denominator,
+                    path_quality,
+                    path_reasons,
+                    mfe_numerator,
+                    mfe_denominator,
+                    mae_numerator,
+                    mae_denominator,
+                    mdd_numerator,
+                    mdd_denominator,
                     coordinate,
                     scope,
                     path_version,
                     forward_calendar_revision,
                 ) = row
-                if symbol in forward_by_horizon[horizon]:
+                scoped_rows = forward_path_scopes.setdefault(
+                    (forward_calendar_revision, horizon), {}
+                )
+                if symbol in scoped_rows:
                     raise ResearchFactConflict("FEP同T0期限存在重复Forward来源代码")
-                forward_by_horizon[horizon][symbol] = {
+                forward = {
                     "endpoint_session": endpoint_session,
                     "maturity": maturity,
                     "endpoint_quality": endpoint_quality,
                     "endpoint_reason": endpoint_reason,
                     "endpoint_numerator": endpoint_numerator,
                     "endpoint_denominator": endpoint_denominator,
+                    "path_quality": path_quality,
+                    "path_reasons": list(path_reasons or ()),
+                    "mfe_numerator": mfe_numerator,
+                    "mfe_denominator": mfe_denominator,
+                    "mae_numerator": mae_numerator,
+                    "mae_denominator": mae_denominator,
+                    "mdd_numerator": mdd_numerator,
+                    "mdd_denominator": mdd_denominator,
                     "valid_forward_identity": (
                         coordinate == "RAW_UNADJUSTED"
                         and scope == "NON_PIT_EXPLORATORY"
@@ -293,6 +349,9 @@ def read_fep_source_contexts(
                         and endpoint_session <= research_cutoff
                     ),
                 }
+                scoped_rows[symbol] = forward
+                if forward_calendar_revision == calendar_revision:
+                    forward_by_horizon[horizon][symbol] = forward
 
             cursor.execute(
                 """SELECT id,contract_version,calendar_revision,source_count,
@@ -382,6 +441,7 @@ def read_fep_source_contexts(
                     "enrollments": enrollment_kinds,
                     "enrollment_complete": enrollment_complete,
                     "forward_by_horizon": forward_by_horizon,
+                    "forward_path_scopes": forward_path_scopes,
                     "market": market,
                 }
             )
@@ -401,7 +461,10 @@ def _row_values(row: Mapping[str, Any]) -> tuple[Any, ...]:
 
 
 def persist_fep_baseline_rows(
-    config: Mapping[str, Any], rows: list[Mapping[str, Any]]
+    config: Mapping[str, Any],
+    rows: list[Mapping[str, Any]],
+    *,
+    allow_statistical_restatement: bool = False,
 ) -> dict[str, Any]:
     """以一个串行化事务幂等写入；同业务键异内容冲突并回滚。"""
     if not rows:
@@ -431,6 +494,16 @@ def persist_fep_baseline_rows(
             raise ResearchFactConflict("FEP输入批次同业务键包含异内容")
         expected_by_key[key] = value
 
+    restatable_indexes = {_COLUMNS.index(name) for name in _RESTATABLE_COLUMNS}
+    key_filter = " AND ".join(
+        f"{column} IS NOT DISTINCT FROM %s" for column in _COLUMNS[:23]
+    )
+    update_sql = (
+        f"UPDATE {_TABLE} SET "
+        + ",".join(f"{column}=%s" for column in _RESTATABLE_COLUMNS)
+        + f" WHERE {key_filter}"
+    )
+
     with _transaction(config, write=True, statement_timeout_ms=30000) as (
         _,
         cursor,
@@ -448,19 +521,182 @@ def persist_fep_baseline_rows(
         )
         stored = cursor.fetchall()
         stored_by_key = {business_key(tuple(row)): tuple(row) for row in stored}
+        restated = 0
         for key, expected in expected_by_key.items():
             actual = stored_by_key.get(key)
-            if actual != expected:
+            if actual is None:
+                raise ResearchFactConflict("FEP业务键写入后未读回")
+            if actual != expected and allow_statistical_restatement:
+                non_restatable = {
+                    index
+                    for index in range(len(_COLUMNS))
+                    if index not in restatable_indexes
+                }
+                if any(actual[index] != expected[index] for index in non_restatable):
+                    raise ResearchFactConflict(
+                        "FEP纠错影响业务身份或冻结分母；拒绝覆盖并回滚"
+                    )
+                cursor.execute(
+                    update_sql,
+                    tuple(
+                        expected[_COLUMNS.index(name)] for name in _RESTATABLE_COLUMNS
+                    )
+                    + tuple(expected[:23]),
+                )
+                if cursor.rowcount != 1:
+                    raise ResearchFactConflict("FEP同键定点修订未更新唯一业务行")
+                restated += 1
+            elif actual != expected:
                 raise ResearchFactConflict(
                     "同一FEP业务键的已存typed内容不同；事务已回滚"
                 )
+        if restated:
+            cursor.execute(
+                f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
+                    WHERE research_cutoff=%s AND source_package_id=%s
+                      AND rule_id=ANY(%s) AND horizon=ANY(%s) AND lane=ANY(%s)
+                    ORDER BY summary_scope,target_session,period_start_session,
+                             rule_id,lane,horizon,condition_code,group_code,metric_code""",
+                (cutoffs[0], packages[0], rules, horizons, lanes),
+            )
+            stored_after = {
+                business_key(tuple(row)): tuple(row) for row in cursor.fetchall()
+            }
+            if any(
+                stored_after.get(key) != value for key, value in expected_by_key.items()
+            ):
+                raise ResearchFactConflict("FEP受控修订后事务内读回不一致；事务已回滚")
     return {
         "inserted_row_count": inserted,
         "verified_row_count": len(expected_by_key),
+        "restated_row_count": restated,
         "status": "PERSISTED_AND_IDEMPOTENT",
         "database_write_attempted": True,
         "transaction": "SERIALIZABLE_SINGLE_BATCH",
     }
+
+
+def _validate_fep_baseline_closure(rows: list[tuple[Any, ...]]) -> list[str]:
+    """证明每个T0三组、比较行及四个条件日期分区都完整且唯一。"""
+    reasons = []
+    keys = [tuple(row[:23]) for row in rows]
+    if len(keys) != len(set(keys)):
+        reasons.append("FEP_READER_DUPLICATE_BUSINESS_SCOPE")
+    t0_rows = [row for row in rows if row[19] == "T0"]
+    equal_rows = [row for row in rows if row[19] == "EQUAL_DATE"]
+    if len(t0_rows) + len(equal_rows) != len(rows):
+        reasons.append("FEP_READER_UNKNOWN_SUMMARY_SCOPE")
+    expected_t0 = {
+        (group, metric, "ALL")
+        for group in ("MATCH", "NO_MATCH", "UNKNOWN")
+        for metric in ("RAW_CLOSE_RETURN", "RAW_MFE", "RAW_MAE", "RAW_MDD_CLOSE")
+    } | {("MATCH_VS_NO_MATCH", "RAW_CLOSE_RETURN", "ALL")}
+    targets = sorted({row[3] for row in t0_rows})
+    if not targets:
+        reasons.append("FEP_READER_T0_ROWS_MISSING")
+    index = {name: _COLUMNS.index(name) for name in _COLUMNS}
+    for target in targets:
+        day_rows = [row for row in t0_rows if row[3] == target]
+        by_scope = {(row[20], row[21], row[22]): row for row in day_rows}
+        if len(by_scope) != len(day_rows) or set(by_scope) != expected_t0:
+            reasons.append("FEP_READER_T0_GROUP_METRIC_INCOMPLETE")
+            continue
+        match_row = by_scope[("MATCH", "RAW_CLOSE_RETURN", "ALL")]
+        source_count = match_row[index["source_pool_count"]]
+        true_count = match_row[index["t0_match_count"]]
+        false_count = match_row[index["t0_no_match_count"]]
+        unknown_state_count = match_row[index["t0_unknown_count"]]
+        state_denominators = {
+            tuple(
+                row[index[name]]
+                for name in (
+                    "source_pool_count",
+                    "t0_match_count",
+                    "t0_no_match_count",
+                    "t0_unknown_count",
+                )
+            )
+            for row in day_rows
+        }
+        if (
+            None in (source_count, true_count, false_count, unknown_state_count)
+            or true_count + false_count + unknown_state_count != source_count
+            or state_denominators
+            != {(source_count, true_count, false_count, unknown_state_count)}
+        ):
+            reasons.append("FEP_READER_T0_STATE_DENOMINATOR_OPEN")
+        expected_members = {
+            "MATCH": match_row[
+                index["entry_count"]
+                if rows[0][17] == "ENTRY"
+                else index["daily_landmark_count"]
+            ],
+            "NO_MATCH": false_count,
+            "UNKNOWN": unknown_state_count,
+        }
+        for group, expected_member_count in expected_members.items():
+            group_rows = [
+                by_scope[(group, metric, "ALL")]
+                for metric in (
+                    "RAW_CLOSE_RETURN",
+                    "RAW_MFE",
+                    "RAW_MAE",
+                    "RAW_MDD_CLOSE",
+                )
+            ]
+            if any(
+                row[index["member_count"]] != expected_member_count
+                for row in group_rows
+            ):
+                reasons.append("FEP_READER_T0_GROUP_DENOMINATOR_MISMATCH")
+            path_counts = {
+                tuple(
+                    row[index[name]]
+                    for name in (
+                        "status",
+                        "member_count",
+                        "due_count",
+                        "not_due_count",
+                        "observed_count",
+                        "unknown_count",
+                        "not_computed_count",
+                    )
+                )
+                for row in group_rows[1:]
+            }
+            if len(path_counts) != 1:
+                reasons.append("FEP_READER_T0_PATH_METRICS_PARTIAL")
+        if by_scope.get(("MATCH_VS_NO_MATCH", "RAW_CLOSE_RETURN", "ALL")) is None:
+            reasons.append("FEP_READER_T0_COMPARISON_MISSING")
+
+    expected_conditions = {
+        ("MATCH_VS_NO_MATCH", "RAW_CLOSE_RETURN", condition)
+        for condition in (
+            "ALL",
+            "B_FIXED_POSITIVE",
+            "B_FIXED_NON_POSITIVE",
+            "B_FIXED_UNKNOWN",
+        )
+    }
+    equal_scopes = [(row[20], row[21], row[22]) for row in equal_rows]
+    if (
+        len(equal_scopes) != len(set(equal_scopes))
+        or set(equal_scopes) != expected_conditions
+    ):
+        reasons.append("FEP_READER_EQUAL_DATE_CONDITIONS_INCOMPLETE")
+    if equal_rows:
+        expected_start = min(targets) if targets else None
+        expected_end = max(targets) if targets else None
+        requested = len(targets)
+        for row in equal_rows:
+            if (
+                row[4] != expected_start
+                or row[5] != expected_end
+                or row[index["requested_date_count"]] != requested
+            ):
+                reasons.append("FEP_READER_EQUAL_DATE_RANGE_MISMATCH")
+                break
+    return sorted(set(reasons))
 
 
 def read_fep_baseline(
@@ -547,8 +783,12 @@ def read_fep_baseline(
     partitions = {
         (row[6], row[7], row[8], row[13], row[14], row[15], row[16]) for row in rows
     }
+    closure_reasons = _validate_fep_baseline_closure(rows)
+    if len(partitions) != 1:
+        closure_reasons.append("FEP_READER_MULTIPLE_INPUT_PARTITIONS")
     return {
-        "status": "AVAILABLE" if len(partitions) == 1 else "INCOMPLETE",
+        "status": "AVAILABLE" if not closure_reasons else "INCOMPLETE",
+        "reason_codes": sorted(set(closure_reasons)),
         "research_cutoff": research_cutoff.isoformat(),
         "source_package_id": source_package_id,
         "rule_id": rule_id,

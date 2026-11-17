@@ -641,6 +641,184 @@ def _insert_and_compare(cursor, table, columns, rows, key_columns, selection, ar
     return inserted
 
 
+def restate_forward_path_metrics(
+    config,
+    *,
+    corrections,
+    research_cutoff,
+):
+    """按FEP真实依赖对已存Forward路径字段做受控同键纠错。"""
+    if type(research_cutoff) is not date or not corrections:
+        raise ValueError("Forward路径纠错须绑定截止日和非空业务行")
+    grouped = {}
+    for expected, desired in corrections:
+        if (
+            len(expected) != len(PATH_COLUMNS)
+            or len(desired) != 8
+            or expected[0] > research_cutoff
+            or expected[7] > research_cutoff
+            or expected[21:] != ("RAW_UNADJUSTED", SCOPE)
+            or expected[5] != PATH_VERSION
+            or expected[4] not in {1, 3, 5}
+        ):
+            raise ValueError("Forward路径纠错越过截止、坐标、版本或期限范围")
+        scope = (
+            expected[0],
+            expected[2],
+            expected[3],
+            expected[4],
+            expected[5],
+            expected[6],
+            expected[7],
+        )
+        grouped.setdefault(scope, {})
+        symbol = expected[1]
+        if symbol in grouped[scope]:
+            raise ResearchFactConflict("Forward纠错批次存在重复T0业务键")
+        grouped[scope][symbol] = (tuple(expected), tuple(desired))
+
+    columns = sql.SQL(", ").join(map(sql.Identifier, PATH_COLUMNS))
+    select_scope = sql.SQL(
+        "SELECT {} FROM source_forward_path_facts WHERE target_session=%s "
+        "AND source_package_id=%s AND source_capture_id=%s AND horizon=%s "
+        "AND path_rule_version=%s AND calendar_revision=%s AND endpoint_session=%s "
+        "AND target_session<=%s AND endpoint_session<=%s "
+        "AND price_coordinate='RAW_UNADJUSTED' AND scope='NON_PIT_EXPLORATORY' "
+        "ORDER BY source_symbol FOR UPDATE"
+    ).format(columns)
+    select_scope_read = sql.SQL(
+        "SELECT {} FROM source_forward_path_facts WHERE target_session=%s "
+        "AND source_package_id=%s AND source_capture_id=%s AND horizon=%s "
+        "AND path_rule_version=%s AND calendar_revision=%s AND endpoint_session=%s "
+        "AND target_session<=%s AND endpoint_session<=%s "
+        "AND price_coordinate='RAW_UNADJUSTED' AND scope='NON_PIT_EXPLORATORY' "
+        "ORDER BY source_symbol"
+    ).format(columns)
+    update_sql = sql.SQL(
+        "UPDATE source_forward_path_facts SET path_quality=%s,path_reasons=%s,"
+        "mfe_numerator=%s,mfe_denominator=%s,mae_numerator=%s,mae_denominator=%s,"
+        "mdd_numerator=%s,mdd_denominator=%s WHERE target_session=%s "
+        "AND source_symbol=%s AND source_package_id=%s AND source_capture_id=%s "
+        "AND horizon=%s AND path_rule_version=%s AND calendar_revision=%s "
+        "AND endpoint_session=%s"
+    )
+    updated_count = 0
+    verified_count = 0
+    with _transaction(config, write=True, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _,
+    ):
+        for scope, expected_by_symbol in grouped.items():
+            target, package, capture, horizon, version, calendar, endpoint = scope
+            cursor.execute(
+                select_scope,
+                (
+                    target,
+                    package,
+                    capture,
+                    horizon,
+                    version,
+                    calendar,
+                    endpoint,
+                    research_cutoff,
+                    research_cutoff,
+                ),
+            )
+            stored = [tuple(row) for row in cursor.fetchall()]
+            expected_symbols = tuple(sorted(expected_by_symbol))
+            if (
+                len(stored) != len(expected_symbols)
+                or tuple(row[1] for row in stored) != expected_symbols
+            ):
+                raise ResearchFactConflict("Forward路径纠错范围未闭合完整来源代码集合")
+            after = []
+            updates = []
+            for actual in stored:
+                expected, desired = expected_by_symbol[actual[1]]
+                if actual != expected:
+                    raise ResearchFactConflict(
+                        "Forward路径纠错前业务行与已读PG事实不一致；事务已回滚"
+                    )
+                corrected = actual[:13] + desired + actual[21:]
+                after.append(corrected)
+                if corrected != actual:
+                    updates.append(
+                        desired
+                        + (
+                            target,
+                            actual[1],
+                            package,
+                            capture,
+                            horizon,
+                            version,
+                            calendar,
+                            endpoint,
+                        )
+                    )
+            if updates:
+                cursor.executemany(update_sql, updates)
+            cursor.execute(
+                select_scope,
+                (
+                    target,
+                    package,
+                    capture,
+                    horizon,
+                    version,
+                    calendar,
+                    endpoint,
+                    research_cutoff,
+                    research_cutoff,
+                ),
+            )
+            actual_after = [tuple(row) for row in cursor.fetchall()]
+            if actual_after != after:
+                raise ResearchFactConflict("Forward路径同事务读回不匹配；事务已回滚")
+            updated_count += len(updates)
+            verified_count += len(after)
+
+    read_back_count = 0
+    with _transaction(config, write=False, statement_timeout_ms=30000) as (
+        _,
+        cursor,
+        _,
+    ):
+        for scope, expected_by_symbol in grouped.items():
+            target, package, capture, horizon, version, calendar, endpoint = scope
+            cursor.execute(
+                select_scope_read,
+                (
+                    target,
+                    package,
+                    capture,
+                    horizon,
+                    version,
+                    calendar,
+                    endpoint,
+                    research_cutoff,
+                    research_cutoff,
+                ),
+            )
+            stored = [tuple(row) for row in cursor.fetchall()]
+            expected_after = []
+            for symbol in sorted(expected_by_symbol):
+                expected, desired = expected_by_symbol[symbol]
+                expected_after.append(expected[:13] + desired + expected[21:])
+            if stored != expected_after:
+                raise ResearchFactConflict("Forward路径异事务只读读回不匹配")
+            read_back_count += len(stored)
+    return {
+        "status": "CORRECTED_AND_READ_BACK",
+        "target_scope_count": len(grouped),
+        "verified_before_count": verified_count,
+        "updated_path_row_count": updated_count,
+        "unchanged_path_row_count": verified_count - updated_count,
+        "independent_read_back_count": read_back_count,
+        "transaction": "SERIALIZABLE_CORRECTION_PLUS_REPEATABLE_READ_READ_ONLY_READBACK",
+    }
+
+
 def write_research_rows(config, *, rules, paths, previous_session, events=None):
     """单T0整体事务；同键相同内容幂等，异值拒绝并回滚。"""
     if not rules:

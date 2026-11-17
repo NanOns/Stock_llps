@@ -106,6 +106,7 @@ def summarize_day(
                     Counter(),
                 )
                 endpoint_values = []
+                endpoint_quality = Counter()
                 event_values = []
                 event_maturity, event_quality = Counter(), Counter()
                 rule_reasons = Counter()
@@ -145,6 +146,7 @@ def summarize_day(
                     event_maturity[fact["maturity"]] += weight
                     event_quality[fact["path_quality"]] += weight
                     value = fact["endpoint"]["raw_close_relative_change"]
+                    endpoint_quality[value["quality"]] += 1
                     if value["quality"] == "OBSERVED":
                         amount = Fraction(value["value"]["exact"])
                         endpoint_values.append(amount)
@@ -244,6 +246,7 @@ def summarize_day(
                         if rule == "D1_ANCHOR_WINDOW" and state == "TRUE"
                         else None,
                         "maturity": dict(maturity),
+                        "endpoint_quality": dict(endpoint_quality),
                         "path_quality": dict(quality),
                         "endpoint_reasons": dict(endpoint_reasons),
                         "path_reasons": dict(path_reasons),
@@ -282,7 +285,7 @@ def summarize_day(
                 if r["rule"] == rule and r["horizon"] == horizon
             }
             a, b = selected["MATCH"]["endpoint"], selected["NO_MATCH"]["endpoint"]
-            comparable = a["median"] is not None and b["median"] is not None
+            comparable = a["count"] > 0 and b["count"] > 0
             comparisons.append(
                 {
                     "rule": rule,

@@ -119,10 +119,18 @@ def exploratory_raw_path(
         selected = {row["session_date"]: row for row in safe}
         base = exact_number(birth["raw_close"])
         mfe = max(
-            exact_number(selected[day]["raw_high"]) / base - 1 for day in sessions[1:]
+            Fraction(0),
+            *(
+                exact_number(selected[day]["raw_high"]) / base - 1
+                for day in sessions[1:]
+            ),
         )
         mae = min(
-            exact_number(selected[day]["raw_low"]) / base - 1 for day in sessions[1:]
+            Fraction(0),
+            *(
+                exact_number(selected[day]["raw_low"]) / base - 1
+                for day in sessions[1:]
+            ),
         )
         peak = base
         mdd = Fraction(0)

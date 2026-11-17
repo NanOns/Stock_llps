@@ -5933,24 +5933,6 @@ function renderFepLaneBaseline(root, result, lane) {
       ),
     );
   }
-  const pathRows = rows.filter(
-    (row) =>
-      row.summary_scope === "T0" &&
-      ["RAW_MFE", "RAW_MAE", "RAW_MDD_CLOSE"].includes(row.metric_code),
-  );
-  if (pathRows.length) {
-    const pathReasons = [
-      ...new Set(pathRows.flatMap((row) => row.reason_codes || [])),
-    ];
-    root.append(
-      node(
-        "p",
-        `MFE / MAE / MDD_CLOSE：${pathRows.some((row) => row.status === "NOT_COMPUTED") ? "NOT_COMPUTED" : "NOT_DUE"} · ${pathReasons.join("、") || "官方后继尚未到期"}。`,
-        "muted",
-      ),
-    );
-  }
-
   const conditions = rows.filter(
     (row) =>
       row.summary_scope === "EQUAL_DATE" &&
@@ -5995,6 +5977,28 @@ function renderFepLaneBaseline(root, result, lane) {
           `${group.group_code} · 样本 ${format(group.member_count)} · 有价 ${format(group.observed_count)} · 未到期 ${format(group.not_due_count)} · 未知 ${format(group.unknown_count)} · 未计算 ${format(group.not_computed_count)} · p25/p50/p75 ${formatFepPercent(group.p25)} / ${formatFepPercent(group.p50)} / ${formatFepPercent(group.p75)} · 正/非正 ${format(group.positive_count)}/${format(group.non_positive_count)}${group.reason_codes?.length ? ` · 原因 ${group.reason_codes.join("、")}` : ""}`,
         ),
       );
+      const pathLabels = {
+        RAW_MFE: "MFE",
+        RAW_MAE: "MAE",
+        RAW_MDD_CLOSE: "MDD_CLOSE",
+      };
+      for (const metricCode of Object.keys(pathLabels)) {
+        const path = rows.find(
+          (row) =>
+            row.summary_scope === "T0" &&
+            row.target_session === session &&
+            row.group_code === group.group_code &&
+            row.metric_code === metricCode,
+        );
+        if (!path) continue;
+        details.append(
+          node(
+            "p",
+            `  ${pathLabels[metricCode]} · ${path.status} · 可评价 ${format(path.observed_count)} / ${format(path.member_count)} · 未到期 ${format(path.not_due_count)} · UNKNOWN ${format(path.unknown_count)} · 未计算 ${format(path.not_computed_count)} · p25/p50/p75 ${formatFepPercent(path.p25)} / ${formatFepPercent(path.p50)} / ${formatFepPercent(path.p75)}${path.reason_codes?.length ? ` · 原因 ${path.reason_codes.join("、")}` : ""}`,
+            "muted",
+          ),
+        );
+      }
     }
     if (match) {
       details.append(

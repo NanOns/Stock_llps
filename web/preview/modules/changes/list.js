@@ -187,17 +187,17 @@ async function runChanges(requestId) {
     const snapshotMatches = (received, expected) =>
       Boolean(
         received?.complete &&
-          profileSnapshotKey(received) === profileSnapshotKey(expected) &&
-          typeof received.history_calendar_id === "string" &&
-          received.history_calendar_id.length > 0 &&
-          typeof received.history_calendar_revision === "string" &&
-          received.history_calendar_revision.length > 0 &&
-          received.window_start === expected.window_start &&
-          received.window_end === expected.window_end &&
-          received.history_session_count === expected.history_session_count &&
-          received.source_symbol_count === expected.source_symbol_count &&
-          received.expected_source_symbol_count ===
-            expected.expected_source_symbol_count,
+        profileSnapshotKey(received) === profileSnapshotKey(expected) &&
+        typeof received.history_calendar_id === "string" &&
+        received.history_calendar_id.length > 0 &&
+        typeof received.history_calendar_revision === "string" &&
+        received.history_calendar_revision.length > 0 &&
+        received.window_start === expected.window_start &&
+        received.window_end === expected.window_end &&
+        received.history_session_count === expected.history_session_count &&
+        received.source_symbol_count === expected.source_symbol_count &&
+        received.expected_source_symbol_count ===
+          expected.expected_source_symbol_count,
       );
     if (
       !snapshotMatches(data.before_snapshot, beforeSnapshot) ||

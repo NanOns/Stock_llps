@@ -227,10 +227,10 @@ function sectorSetObservationMode() {
 function sectorInputsReady() {
   return Boolean(
     sectorSelectedVersion() &&
-      $("sectorProfileRevisionSelect").value &&
-      $("sectorIndustrySnapshotSelect").value &&
-      $("sectorConceptSnapshotSelect").value &&
-      $("sectorEventWindowSelect").value,
+    $("sectorProfileRevisionSelect").value &&
+    $("sectorIndustrySnapshotSelect").value &&
+    $("sectorConceptSnapshotSelect").value &&
+    $("sectorEventWindowSelect").value,
   );
 }
 

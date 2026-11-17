@@ -55,9 +55,9 @@ function renderPersistedProfileObservation(point) {
   const snapshot = state.timelineContext?.persistedProfileSnapshot;
   const exactMatch = Boolean(
     snapshot?.profile_revision &&
-      snapshot.target_session === point.session_date &&
-      snapshot.source_package_id === point.source_package_id &&
-      snapshot.field_ids?.length,
+    snapshot.target_session === point.session_date &&
+    snapshot.source_package_id === point.source_package_id &&
+    snapshot.field_ids?.length,
   );
   if (!exactMatch) {
     status.textContent =
