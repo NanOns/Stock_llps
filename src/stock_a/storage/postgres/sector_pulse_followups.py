@@ -947,6 +947,7 @@ JOIN tdx_sector_catalog c ON c.id=p.catalog_id
 WHERE p.source_package_id=%s AND p.source_capture_id=%s AND p.profile_revision=%s
   AND p.algorithm_contract=%s AND c.snapshot_id=ANY(%s::bigint[])
   AND f.followup_contract=%s AND f.calendar_id=%s AND f.calendar_revision=%s
+  AND f.target_session<=%s
 ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
             (
                 package_id,
@@ -957,6 +958,7 @@ ORDER BY c.board_kind,c.board_native_id COLLATE "C",f.horizon_sessions""",
                 _FOLLOWUP,
                 calendar_id,
                 calendar_revision,
+                research_cutoff,
             ),
         )
         names = [item.name for item in cursor.description]

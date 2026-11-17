@@ -15,6 +15,9 @@ const $ = (id) => document.getElementById(id);
 const state = {
   versions: [],
   profiles: [],
+  profilesReady: null,
+  profileDirectoryStatus: "NOT_LOADED",
+  profileDirectoryError: null,
   context: null,
   displayNameContext: null,
   selected: null,
@@ -1677,7 +1680,8 @@ function gotoPage(page) {
   activePage = page;
   const extra = ["focus", "market", "diagnostics"].includes(page);
   $("refreshResearch").hidden = extra;
-  $("contextNotice").hidden = extra;
+  $("contextNotice").hidden =
+    extra && state.profileDirectoryStatus !== "READ_FAILED";
   $("d1MaterialFilters").hidden =
     !state.d1Requested || !["sectors", "stocks"].includes(page);
   $("d1MaterialQuality").hidden =
@@ -1722,6 +1726,7 @@ function invalidateDate() {
   ++state.focusAutoRequest;
   ++state.stockRequest;
   ++state.profileChangeRequest;
+  ++state.focusMarketRequest;
   ++state.d0Request;
   ++state.d0BoardRequest;
   ++d1MaterialState.request;
@@ -1735,6 +1740,8 @@ function invalidateDate() {
   d1MaterialState.controller?.abort();
   state.selected = null;
   state.context = null;
+  state.focusMarketKey = null;
+  state.focusAutoBoard = null;
   state.d1Requested = false;
   state.d0Result = null;
   state.d0Featured = null;
@@ -1757,6 +1764,9 @@ function invalidateDate() {
     d1MaterialState.memberOffset =
       0;
   currentStockSymbol = currentStockSource = null;
+  focusKeysLoading = false;
+  cohortRpsPulseData = null;
+  cohortRpsPulseRequested = false;
   for (const id of ["boardDialog", "stockDialog"])
     if ($(id).open) $(id).close();
   for (const id of [
@@ -1772,10 +1782,14 @@ function invalidateDate() {
     "cohortDateComparison",
     "cohortSymbolForward",
     "cohortRows",
+    "cohortEnrollmentSummary",
+    "cohortRpsPulseSummary",
     "focusStockResult",
     "focusAutoRows",
+    "focusS2T1CohortTables",
   ])
     $(id).replaceChildren();
+  $("cohortRpsGroup").replaceChildren(new Option("全部非空组合", "ALL"));
   $("d0BoardSearch").value = "";
   $("d0BoardKind").value = "ALL";
   const d0EmptyRow = node("tr");
@@ -1807,9 +1821,15 @@ function invalidateDate() {
   message("profileChangeSummary", "当前日期尚未读取");
   message("profileChangeList", "正在核验相邻会话画像口径。");
   message("focusStatus", "当前日期尚未读取。");
+  message("focusMarketContext", "当前日期尚未读取。");
+  message("focusS2T1CohortStatus", "当前日期尚未读取。");
+  message("cohortEnrollmentStatus", "当前日期尚未读取。");
+  message("cohortRpsPulseStatus", "当前日期尚未读取。");
   message("focusStockStatus", "当前日期尚未读取。");
   message("focusAutoStatus", "当前日期尚未读取。");
   message("focusAutoPage", "—");
+  message("focusAutoBoardFilter", "当前未按板块筛选；等待当前日期。");
+  message("stockSearchStatus", "");
   $("focusAutoPrev").disabled = $("focusAutoNext").disabled = true;
   $("refreshResearch").disabled = false;
   for (const id of [
@@ -1857,13 +1877,7 @@ async function init() {
     } while (offset !== null);
     if (versions.length !== total) throw new Error("来源日期目录未完整读取");
     state.versions = versions;
-    state.profilesReady = api("/api/source-symbol-price-profiles/snapshots")
-      .then((profiles) => {
-        state.profiles = profiles.snapshots || [];
-      })
-      .catch(() => {
-        state.profiles = [];
-      });
+    void loadProfileDirectory();
     const dates = [...new Set(versions.map((v) => v.session_date))]
       .sort()
       .reverse();
@@ -1888,6 +1902,73 @@ function uniqueRawVersion(date) {
     (v) => v.session_date === date && v.version_status === "CLOSED",
   );
   return closed.length === 1 ? closed[0] : null;
+}
+
+function loadProfileDirectory() {
+  state.profileDirectoryStatus = "LOADING";
+  state.profileDirectoryError = null;
+  state.profilesReady = api("/api/source-symbol-price-profiles/snapshots")
+    .then((profiles) => {
+      if (!Array.isArray(profiles.snapshots))
+        throw new Error("画像目录返回格式无效");
+      state.profiles = profiles.snapshots;
+      state.profileDirectoryStatus = profiles.snapshots.length
+        ? "READY"
+        : "EMPTY";
+      return true;
+    })
+    .catch((error) => {
+      state.profiles = [];
+      state.profileDirectoryStatus = "READ_FAILED";
+      state.profileDirectoryError = error;
+      return false;
+    });
+  return state.profilesReady;
+}
+
+function profileDirectoryRetryButton() {
+  const retry = node("button", "重试读取画像目录", "button subtle");
+  retry.type = "button";
+  retry.addEventListener("click", () => void retryProfileDirectory());
+  return retry;
+}
+
+function showProfileDirectoryReadFailure(context = state.selected) {
+  if (context) {
+    context.profile_revision = null;
+    context.profile_status = "DIRECTORY_READ_FAILED";
+  }
+  const detail = state.profileDirectoryError?.message || "服务暂不可用";
+  const text = `画像目录读取失败（DIRECTORY_READ_FAILED），尚未判断画像可比性：${detail}`;
+  message("profileChangeSummary", "DIRECTORY_READ_FAILED");
+  message("profileChangeList", text);
+  $("contextText").replaceChildren(
+    node("span", `${context?.target_session || "当前日期"} · ${text} `),
+    profileDirectoryRetryButton(),
+  );
+  $("contextNotice").hidden = false;
+}
+
+async function retryProfileDirectory() {
+  if (state.profileDirectoryStatus === "LOADING") return;
+  const context = state.selected;
+  const detail = state.context;
+  const token = state.contextRequest;
+  if (!context?.contextReady || !detail) return;
+  message("contextText", `${context.target_session} · 正在重试读取画像目录…`);
+  $("contextNotice").hidden = false;
+  const ready = await loadProfileDirectory();
+  if (token !== state.contextRequest || state.selected !== context) return;
+  if (!ready) {
+    showProfileDirectoryReadFailure(context);
+    return;
+  }
+  context.profileResolution = resolveProfileForDate(
+    context,
+    token,
+    context.snapshotText,
+    detail,
+  );
 }
 
 $("researchDate").addEventListener(
@@ -1981,6 +2062,7 @@ async function selectDate(target_session) {
           `${item.source_kind === "TDX_TDXHY_CFG" ? "行业" : "概念"}观测 ${item.observed_at}`,
       )
       .join("；");
+    selected.snapshotText = snapshotText;
     message(
       "contextText",
       `${target_session} · 当前成员回看 NON_PIT ${snapshotText || "成员不可用"} · 画像 ${selected.profile_status}`,
@@ -1990,7 +2072,7 @@ async function selectDate(target_session) {
       selected,
       token,
       snapshotText,
-      controller.signal,
+      c,
     );
     void loadD0Overview(selected);
     if (state.d0BoardView === "PULSE") void loadD0PulseDirectoryPage();
@@ -2006,15 +2088,20 @@ async function selectDate(target_session) {
   }
 }
 
-async function resolveProfileForDate(c, token, snapshotText, signal) {
+async function resolveProfileForDate(
+  c,
+  token,
+  snapshotText,
+  detail = state.context,
+) {
   try {
-    const detail = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session, source_package_id: c.source_package_id })}`,
-      undefined,
-      signal,
-    );
-    await state.profilesReady;
     if (token !== state.contextRequest || state.selected !== c) return;
+    const directoryReady = await state.profilesReady;
+    if (token !== state.contextRequest || state.selected !== c) return;
+    if (!directoryReady || state.profileDirectoryStatus === "READ_FAILED") {
+      showProfileDirectoryReadFailure(c);
+      return;
+    }
     const observation = detail.profile_observation;
     const selection = observation?.profile_revision_selection;
     const revision =
@@ -2042,6 +2129,9 @@ async function resolveProfileForDate(c, token, snapshotText, signal) {
       "contextText",
       `${c.target_session} · 当前成员回看 NON_PIT ${snapshotText || "成员不可用"} · 画像 ${c.profile_status}`,
     );
+    $("contextNotice").hidden = ["focus", "market", "diagnostics"].includes(
+      activePage,
+    );
     void loadProfileChanges();
     if (activePage === "diagnostics") void loadExtra("diagnostics");
   } catch (error) {
@@ -2051,7 +2141,7 @@ async function resolveProfileForDate(c, token, snapshotText, signal) {
       error.name !== "AbortError"
     ) {
       c.profile_status = "NOT_COMPUTED";
-      message("profileChangeSummary", "NOT_COMPARABLE");
+      message("profileChangeSummary", "画像口径读取失败");
       message("profileChangeList", `画像语义不可核验：${error.message}`);
     }
   }
@@ -5001,10 +5091,12 @@ async function openStock(symbol, row = {}) {
   const selected = state.selected;
   if (!state.selected) {
     message("contextText", "当前日期的研究上下文尚未就绪。");
+    message("stockSearchStatus", "研究日期上下文尚未就绪，请稍后重试。");
     return;
   }
   if (!state.selected.contextReady) {
     message("contextText", "当前日期的研究上下文尚未就绪。");
+    message("stockSearchStatus", "研究日期上下文尚未就绪，请稍后重试。");
     return;
   }
   try {
@@ -5045,6 +5137,7 @@ async function openStock(symbol, row = {}) {
         "rule",
       ),
     );
+    message("stockSearchStatus", "该成员已打开；未映射到本次沪深来源池。");
     if (!$("stockDialog").open) $("stockDialog").showModal();
     return;
   }
@@ -5064,6 +5157,10 @@ async function openStock(symbol, row = {}) {
   );
   message("stockStatus", "正在读取同日 Raw、Core 与 Profile…");
   $("stockContent").replaceChildren();
+  message(
+    "stockSearchStatus",
+    `${displayStockTitle(row, symbol)} 的详情已打开。`,
+  );
   if (!$("stockDialog").open) $("stockDialog").showModal();
   try {
     if (c.profileResolution) await c.profileResolution;
@@ -5141,7 +5238,13 @@ async function openStock(symbol, row = {}) {
     const periods = node("div", null, "rule");
     const periodControls = node("div", null, "period-controls");
     const periodResults = node("div", "正在读取历史价格…", "history-list");
-    const history = { day: null, week: null, month: null, selected: "day" };
+    const history = {
+      day: null,
+      week: null,
+      month: null,
+      selected: "day",
+      periodStatus: "LOADING",
+    };
     function showHistory(kind) {
       history.selected = kind;
       periodControls.querySelectorAll("button").forEach((button) => {
@@ -5150,7 +5253,10 @@ async function openStock(symbol, row = {}) {
       const entries = history[kind];
       periodResults.replaceChildren();
       if (!entries) {
-        periodResults.textContent = "正在读取或历史价格不可用。";
+        periodResults.textContent =
+          history.periodStatus === "READ_FAILED" && kind !== "day"
+            ? "周 / 月历史读取失败，状态为 UNKNOWN；原因见上方。"
+            : "正在读取或历史价格不可用。";
         return;
       }
       if (!entries.length) {
@@ -5303,13 +5409,17 @@ async function openStock(symbol, row = {}) {
     stockApi(`/api/source-symbol/raw-periods?${query}`)
       .then((p) => {
         if (token !== state.stockRequest) return;
-        history.week = p.periods?.week || [];
-        history.month = p.periods?.month || [];
+        if (!Array.isArray(p.periods?.week) || !Array.isArray(p.periods?.month))
+          throw new Error("周月周期响应缺少完整结果");
+        history.week = p.periods.week;
+        history.month = p.periods.month;
+        history.periodStatus = "READY";
         if (history.selected !== "day") showHistory(history.selected);
       })
       .catch((e) => {
         if (token === state.stockRequest) {
-          history.week = history.month = [];
+          history.periodStatus = "READ_FAILED";
+          history.week = history.month = null;
           periods.append(node("p", `周 / 月 UNKNOWN：${e.message}`));
           if (history.selected !== "day") showHistory(history.selected);
         }
@@ -5733,7 +5843,7 @@ function cohortDateComparisonDisclosure(context, key, token) {
   content.append(
     node(
       "p",
-      "普通 Cohort 读取不请求跨 T0 聚合；展开此项后才读取当前冻结规则的已存逐日对照。",
+      "普通 Cohort 支持 T+1/3/5/10/20；此跨 T0 ENTRY / REENTRY 对照仅支持 T+1/3/5。展开后才读取当前冻结规则的已存逐日对照。",
       "muted",
     ),
   );
@@ -5742,12 +5852,22 @@ function cohortDateComparisonDisclosure(context, key, token) {
   details.addEventListener("toggle", async () => {
     if (!details.open || requested) return;
     requested = true;
+    const horizon = $("cohortHorizon").value;
+    if (!["1", "3", "5"].includes(horizon)) {
+      content.replaceChildren(
+        node(
+          "p",
+          `跨 T0 ENTRY / REENTRY 对照不支持 T+${horizon}；普通 Cohort 的 T+${horizon} 读取仍然有效。请选择 T+1、T+3 或 T+5 后重新读取 Cohort。`,
+        ),
+      );
+      return;
+    }
     content.replaceChildren(node("p", "正在读取跨 T0 对照…", "muted"));
     try {
       const comparisonQuery = {
         source_package_id: context.source_package_id,
         rule: key.rule,
-        horizon: $("cohortHorizon").value,
+        horizon,
       };
       const comparison = await api(
         `/api/product/cohort-date-comparison?${new URLSearchParams(comparisonQuery)}`,
@@ -6044,6 +6164,16 @@ async function loadExtra(page) {
             ? p.profile_revision === c.profile_revision
             : true),
       );
+      const profileCount =
+        state.profileDirectoryStatus === "READ_FAILED"
+          ? `DIRECTORY_READ_FAILED · ${state.profileDirectoryError?.message || "读取失败"}`
+          : state.profileDirectoryStatus === "LOADING"
+            ? "目录读取中"
+            : profiles.length
+              ? profiles.length
+              : state.profileDirectoryStatus === "EMPTY"
+                ? "目录为空"
+                : "所选日期无已保存修订";
       const context = await api(
         `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session })}`,
       );
@@ -6063,7 +6193,7 @@ async function loadExtra(page) {
             ? `${version.capture_read_started_at} → ${version.capture_validated_at} · ${version.source_time_quality} · ${version.source_clock_role}`
             : "UNKNOWN",
         ],
-        ["画像修订数", profiles.length || "目录中未保存"],
+        ["画像修订数", profileCount],
         ...profiles.map((p) => [
           `画像 ${p.profile_revision}`,
           `${p.source_symbol_count} / ${p.expected_source_symbol_count} · ${p.complete ? "已保存完整" : "不完整"} · ${p.history_session_count} 会话`,
@@ -6344,12 +6474,9 @@ $("focusReadStock").addEventListener("click", async () => {
     const resolved = await resolveStockCodeInput(stockCode, c);
     const symbol = resolved.source_symbol;
     if (token !== focusStockRequest || activePage !== "focus") return;
-    const context = await api(
-      `/api/preview/sector-change-context?${new URLSearchParams({ target_session: c.target_session })}`,
-    );
-    if (token !== focusStockRequest || activePage !== "focus") return;
-    const sessionCount = context.source_history_session_count;
-    if (!sessionCount) throw new Error("官方会话窗口不可用");
+    const sessionCount = c.stock_history_session_count;
+    if (!Number.isInteger(sessionCount) || sessionCount <= 0)
+      throw new Error("所选日期的股票历史窗口不可用");
     const data = await api("/api/preview/stock", {
       symbol,
       target_session: c.target_session,
