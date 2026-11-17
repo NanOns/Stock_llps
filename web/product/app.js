@@ -4017,31 +4017,37 @@ function renderSourceObservationSegment(item, context) {
         undefined,
         "focus-observation-drilldown-result",
       );
+      const cohortStatus =
+        Array.isArray(cohort.groups) && cohort.groups.length
+          ? "T0分组可用"
+          : "T0分组未知";
       detail.append(
         node(
           "p",
-          `Cohort ${cohort.storage_status || cohort.status || "UNKNOWN"} · ${cohort.target_session || item.t0_session} · 来源规则全集 ${cohort.source_pool_count ?? "UNKNOWN"} 条事实 · ${cohort.scope || "NON_PIT_EXPLORATORY"} · RETROSPECTIVE_DESCRIPTIVE_NON_PIT`,
+          `Cohort ${cohortStatus} · ${cohort.target_session || item.t0_session} · T0分组 ${cohort.groups?.length ?? 0} 项 · 来源规则全集 ${cohort.source_pool_count ?? "UNKNOWN"} 条事实 · 同一查询期限 T+5 ${cohort.due ? "已到期" : "NOT_DUE"} · ${cohort.scope || "NON_PIT_EXPLORATORY"} · RETROSPECTIVE_DESCRIPTIVE_NON_PIT`,
         ),
       );
       const exactFact = (cohort.selected_rules || []).find(
         (fact) =>
           fact.rule_id === item.rule_id &&
-          String(fact.rule_fact_id ?? fact.id) ===
-            String(item.anchor_rule_fact_id) &&
-          String(fact.source_capture_id) === String(item.anchor_capture_id),
+          String(fact.fact_id) === String(item.anchor_rule_fact_id) &&
+          String(fact.enrollment?.id) === String(item.enrollment_id) &&
+          fact.enrollment?.kind === item.enrollment_kind &&
+          (fact.enrollment?.parent_enrollment_id ?? null) ===
+            item.parent_enrollment_id,
       );
       if (exactFact) {
         detail.append(
           node(
             "p",
-            `原始登记 T0 ${exactFact.rule_id} ${exactFact.state || "UNKNOWN"} · 事实 #${item.anchor_rule_fact_id} · 捕获 ${item.anchor_capture_id} · ${item.enrollment_kind} 登记 #${item.enrollment_id}`,
+            `原始登记 T0 ${exactFact.rule_id} ${exactFact.state || "UNKNOWN"} · 规则事实 #${exactFact.fact_id} · 捕获 ${item.anchor_capture_id} · ${exactFact.enrollment.kind} 登记 #${exactFact.enrollment.id} · 父段 ${exactFact.enrollment.parent_enrollment_id ?? "无"}`,
           ),
         );
       } else {
         detail.append(
           node(
             "p",
-            `Cohort未返回与原始登记事实 #${item.anchor_rule_fact_id}、捕获 ${item.anchor_capture_id} 完全一致的记录；该登记的Cohort状态为 UNKNOWN。`,
+            `Cohort未返回与原始登记事实 #${item.anchor_rule_fact_id}、登记 #${item.enrollment_id} 完全一致的记录；该登记的Cohort状态为 UNKNOWN。`,
           ),
         );
       }
