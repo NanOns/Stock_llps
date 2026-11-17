@@ -52,8 +52,8 @@ def summarize_day(
         for rule in rules
     ):
         raise ValueError("规则三态无效，拒绝丢失来源分母")
-    if lane not in {None, "ENTRY", "DAILY_LANDMARK"}:
-        raise ValueError("FEP lane只接受ENTRY或DAILY_LANDMARK")
+    if lane not in {None, "ENTRY", "DAILY_LANDMARK", "REENTRY"}:
+        raise ValueError("FEP lane只接受ENTRY、DAILY_LANDMARK或REENTRY")
     enrollment_kinds = enrollment_kinds or {}
     lane_counts = {}
     for rule in rules:

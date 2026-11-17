@@ -625,12 +625,16 @@ def _validate_fep_baseline_closure(rows: list[tuple[Any, ...]]) -> list[str]:
             != {(source_count, true_count, false_count, unknown_state_count)}
         ):
             reasons.append("FEP_READER_T0_STATE_DENOMINATOR_OPEN")
+        lane_member_column = {
+            "ENTRY": "entry_count",
+            "DAILY_LANDMARK": "daily_landmark_count",
+            "REENTRY": "reentry_count",
+        }.get(rows[0][17])
+        if lane_member_column is None:
+            reasons.append("FEP_READER_LANE_INVALID")
+            continue
         expected_members = {
-            "MATCH": match_row[
-                index["entry_count"]
-                if rows[0][17] == "ENTRY"
-                else index["daily_landmark_count"]
-            ],
+            "MATCH": match_row[index[lane_member_column]],
             "NO_MATCH": false_count,
             "UNKNOWN": unknown_state_count,
         }
@@ -699,6 +703,213 @@ def _validate_fep_baseline_closure(rows: list[tuple[Any, ...]]) -> list[str]:
     return sorted(set(reasons))
 
 
+def _comparison_group(row: tuple[Any, ...] | None) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    index = {name: _COLUMNS.index(name) for name in _COLUMNS}
+    return {
+        "status": row[index["status"]],
+        "member_count": row[index["member_count"]],
+        "due_count": row[index["due_count"]],
+        "not_due_count": row[index["not_due_count"]],
+        "observed_count": row[index["observed_count"]],
+        "unknown_count": row[index["unknown_count"]],
+        "not_computed_count": row[index["not_computed_count"]],
+        "p25": _ratio(row[index["p25_numerator"]], row[index["p25_denominator"]]),
+        "p50": _ratio(row[index["p50_numerator"]], row[index["p50_denominator"]]),
+        "p75": _ratio(row[index["p75_numerator"]], row[index["p75_denominator"]]),
+    }
+
+
+def _same_t0_lane_comparison(
+    rows: list[tuple[Any, ...]], *, counterpart_closure_reasons: list[str]
+) -> dict[str, Any]:
+    """从同一typed表的T0 MATCH行生成只读、日期等权lane对照。"""
+    index = {name: _COLUMNS.index(name) for name in _COLUMNS}
+    identity_fields = (
+        "source_package_id",
+        "source_capture_id",
+        "target_session",
+        "rule_id",
+        "rule_version",
+        "profile_family",
+        "profile_revision",
+        "history_session_count",
+        "d1_history_session_count",
+        "event_window_start",
+        "calendar_revision",
+        "path_rule_version",
+        "source_time_quality",
+        "parser_contract",
+        "horizon",
+        "summary_scope",
+        "group_code",
+        "condition_code",
+        "market_condition_code",
+        "market_time_quality",
+        "entity_code",
+        "target_code",
+        "scope",
+        "price_coordinate",
+    )
+    identity_indexes = tuple(index[name] for name in identity_fields)
+    groups: dict[tuple[str, date, str], tuple[Any, ...] | None] = {}
+    dates = sorted(
+        {
+            row[index["target_session"]]
+            for row in rows
+            if row[index["summary_scope"]] == "T0"
+            and row[index["group_code"]] == "MATCH"
+        }
+    )
+    duplicate_keys: set[tuple[str, date, str]] = set()
+    for row in rows:
+        if (
+            row[index["summary_scope"]] != "T0"
+            or row[index["group_code"]] != "MATCH"
+            or row[index["condition_code"]] != "ALL"
+        ):
+            continue
+        key = (
+            row[index["lane"]],
+            row[index["target_session"]],
+            row[index["metric_code"]],
+        )
+        if key in groups:
+            duplicate_keys.add(key)
+        else:
+            groups[key] = row
+
+    metrics = []
+    for metric_code in (
+        "RAW_CLOSE_RETURN",
+        "RAW_MFE",
+        "RAW_MAE",
+        "RAW_MDD_CLOSE",
+    ):
+        date_rows = []
+        differences = []
+        status_counts = Counter()
+        for target in dates:
+            entry_key = ("ENTRY", target, metric_code)
+            reentry_key = ("REENTRY", target, metric_code)
+            entry_row = groups.get(entry_key)
+            reentry_row = groups.get(reentry_key)
+            entry = _comparison_group(entry_row)
+            reentry = _comparison_group(reentry_row)
+            pair_status = "NO_COMPARABLE_PAIR"
+            difference = None
+            identity_matches = bool(
+                entry_row is not None
+                and reentry_row is not None
+                and tuple(entry_row[i] for i in identity_indexes)
+                == tuple(reentry_row[i] for i in identity_indexes)
+            )
+            if entry_key in duplicate_keys or reentry_key in duplicate_keys:
+                pair_status = "INCOMPLETE"
+            elif entry_row is not None and reentry_row is not None:
+                if not identity_matches:
+                    pair_status = "INPUT_IDENTITY_MISMATCH"
+                elif (
+                    entry["status"] == "OBSERVED"
+                    and reentry["status"] == "OBSERVED"
+                    and entry["observed_count"] > 0
+                    and reentry["observed_count"] > 0
+                    and entry["p50"] is not None
+                    and reentry["p50"] is not None
+                ):
+                    pair_status = "OBSERVED"
+                    difference = Fraction(reentry["p50"]) - Fraction(entry["p50"])
+                    differences.append(difference)
+                else:
+                    statuses = {entry["status"], reentry["status"]}
+                    pair_status = next(
+                        (
+                            status
+                            for status in (
+                                "INCOMPLETE",
+                                "UNKNOWN",
+                                "NOT_COMPUTED",
+                                "NOT_DUE",
+                                "NOT_EVALUABLE",
+                            )
+                            if status in statuses
+                        ),
+                        "NO_COMPARABLE_PAIR",
+                    )
+            status_counts[pair_status] += 1
+            date_rows.append(
+                {
+                    "target_session": target.isoformat(),
+                    "status": pair_status,
+                    "entry": entry,
+                    "reentry": reentry,
+                    "reentry_minus_entry_p50": str(difference)
+                    if difference is not None
+                    else None,
+                }
+            )
+
+        paired_dates = len(differences)
+        status = (
+            "NO_COMPARABLE_PAIR"
+            if paired_dates == 0
+            else "INSUFFICIENT_INDEPENDENT_DATES"
+            if paired_dates == 1
+            else "DESCRIPTIVE_ONLY"
+        )
+        metrics.append(
+            {
+                "metric_code": metric_code,
+                "status": status,
+                "requested_t0_date_count": len(dates),
+                "paired_t0_date_count": paired_dates,
+                "no_comparable_pair_date_count": status_counts["NO_COMPARABLE_PAIR"],
+                "not_due_date_count": status_counts["NOT_DUE"],
+                "unknown_date_count": status_counts["UNKNOWN"],
+                "not_computed_date_count": status_counts["NOT_COMPUTED"],
+                "incomplete_date_count": status_counts["INCOMPLETE"]
+                + status_counts["INPUT_IDENTITY_MISMATCH"],
+                "not_evaluable_date_count": status_counts["NOT_EVALUABLE"],
+                "equal_date_mean_p50_difference": str(
+                    sum(differences, Fraction()) / paired_dates
+                )
+                if paired_dates
+                else None,
+                "positive_direction_date_count": sum(
+                    value > 0 for value in differences
+                ),
+                "negative_direction_date_count": sum(
+                    value < 0 for value in differences
+                ),
+                "zero_direction_date_count": sum(value == 0 for value in differences),
+                "dates": date_rows,
+            }
+        )
+
+    overall = (
+        "INCOMPLETE"
+        if counterpart_closure_reasons
+        else "DESCRIPTIVE_ONLY"
+        if any(item["paired_t0_date_count"] > 1 for item in metrics)
+        else "INSUFFICIENT_INDEPENDENT_DATES"
+        if any(item["paired_t0_date_count"] == 1 for item in metrics)
+        else "NO_COMPARABLE_PAIR"
+    )
+    return {
+        "status": overall,
+        "direction": "REENTRY_MINUS_ENTRY",
+        "comparison_source": "PERSISTED_TYPED_T0_MATCH_ROWS",
+        "scope": "NON_PIT_EXPLORATORY",
+        "price_coordinate": "RAW_UNADJUSTED",
+        "capability": "DESCRIPTIVE_ONLY",
+        "causal_or_strategy_claim": False,
+        "reason_codes": counterpart_closure_reasons,
+        "requested_t0_date_count": len(dates),
+        "metrics": metrics,
+    }
+
+
 def read_fep_baseline(
     config: Mapping[str, Any],
     *,
@@ -716,9 +927,10 @@ def read_fep_baseline(
         or not isinstance(rule_id, str)
         or not rule_id.strip()
         or horizon not in {1, 3, 5}
-        or lane not in {"ENTRY", "DAILY_LANDMARK"}
+        or lane not in {"ENTRY", "DAILY_LANDMARK", "REENTRY"}
     ):
         raise ValueError("FEP只读查询参数无效")
+    query_lanes = ("ENTRY", "REENTRY") if lane in {"ENTRY", "REENTRY"} else (lane,)
     with _transaction(config, write=False, statement_timeout_ms=15000) as (
         _,
         cursor,
@@ -727,11 +939,12 @@ def read_fep_baseline(
         cursor.execute(
             f"""SELECT {",".join(_COLUMNS)} FROM {_TABLE}
                 WHERE research_cutoff=%s AND source_package_id=%s
-                  AND rule_id=%s AND horizon=%s AND lane=%s
-                ORDER BY summary_scope,target_session,condition_code,group_code,metric_code""",
-            (research_cutoff, source_package_id, rule_id, horizon, lane),
+                  AND rule_id=%s AND horizon=%s AND lane=ANY(%s)
+                ORDER BY lane,summary_scope,target_session,condition_code,group_code,metric_code""",
+            (research_cutoff, source_package_id, rule_id, horizon, list(query_lanes)),
         )
-        rows = cursor.fetchall()
+        comparison_rows = cursor.fetchall()
+    rows = [row for row in comparison_rows if row[17] == lane]
     if not rows:
         return {
             "status": "NOT_COMPUTED",
@@ -786,7 +999,7 @@ def read_fep_baseline(
     closure_reasons = _validate_fep_baseline_closure(rows)
     if len(partitions) != 1:
         closure_reasons.append("FEP_READER_MULTIPLE_INPUT_PARTITIONS")
-    return {
+    result = {
         "status": "AVAILABLE" if not closure_reasons else "INCOMPLETE",
         "reason_codes": sorted(set(closure_reasons)),
         "research_cutoff": research_cutoff.isoformat(),
@@ -806,3 +1019,33 @@ def read_fep_baseline(
         "model_capability": "NOT_ENABLED",
         "rows": records,
     }
+    if lane in {"ENTRY", "REENTRY"}:
+        counterpart = "REENTRY" if lane == "ENTRY" else "ENTRY"
+        counterpart_rows = [row for row in comparison_rows if row[17] == counterpart]
+        counterpart_reasons = (
+            _validate_fep_baseline_closure(counterpart_rows) if counterpart_rows else []
+        )
+        if (
+            counterpart_rows
+            and len(
+                {
+                    (
+                        row[6],
+                        row[7],
+                        row[8],
+                        row[13],
+                        row[14],
+                        row[15],
+                        row[16],
+                    )
+                    for row in counterpart_rows
+                }
+            )
+            != 1
+        ):
+            counterpart_reasons.append("FEP_READER_MULTIPLE_INPUT_PARTITIONS")
+        result["same_t0_comparison"] = _same_t0_lane_comparison(
+            comparison_rows,
+            counterpart_closure_reasons=sorted(set(counterpart_reasons)),
+        )
+    return result

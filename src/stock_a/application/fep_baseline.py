@@ -22,7 +22,7 @@ from stock_a.storage.postgres.research_facts import (
 )
 from stock_a.storage.postgres.source_raw import read_raw_daily_forward_pool
 
-_LANES = ("ENTRY", "DAILY_LANDMARK")
+_LANES = ("ENTRY", "DAILY_LANDMARK", "REENTRY")
 _METRICS = (
     ("RAW_CLOSE_RETURN", "endpoint"),
     ("RAW_MFE", "mfe"),
@@ -857,7 +857,7 @@ def produce_fep_baseline(
         lanes=lanes,
     )
     write_result = persist_fep_baseline_rows(
-        config, prepared["typed_rows"], allow_statistical_restatement=True
+        config, prepared["typed_rows"], allow_statistical_restatement=False
     )
     return {key: value for key, value in prepared.items() if key != "typed_rows"} | {
         "status": "PERSISTED",

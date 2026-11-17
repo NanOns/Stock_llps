@@ -51,6 +51,7 @@ _MIGRATION_FILES = (
     "0037_r07_rps_pulse_t0_grouped_forward.sql",
     "0038_r08_fep_conditional_baseline.sql",
     "0039_r08_source_observation_segments.sql",
+    "0040_r08_fep05_reentry_lane.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -89,6 +90,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R07_RPS_PULSE_T0_GROUPED_FORWARD_CONSUMERS_R1": frozenset({37}),
     "R08_FEP01_CONDITIONAL_BASELINE_R1": frozenset({38}),
     "R08_FEP03_SOURCE_OBSERVATION_SEGMENTS_R1": frozenset({39}),
+    "R08_FEP05_REENTRY_CONDITIONAL_BASELINE_R1": frozenset({40}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -243,6 +245,7 @@ _RELATIONS_BY_MIGRATION_COUNT[38] = _RELATIONS_BY_MIGRATION_COUNT[37] | {
 _RELATIONS_BY_MIGRATION_COUNT[39] = _RELATIONS_BY_MIGRATION_COUNT[38] | {
     "source_research_observation_segment_days",
 }
+_RELATIONS_BY_MIGRATION_COUNT[40] = _RELATIONS_BY_MIGRATION_COUNT[39]
 
 
 class BindingRefused(Exception):

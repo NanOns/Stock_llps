@@ -698,10 +698,10 @@ def register_commands(commands):
     )
     fep_baseline.add_argument(
         "--lane",
-        choices=("ENTRY", "DAILY_LANDMARK"),
+        choices=("ENTRY", "DAILY_LANDMARK", "REENTRY"),
         action="append",
         required=True,
-        help="独立FEP观察lane，可重复指定；REENTRY/左截断不并入ENTRY",
+        help="独立FEP观察lane，可重复指定；REENTRY和左截断不并入ENTRY",
     )
     fep_baseline.add_argument(
         "--persist",

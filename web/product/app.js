@@ -4086,7 +4086,9 @@ function renderSourceObservationSegment(item, context) {
           ? "ENTRY"
           : item.enrollment_kind === "DAILY_LANDMARK"
             ? "DAILY_LANDMARK"
-            : null;
+            : item.enrollment_kind === "REENTRY"
+              ? "REENTRY"
+              : null;
       if (!fepLane) {
         fepSection.append(
           node(
@@ -4148,6 +4150,48 @@ function renderSourceObservationSegment(item, context) {
                   `${groupLabel} ${fact.status} · 成员 ${fact.member_count ?? "UNKNOWN"} · 到期 ${fact.due_count ?? "UNKNOWN"} · 已观察 ${fact.observed_count ?? "UNKNOWN"} · 未知 ${fact.unknown_count ?? "UNKNOWN"} · 未计算 ${fact.not_computed_count ?? "UNKNOWN"} · 未到期 ${fact.not_due_count ?? "UNKNOWN"} · 中位数 ${fact.p50 ?? "UNKNOWN"}`,
                 ),
               );
+            }
+            if (fepLane === "REENTRY") {
+              const comparison = entry.result.same_t0_comparison;
+              const returnPair = comparison?.metrics?.find(
+                (metric) => metric.metric_code === "RAW_CLOSE_RETURN",
+              );
+              const datePair = returnPair?.dates?.find(
+                (pair) => pair.target_session === item.t0_session,
+              );
+              fepSection.append(
+                node(
+                  "p",
+                  `同 T0 ENTRY 对照 · ${datePair?.status || "NO_COMPARABLE_PAIR"} · REENTRY−ENTRY p50 ${datePair?.reentry_minus_entry_p50 ?? "未计算"} · 同规则、来源捕获、画像、日历、RAW_UNADJUSTED 与质量政策 · 纯描述性，不表示因果或策略优势。`,
+                ),
+              );
+              const pathMetrics = (entry.result.rows || []).filter(
+                (fact) =>
+                  fact.target_session === item.t0_session &&
+                  fact.rule_id === item.rule_id &&
+                  String(fact.source_capture_id) ===
+                    String(item.anchor_capture_id) &&
+                  fact.profile_revision === item.profile_revision &&
+                  fact.history_session_count === item.history_session_count &&
+                  fact.d1_history_session_count ===
+                    item.d1_history_session_count &&
+                  fact.event_window_start === item.event_window_start &&
+                  fact.calendar_revision === item.calendar_revision &&
+                  fact.summary_scope === "T0" &&
+                  fact.group_code === "MATCH" &&
+                  fact.condition_code === "ALL" &&
+                  ["RAW_MFE", "RAW_MAE", "RAW_MDD_CLOSE"].includes(
+                    fact.metric_code,
+                  ),
+              );
+              for (const fact of pathMetrics) {
+                fepSection.append(
+                  node(
+                    "p",
+                    `${fact.metric_code} · ${fact.status} · 可评价 ${fact.observed_count ?? "UNKNOWN"}/${fact.member_count ?? "UNKNOWN"} · UNKNOWN ${fact.unknown_count ?? "UNKNOWN"} · 未计算 ${fact.not_computed_count ?? "UNKNOWN"} · 未到期 ${fact.not_due_count ?? "UNKNOWN"} · 最近秩 p25/p50/p75 ${fact.p25 ?? "未计算"}/${fact.p50 ?? "未计算"}/${fact.p75 ?? "未计算"}`,
+                  ),
+                );
+              }
             }
           }
         } catch (error) {
@@ -6534,6 +6578,42 @@ function renderFepLaneBaseline(root, result, lane) {
       ),
     );
   }
+  const sameT0Comparison = result.same_t0_comparison;
+  if (lane === "REENTRY" && sameT0Comparison) {
+    root.append(
+      node(
+        "p",
+        `同 T0 ENTRY / REENTRY 配对 · ${sameT0Comparison.status} · ${sameT0Comparison.requested_t0_date_count} 个独立T0日期；仅当来源捕获、规则与版本、画像、期限、日历、坐标和质量政策一致且两组有可评价值时配对。差异只作描述，不表示因果或策略优势。`,
+        "cohort-result-summary",
+      ),
+    );
+    const metricLabels = {
+      RAW_CLOSE_RETURN: "端点收益",
+      RAW_MFE: "MFE",
+      RAW_MAE: "MAE",
+      RAW_MDD_CLOSE: "MDD_CLOSE",
+    };
+    for (const metric of sameT0Comparison.metrics || []) {
+      root.append(
+        node(
+          "p",
+          `${metricLabels[metric.metric_code] || metric.metric_code} · ${metric.status} · 同日可比 ${format(metric.paired_t0_date_count)}/${format(metric.requested_t0_date_count)} 天 · 未匹配 ${format(metric.no_comparable_pair_date_count)} · NOT_DUE ${format(metric.not_due_date_count)} · UNKNOWN ${format(metric.unknown_date_count)} · NOT_COMPUTED ${format(metric.not_computed_date_count)} · 不完整 ${format(metric.incomplete_date_count)} · 日期等权 REENTRY−ENTRY p50差 ${formatFepPercent(metric.equal_date_mean_p50_difference)}。`,
+          "muted",
+        ),
+      );
+      for (const pair of metric.dates || []) {
+        const entry = pair.entry;
+        const reentry = pair.reentry;
+        root.append(
+          node(
+            "p",
+            `${pair.target_session} · ${pair.status} · ENTRY ${entry ? `${entry.status} ${format(entry.observed_count)}/${format(entry.member_count)} p25/p50/p75 ${formatFepPercent(entry.p25)}/${formatFepPercent(entry.p50)}/${formatFepPercent(entry.p75)}` : "无已存T0行"} · REENTRY ${reentry ? `${reentry.status} ${format(reentry.observed_count)}/${format(reentry.member_count)} p25/p50/p75 ${formatFepPercent(reentry.p25)}/${formatFepPercent(reentry.p50)}/${formatFepPercent(reentry.p75)}` : "无已存T0行"} · REENTRY−ENTRY p50 ${formatFepPercent(pair.reentry_minus_entry_p50)}`,
+            "muted",
+          ),
+        );
+      }
+    }
+  }
   const conditions = rows.filter(
     (row) =>
       row.summary_scope === "EQUAL_DATE" &&
@@ -6638,7 +6718,7 @@ function cohortDateComparisonDisclosure(context, key, token) {
     container.replaceChildren(node("p", "正在读取已存FEP描述统计…", "muted"));
     try {
       const results = await Promise.all(
-        ["ENTRY", "DAILY_LANDMARK"].map(async (lane) => {
+        ["ENTRY", "DAILY_LANDMARK", "REENTRY"].map(async (lane) => {
           const query = new URLSearchParams({
             source_package_id: context.source_package_id,
             rule: key.rule,

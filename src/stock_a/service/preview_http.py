@@ -4569,7 +4569,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     raise PreviewHttpError(
                         400,
                         "FEP_BASELINE_QUERY_INVALID",
-                        "须提供来源包、冻结规则、期限及ENTRY或DAILY_LANDMARK lane",
+                        "须提供来源包、冻结规则、期限及ENTRY、DAILY_LANDMARK或REENTRY lane",
                     )
                 if values["horizon"] not in {"1", "3", "5"}:
                     raise PreviewHttpError(
@@ -4577,11 +4577,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "FEP_BASELINE_HORIZON_INVALID",
                         "FEP描述统计仅读取T+1、T+3或T+5已存事实",
                     )
-                if values["lane"] not in {"ENTRY", "DAILY_LANDMARK"}:
+                if values["lane"] not in {"ENTRY", "DAILY_LANDMARK", "REENTRY"}:
                     raise PreviewHttpError(
                         400,
                         "FEP_BASELINE_LANE_INVALID",
-                        "FEP lane只接受ENTRY或DAILY_LANDMARK",
+                        "FEP lane只接受ENTRY、DAILY_LANDMARK或REENTRY",
                     )
                 try:
                     from stock_a.storage.postgres.fep_baseline import (
