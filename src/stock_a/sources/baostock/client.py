@@ -23,6 +23,7 @@ _QUERY_FIELDS = (
     "date,code,open,high,low,close,volume,amount,adjustflag,turn,tradestatus,isST"
 )
 _MAX_QUERY_ROWS = 8
+_MAX_DAILY_QUERIES_PER_SESSION = 10
 _DEFAULT_SOCKET_TIMEOUT_SECONDS = 30.0
 _VERIFIED_DAILY_CAPTURES: dict[int, "BaoStockDailySourceCapture"] = {}
 _VERIFIED_IDENTITY_CAPTURES: dict[int, "BaoStockIdentitySourceCapture"] = {}
@@ -1184,19 +1185,21 @@ def query_daily_range_rows(
     *,
     timeout_seconds: float = _DEFAULT_SOCKET_TIMEOUT_SECONDS,
     max_rows_per_symbol: int = 20,
+    max_queries_per_target_session: int = _MAX_DAILY_QUERIES_PER_SESSION,
+    target_session_count: int | None = None,
     transport: object | None = None,
 ) -> dict[str, Any]:
-    """一次登录有界查询少量显式证券的未复权日线，不重试或写入来源数据。"""
+    """一次登录按逐会话请求预算查询显式证券范围，不重试或写入来源数据。"""
     if (
         not isinstance(symbols, tuple)
-        or not 1 <= len(symbols) <= 20
+        or not symbols
         or len(set(symbols)) != len(symbols)
         or any(
             not isinstance(symbol, str) or _SYMBOL_PATTERN.fullmatch(symbol) is None
             for symbol in symbols
         )
     ):
-        raise ContractError("BaoStock日线范围查询必须显式提供1至20个不重复沪深代码")
+        raise ContractError("BaoStock日线范围查询必须显式提供不重复沪深代码")
     if not isinstance(start_date, str) or not isinstance(end_date, str):
         raise ContractError("BaoStock日线范围必须提供YYYY-MM-DD起止日期")
     try:
@@ -1210,6 +1213,19 @@ def query_daily_range_rows(
         raise ContractError("BaoStock日线范围日期必须使用规范YYYY-MM-DD格式")
     if end_day < start_day or (end_day - start_day).days > 14:
         raise ContractError("BaoStock日线范围必须正序且跨度不超过14天")
+    calendar_day_span = (end_day - start_day).days + 1
+    if target_session_count is None:
+        target_session_count = calendar_day_span
+    if (
+        type(target_session_count) is not int
+        or not 1 <= target_session_count <= calendar_day_span
+    ):
+        raise ContractError("BaoStock目标官方会话数必须在请求日历范围内")
+    if (
+        type(max_queries_per_target_session) is not int
+        or not 1 <= max_queries_per_target_session <= _MAX_DAILY_QUERIES_PER_SESSION
+    ):
+        raise ContractError("BaoStock每目标会话查询预算必须在1至10次之间")
     if (
         isinstance(timeout_seconds, bool)
         or not isinstance(timeout_seconds, (int, float))
@@ -1219,6 +1235,52 @@ def query_daily_range_rows(
     if type(max_rows_per_symbol) is not int or not 1 <= max_rows_per_symbol <= 20:
         raise ContractError("BaoStock每证券响应行数上限必须在1至20之间")
     started_at = _timestamp()
+    request_budget = max_queries_per_target_session * target_session_count
+    request_units_per_symbol = target_session_count
+    max_symbols_per_batch = request_budget // request_units_per_symbol
+    budget_plan = {
+        "max_queries_per_target_session": max_queries_per_target_session,
+        "target_session_count": target_session_count,
+        "calendar_day_span": calendar_day_span,
+        "request_units_per_symbol": request_units_per_symbol,
+        "total_request_budget": request_budget,
+        "requests_required": len(symbols) * request_units_per_symbol,
+        "max_symbols_per_batch": max_symbols_per_batch,
+        "requested_symbols": len(symbols),
+        "symbols_over_batch_bound": max(0, len(symbols) - max_symbols_per_batch),
+        "not_attempted_symbols": (
+            len(symbols) if len(symbols) > max_symbols_per_batch else 0
+        ),
+    }
+    if budget_plan["requests_required"] > request_budget:
+        return {
+            "contract": "STOCK-A-BAOSTOCK-DAILY-RANGE-READ/R1",
+            "status": "REQUEST_BUDGET_EXCEEDED",
+            "source": "BAOSTOCK",
+            "symbols": list(symbols),
+            "start_date": start_date,
+            "end_date": end_date,
+            "request_started_at": started_at,
+            "request_completed_at": _timestamp(),
+            "capture_clock_role": "CAPTURED_AT_THIS_QUERY_NOT_HISTORICAL_FIRST_AVAILABLE",
+            "available_at": None,
+            "published_at": None,
+            "sdk_version": None,
+            "max_queries_per_target_session": max_queries_per_target_session,
+            "budget_plan": budget_plan,
+            "login_attempted": False,
+            "query_calls": 0,
+            "retry_count": 0,
+            "responses": {},
+            "verified_source_captures": {},
+            "source_network_called": False,
+            "not_attempted_symbols": len(symbols),
+            "error_type": None,
+            "reason": (
+                f"请求{len(symbols)}只证券、{target_session_count}个目标会话，"
+                f"超过每会话{max_queries_per_target_session}次查询预算；未登录或发送请求"
+            ),
+        }
     try:
         sdk, sdk_version = _load_sdk(transport)
     except Exception as error:
@@ -1235,6 +1297,8 @@ def query_daily_range_rows(
             "available_at": None,
             "published_at": None,
             "sdk_version": None,
+            "max_queries_per_target_session": max_queries_per_target_session,
+            "budget_plan": budget_plan,
             "login_attempted": False,
             "query_calls": 0,
             "retry_count": 0,
@@ -1255,6 +1319,8 @@ def query_daily_range_rows(
             "available_at": None,
             "published_at": None,
             "sdk_version": sdk_version,
+            "max_queries_per_target_session": max_queries_per_target_session,
+            "budget_plan": budget_plan,
             "login_attempted": False,
             "query_calls": 0,
             "retry_count": 0,
@@ -1447,6 +1513,8 @@ def query_daily_range_rows(
         "available_at": None,
         "published_at": None,
         "sdk_version": sdk_version,
+        "max_queries_per_target_session": max_queries_per_target_session,
+        "budget_plan": budget_plan,
         "endpoint": endpoint,
         "socket_timeout_seconds": float(timeout_seconds),
         "fields": _QUERY_FIELDS.split(","),

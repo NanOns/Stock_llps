@@ -1704,6 +1704,106 @@ td.empty {
   line-height: 1.5;
 }
 
+.job-reset-notice {
+  padding: 0.75rem 0.9rem;
+  border-left: 3px solid #b65d4a;
+  border-radius: 0 8px 8px 0;
+  background: #fff5f2;
+  color: #713e32;
+  line-height: 1.55;
+}
+
+.data-reset-dialog {
+  width: min(860px, calc(100vw - 32px));
+  max-width: 860px;
+}
+
+.job-reset-summary {
+  max-height: min(48vh, 520px);
+  overflow: auto;
+  padding: 0.85rem;
+  border: 1px solid #e1c5bc;
+  border-radius: 10px;
+  background: #fffaf8;
+}
+
+.job-reset-summary h3 {
+  margin: 0.5rem 0;
+  color: #713e32;
+}
+
+.job-reset-summary p {
+  margin: 0.35rem 0;
+  overflow-wrap: anywhere;
+}
+
+.job-reset-summary table {
+  width: 100%;
+  border-collapse: collapse;
+}
+
+.job-reset-summary th,
+.job-reset-summary td {
+  padding: 0.45rem;
+  border-bottom: 1px solid #efdcd6;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.job-reset-step {
+  margin-top: 1rem;
+  padding: 0.9rem;
+  border: 1px solid #e5e9e5;
+  border-radius: 10px;
+}
+
+.job-reset-step h3 {
+  margin: 0 0 0.7rem;
+  font-size: 1rem;
+}
+
+.job-reset-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 0.6rem;
+  color: #374f46;
+  line-height: 1.5;
+}
+
+.job-reset-check input {
+  margin-top: 0.2rem;
+}
+
+.job-reset-phrase-label {
+  display: block;
+  margin: 0.7rem 0 0.35rem;
+  color: #536960;
+}
+
+#dataInitResetPhrase {
+  width: min(100%, 420px);
+  min-height: 40px;
+  margin-bottom: 0.8rem;
+  padding: 0.4rem 0.55rem;
+  border: 1px solid #cfdcd4;
+  border-radius: 6px;
+}
+
+.button.danger {
+  border: 1px solid #953f31;
+  background: #a84b3b;
+  color: #fff;
+}
+
+.button.danger:hover:not(:disabled) {
+  background: #873b2f;
+}
+
+.button.danger:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 .job-plan {
   margin-top: 1rem;
   padding: 0.85rem 1rem;

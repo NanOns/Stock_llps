@@ -757,6 +757,17 @@
               </p>
               <div class="job-controls">
                 <label>
+                  初始化范围
+                  <select id="dataInitMode">
+                    <option value="REUSE_RAW">
+                      复用已有Raw，补算或重算派生结果
+                    </option>
+                    <option value="RESET_ALL_BUSINESS_FACTS">
+                      清空本项目全部业务事实后重新初始化
+                    </option>
+                  </select>
+                </label>
+                <label>
                   研究截止官方交易会话
                   <select
                     id="dataInitTarget"
@@ -772,6 +783,18 @@
                     max="32767"
                     step="1"
                     value="200"
+                  />
+                </label>
+                <label>
+                  Core/Profile共享历史输入窗口
+                  <input
+                    id="dataInitProfileHistory"
+                    type="number"
+                    min="1"
+                    max="32767"
+                    step="1"
+                    placeholder="读取当前算法窗口配置"
+                    aria-describedby="dataInitProfileHistoryHelp"
                   />
                 </label>
                 <div class="job-quick-values" aria-label="历史会话快捷值">
@@ -792,6 +815,12 @@
                   <span>或输入自定义正整数</span>
                 </div>
               </div>
+              <p class="muted">
+                默认读取最近200个官方会话作为基础Raw和预热输入；画像及每个已实现算法分别默认只保存最近5个输出会话，可在模块项中单独调整。
+              </p>
+              <p id="dataInitProfileHistoryHelp" class="muted">
+                此窗口单独控制Core/Profile逐个输出日读取的历史长度，不随Raw总量或输出会话数变化；初始值取当前Profile窗口配置，若没有该值则取Core最大实际回看窗口。
+              </p>
               <div
                 id="dataInitModules"
                 class="job-module-picker"
@@ -800,7 +829,7 @@
                 <p class="muted">正在读取实际可用的来源与算法模块…</p>
               </div>
               <div class="job-controls job-scope-controls">
-                <label>
+                <label id="dataInitOperationWrap">
                   执行方式
                   <select id="dataInitOperation">
                     <option value="FILL_MISSING">仅补齐缺失结果</option>
@@ -811,7 +840,10 @@
                 </label>
               </div>
               <p class="muted">
-                基础Raw窗口用于来源读取与必要预热；每个已选模块只保存其指定的最近N个官方输出会话。基础Raw默认保留，清理操作只允许作用于预览中明确列出的派生事实。
+                基础Raw窗口用于来源读取与必要预热；每个已选模块只保存其指定的最近N个官方输出会话。“复用Raw”模式只补算或清理预览中的派生事实；整库清理必须选择上方的显式重初始化模式。
+              </p>
+              <p id="dataInitResetNotice" class="job-reset-notice" hidden>
+                整库重初始化会清除预览中列出的本项目业务事实，并保留数据库结构、迁移记录、运行身份和必要配置。必须通过来源与范围预检，再逐步确认后提交一个可跟踪任务。
               </p>
               <div class="job-actions">
                 <button
@@ -871,6 +903,18 @@
               </p>
               <div class="job-controls job-scope-controls">
                 <label>
+                  日更范围
+                  <select id="dataDailyMode">
+                    <option value="FULL_THREE_LAYERS">
+                      FULL_THREE_LAYERS · 完整三层日更
+                    </option>
+                    <option value="SOURCE_ONLY">
+                      SOURCE_ONLY · 仅增量更新第一层来源
+                    </option>
+                    <option value="CUSTOM">自定义模块范围</option>
+                  </select>
+                </label>
+                <label>
                   执行方式
                   <select id="dataDailyOperation">
                     <option value="FILL_MISSING">仅补齐缺失结果</option>
@@ -887,6 +931,11 @@
               >
                 <p class="muted">正在读取实际可用的来源与算法模块…</p>
               </div>
+              <p class="muted">
+                FULL_THREE_LAYERS
+                选择全部可执行来源、基础画像和研究模块；SOURCE_ONLY
+                只选择第一层来源，第二、三层生产者不会启动。
+              </p>
               <div class="job-actions">
                 <button
                   id="refreshDataDaily"
@@ -1031,6 +1080,77 @@
           查看该代码的关注观察
         </button>
         <div id="stockContent"></div>
+      </div>
+    </dialog>
+    <dialog id="dataInitResetDialog" class="modal data-reset-dialog">
+      <div class="dialog-head">
+        <div>
+          <span class="section-kicker">BUSINESS FACT RESET</span>
+          <h2>清空业务事实并重新初始化</h2>
+          <p>再次核对数据库范围、来源和输出会话后提交单个任务。</p>
+        </div>
+        <button
+          class="icon-button"
+          data-close="dataInitResetDialog"
+          aria-label="取消并关闭"
+        >
+          ×
+        </button>
+      </div>
+      <div class="dialog-body">
+        <div id="dataInitResetSummary" class="job-reset-summary"></div>
+        <section id="dataInitResetStepOne" class="job-reset-step">
+          <h3>第一步：核对清理范围</h3>
+          <label class="job-reset-check">
+            <input id="dataInitResetReviewed" type="checkbox" />
+            <span>我已核对目标数据库、业务表、预计行数、来源及保留对象。</span>
+          </label>
+          <div class="job-actions">
+            <button
+              id="dataInitResetContinue"
+              class="button primary"
+              type="button"
+              disabled
+            >
+              继续第二步
+            </button>
+          </div>
+        </section>
+        <section id="dataInitResetStepTwo" class="job-reset-step" hidden>
+          <h3>第二步：明确确认不可直接撤销的清理</h3>
+          <label class="job-reset-phrase-label" for="dataInitResetPhrase">
+            输入“清空本项目全部业务事实”继续
+          </label>
+          <input
+            id="dataInitResetPhrase"
+            type="text"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <label class="job-reset-check">
+            <input id="dataInitResetFinalAck" type="checkbox" />
+            <span>我确认按当前预检范围清空业务事实并开始初始化。</span>
+          </label>
+          <div class="job-actions">
+            <button
+              id="dataInitResetConfirm"
+              class="button danger"
+              type="button"
+              disabled
+            >
+              确认清空并初始化
+            </button>
+          </div>
+        </section>
+        <div class="job-actions">
+          <button
+            class="button subtle"
+            data-close="dataInitResetDialog"
+            type="button"
+          >
+            取消，不清理
+          </button>
+        </div>
       </div>
     </dialog>
   </body>

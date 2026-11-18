@@ -29,6 +29,10 @@ _EXIT_PERMISSION = 4
 
 _EXIT_ENGINEERING = 5
 
+_MAX_BAOSTOCK_LOGIN_BATCHES = 10000
+
+_MAX_BAOSTOCK_QUERIES_PER_TARGET_SESSION = 10
+
 
 class DiagnosticError(Exception):
     """可向用户显示的配置或能力不可用错误。"""
@@ -253,17 +257,21 @@ def _validate_config(config: Any) -> None:
     budget = _require_mapping(
         bao.get("request_budget"), "source_policy.baostock_supplement.request_budget"
     )
+    max_logins = budget.get("max_logins")
+    max_queries = budget.get("max_queries_per_target_session")
+    query_timeout = budget.get("query_timeout_seconds")
     if (
         bao.get("contract") != "STOCK-A-OPTIONAL-BAOSTOCK-SUPPLEMENT/R1"
         or bao.get("request_policy") != "NOT_REQUESTED"
         or bao.get("reason_code") != "OPTIONAL_SOURCE_NOT_REQUESTED"
         or bao.get("required_for_core") is not False
-        or budget
-        != {
-            "max_logins": 1,
-            "max_queries_per_target_session": 10,
-            "query_timeout_seconds": 30,
-        }
+        or type(max_logins) is not int
+        or not 1 <= max_logins <= _MAX_BAOSTOCK_LOGIN_BATCHES
+        or type(max_queries) is not int
+        or not 1 <= max_queries <= _MAX_BAOSTOCK_QUERIES_PER_TARGET_SESSION
+        or isinstance(query_timeout, bool)
+        or not isinstance(query_timeout, (int, float))
+        or not 0.2 <= float(query_timeout) <= 30.0
     ):
         raise DiagnosticError(
             "CONFIG_INVALID", "BaoStock可选来源策略或本批请求预算不符合合同"

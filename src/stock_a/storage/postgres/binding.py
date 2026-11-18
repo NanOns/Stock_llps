@@ -59,6 +59,9 @@ _MIGRATION_FILES = (
     "0045_r08_biz09_baostock_source_daily.sql",
     "0046_r08_biz09_layered_jobs_cleanup.sql",
     "0047_r08_biz09_baostock_input_units.sql",
+    "0048_r08_biz10_baostock_typed_idempotency.sql",
+    "0049_r08_biz10_typed_job_modes_and_provenance.sql",
+    "0050_r08_biz10_register_current_job_modules.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -101,6 +104,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R08_BIZ07_LAUNCH_FORMAL_ADMISSION_FROZEN_LINE_R1": frozenset({41, 42}),
     "R08_BIZ08_DATA_JOBS_AND_HISTORY_WINDOW_R1": frozenset({43, 44}),
     "R08_BIZ09_LAYERED_DATA_JOBS_SECTOR_BAOSTOCK_R1": frozenset({45, 46, 47}),
+    "R08_BIZ10_RESET_INITIALIZE_LAYERED_DAILY_R1": frozenset({48, 49, 50}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -271,6 +275,9 @@ _RELATIONS_BY_MIGRATION_COUNT[45] = _RELATIONS_BY_MIGRATION_COUNT[44] | {
 }
 _RELATIONS_BY_MIGRATION_COUNT[46] = _RELATIONS_BY_MIGRATION_COUNT[45]
 _RELATIONS_BY_MIGRATION_COUNT[47] = _RELATIONS_BY_MIGRATION_COUNT[46]
+_RELATIONS_BY_MIGRATION_COUNT[48] = _RELATIONS_BY_MIGRATION_COUNT[47]
+_RELATIONS_BY_MIGRATION_COUNT[49] = _RELATIONS_BY_MIGRATION_COUNT[48]
+_RELATIONS_BY_MIGRATION_COUNT[50] = _RELATIONS_BY_MIGRATION_COUNT[49]
 
 
 class BindingRefused(Exception):

@@ -223,7 +223,6 @@ def read_baostock_detail(
         "unit_contract": contract,
         "returned_fields": row.get("returned_fields", []),
         "fields": fields,
-        "normalized_sha256": str(row.get("normalized_sha256", "")).strip(),
         "source_network_called": False,
         "database_write_attempted": False,
     }

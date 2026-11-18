@@ -2,6 +2,9 @@ const STATUS_LABELS = {
   AVAILABLE: "可查看",
   BLOCKED_NOT_AUTHORIZED: "受限：未获行情执行授权",
   BLOCKED_SOURCE_NOT_AVAILABLE: "受限：来源不可用",
+  BLOCKED_BAOSTOCK_REQUEST_NOT_ENABLED: "BaoStock请求未启用；其它来源继续",
+  RESET_SOURCE_PREFLIGHT_REQUIRED: "清理前来源核验待执行",
+  RESET_PREVIEW_STALE: "清理范围已变化，请重新预览",
   BLOCKED_HISTORY_INSUFFICIENT: "受限：历史会话不足",
   HISTORY_INSUFFICIENT: "历史会话不足",
   READY: "可执行",
@@ -24,8 +27,10 @@ const STATUS_LABELS = {
 };
 
 const STAGE_LABELS = {
+  BUSINESS_RESET: "清理业务事实",
   SOURCE_RAW: "来源与 Raw",
   SOURCE_BAOSTOCK: "BaoStock补充来源",
+  SOURCE_SECTOR_MEMBERS: "行业 / GN成员来源",
   CORE_PROFILE: "Core / Profile",
   STATIC_RESEARCH: "静态研究",
   D0_D1: "D0 / D1",
@@ -33,6 +38,7 @@ const STAGE_LABELS = {
   MARKET_PARTICIPATION: "成交参与",
   FOCUS_FORMAL: "Focus正式准入",
   SECTOR_PULSE: "行业 / 概念 PULSE",
+  SECTOR_TRANSITION: "行业 / 概念相邻变化",
   SECTOR_FOLLOWUP: "板块跨日跟踪",
 };
 
@@ -138,11 +144,27 @@ function renderProgress(root, job) {
     ? units.filter((unit) => CLOSED_UNIT_STATUSES.includes(unit.status)).length
     : job.completed_units;
   const plannedUnits = job.planned_units ?? (units.length || null);
+  const workflowMode =
+    job.daily_mode ||
+    job.initialization_mode ||
+    job.request?.daily_mode ||
+    job.request?.initialization_mode;
+  const workflowLabel =
+    workflowMode === "FULL_THREE_LAYERS"
+      ? "完整三层日更"
+      : workflowMode === "SOURCE_ONLY"
+        ? "仅第一层来源"
+        : workflowMode === "RESET_ALL_BUSINESS_FACTS"
+          ? "清空业务事实后重初始化"
+          : workflowMode === "REUSE_RAW"
+            ? "复用Raw补算派生"
+            : workflowMode || "";
   const heading = element("div", null, "job-progress-heading");
   heading.append(
     element(
       "div",
       (job.mode === "INITIALIZE" ? "数据初始化" : "数据日更") +
+        (workflowLabel ? ` · ${workflowLabel}` : "") +
         " · " +
         (job.target_session || "目标会话未知"),
       "job-progress-title",
@@ -314,7 +336,14 @@ function renderRecent(root, jobs) {
       job.d1_output_session_count;
     const tr = document.createElement("tr");
     tr.append(
-      element("td", job.mode === "INITIALIZE" ? "初始化" : "手动日更"),
+      element(
+        "td",
+        job.mode === "INITIALIZE"
+          ? job.initialization_mode === "RESET_ALL_BUSINESS_FACTS"
+            ? "重置后初始化"
+            : "复用Raw初始化"
+          : job.daily_mode || "手动日更",
+      ),
       element("td", job.target_session || "未知"),
       element("td", windowLabel),
       element("td", statusLabel(job.status)),
@@ -344,8 +373,11 @@ function currentPageBody(page) {
   if (page === "initialize") {
     return {
       mode: "INITIALIZE",
+      initialization_mode: byId("dataInitMode").value,
       target_session: byId("dataInitTarget").value || undefined,
       history_session_count: Number(byId("dataInitHistory").value),
+      profile_history_session_count:
+        Number(byId("dataInitProfileHistory").value) || null,
       source_modules: modules
         .filter((item) => item.layer === "SOURCE")
         .map((item) => item.code),
@@ -363,6 +395,7 @@ function currentPageBody(page) {
   }
   return {
     mode: "MANUAL_DAILY",
+    daily_mode: byId("dataDailyMode").value,
     source_modules: modules
       .filter((item) => item.layer === "SOURCE")
       .map((item) => item.code),
@@ -374,7 +407,7 @@ function currentPageBody(page) {
       .map((item) => item.code),
     output_session_count:
       modules.find((item) => item.outputSessionCount !== null)
-        ?.outputSessionCount || 0,
+        ?.outputSessionCount || 1,
     module_output_session_counts: Object.fromEntries(
       modules
         .filter((item) => item.outputSessionCount !== null)
@@ -408,6 +441,11 @@ export function mountDataJobPages(api) {
     timer: null,
     loading: false,
     planBody: null,
+    resetPreviewBody: null,
+    resetResumeFingerprint: null,
+    resetDialogOpen: false,
+    startPending: false,
+    profileHistoryTouched: false,
   };
 
   function normalizeModules(capabilities) {
@@ -446,6 +484,12 @@ export function mountDataJobPages(api) {
       [...root.querySelectorAll("[data-module-code]")].map((input) => [
         input.dataset.moduleCode,
         input.checked,
+      ]),
+    );
+    const previousCounts = new Map(
+      [...root.querySelectorAll("[data-output-for]")].map((input) => [
+        input.dataset.outputFor,
+        input.value,
       ]),
     );
     const modules = normalizeModules(capabilities).filter((item) => {
@@ -488,9 +532,15 @@ export function mountDataJobPages(api) {
         checkbox.dataset.cleanupAllowed = String(item.cleanup_allowed === true);
         checkbox.dataset.cleanupReason = item.cleanup_reason || "";
         checkbox.disabled = !available;
+        const defaultSelected =
+          page === "daily"
+            ? byId("dataDailyMode").value === "SOURCE_ONLY"
+              ? layer === "SOURCE"
+              : true
+            : Boolean(item.default_selected);
         checkbox.checked = previous.has(code)
           ? previous.get(code)
-          : Boolean(item.default_selected) && available;
+          : defaultSelected && available;
         const moduleLabel = element("label", null, "job-module-label");
         moduleLabel.append(
           checkbox,
@@ -511,7 +561,8 @@ export function mountDataJobPages(api) {
           countInput.min = "1";
           countInput.max = "32767";
           countInput.step = "1";
-          countInput.value = String(item.default_output_session_count || 1);
+          countInput.value =
+            previousCounts.get(code) || (page === "daily" ? "1" : "5");
           countInput.id = countId;
           countInput.setAttribute(
             "aria-label",
@@ -527,13 +578,44 @@ export function mountDataJobPages(api) {
           countInput.addEventListener("input", () => invalidateStart(page));
           wrapper.append(countLabel, countInput, element("span", "个官方会话"));
         }
-        checkbox.addEventListener("change", () => invalidateStart(page));
+        checkbox.addEventListener("change", () => {
+          if (page === "daily") byId("dataDailyMode").value = "CUSTOM";
+          invalidateStart(page);
+        });
         options.append(wrapper);
       }
       group.append(options);
       root.append(group);
     }
     updateCleanupAvailability(page);
+  }
+
+  function applyDailyPreset() {
+    const sourceOnly = byId("dataDailyMode").value === "SOURCE_ONLY";
+    if (byId("dataDailyMode").value === "CUSTOM") {
+      invalidateStart("daily");
+      return;
+    }
+    for (const checkbox of byId("dataDailyModules").querySelectorAll(
+      "[data-module-code]",
+    )) {
+      const isSource = checkbox.dataset.moduleLayer === "SOURCE";
+      const available = checkbox.dataset.moduleAvailable === "true";
+      checkbox.checked = available && (sourceOnly ? isSource : true);
+      if (checkbox.dataset.outputCountId) {
+        byId(checkbox.dataset.outputCountId).disabled = !checkbox.checked;
+      }
+    }
+    byId("dataDailyOperation").value = "FILL_MISSING";
+    invalidateStart("daily");
+  }
+
+  function updateInitializationMode() {
+    const reset = byId("dataInitMode").value === "RESET_ALL_BUSINESS_FACTS";
+    byId("dataInitResetNotice").hidden = !reset;
+    byId("dataInitOperationWrap").hidden = reset;
+    byId("dataInitOperation").disabled = reset;
+    invalidateStart("initialize");
   }
 
   function updateCleanupAvailability(page) {
@@ -589,6 +671,21 @@ export function mountDataJobPages(api) {
     byId(page === "initialize" ? "startDataInit" : "startDataDaily").disabled =
       true;
     state.planBody = null;
+    if (page === "initialize") {
+      state.resetResumeFingerprint = null;
+      state.resetPreviewBody = null;
+    }
+  }
+
+  function requestBodyForPage(page) {
+    const body = currentPageBody(page);
+    if (page === "initialize" && state.resetResumeFingerprint) {
+      return {
+        ...body,
+        reset_preview_fingerprint: state.resetResumeFingerprint,
+      };
+    }
+    return body;
   }
 
   function populateTargets(capabilities) {
@@ -659,15 +756,218 @@ export function mountDataJobPages(api) {
       ? "未启动"
       : "受限";
     populateTargets(capabilities);
+    if (!state.profileHistoryTouched) {
+      const profileWindow =
+        capabilities.current_profile_history_session_count ??
+        capabilities.core_max_actual_lookback;
+      const normalizedProfileWindow = Number(profileWindow);
+      byId("dataInitProfileHistory").value =
+        Number.isInteger(normalizedProfileWindow) && normalizedProfileWindow > 0
+          ? String(normalizedProfileWindow)
+          : "";
+    }
     renderModulePicker("initialize", capabilities);
     renderModulePicker("daily", capabilities);
     renderRecent(byId("dataInitRecent"), capabilities.recent_jobs);
     renderRecent(byId("dataDailyRecent"), capabilities.recent_jobs);
   }
 
+  function renderBusinessResetPreview(root, preview, body) {
+    if (!preview) return;
+    root.replaceChildren();
+    const title = element(
+      "h3",
+      preview.resume_existing_reset
+        ? "恢复既有重初始化任务"
+        : "业务事实清理与重初始化预览",
+    );
+    root.append(title);
+    const database =
+      preview.database_name ||
+      preview.database_identity ||
+      preview.database ||
+      "未提供";
+    const schema = preview.schema || preview.schema_name || "未提供";
+    const targets =
+      preview.target_sessions ||
+      (preview.target_session ? [preview.target_session] : []);
+    const targetRange =
+      Array.isArray(targets) && targets.length
+        ? `${targets.length}个官方会话（${targets[0]} 至 ${targets[targets.length - 1]}）`
+        : "未提供";
+    const sourceModules = Array.isArray(body.source_modules)
+      ? body.source_modules
+      : [];
+    const rawCount = body.history_session_count;
+    const outputs = Object.entries(body.module_output_session_counts || {}).map(
+      ([module, sessions]) => `${module}：${sessions}个输出会话`,
+    );
+    const scope = document.createElement("dl");
+    scope.className = "job-cleanup-preview";
+    for (const [label, value] of [
+      ["PG数据库", database],
+      ["业务schema", schema],
+      ["目标官方会话", targetRange],
+      ["基础Raw目标", `${rawCount || "未提供"}个官方会话`],
+      [
+        "Core/Profile历史输入窗口",
+        body.profile_history_session_count
+          ? `${body.profile_history_session_count}个官方会话`
+          : "未提供当前算法窗口",
+      ],
+      ["来源选择", sourceModules.join("、") || "未选择"],
+      ["画像与算法输出", outputs.join("；") || "未选择派生模块"],
+      ["范围预检", preview.complete === true ? "完整" : "未完成"],
+      [
+        "必需来源可用性",
+        preview.source_ready === true || preview.sources_ready === true
+          ? "已确认可用"
+          : preview.source_preflight_required_before_delete === true
+            ? preview.resume_existing_reset
+              ? "恢复前逐项核验；清理步骤已提交"
+              : "任务启动后逐项核验；未通过则保留现有事实"
+            : "未证明可重建",
+      ],
+    ]) {
+      scope.append(element("dt", label), element("dd", value));
+    }
+    root.append(scope);
+
+    const tableRows = Array.isArray(preview.affected_tables)
+      ? preview.affected_tables
+      : [];
+    root.append(
+      element(
+        "h3",
+        preview.resume_existing_reset
+          ? "当前已重建表与PG读回行数"
+          : "将清除的业务表与预计行数",
+      ),
+    );
+    if (!tableRows.length) {
+      root.append(
+        element(
+          "p",
+          "后端尚未返回精确业务表清单；在清单完整前不能确认或清理。",
+          "job-error",
+        ),
+      );
+    } else {
+      const table = document.createElement("table");
+      const head = document.createElement("tr");
+      head.append(element("th", "业务表"), element("th", "预计行数"));
+      const thead = document.createElement("thead");
+      thead.append(head);
+      table.append(thead);
+      const tbody = document.createElement("tbody");
+      for (const row of tableRows) {
+        const name =
+          typeof row === "string"
+            ? row
+            : row.table || row.table_name || row.business_table || "未知";
+        const rows =
+          typeof row === "string" ? null : (row.row_count ?? row.rows);
+        const tr = document.createElement("tr");
+        tr.append(element("td", name), element("td", count(rows)));
+        tbody.append(tr);
+      }
+      table.append(tbody);
+      root.append(table);
+    }
+    root.append(
+      element("p", "预计清理总行数：" + count(preview.affected_rows)),
+    );
+    const retained =
+      preview.retained_objects ||
+      preview.retained_identity_migration_config ||
+      preview.preserved_objects ||
+      preview.retained ||
+      [];
+    const retainedItems = Array.isArray(retained)
+      ? retained.map(plainValue)
+      : Object.entries(retained).map(
+          ([name, value]) => `${name}：${plainValue(value)}`,
+        );
+    root.append(
+      element("h3", "将保留的运行基础"),
+      element(
+        "p",
+        retainedItems.join("；") ||
+          "后端尚未明确身份、迁移记录及运行配置保留范围。",
+        retainedItems.length ? "" : "job-error",
+      ),
+    );
+    if (preview.blocked_reasons?.length) {
+      root.append(
+        element(
+          "p",
+          "预检阻断：" + preview.blocked_reasons.join("、"),
+          "job-error",
+        ),
+      );
+    }
+    if (preview.irreversible_warning) {
+      root.append(element("p", preview.irreversible_warning, "job-error"));
+    } else {
+      root.append(
+        element(
+          "p",
+          preview.resume_existing_reset
+            ? "原清理事务已经提交；本次只验证来源并从已完成PG单元继续，不会再次清空。"
+            : "此操作会先清除已列出的业务事实，清除结果无法直接撤销；只有预检完整且所选必需来源可以合法重建时才会继续。",
+          "job-error",
+        ),
+      );
+    }
+  }
+
+  function resetPreviewReady(preview) {
+    if (
+      preview?.complete !== true ||
+      (preview.source_ready !== true &&
+        preview.sources_ready !== true &&
+        preview.source_preflight_required_before_delete !== true) ||
+      typeof preview.reset_preview_fingerprint !== "string" ||
+      preview.reset_preview_fingerprint.length === 0 ||
+      !Number.isFinite(Number(preview.affected_rows))
+    ) {
+      return false;
+    }
+    const tables = preview.affected_tables;
+    const retained =
+      preview.retained_objects ||
+      preview.retained_identity_migration_config ||
+      preview.preserved_objects ||
+      preview.retained;
+    const retainedPresent = Array.isArray(retained)
+      ? retained.length > 0
+      : retained && typeof retained === "object"
+        ? Object.keys(retained).length > 0
+        : Boolean(retained);
+    return (
+      Array.isArray(tables) &&
+      tables.length > 0 &&
+      tables.every((row) => {
+        const name =
+          typeof row === "string"
+            ? row
+            : row?.table || row?.table_name || row?.business_table;
+        const rowCount =
+          typeof row === "string" ? null : (row?.row_count ?? row?.rows);
+        return (
+          Boolean(name) &&
+          rowCount !== null &&
+          rowCount !== undefined &&
+          Number.isFinite(Number(rowCount))
+        );
+      }) &&
+      retainedPresent
+    );
+  }
+
   function renderPlan(plan, page) {
     state.plan = plan;
-    state.planBody = JSON.stringify(currentPageBody(page));
+    state.planBody = JSON.stringify(requestBodyForPage(page));
     const root = byId(page === "initialize" ? "dataInitPlan" : "dataDailyPlan");
     root.replaceChildren();
     byId(
@@ -686,6 +986,40 @@ export function mountDataJobPages(api) {
       byId("startDataDaily").textContent = plan.resume_existing_job
         ? "恢复未完成日更"
         : "手动开始日更";
+    } else {
+      const resetPreview = plan.reset_preview || plan.business_reset_preview;
+      byId("startDataInit").textContent =
+        currentPageBody(page).initialization_mode ===
+          "RESET_ALL_BUSINESS_FACTS" &&
+        !plan.executable &&
+        resetPreviewReady(resetPreview)
+          ? "查看清理确认"
+          : "开始数据初始化";
+    }
+    if (
+      page === "initialize" &&
+      currentPageBody(page).initialization_mode === "RESET_ALL_BUSINESS_FACTS"
+    ) {
+      const preview = plan.reset_preview || plan.business_reset_preview;
+      if (preview) {
+        byId("startDataInit").textContent =
+          plan.resume_existing_job || preview.resume_existing_reset
+            ? "恢复未完成重初始化"
+            : !plan.executable && resetPreviewReady(preview)
+              ? "查看清理确认"
+              : "清空后重初始化";
+        const previewRoot = element("section", null, "job-reset-summary");
+        renderBusinessResetPreview(previewRoot, preview, currentPageBody(page));
+        root.append(previewRoot);
+      } else {
+        root.append(
+          element(
+            "p",
+            "后端尚未返回全库重初始化预览；未提供完整表/行数和来源可用性时不能启动。",
+            "job-error",
+          ),
+        );
+      }
     }
     if (plan.resume_existing_job) {
       root.append(
@@ -702,16 +1036,29 @@ export function mountDataJobPages(api) {
           "p",
           "基础Raw窗口 " +
             plan.raw_history_session_count_available +
-            " 个官方会话；PG已闭合 " +
+            " 个本次计算输入官方会话；精确可复用同包已闭合 " +
             plan.raw_history_sessions_in_pg +
             " 个，未在PG中找到 " +
             (plan.missing_raw_sessions || []).length +
+            " 个；截止内PG总Raw会话 " +
+            (plan.source_coverage?.pg_closed_raw_session_count ?? "未知") +
             " 个；当前画像来源包 " +
             (plan.source_coverage?.active_pg_source_package_id ||
               "未唯一绑定") +
             "。来源覆盖：" +
             (plan.source_coverage?.status || "未知") +
             "。",
+        ),
+      );
+    }
+    if (Number.isInteger(currentPageBody(page).profile_history_session_count)) {
+      root.append(
+        element(
+          "p",
+          "Core/Profile每个输出日分别使用 " +
+            currentPageBody(page).profile_history_session_count +
+            " 个官方历史会话；该窗口独立于Raw总量和输出保存范围。",
+          "muted",
         ),
       );
     }
@@ -1020,8 +1367,18 @@ export function mountDataJobPages(api) {
         selected.every(
           (item) => item.layer !== "SOURCE" && item.cleanupAllowed,
         ));
+    const resetPreview = plan.reset_preview || plan.business_reset_preview;
+    const resetReviewOnly =
+      page === "initialize" &&
+      currentBody.initialization_mode === "RESET_ALL_BUSINESS_FACTS" &&
+      !plan.executable &&
+      resetPreviewReady(resetPreview);
+    const resetReady =
+      page !== "initialize" ||
+      currentBody.initialization_mode !== "RESET_ALL_BUSINESS_FACTS" ||
+      resetPreviewReady(resetPreview);
     byId(page === "initialize" ? "startDataInit" : "startDataDaily").disabled =
-      !plan.executable ||
+      (!plan.executable && !resetReviewOnly) ||
       !(
         body.source_modules.length +
         body.base_modules.length +
@@ -1029,7 +1386,8 @@ export function mountDataJobPages(api) {
       ) ||
       !cleanupScopeValid ||
       (cleanupRequested &&
-        (!plan.cleanup_preview || plan.cleanup_preview.complete !== true));
+        (!plan.cleanup_preview || plan.cleanup_preview.complete !== true)) ||
+      !resetReady;
   }
 
   async function loadJob(jobId, page) {
@@ -1081,7 +1439,61 @@ export function mountDataJobPages(api) {
     );
     try {
       const capabilities = await api("/api/product/data-jobs/capabilities");
+      let resumableResetJob = null;
+      if (page === "initialize") {
+        resumableResetJob = (capabilities.recent_jobs || []).find(
+          (job) =>
+            job.mode === "INITIALIZE" &&
+            job.initialization_mode === "RESET_ALL_BUSINESS_FACTS" &&
+            [
+              "RUNNING",
+              "FAILED",
+              "INTERRUPTED",
+              "INCOMPLETE",
+              "BLOCKED",
+            ].includes(job.status) &&
+            typeof job.reset_preview_fingerprint === "string",
+        );
+        state.resetResumeFingerprint =
+          resumableResetJob?.reset_preview_fingerprint || null;
+      }
       renderCapabilities(capabilities);
+      if (resumableResetJob) {
+        byId("dataInitMode").value = "RESET_ALL_BUSINESS_FACTS";
+        byId("dataInitTarget").value = resumableResetJob.target_session || "";
+        byId("dataInitHistory").value = String(
+          resumableResetJob.history_session_count || "",
+        );
+        byId("dataInitProfileHistory").value = String(
+          resumableResetJob.profile_history_session_count || "",
+        );
+        const savedCounts = Object.fromEntries(
+          (resumableResetJob.selected_modules || []).map((code, index) => [
+            code,
+            resumableResetJob.module_output_session_counts?.[index],
+          ]),
+        );
+        for (const checkbox of byId("dataInitModules").querySelectorAll(
+          "[data-module-code]",
+        )) {
+          checkbox.checked = (
+            resumableResetJob.selected_modules || []
+          ).includes(checkbox.dataset.moduleCode);
+          const countInput = byId(checkbox.dataset.outputCountId || "");
+          if (
+            countInput &&
+            Number.isInteger(savedCounts[checkbox.dataset.moduleCode])
+          ) {
+            countInput.value = String(savedCounts[checkbox.dataset.moduleCode]);
+            countInput.disabled = !checkbox.checked;
+          }
+        }
+        byId("dataInitOperation").value =
+          resumableResetJob.operation || "FILL_MISSING";
+        updateInitializationMode();
+        state.resetResumeFingerprint =
+          resumableResetJob.reset_preview_fingerprint;
+      }
       await loadJob(null, page);
       const result = await api(
         "/api/product/data-jobs/plan",
@@ -1102,7 +1514,7 @@ export function mountDataJobPages(api) {
 
   async function preview(page) {
     try {
-      const body = currentPageBody(page);
+      const body = requestBodyForPage(page);
       const result = await api("/api/product/data-jobs/plan", body);
       renderPlan(result.plan, page);
     } catch (error) {
@@ -1117,17 +1529,86 @@ export function mountDataJobPages(api) {
     }
   }
 
-  async function start(page) {
+  function openResetConfirmation(body) {
+    const preview =
+      state.plan?.reset_preview || state.plan?.business_reset_preview;
+    const ready = resetPreviewReady(preview);
+    if (!ready) {
+      throw new Error("全库清理范围或必需来源尚未完整核验；没有执行清理。");
+    }
+    state.resetPreviewBody = JSON.stringify(body);
+    renderBusinessResetPreview(byId("dataInitResetSummary"), preview, body);
+    byId("dataInitResetStepOne").hidden = false;
+    byId("dataInitResetStepTwo").hidden = true;
+    byId("dataInitResetReviewed").checked = false;
+    byId("dataInitResetPhrase").value = "";
+    byId("dataInitResetFinalAck").checked = false;
+    byId("dataInitResetContinue").disabled = true;
+    byId("dataInitResetConfirm").disabled = true;
+    state.resetDialogOpen = true;
+    byId("dataInitResetDialog").showModal();
+  }
+
+  function updateResetConfirmAvailability() {
+    byId("dataInitResetContinue").disabled =
+      !byId("dataInitResetReviewed").checked || state.startPending;
+    byId("dataInitResetConfirm").disabled =
+      byId("dataInitResetPhrase").value !== "清空本项目全部业务事实" ||
+      !byId("dataInitResetFinalAck").checked ||
+      state.startPending;
+  }
+
+  async function start(page, { resetConfirmed = false } = {}) {
+    if (state.startPending) return;
+    state.startPending = true;
+    updateResetConfirmAvailability();
     const button = byId(
       page === "initialize" ? "startDataInit" : "startDataDaily",
     );
     button.disabled = true;
     try {
-      const body = currentPageBody(page);
+      const body = requestBodyForPage(page);
       if (state.planBody !== JSON.stringify(body)) {
         await preview(page);
       }
-      if (!state.plan?.executable) return;
+      const resetMode =
+        page === "initialize" &&
+        body.initialization_mode === "RESET_ALL_BUSINESS_FACTS";
+      if (!state.plan?.executable) {
+        const preview =
+          state.plan?.reset_preview || state.plan?.business_reset_preview;
+        if (resetMode && resetPreviewReady(preview) && !resetConfirmed) {
+          openResetConfirmation(body);
+          return;
+        }
+        if (resetMode && resetConfirmed) {
+          throw new Error(
+            "当前来源/执行前置条件未通过；未创建任务，也未清理业务事实。",
+          );
+        }
+        return;
+      }
+      if (resetMode && !resetConfirmed) {
+        openResetConfirmation(body);
+        return;
+      }
+      let requestBody = body;
+      if (resetMode) {
+        const preview =
+          state.plan.reset_preview || state.plan.business_reset_preview;
+        if (
+          state.resetPreviewBody !== JSON.stringify(body) ||
+          !preview?.reset_preview_fingerprint
+        ) {
+          throw new Error("初始化范围已改变；请重新检查清理预览后再确认。");
+        }
+        requestBody = {
+          ...body,
+          reset_preview_fingerprint: preview.reset_preview_fingerprint,
+          reset_confirmed: true,
+        };
+        state.resetResumeFingerprint = preview.reset_preview_fingerprint;
+      }
       if (["CLEAR_DERIVED", "CLEAR_AND_REGENERATE"].includes(body.operation)) {
         if (
           selectedModules(page).some(
@@ -1159,8 +1640,9 @@ export function mountDataJobPages(api) {
         )
           return;
       }
-      const result = await api("/api/product/data-jobs/start", body);
+      const result = await api("/api/product/data-jobs/start", requestBody);
       state.latestJobId = result.job_id || result.job?.job_id || null;
+      if (resetMode) byId("dataInitResetDialog").close();
       await loadJob(state.latestJobId, page);
       const recent = await api("/api/product/data-jobs/capabilities");
       renderRecent(
@@ -1174,7 +1656,9 @@ export function mountDataJobPages(api) {
         element("p", "启动被拒绝：" + error.message, "job-error"),
       );
     } finally {
-      await preview(page);
+      state.startPending = false;
+      updateResetConfirmAvailability();
+      if (!state.resetDialogOpen) await preview(page);
     }
   }
 
@@ -1197,7 +1681,42 @@ export function mountDataJobPages(api) {
     updateCleanupAvailability("initialize");
   });
   byId("dataDailyOperation").addEventListener("change", () => {
+    if (
+      ["CLEAR_DERIVED", "CLEAR_AND_REGENERATE"].includes(
+        byId("dataDailyOperation").value,
+      )
+    ) {
+      byId("dataDailyMode").value = "CUSTOM";
+    }
     updateCleanupAvailability("daily");
+  });
+  byId("dataInitMode").addEventListener("change", updateInitializationMode);
+  byId("dataInitProfileHistory").addEventListener("input", () => {
+    state.profileHistoryTouched = true;
+  });
+  byId("dataDailyMode").addEventListener("change", applyDailyPreset);
+  byId("dataInitResetReviewed").addEventListener(
+    "change",
+    updateResetConfirmAvailability,
+  );
+  byId("dataInitResetPhrase").addEventListener(
+    "input",
+    updateResetConfirmAvailability,
+  );
+  byId("dataInitResetFinalAck").addEventListener(
+    "change",
+    updateResetConfirmAvailability,
+  );
+  byId("dataInitResetContinue").addEventListener("click", () => {
+    byId("dataInitResetStepOne").hidden = true;
+    byId("dataInitResetStepTwo").hidden = false;
+    byId("dataInitResetPhrase").focus();
+  });
+  byId("dataInitResetConfirm").addEventListener("click", () => {
+    void start("initialize", { resetConfirmed: true });
+  });
+  byId("dataInitResetDialog").addEventListener("close", () => {
+    state.resetDialogOpen = false;
   });
   for (const button of document.querySelectorAll("[data-history-sessions]")) {
     button.addEventListener("click", () => {
@@ -1207,6 +1726,9 @@ export function mountDataJobPages(api) {
   for (const id of [
     "dataInitTarget",
     "dataInitHistory",
+    "dataInitProfileHistory",
+    "dataInitMode",
+    "dataDailyMode",
     "dataInitOperation",
     "dataDailyOperation",
   ]) {

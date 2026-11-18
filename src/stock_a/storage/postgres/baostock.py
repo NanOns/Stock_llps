@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -30,6 +28,23 @@ _FIELD_NAMES = (
     "turn",
     "tradestatus",
     "is_st",
+)
+_DAILY_COLUMNS = (
+    "capture_id",
+    "source_code",
+    "source_symbol",
+    "session_date",
+    "captured_at",
+    "capture_clock_role",
+    "adjustment_flag",
+    "price_coordinate",
+    "unit_contract_version",
+    "returned_fields",
+    *(
+        f"{field_name}_{suffix}"
+        for field_name in _FIELD_NAMES
+        for suffix in ("value", "quality", "reason")
+    ),
 )
 
 
@@ -152,7 +167,7 @@ def _record_values(
     units: BaoUnitContract,
     *,
     cutoff: date,
-) -> tuple[tuple[Any, ...], str]:
+) -> tuple[Any, ...]:
     if not isinstance(capture_id, UUID):
         raise BaoStockDailyPgError("CAPTURE_ID_INVALID", "捕获标识必须是UUID")
     if not isinstance(record, BaoStockDailyRecord):
@@ -206,18 +221,6 @@ def _record_values(
         units.version,
         list(observation.returned_fields),
     ]
-    digest_values: list[Any] = [
-        str(capture_id),
-        observation.source_code,
-        symbol,
-        observation.session_date.isoformat(),
-        captured_at.isoformat(),
-        _CAPTURE_CLOCK_ROLE,
-        record.adjustment_flag,
-        record.price_coordinate,
-        units.version,
-        list(observation.returned_fields),
-    ]
     for name in _FIELD_NAMES:
         field = getattr(observation, name)
         value, quality, reason = _field_parts(
@@ -241,46 +244,13 @@ def _record_values(
                 "STATUS_VALUE_INVALID", "BaoStock状态字段只接受0或1"
             )
         values.extend((value, quality, reason))
-        digest_values.extend(
-            (str(value) if value is not None else None, quality, reason)
-        )
-    normalized_sha256 = hashlib.sha256(
-        json.dumps(digest_values, ensure_ascii=False, separators=(",", ":")).encode(
-            "utf-8"
-        )
-    ).hexdigest()
-    values.append(normalized_sha256)
-    return tuple(values), normalized_sha256
-
-
-def normalized_baostock_record_sha256(
-    capture_id: UUID,
-    record: BaoStockDailyRecord,
-    units: BaoUnitContract,
-    *,
-    cutoff: date,
-) -> str:
-    """返回与PG业务行相同的内容摘要，供事务外读回逐条核验。"""
-    return _record_values(capture_id, record, units, cutoff=cutoff)[1]
+    return tuple(values)
 
 
 _DAILY_INSERT = (
-    """INSERT INTO source_baostock_daily (
-    capture_id, source_code, source_symbol, session_date, captured_at,
-    capture_clock_role, adjustment_flag, price_coordinate,
-    unit_contract_version, returned_fields,
-    open_value, open_quality, open_reason,
-    high_value, high_quality, high_reason,
-    low_value, low_quality, low_reason,
-    close_value, close_quality, close_reason,
-    volume_value, volume_quality, volume_reason,
-    amount_value, amount_quality, amount_reason,
-    turn_value, turn_quality, turn_reason,
-    tradestatus_value, tradestatus_quality, tradestatus_reason,
-    is_st_value, is_st_quality, is_st_reason, normalized_sha256
-) VALUES ("""
-    + ", ".join(["%s"] * 38)
-    + ") ON CONFLICT (capture_id, source_code, session_date) DO NOTHING"
+    f"INSERT INTO source_baostock_daily ({', '.join(_DAILY_COLUMNS)}) "
+    f"VALUES ({', '.join(['%s'] * len(_DAILY_COLUMNS))}) "
+    "ON CONFLICT (capture_id, source_code, session_date) DO NOTHING"
 )
 
 
@@ -291,7 +261,7 @@ def persist_baostock_daily_capture(
     records: Sequence[BaoStockDailyRecord],
     units: BaoUnitContract,
     cutoff: date,
-) -> dict[str, int]:
+) -> dict[str, Any]:
     """单事务保存规范化BaoStock行；同捕获重试校验摘要，禁止越过显式截止日。"""
     if not isinstance(config, Mapping):
         raise BaoStockDailyPgError("RUNTIME_CONFIG_INVALID", "缺少唯一PG运行配置")
@@ -304,20 +274,22 @@ def persist_baostock_daily_capture(
             "RECORDS_INVALID", "一次BaoStock捕获必须包含至少一条规范行"
         )
     contract_values = _contract_values(units)
-    normalized: list[tuple[tuple[Any, ...], str]] = []
+    normalized: list[tuple[Any, ...]] = []
     keys: set[tuple[str, date]] = set()
     for record in records:
-        values, digest = _record_values(capture_id, record, units, cutoff=cutoff)
+        values = _record_values(capture_id, record, units, cutoff=cutoff)
         key = (values[1], values[3])
         if key in keys:
             raise BaoStockDailyPgError(
                 "DUPLICATE_SOURCE_ROW", "同一捕获重复返回来源代码与日期"
             )
         keys.add(key)
-        normalized.append((values, digest))
+        normalized.append(values)
 
     inserted = 0
     unchanged = 0
+    inserted_by_session: dict[str, int] = {}
+    unchanged_by_session: dict[str, int] = {}
     try:
         with source_raw._transaction(config, write=True) as (
             _connection,
@@ -346,23 +318,32 @@ FROM source_baostock_unit_contracts WHERE unit_contract_version=%s""",
                     "UNIT_CONTRACT_VERSION_CONFLICT",
                     "同一单位合同版本绑定了不同输入单位或转换倍率",
                 )
-            for values, digest in normalized:
+            for values in normalized:
                 cursor.execute(_DAILY_INSERT, values)
                 if cursor.rowcount == 1:
                     inserted += 1
+                    session_key = values[3].isoformat()
+                    inserted_by_session[session_key] = (
+                        inserted_by_session.get(session_key, 0) + 1
+                    )
                     continue
                 cursor.execute(
-                    """SELECT normalized_sha256 FROM source_baostock_daily
+                    f"""SELECT {", ".join(_DAILY_COLUMNS)}
+FROM source_baostock_daily
 WHERE capture_id=%s AND source_code=%s AND session_date=%s""",
                     (capture_id, values[1], values[3]),
                 )
                 existing = cursor.fetchone()
-                if existing is None or str(existing[0]).strip() != digest:
+                if existing is None or tuple(existing) != values:
                     raise BaoStockDailyPgError(
                         "CAPTURE_CONTENT_CONFLICT",
-                        "同一捕获业务键已存在不同规范字段、质量或时钟",
+                        "同一捕获业务键已存在不同typed字段、质量、单位或时钟",
                     )
                 unchanged += 1
+                session_key = values[3].isoformat()
+                unchanged_by_session[session_key] = (
+                    unchanged_by_session.get(session_key, 0) + 1
+                )
     except BaoStockDailyPgError:
         raise
     except Exception as error:
@@ -371,7 +352,12 @@ WHERE capture_id=%s AND source_code=%s AND session_date=%s""",
         raise BaoStockDailyPgError(
             "PG_WRITE_FAILED", f"BaoStock来源捕获写入失败（{type(error).__name__}）"
         ) from error
-    return {"inserted_rows": inserted, "unchanged_rows": unchanged}
+    return {
+        "inserted_rows": inserted,
+        "unchanged_rows": unchanged,
+        "inserted_rows_by_session": inserted_by_session,
+        "unchanged_rows_by_session": unchanged_by_session,
+    }
 
 
 def _read_field(value: Any, quality: str, reason: str) -> FieldValue:
@@ -521,6 +507,7 @@ def read_baostock_daily_capture(
         "source_symbol",
         "session_date",
         "captured_at",
+        "capture_clock_role",
         "adjustment_flag",
         "price_coordinate",
         "unit_contract_version",
@@ -535,7 +522,6 @@ def read_baostock_daily_capture(
     ]
     for name in _FIELD_NAMES:
         columns.extend((f"{name}_value", f"{name}_quality", f"{name}_reason"))
-    columns.append("normalized_sha256")
     select_sql = ", ".join(columns)
     try:
         with source_raw._transaction(config, write=False) as (
@@ -604,5 +590,116 @@ ORDER BY session_date, source_symbol COLLATE "C" LIMIT %s OFFSET %s""",
             else None,
         },
         "rows": output,
+        "execution": {"source_network_called": False, "database_write": False},
+    }
+
+
+def read_baostock_symbol_session_coverage(
+    config: Mapping[str, Any],
+    *,
+    target_sessions: Sequence[date],
+    cutoff: date,
+) -> dict[str, Any]:
+    """按显式会话读回BaoStock已存证券、捕获UUID及逐捕获行数。"""
+    if not isinstance(config, Mapping):
+        raise BaoStockDailyPgError("RUNTIME_CONFIG_INVALID", "缺少唯一PG运行配置")
+    if (
+        not isinstance(target_sessions, Sequence)
+        or isinstance(target_sessions, (str, bytes))
+        or not target_sessions
+        or type(cutoff) is not date
+    ):
+        raise BaoStockDailyPgError(
+            "SESSION_PLAN_INVALID", "必须显式提供非空目标会话和截止日"
+        )
+    sessions = tuple(target_sessions)
+    if (
+        any(type(session) is not date or session > cutoff for session in sessions)
+        or tuple(sorted(set(sessions))) != sessions
+    ):
+        raise BaoStockDailyPgError(
+            "SESSION_PLAN_INVALID", "目标会话必须唯一、递增且不晚于显式截止日"
+        )
+
+    try:
+        with source_raw._transaction(config, write=False) as (
+            _connection,
+            cursor,
+            _scope,
+        ):
+            cursor.execute(
+                """SELECT session_date, capture_id, source_symbol, count(*)
+FROM stock.source_baostock_daily
+WHERE session_date = ANY(%s) AND session_date <= %s
+GROUP BY session_date, capture_id, source_symbol
+ORDER BY session_date, capture_id::text, source_symbol COLLATE "C""",
+                (list(sessions), cutoff),
+            )
+            rows = cursor.fetchall()
+    except Exception as error:
+        if getattr(error, "preserve_transaction_error", False) is True:
+            raise
+        raise BaoStockDailyPgError(
+            "PG_READ_FAILED", f"BaoStock会话覆盖读回失败（{type(error).__name__}）"
+        ) from error
+
+    by_session: dict[date, dict[str, Any]] = {
+        session: {"row_count": 0, "source_symbols": set(), "captures": {}}
+        for session in sessions
+    }
+    for session, capture_id, source_symbol, row_count in rows:
+        if (
+            type(session) is not date
+            or session not in by_session
+            or session > cutoff
+            or not isinstance(capture_id, UUID)
+            or normalize_baostock_symbol(source_symbol) != source_symbol
+            or type(row_count) is not int
+            or row_count < 1
+        ):
+            raise BaoStockDailyPgError(
+                "PG_READ_INVALID", "BaoStock会话覆盖读回包含非法日期、身份或行数"
+            )
+        item = by_session[session]
+        item["row_count"] += row_count
+        item["source_symbols"].add(source_symbol)
+        capture = item["captures"].setdefault(
+            capture_id, {"row_count": 0, "source_symbols": set()}
+        )
+        capture["row_count"] += row_count
+        capture["source_symbols"].add(source_symbol)
+
+    output_sessions: list[dict[str, Any]] = []
+    for session in sessions:
+        item = by_session[session]
+        captures = [
+            {
+                "capture_id": str(capture_id),
+                "row_count": capture["row_count"],
+                "source_symbols": sorted(capture["source_symbols"]),
+            }
+            for capture_id, capture in sorted(
+                item["captures"].items(), key=lambda entry: str(entry[0])
+            )
+        ]
+        output_sessions.append(
+            {
+                "session_date": session.isoformat(),
+                "status": "AVAILABLE" if item["row_count"] else "NOT_COMPUTED",
+                "row_count": item["row_count"],
+                "source_symbols": sorted(item["source_symbols"]),
+                "source_capture_ids": [capture["capture_id"] for capture in captures],
+                "captures": captures,
+            }
+        )
+    return {
+        "status": (
+            "AVAILABLE"
+            if any(item["row_count"] for item in by_session.values())
+            else "NOT_COMPUTED"
+        ),
+        "cutoff": cutoff.isoformat(),
+        "target_sessions": [session.isoformat() for session in sessions],
+        "sessions": output_sessions,
         "execution": {"source_network_called": False, "database_write": False},
     }
