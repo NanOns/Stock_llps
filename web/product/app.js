@@ -3353,20 +3353,29 @@ function formalD0AdmissionSummaryText(admission) {
     TREND_CONTINUE: "CONTINUE",
   };
   const states = admission.scenarios || {};
+  const launch = states.LAUNCH_CONFIRM || {};
   const scenarios = Object.entries(states).map(([name, item]) => {
     const raw = item.raw_state || item.raw_status || "NOT_COMPUTED";
     const formal = item.formal_state || "NOT_COMPUTED";
     const reasons = [
-      item.reason_code,
-      ...(item.reason_codes || []),
-      ...(item.raw_reason_codes || []),
+      ...new Set([
+        item.reason_code,
+        ...(item.reason_codes || []),
+        ...(item.raw_reason_codes || []),
+      ]),
     ]
       .filter(Boolean)
       .join("、");
-    return `${scenarioNames[name] || name} ${item.message_zh || `Raw ${raw} → 正式 ${formal}/${item.admission_status || "NOT_COMPUTED"}`}${reasons ? ` · ${reasons}` : ""}`;
+    const line = item.frozen_line;
+    const lineText = line?.value
+      ? ` · 冻结${line.source || "T0_PHC20"} ${line.value.numerator}/${line.value.denominator} ${line.coordinate || "RAW_UNADJUSTED"} · 严格前${line.source_window_session_count || 20}会话自 ${line.source_window_start || "UNKNOWN"} · 事件 ${line.source_event_ref || "UNKNOWN"} · 下一会话 ${line.effective_from_session || "UNKNOWN"} · 后继比较 ${item.forward_line_check_status || "NOT_DUE"}`
+      : "";
+    return `${scenarioNames[name] || name} ${item.message_zh || `Raw ${raw} → 正式 ${formal}/${item.admission_status || "NOT_COMPUTED"}`}${reasons ? ` · ${reasons}` : ""}${lineText}`;
   });
   return [
     scenarios.join("；") || "LAUNCH / RECOVERY 原始事实 NOT_COMPUTED",
+    `角色边界 ${admission.source_role_boundary?.formal_admission_role || "FORMAL"}准入 / ${admission.source_role_boundary?.source_d0_raw_reader_role || "DIAGNOSTIC"}原始读取 · ${admission.identity_scope || "SOURCE_SYMBOL_ONLY"} · ${admission.research_mode || "NON_PIT_EXPLORATORY"} · ${admission.price_coordinate || "RAW_UNADJUSTED"}`,
+    `来源捕获 ${launch.source_capture_id ?? admission.source_capture_id ?? "UNKNOWN"} · ${launch.source_time_quality || "UNKNOWN"} / ${launch.source_clock_role || "UNKNOWN"} · ${launch.capture_started_at || "UNKNOWN"} → ${launch.capture_validated_at || "UNKNOWN"} · source_available_at ${launch.source_available_at || "UNKNOWN"}`,
     `Episode ${admission.formal_episode_status || "NOT_COMPUTED"} · D2 ${admission.d2_status || "NOT_COMPUTED"} · Risk ${admission.risk_status || "NOT_COMPUTED"} · Priority ${admission.priority_status || "NOT_COMPUTED"}`,
     `准入原因 ${(admission.reason_codes || []).join("、") || "无额外原因码"}`,
   ].join("；");
@@ -3376,11 +3385,17 @@ function formalD0AdmissionHeadline(admission) {
   if (!admission) return "正式D0 / D2 / Risk / Priority NOT_COMPUTED";
   const launch = admission.scenarios?.LAUNCH_CONFIRM || {};
   const recovery = admission.scenarios?.RECOVERY_TURN || {};
-  const blockers = [launch.reason_code, ...(launch.reason_codes || [])]
+  const blockers = [
+    ...new Set([launch.reason_code, ...(launch.reason_codes || [])]),
+  ]
     .filter(Boolean)
     .slice(0, 3)
     .join("、");
-  return `正式D0 LAUNCH ${launch.raw_state || "NOT_COMPUTED"}→${launch.formal_state || "NOT_COMPUTED"}/${launch.admission_status || "NOT_COMPUTED"}；RECOVERY ${recovery.raw_state || "NOT_COMPUTED"}→${recovery.formal_state || "NOT_COMPUTED"}/${recovery.admission_status || "NOT_COMPUTED"}${blockers ? ` · ${blockers}` : ""}；Episode / D2 / Risk / Priority NOT_COMPUTED`;
+  const line = launch.frozen_line;
+  const lineText = line?.value
+    ? ` · ${line.source || "T0_PHC20"}冻结 ${line.value.numerator}/${line.value.denominator} ${line.coordinate || "RAW_UNADJUSTED"} · 严格前${line.source_window_session_count || 20}会话自 ${line.source_window_start || "UNKNOWN"} · 事件 ${line.source_event_ref || "UNKNOWN"} · 生效 ${line.effective_from_session || "UNKNOWN"}`
+    : "";
+  return `正式D0 LAUNCH ${launch.raw_state || "NOT_COMPUTED"}→${launch.formal_state || "NOT_COMPUTED"}/${launch.admission_status || "NOT_COMPUTED"}；RECOVERY ${recovery.raw_state || "NOT_COMPUTED"}→${recovery.formal_state || "NOT_COMPUTED"}/${recovery.admission_status || "NOT_COMPUTED"}${blockers ? ` · ${blockers}` : ""}${lineText}；Episode / D2 / Risk / Priority NOT_COMPUTED`;
 }
 
 function sourceCandidateCohortKey(rule, ruleScope, sourceCaptureId) {
@@ -3541,7 +3556,7 @@ function focusEvidenceDetails(item, context) {
     .filter(([, fact]) => fact?.failure_line_candidate?.value)
     .map(([rule, fact]) => {
       const line = fact.failure_line_candidate;
-      return `${rule} ${line.value.numerator}/${line.value.denominator} · ${line.source} · ${line.price_coordinate} · NON_PIT研究线索`;
+      return `${rule} ${line.value.numerator}/${line.value.denominator} · ${line.source} · ${line.price_coordinate} · DIAGNOSTIC来源规则研究线索`;
     });
   details.append(
     node(
@@ -3551,8 +3566,8 @@ function focusEvidenceDetails(item, context) {
     node(
       "p",
       lineHints.length
-        ? `已保存冻结线索：${lineHints.join("；")}`
-        : "没有可显示的合法冻结线索；非TRUE规则或缺少合法原始价格线不会生成失效价。",
+        ? `已存DIAGNOSTIC来源规则线索（不是FORMAL事件冻结线）：${lineHints.join("；")}`
+        : "没有可显示的诊断规则线索；非TRUE规则或缺少合法原始价格线不会生成来源规则研究线。",
     ),
     node(
       "p",
@@ -3791,6 +3806,12 @@ async function loadFocusAuto(context, offset = 0) {
       UNKNOWN: "UNKNOWN待核对",
       KNOWN_NO_SIGNAL: "已计算无信号",
     };
+    const formalAdmission = result.formal_admission || {};
+    const admissionCounts = formalAdmission.counts;
+    const admissionSummary =
+      formalAdmission.status === "AVAILABLE" && admissionCounts
+        ? `正式LAUNCH ${admissionCounts.READY} READY / ${admissionCounts.BLOCKED} BLOCKED / ${admissionCounts.NOT_READY} NOT_READY / ${admissionCounts.NOT_REQUIRED} NOT_REQUIRED · 分母 ${formalAdmission.distinct_source_count}/${formalAdmission.source_count}`
+        : `正式LAUNCH ${formalAdmission.status || "NOT_COMPUTED"} · ${formalAdmission.reason_code || "FORMAL_ADMISSION_FACT_NOT_SAVED"}`;
     message(
       "focusAutoStatus",
       context.target_session +
@@ -3810,7 +3831,8 @@ async function loadFocusAuto(context, offset = 0) {
         `${groupLabels[group] || group} ${currentGroupCount}` +
         ` · 分母闭合 ${result.watch_groups?.partition_closed ? "是" : "UNKNOWN"}` +
         ` · 本页已存PULSE ${availablePulseCount}/${pageMemberships.length}` +
-        " · 来源研究 NON_PIT",
+        " · 来源研究 NON_PIT · " +
+        admissionSummary,
     );
     message(
       "focusAutoPage",
@@ -7684,7 +7706,7 @@ $("focusReadStock").addEventListener("click", async () => {
       ...Object.entries(data.stored_research_evidence?.rules?.facts || {}).map(
         ([rule, fact]) => [
           `冻结规则 ${rule}`,
-          `${fact.state || "UNKNOWN"} · ${(fact.reasons || []).join("、") || "无原因码"}${fact.failure_line_candidate?.value ? ` · 研究失效线 ${fact.failure_line_candidate.value.numerator}/${fact.failure_line_candidate.value.denominator} · ${fact.failure_line_candidate.source} · NON_PIT` : " · 无合法失效线"}`,
+          `${fact.state || "UNKNOWN"} · ${(fact.reasons || []).join("、") || "无原因码"}${fact.failure_line_candidate?.value ? ` · DIAGNOSTIC研究候选价 ${fact.failure_line_candidate.value.numerator}/${fact.failure_line_candidate.value.denominator} · ${fact.failure_line_candidate.source} · 非FORMAL事件线 · NON_PIT` : " · 无诊断候选价"}`,
         ],
       ),
       [

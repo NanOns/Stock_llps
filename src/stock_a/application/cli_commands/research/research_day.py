@@ -21,6 +21,9 @@ from stock_a.application.source_research_day import (
     run_source_research_day,
     run_source_static_research_day,
 )
+from stock_a.application.source_formal_admission_production import (
+    run_source_formal_admission_range_from_saved,
+)
 from stock_a.application.source_d0_raw import _official_calendar
 from stock_a.storage.postgres.source_raw import read_raw_daily_catalog
 
@@ -91,6 +94,40 @@ def _run_source_research_day(args: argparse.Namespace) -> int:
             raise ValueError("板块数字快照ID只能与 --include-sector-pulse 同时使用")
         sector_snapshot_ids = snapshot_ids if args.include_sector_pulse else None
         config, config_path = load_runtime_config()
+        if args.formal_admission_from_saved:
+            if (
+                not args.persist
+                or args.static_only
+                or args.t1_forward_from_saved
+                or args.enrollment_from_saved
+                or args.cohort_stats_from_saved
+                or args.rps_pulse_groups_from_saved
+                or args.t0_early_observations_from_saved
+                or args.d0_launch_reference_only
+                or args.include_sector_pulse
+                or snapshot_ids_supplied
+            ):
+                raise ValueError(
+                    "LAUNCH正式准入仅消费已存D0/Core/Profile事实，须单独显式指定--persist"
+                )
+            target = _parse_session_date(args.target_session)
+            cutoff = _parse_session_date(args.research_cutoff)
+            start = (
+                _parse_session_date(args.start_session)
+                if args.start_session
+                else target
+            )
+            report = run_source_formal_admission_range_from_saved(
+                config,
+                start_session=start,
+                target_session=target,
+                research_cutoff=cutoff,
+                source_package_id=args.source_package_id,
+            )
+            report["configuration_path"] = str(config_path)
+            report["ok"] = report.get("status") == "PERSISTED"
+            _emit(report, error=not report["ok"])
+            return _EXIT_OK if report["ok"] else _EXIT_UNAVAILABLE
         if args.rps_pulse_groups_from_saved:
             if (
                 not args.persist

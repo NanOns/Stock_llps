@@ -197,6 +197,11 @@ def register_commands(commands):
         help="仅生产相邻会话消费者明确需要的LAUNCH_CONFIRM前日D0参考事实",
     )
     research_day.add_argument(
+        "--formal-admission-from-saved",
+        action="store_true",
+        help="从已存完整D0与Core/Profile事实离线生产LAUNCH正式准入typed结果",
+    )
+    research_day.add_argument(
         "--include-sector-pulse",
         action="store_true",
         help="在现役单日静态生产链中计算并保存行业与GN概念完整同类板块跨日PULSE",

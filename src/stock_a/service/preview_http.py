@@ -113,7 +113,7 @@ from stock_a.application.source_d0_raw import (
     query_source_d0_raw_launch,
 )
 from stock_a.application.source_formal_admission import (
-    prepare_source_formal_d0_admission,
+    present_source_formal_admission,
 )
 from stock_a.application.source_pool_factors import read_source_pool_rps
 from stock_a.application.source_tdx_sector_membership import (
@@ -1364,6 +1364,18 @@ class _PreviewHandler(BaseHTTPRequestHandler):
 
         page_rows = page_result["results"]
         page_symbols = [item["source_symbol"] for item in page_rows]
+        from stock_a.storage.postgres.formal_admission import (
+            read_source_formal_admission_day,
+        )
+
+        formal_admission_day = read_source_formal_admission_day(
+            config,
+            target_session=target_session,
+            source_package_id=source_package_id,
+            source_capture_id=after_source["source_capture_id"],
+            expected_source_count=after_source["capture_expected_row_count"],
+            source_symbols=sorted(page_symbols),
+        )
         t0_summary_query_started = time.perf_counter()
         from stock_a.storage.postgres.t0_early_observations import (
             read_source_t0_early_triage_summaries_for_symbols,
@@ -2205,13 +2217,13 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "source_clock_role": after_source["source_clock_role"],
                 "parser_contract": after_source["parser_contract"],
             }
-            formal_d0_admission = prepare_source_formal_d0_admission(
-                evidence=item_evidence,
-                entity_id=symbol,
+            formal_d0_admission = present_source_formal_admission(
+                stored_day=formal_admission_day,
+                source_symbol=symbol,
                 target_session=target_session,
                 source_package_id=source_package_id,
                 source_capture_id=after_source["source_capture_id"],
-                official_sessions=calendar_sessions,
+                d0_evidence=item_evidence.get("d0"),
             )
             item_evidence = {
                 **item_evidence,
@@ -2362,6 +2374,19 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "grouping": "D0_NEW > SEED_RULE > D1_MATERIAL > UNKNOWN > KNOWN_NO_SIGNAL",
                 "d0_scope_status": page_result["scope_status"]["d0"],
             },
+            "formal_admission": {
+                "status": formal_admission_day.get("status", "NOT_COMPUTED"),
+                "reason_code": formal_admission_day.get("reason_code"),
+                "source_count": formal_admission_day.get("source_count"),
+                "stored_rows": formal_admission_day.get("stored_rows"),
+                "distinct_source_count": formal_admission_day.get(
+                    "distinct_source_count"
+                ),
+                "counts": formal_admission_day.get("counts"),
+                "identity_scope": "SOURCE_SYMBOL_ONLY",
+                "research_mode": "NON_PIT_EXPLORATORY",
+                "price_coordinate": "RAW_UNADJUSTED",
+            },
             "pagination": {
                 "offset": offset,
                 "limit": limit,
@@ -2412,6 +2437,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "execution": {
                 **page_result["execution"],
                 "d0_full_pool_computed_before_selection": False,
+                "formal_admission_get_recalculated": False,
                 "cache_hit": False,
                 "membership_read_scope": "CURRENT_PAGE_SYMBOLS_ONLY",
                 "pulse_read_scope": "CURRENT_PAGE_MEMBER_BOARDS_ONLY",
@@ -6634,13 +6660,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "price_coordinate": "RAW_UNADJUSTED",
                     "scope": "NON_PIT_EXPLORATORY",
                 }
-                formal_d0_admission = prepare_source_formal_d0_admission(
-                    evidence=single_evidence,
-                    entity_id=symbol,
+                from stock_a.storage.postgres.formal_admission import (
+                    read_source_formal_admission_day,
+                )
+
+                formal_admission_day = read_source_formal_admission_day(
+                    config,
                     target_session=target,
                     source_package_id=source_package_id,
                     source_capture_id=source_context["source_capture_id"],
-                    official_sessions=calendar_sessions,
+                    expected_source_count=source_context["capture_expected_row_count"],
+                    source_symbols=[symbol],
+                )
+                formal_d0_admission = present_source_formal_admission(
+                    stored_day=formal_admission_day,
+                    source_symbol=symbol,
+                    target_session=target,
+                    source_package_id=source_package_id,
+                    source_capture_id=source_context["source_capture_id"],
+                    d0_evidence=single_evidence.get("d0"),
                 )
                 result["formal_d0_admission"] = formal_d0_admission
                 result["t0_observation"]["formal_d0_admission"] = formal_d0_admission
