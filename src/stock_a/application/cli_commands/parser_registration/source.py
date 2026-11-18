@@ -64,7 +64,7 @@ def register_commands(commands):
         "--history-session-count",
         type=int,
         default=1,
-        help="显式官方日历历史窗口会话数，1保持单日行为，最多75；每个VIPDATA条目只扫描一次",
+        help="显式官方日历历史窗口会话数，1保持单日行为；每个VIPDATA条目只扫描一次",
     )
     raw_import.add_argument(
         "--max-source-quality-bytes",
@@ -89,6 +89,12 @@ def register_commands(commands):
         type=int,
         default=100,
         help="每个可恢复PG事务最多写入行数，固定上限100",
+    )
+    raw_import.add_argument(
+        "--max-raw-rows",
+        type=int,
+        default=2_000_000,
+        help="单次历史导入可暂存的最大全池Raw行数，默认200万；超过预算时拒绝",
     )
     raw_catalog = commands.add_parser(
         "source-raw-catalog",

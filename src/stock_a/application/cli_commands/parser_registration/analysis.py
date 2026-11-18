@@ -752,3 +752,8 @@ def register_commands(commands):
         required=True,
         help="显式冻结研究截止日；之后的页面查询在访问PG前拒绝",
     )
+    preview_serve.add_argument(
+        "--authorize-data-jobs",
+        action="store_true",
+        help="仅在用户另行解除数据冻结后启用真实来源读取和数据写入；默认关闭",
+    )

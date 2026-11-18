@@ -18,7 +18,7 @@ import traceback
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 from urllib.parse import parse_qs, urlsplit
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from stock_a.application.source_market_context import (
     SourceMarketContextError,
@@ -112,6 +112,7 @@ from stock_a.application.source_d0_raw import (
     _official_calendar,
     query_source_d0_raw_launch,
 )
+from stock_a.application.data_jobs import DataJobCoordinator, DataJobError
 from stock_a.application.source_formal_admission import (
     present_source_formal_admission,
 )
@@ -127,6 +128,7 @@ from stock_a.storage.postgres.source_raw import (
     read_raw_daily_history_stock,
     resolve_raw_stock_code,
 )
+from stock_a.storage.postgres.data_jobs import DataJobPgError
 from stock_a.research import core as research_core
 from stock_a.research import entry as research_entry
 from stock_a.research import raw_periods as research_raw_periods
@@ -721,7 +723,9 @@ def _preview_source_context(
 
 
 class _PreviewState:
-    def __init__(self, *, research_cutoff: date) -> None:
+    def __init__(
+        self, *, research_cutoff: date, data_jobs_authorized: bool = False
+    ) -> None:
         if type(research_cutoff) is not date:
             raise DiagnosticError("RESEARCH_CUTOFF_REQUIRED", "必须显式绑定研究截止日")
         self.research_cutoff = research_cutoff
@@ -745,6 +749,11 @@ class _PreviewState:
         self.profile_contract_revision = (
             self.profile_contract["contract_id"],
             self.profile_contract["version"],
+        )
+        self.data_jobs = DataJobCoordinator(
+            config=self.config,
+            research_cutoff=research_cutoff,
+            execution_authorized=data_jobs_authorized,
         )
         self.source_d1_algorithm_version = "SOURCE_D1_PREVIEW_R1"
         self.source_d1_cache_lock = threading.Lock()
@@ -1169,6 +1178,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
     def _handle_error(self, error: Exception) -> None:
         if isinstance(error, PreviewHttpError):
             self._error(error)
+            return
+        if isinstance(error, DataJobError):
+            self._error(PreviewHttpError(error.status, error.code, str(error)))
+            return
+        if isinstance(error, DataJobPgError):
+            status = (
+                409
+                if error.code
+                in {
+                    "DATA_JOB_BUSY",
+                    "DATA_JOB_STATE_CONFLICT",
+                    "DATA_JOB_SOURCE_REVISION_CONFLICT",
+                    "DATA_JOB_PROGRESS_CONFLICT",
+                }
+                else 503
+            )
+            self._error(
+                PreviewHttpError(status, error.code, "数据任务PG状态读取或写入失败。")
+            )
             return
         if isinstance(error, PgResearchBindingError):
             if error.code.endswith("MISMATCH") or error.code.endswith("AMBIGUOUS"):
@@ -3696,6 +3724,48 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 body, content_type = read_static_asset(asset_name)
                 self._send(200, body, content_type)
                 return
+            if parsed.path == "/api/product/data-jobs/capabilities":
+                if parsed.query:
+                    raise PreviewHttpError(
+                        400, "DATA_JOB_QUERY_INVALID", "能力读取不接受查询参数。"
+                    )
+                self._send_json(
+                    200,
+                    {"ok": True, **self.preview_server.state.data_jobs.capabilities()},
+                )
+                return
+            if parsed.path == "/api/product/data-jobs/latest":
+                if parsed.query:
+                    raise PreviewHttpError(
+                        400, "DATA_JOB_QUERY_INVALID", "最近任务读取不接受查询参数。"
+                    )
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "job": self.preview_server.state.data_jobs.read_job(),
+                    },
+                )
+                return
+            if parsed.path == "/api/product/data-jobs":
+                values = _query(self.path, {"id"})
+                if set(values) != {"id"}:
+                    raise PreviewHttpError(
+                        400, "DATA_JOB_ID_REQUIRED", "任务进度查询必须提供任务ID。"
+                    )
+                try:
+                    job_id = UUID(values["id"])
+                except (ValueError, AttributeError) as error:
+                    raise PreviewHttpError(
+                        400, "DATA_JOB_ID_INVALID", "任务ID格式无效。"
+                    ) from error
+                job = self.preview_server.state.data_jobs.read_job(job_id)
+                if job is None:
+                    raise PreviewHttpError(
+                        404, "DATA_JOB_NOT_FOUND", "PostgreSQL中没有该数据任务。"
+                    )
+                self._send_json(200, {"ok": True, "job": job})
+                return
             if parsed.path == "/api/product/research-day":
                 values = _query(
                     self.path,
@@ -5763,6 +5833,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
             "/api/preview/sector-change-stocks",
             "/api/product/d1-material",
             "/api/product/board-comparison",
+            "/api/product/data-jobs/plan",
+            "/api/product/data-jobs/start",
         }:
             self._error(
                 PreviewHttpError(
@@ -5805,6 +5877,22 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     400,
                     "BOARD_COMPARISON_QUERY_REJECTED",
                     "双板块比较POST只接受JSON请求体",
+                )
+            )
+            return
+        if (
+            post_path
+            in {
+                "/api/product/data-jobs/plan",
+                "/api/product/data-jobs/start",
+            }
+            and self.path != post_path
+        ):
+            self._error(
+                PreviewHttpError(
+                    400,
+                    "DATA_JOB_QUERY_INVALID",
+                    "数据任务计划与启动只接受JSON请求体。",
                 )
             )
             return
@@ -5874,6 +5962,30 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 return
             if post_path == "/api/product/board-comparison":
                 self._send_json(200, self._board_comparison(body))
+                return
+            if post_path == "/api/product/data-jobs/plan":
+                plan = self.preview_server.state.data_jobs.plan(body)
+                self._send_json(200, {"ok": True, "plan": plan})
+                return
+            if post_path == "/api/product/data-jobs/start":
+                result = self.preview_server.state.data_jobs.start(body)
+                if not result.get("accepted"):
+                    plan = result.get("plan", {})
+                    code = str(plan.get("status") or "DATA_JOB_NOT_EXECUTABLE")
+                    message = (
+                        "当前数据边界或计划条件不允许启动；未发起来源读取或行情写入。"
+                    )
+                    self._send_json(
+                        409,
+                        {
+                            "ok": False,
+                            "code": code,
+                            "message": message,
+                            "plan": plan,
+                        },
+                    )
+                    return
+                self._send_json(202, {"ok": True, **result})
                 return
             if post_path == "/api/preview/sector-change-stocks":
                 self._send_json(200, self._sector_change_stocks(body))
@@ -6691,7 +6803,11 @@ class _PreviewHandler(BaseHTTPRequestHandler):
 
 
 def run_preview_server(
-    *, host: str = _HOST, port: int = _PORT, research_cutoff: date
+    *,
+    host: str = _HOST,
+    port: int = _PORT,
+    research_cutoff: date,
+    data_jobs_authorized: bool = False,
 ) -> int:
     """仅以前台显式运行方式启动127.0.0.1:28766。"""
     if host != _HOST or type(port) is not int or port != _PORT:
@@ -6709,7 +6825,10 @@ def run_preview_server(
         except OSError:
             pass
     try:
-        state = _PreviewState(research_cutoff=research_cutoff)
+        state = _PreviewState(
+            research_cutoff=research_cutoff,
+            data_jobs_authorized=data_jobs_authorized,
+        )
         server = _BoundedHTTPServer((_HOST, _PORT), state)
     except (OSError, DiagnosticError, PriceProfileContractError) as error:
         print(f"预览服务未启动：{type(error).__name__}。", file=sys.stderr)

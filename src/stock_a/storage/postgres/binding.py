@@ -54,6 +54,8 @@ _MIGRATION_FILES = (
     "0040_r08_fep05_reentry_lane.sql",
     "0041_r08_biz07_launch_formal_admission.sql",
     "0042_r08_biz07_formal_admission_calendar_key.sql",
+    "0043_r08_biz08_data_jobs.sql",
+    "0044_r08_biz08_formal_history_window.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -94,6 +96,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R08_FEP03_SOURCE_OBSERVATION_SEGMENTS_R1": frozenset({39}),
     "R08_FEP05_REENTRY_CONDITIONAL_BASELINE_R1": frozenset({40}),
     "R08_BIZ07_LAUNCH_FORMAL_ADMISSION_FROZEN_LINE_R1": frozenset({41, 42}),
+    "R08_BIZ08_DATA_JOBS_AND_HISTORY_WINDOW_R1": frozenset({43, 44}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -253,6 +256,11 @@ _RELATIONS_BY_MIGRATION_COUNT[41] = _RELATIONS_BY_MIGRATION_COUNT[40] | {
     "source_d0_formal_admission_day_facts",
 }
 _RELATIONS_BY_MIGRATION_COUNT[42] = _RELATIONS_BY_MIGRATION_COUNT[41]
+_RELATIONS_BY_MIGRATION_COUNT[43] = _RELATIONS_BY_MIGRATION_COUNT[42] | {
+    "data_jobs",
+    "data_job_progress",
+}
+_RELATIONS_BY_MIGRATION_COUNT[44] = _RELATIONS_BY_MIGRATION_COUNT[43]
 
 
 class BindingRefused(Exception):

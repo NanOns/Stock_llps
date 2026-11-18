@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import time
 from typing import Any, Iterator, Mapping, Sequence
+from typing import Callable
 
 from . import binding as postgres_binding
 from . import identity as postgres_identity
@@ -21,6 +22,7 @@ LEGACY_RAW_DAILY_APPEND_SCOPE = "R01_R02_SOURCE_RAW_PG_DAILY_READ_R1"
 RAW_DAILY_APPEND_TASK_SCOPES = (
     RAW_DAILY_APPEND_SCOPE,
     LEGACY_RAW_DAILY_APPEND_SCOPE,
+    "STOCK_A_R08_BIZ08_DATA_JOB_RAW_IMPORT_R1",
 )
 _RAW_DAILY_APPEND_TASK_SCOPES = frozenset(RAW_DAILY_APPEND_TASK_SCOPES)
 _DATASET_ID = "TDX_VIPDATA_PACKAGE"
@@ -321,7 +323,9 @@ def validate_source_candidate_limit(candidate_total: int) -> None:
         )
 
 
-def _register_source_package(config: Mapping[str, Any], package: Any) -> int:
+def _register_source_package(
+    config: Mapping[str, Any], package: Any
+) -> tuple[int, bool]:
     """在原件接收入口校验一次包摘要，再只向下游返回数据库数字包ID。"""
     from stock_a.sources.tdx.vipdata import vipdata_package_entry_sha256
 
@@ -360,7 +364,7 @@ FROM source_packages WHERE dataset_id=%s ORDER BY source_package_id""",
                         "SOURCE_PACKAGE_CONFLICT",
                         "历史来源包大小补录未能通过原件入口校验写入",
                     )
-            return int(existing_id)
+            return int(existing_id), False
         cursor.execute(
             """INSERT INTO source_packages(dataset_id, package_sha256, byte_count)
 VALUES (%s, %s, %s)
@@ -372,7 +376,7 @@ RETURNING source_package_id, byte_count""",
             raise RawSourcePgError(
                 "SOURCE_PACKAGE_CONFLICT", "同一已校验原始包的登记行与文件字节数不一致"
             )
-        return int(row[0])
+        return int(row[0]), True
 
 
 def _register_source_capture(
@@ -401,6 +405,7 @@ ON CONFLICT (source_package_id, parser_contract, target_session) DO NOTHING""",
                 normalized_count,
             ),
         )
+        inserted = cursor.rowcount == 1
         capture = _read_capture(cursor, source_package_id, target_session)
         if (
             capture is None
@@ -412,7 +417,7 @@ ON CONFLICT (source_package_id, parser_contract, target_session) DO NOTHING""",
             raise RawSourcePgError(
                 "SOURCE_CAPTURE_CONFLICT", "同一来源包/目标日捕获合同或完整分母不一致"
             )
-        return capture
+        return {**capture, "inserted": inserted}
 
 
 def _field_value(field: Any) -> Any | None:
@@ -830,7 +835,7 @@ def import_verified_vipdata_target(
     total = len(pool.candidates)
     validate_source_candidate_limit(total)
 
-    source_package_id = _register_source_package(config, package)
+    source_package_id, _package_inserted = _register_source_package(config, package)
     prior_state, prior_capture = _complete_version_state(
         config,
         source_package_id=source_package_id,
@@ -1022,7 +1027,10 @@ def import_verified_vipdata_history(
     task_scope: str,
     scan_budget: Any,
     chunk_size: int = 100,
-    max_raw_rows: int = 750_000,
+    max_raw_rows: int = 2_000_000,
+    on_source_package_verified: Callable[[int, bool], None] | None = None,
+    on_sessions_started: Callable[[Sequence[date]], None] | None = None,
+    on_session_verified: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """单遍扫描一组官方会话，并按会话追加到既有Raw typed表。"""
     from bisect import bisect_right
@@ -1040,13 +1048,13 @@ def import_verified_vipdata_history(
     if (
         not isinstance(sessions, (tuple, list))
         or not sessions
-        or len(sessions) > 75
+        or len(sessions) > 32767
         or any(type(day) is not date for day in sessions)
         or tuple(sorted(set(sessions))) != tuple(sessions)
     ):
         raise RawSourcePgError(
             "HISTORY_SESSION_WINDOW_INVALID",
-            "真实历史会话须为1至75个严格递增且不重复的date",
+            "真实历史会话须为1至32767个严格递增且不重复的date",
         )
     _validate_source_input(package, sessions[-1], task_scope=task_scope)
     if (
@@ -1065,17 +1073,15 @@ def import_verified_vipdata_history(
     total = len(pool.candidates)
     validate_source_candidate_limit(total)
     planned_rows = total * len(sessions)
-    if (
-        type(max_raw_rows) is not int
-        or planned_rows > max_raw_rows
-        or planned_rows > 750_000
-    ):
+    if type(max_raw_rows) is not int or max_raw_rows < 1 or planned_rows > max_raw_rows:
         raise RawSourcePgError(
             "HISTORY_ROW_BUDGET_EXCEEDED",
             f"历史Raw行预算拒绝完整候选集：{total}个来源候选×{len(sessions)}个会话={planned_rows}行",
         )
 
-    source_package_id = _register_source_package(config, package)
+    source_package_id, package_inserted = _register_source_package(config, package)
+    if on_source_package_verified is not None:
+        on_source_package_verified(source_package_id, package_inserted)
     prior_by_session: dict[
         date, tuple[dict[str, Any] | None, dict[str, Any] | None]
     ] = {}
@@ -1088,6 +1094,9 @@ def import_verified_vipdata_history(
         )
         prior_by_session[session] = (prior_state, prior_capture)
 
+    if on_sessions_started is not None:
+        on_sessions_started(sessions)
+
     if all(
         state is not None and state["row_count"] == total
         for state, _capture in prior_by_session.values()
@@ -1096,17 +1105,19 @@ def import_verified_vipdata_history(
         for session in sessions:
             state, capture = prior_by_session[session]
             assert state is not None and capture is not None
-            existing.append(
-                {
-                    "target_session": session.isoformat(),
-                    "candidate_total": total,
-                    "row_count_before": total,
-                    "row_count_after": total,
-                    "new_rows_committed": 0,
-                    "source_capture_id": capture["capture_id"],
-                    "status": "ALREADY_COMPLETE",
-                }
-            )
+            session_result = {
+                "target_session": session.isoformat(),
+                "candidate_total": total,
+                "row_count_before": total,
+                "row_count_after": total,
+                "new_rows_committed": 0,
+                "source_capture_id": capture["capture_id"],
+                "capture_inserted": capture.get("inserted", False),
+                "status": "ALREADY_COMPLETE",
+            }
+            existing.append(session_result)
+            if on_session_verified is not None:
+                on_session_verified(session_result)
         return {
             "status": "ALREADY_COMPLETE",
             "target_session": sessions[-1].isoformat(),
@@ -1351,23 +1362,25 @@ def import_verified_vipdata_history(
                 committed_rows=after,
                 metadata_committed=True,
             )
-        session_results.append(
-            {
-                "target_session": session.isoformat(),
-                "candidate_total": total,
-                "target_present": status_counts["TARGET_PRESENT"],
-                "target_missing": status_counts["TARGET_MISSING"],
-                "read_failed": status_counts["READ_FAILED"],
-                "not_evaluated": status_counts["NOT_EVALUATED"],
-                "row_count_before": before,
-                "row_count_after": after,
-                "new_rows_committed": max(0, after - before),
-                "source_capture_id": capture_id,
-                "status": "COMPLETE_WITH_READ_FAILURES"
-                if status_counts["READ_FAILED"]
-                else "COMPLETE",
-            }
-        )
+        session_result = {
+            "target_session": session.isoformat(),
+            "candidate_total": total,
+            "target_present": status_counts["TARGET_PRESENT"],
+            "target_missing": status_counts["TARGET_MISSING"],
+            "read_failed": status_counts["READ_FAILED"],
+            "not_evaluated": status_counts["NOT_EVALUATED"],
+            "row_count_before": before,
+            "row_count_after": after,
+            "new_rows_committed": max(0, after - before),
+            "source_capture_id": capture_id,
+            "capture_inserted": bool(capture_row.get("inserted")),
+            "status": "COMPLETE_WITH_READ_FAILURES"
+            if status_counts["READ_FAILED"]
+            else "COMPLETE",
+        }
+        session_results.append(session_result)
+        if on_session_verified is not None:
+            on_session_verified(session_result)
 
     return {
         "status": "COMPLETE_WITH_READ_FAILURES"
@@ -2470,6 +2483,7 @@ def read_raw_daily_catalog(
        count(*) FILTER (WHERE r.bar_status='READ_FAILED')::bigint AS read_failed,
        count(*) FILTER (WHERE r.bar_status NOT IN ('TARGET_PRESENT','TARGET_MISSING','READ_FAILED'))::bigint AS unknown_bar_status,
        count(DISTINCT r.source_capture_id)::bigint AS capture_count,
+       min(r.source_capture_id) AS source_capture_id,
        min(c.normalized_count) AS expected_row_count,
        max(c.normalized_count) AS expected_row_count_max,
        min(c.read_started_at) AS capture_read_started_at,
@@ -2539,6 +2553,7 @@ LIMIT %s OFFSET %s""",
                 "expected_row_count": int(item["expected_row_count"]),
                 "bar_status_counts": status_counts,
                 "source_capture_count": item["capture_count"],
+                "source_capture_id": int(item["source_capture_id"]),
                 "capture_read_started_at": _db_scalar(item["capture_read_started_at"]),
                 "capture_validated_at": _db_scalar(item["capture_validated_at"]),
                 "source_time_quality": time_qualities[0],

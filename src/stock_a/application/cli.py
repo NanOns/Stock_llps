@@ -142,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
                 host=args.host,
                 port=args.port,
                 research_cutoff=_parse_session_date(args.research_cutoff),
+                data_jobs_authorized=args.authorize_data_jobs,
             )
     except DiagnosticError as error:
         _emit(

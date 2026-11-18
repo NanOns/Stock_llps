@@ -661,7 +661,7 @@ def persist_static_research_day(
     )
     for attempt in range(5):
         try:
-            return _persist_once(config, scenarios, groups)
+            return _persist_once(config, scenarios, groups, profile_revision)
         except source_raw.RawSourcePgError as error:
             if getattr(error.__cause__, "sqlstate", None) != "40001" or attempt == 4:
                 raise
@@ -669,7 +669,7 @@ def persist_static_research_day(
     raise AssertionError("不可达的静态研究事务重试状态")
 
 
-def _persist_once(config, scenarios, groups) -> dict[str, Any]:
+def _persist_once(config, scenarios, groups, profile_revision) -> dict[str, Any]:
     inserted: dict[str, int] = {}
     scopes = []
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
@@ -743,6 +743,19 @@ def _persist_once(config, scenarios, groups) -> dict[str, Any]:
         "rows_expected": {
             table.rsplit(".", 1)[-1]: len(rows) for table, _, _, rows, *_ in scopes
         },
+        "producer_versions": {
+            table.rsplit(".", 1)[-1]: sorted(
+                {row[columns.index("producer_version")] for row in rows}
+            )
+            for table, columns, _key, rows, *_ in scopes
+        },
+        "calendar_revisions": {
+            table.rsplit(".", 1)[-1]: sorted(
+                {row[columns.index("calendar_revision")] for row in rows}
+            )
+            for table, columns, _key, rows, *_ in scopes
+        },
+        "profile_revision": profile_revision,
         "rows_inserted": inserted,
         "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED"
         if all(item[-1] for item in scopes)
@@ -1237,7 +1250,7 @@ LIMIT 2""",
         or row["source_package_id"] != source_package_id
         or row["history_window_end"] != target_session
         or not row["history_window_start"] <= target_session
-        or not 1 <= row["history_session_count"] <= 75
+        or not 1 <= row["history_session_count"] <= 32767
     ):
         return {
             "status": "INCOMPLETE",

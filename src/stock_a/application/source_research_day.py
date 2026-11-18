@@ -1482,10 +1482,24 @@ def run_source_research_day(
     persist: bool = False,
     history_session_count: int | None = None,
     worker_count: int = 1,
+    include_d0: bool = True,
+    include_d1: bool = True,
+    include_static: bool = True,
 ) -> dict[str, Any]:
-    """执行单日研究；仅显式persist=True时调用PG Writers。"""
+    """执行单日研究；保存域按D0/D1输出日期独立选择。"""
+    if (
+        type(include_d0) is not bool
+        or type(include_d1) is not bool
+        or type(include_static) is not bool
+        or not (include_d0 or include_d1)
+    ):
+        raise SourceResearchDayError(
+            "RESEARCH_DAY_DOMAIN_SELECTION_INVALID",
+            "至少选择D0或D1一个生产域，且域开关必须是布尔值。",
+        )
     validate_seed_worker_count(worker_count)
-    _validate_static_history_count(history_session_count)
+    if include_static:
+        _validate_static_history_count(history_session_count)
     facts, report = prepare_source_research_day(
         config,
         target_session=target_session,
@@ -1494,34 +1508,46 @@ def run_source_research_day(
         d1_history_session_count=d1_history_session_count,
     )
     if persist:
-        write_result = persist_source_research_day(config, facts)
-        static_started = time.perf_counter()
-        static_result = _persist_static_research_day(
+        write_result = persist_source_research_day(
             config,
-            target_session=target_session,
-            research_cutoff=research_cutoff,
-            source_package_id=source_package_id,
-            expected_capture_id=facts.target_capture_id,
-            expected_source_count=facts.d1_source_count,
-            history_session_count=history_session_count,
-            worker_count=worker_count,
+            facts,
+            include_d0=include_d0,
+            include_d1=include_d1,
         )
+        if include_static:
+            static_started = time.perf_counter()
+            static_result = _persist_static_research_day(
+                config,
+                target_session=target_session,
+                research_cutoff=research_cutoff,
+                source_package_id=source_package_id,
+                expected_capture_id=facts.target_capture_id,
+                expected_source_count=facts.d1_source_count,
+                history_session_count=history_session_count,
+                worker_count=worker_count,
+            )
+            static_result["wall_seconds"] = round(
+                time.perf_counter() - static_started, 6
+            )
+        else:
+            static_result = {
+                "status": "SKIPPED_BY_USER",
+                "database_write_attempted": False,
+                "ddl_executed": False,
+                "dml_executed": False,
+            }
         report["static_persistence"] = static_result
-        report["static_persistence"]["wall_seconds"] = round(
-            time.perf_counter() - static_started, 6
-        )
         report["status"] = "PERSISTED"
         report["persistence"] = write_result
-        report["execution"]["transaction"] = (
-            write_result["transaction"] + "; " + static_result["transaction"]
-        )
-        report["execution"]["database_write_attempted"] = (
-            write_result["database_write_attempted"]
-            or static_result["database_write_attempted"]
-        )
-        report["execution"]["dml_executed"] = (
-            write_result["dml_executed"] or static_result["dml_executed"]
-        )
+        report["execution"]["transaction"] = write_result["transaction"]
+        if include_static:
+            report["execution"]["transaction"] += "; " + static_result["transaction"]
+        report["execution"]["database_write_attempted"] = write_result[
+            "database_write_attempted"
+        ] or static_result.get("database_write_attempted", False)
+        report["execution"]["dml_executed"] = write_result[
+            "dml_executed"
+        ] or static_result.get("dml_executed", False)
     return report
 
 

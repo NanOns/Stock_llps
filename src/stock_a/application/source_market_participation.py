@@ -385,7 +385,16 @@ def produce_market_participation(
             category="UNAVAILABLE",
             database_write_attempted=True,
         )
-    return {"persistence": persisted, "readback": readback}
+    return {
+        "persistence": persisted,
+        "readback": readback,
+        "profile_revision": result["profile_revision"],
+        "producer_version": result["producer_version"],
+        "target_session": result["target_session"].isoformat(),
+        "source_package_id": result["source_package_id"],
+        "source_capture_id": result["source_capture_id"],
+        "calendar_revision": result["calendar_revision"],
+    }
 
 
 def read_source_market_participation(

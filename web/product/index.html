@@ -41,6 +41,17 @@
             ><span class="nav-arrow">›</span>
           </button>
         </nav>
+        <p class="nav-caption">数据运营</p>
+        <nav class="navigation" aria-label="数据运营">
+          <button class="nav-item" data-page="initialize">
+            <span class="nav-icon">▤</span><span>数据初始化</span
+            ><span class="nav-arrow">›</span>
+          </button>
+          <button class="nav-item" data-page="daily">
+            <span class="nav-icon">↻</span><span>数据日更</span
+            ><span class="nav-arrow">›</span>
+          </button>
+        </nav>
         <div class="sidebar-note">
           <span class="status-dot"></span>
           <div>
@@ -72,7 +83,8 @@
           <div class="page-heading">
             <div>
               <div class="eyebrow">
-                MARKET RESEARCH <span> / </span>
+                <span id="pageCategory">MARKET RESEARCH</span>
+                <span> / </span>
                 <span id="headingIndex">01</span>
               </div>
               <h1 id="pageTitle">今日总览</h1>
@@ -724,6 +736,186 @@
                 ><span id="cohortPage">—</span
                 ><button id="cohortNext" class="button subtle">下一页</button>
               </div>
+            </section>
+          </section>
+          <section id="initialize" class="page" aria-label="数据初始化">
+            <section class="card">
+              <div class="job-page-heading">
+                <div>
+                  <h2>数据初始化</h2>
+                  <p>
+                    选择官方目标会话、基础Raw历史窗口，以及D0和D1各自最近需要生成的输出会话数。
+                  </p>
+                </div>
+                <span id="dataInitStatus" class="job-status-pill"
+                  >只读预检</span
+                >
+              </div>
+              <p id="dataInitCoverage" class="muted">正在读取PG覆盖…</p>
+              <p id="dataInitGate" class="job-gate-blocked" role="status">
+                正在读取运行许可…
+              </p>
+              <div class="job-controls">
+                <label>
+                  研究截止官方交易会话
+                  <select
+                    id="dataInitTarget"
+                    aria-label="研究截止官方交易会话"
+                  ></select>
+                </label>
+                <label>
+                  基础Raw历史会话数
+                  <input
+                    id="dataInitHistory"
+                    type="number"
+                    min="1"
+                    max="32767"
+                    step="1"
+                    value="200"
+                  />
+                </label>
+                <div class="job-quick-values" aria-label="历史会话快捷值">
+                  <button
+                    class="button subtle"
+                    type="button"
+                    data-history-sessions="200"
+                  >
+                    200日
+                  </button>
+                  <button
+                    class="button subtle"
+                    type="button"
+                    data-history-sessions="250"
+                  >
+                    250日
+                  </button>
+                  <span>或输入自定义正整数</span>
+                </div>
+                <label class="job-output-control">
+                  <span
+                    ><input
+                      id="dataInitD0Enabled"
+                      type="checkbox"
+                      aria-label="生成D0输出"
+                      checked
+                    />
+                    生成D0</span
+                  >
+                  <span>输出保存最近</span>
+                  <input
+                    id="dataInitD0Count"
+                    type="number"
+                    min="1"
+                    max="32767"
+                    step="1"
+                    value="1"
+                    aria-label="D0输出保存最近官方会话数"
+                  />
+                  <span>个官方会话</span>
+                </label>
+                <label class="job-output-control">
+                  <span
+                    ><input
+                      id="dataInitD1Enabled"
+                      type="checkbox"
+                      aria-label="生成D1输出"
+                      checked
+                    />
+                    生成D1</span
+                  >
+                  <span>输出保存最近</span>
+                  <input
+                    id="dataInitD1Count"
+                    type="number"
+                    min="1"
+                    max="32767"
+                    step="1"
+                    value="1"
+                    aria-label="D1输出保存最近官方会话数"
+                  />
+                  <span>个官方会话</span>
+                </label>
+              </div>
+              <p class="muted">
+                基础窗口用于Raw与Core/Profile预热；D0/D1数字只决定输出会话范围，不改变MA、ATR或D1算法窗口。关闭某项表示用户跳过。
+              </p>
+              <div class="job-actions">
+                <button id="planDataInit" class="button subtle" type="button">
+                  检查数据与执行计划
+                </button>
+                <button
+                  id="startDataInit"
+                  class="button primary"
+                  type="button"
+                  disabled
+                >
+                  开始初始化
+                </button>
+              </div>
+              <div id="dataInitPlan" class="job-plan" role="status">
+                选择范围后检查官方日历与截止内PG Raw覆盖。
+              </div>
+            </section>
+            <section class="card">
+              <h2>运行进度</h2>
+              <p class="muted">
+                刷新页面后从PostgreSQL读取任务、阶段和实际业务表进度。
+              </p>
+              <div id="dataInitProgress" class="job-progress">
+                正在读取最近任务…
+              </div>
+            </section>
+            <section class="card">
+              <h2>最近任务</h2>
+              <div id="dataInitRecent" class="job-recent">正在读取…</div>
+            </section>
+          </section>
+          <section id="daily" class="page" aria-label="数据日更">
+            <section class="card">
+              <div class="job-page-heading">
+                <div>
+                  <h2>数据日更</h2>
+                  <p>手动检查最近已完成会话之后的连续官方交易会话。</p>
+                </div>
+                <span id="dataDailyStatus" class="job-status-pill">未启动</span>
+              </div>
+              <p id="dataDailyCoverage" class="muted">正在读取PG覆盖…</p>
+              <p id="dataDailyGate" class="job-gate-blocked" role="status">
+                正在读取运行许可…
+              </p>
+              <p>
+                一次点击由后台任务复用Raw、Core/Profile、市场宽度与成交参与、静态Seed、D0/D1和已实现的LAUNCH
+                Focus准入生产者。页面只发起任务并读取PG进度，不定时采集。
+              </p>
+              <div class="job-actions">
+                <button id="planDataDaily" class="button subtle" type="button">
+                  检查本次日更
+                </button>
+                <button
+                  id="startDataDaily"
+                  class="button primary"
+                  type="button"
+                  disabled
+                >
+                  手动开始日更
+                </button>
+              </div>
+              <div id="dataDailyPlan" class="job-plan" role="status">
+                检查截止内下一组连续官方会话与PG来源覆盖。
+              </div>
+            </section>
+            <section class="card">
+              <h2>运行进度</h2>
+              <p class="muted">
+                任务在服务后台继续运行；切页或刷新不会重启任务。
+              </p>
+              <div id="dataDailyProgress" class="job-progress">
+                正在读取最近任务…
+              </div>
+            </section>
+            <section class="card">
+              <h2>最近任务</h2>
+              <div id="dataDailyRecent" class="job-recent">正在读取…</div>
             </section>
           </section>
           <section id="market" class="page" aria-label="市场研究">

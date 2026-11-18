@@ -758,12 +758,27 @@ def _insert_rows(
 
 
 def persist_source_research_day(
-    config: Mapping[str, Any], facts: ResearchDayFacts
+    config: Mapping[str, Any],
+    facts: ResearchDayFacts,
+    *,
+    include_d0: bool = True,
+    include_d1: bool = True,
 ) -> dict[str, Any]:
-    """序列化冲突时重试完整单日事务。"""
+    """按明确D0/D1日期范围序列化重试单日typed事务。"""
+    if (
+        type(include_d0) is not bool
+        or type(include_d1) is not bool
+        or not (include_d0 or include_d1)
+    ):
+        raise ResearchDayPgError(
+            "RESEARCH_DAY_DOMAIN_SELECTION_INVALID",
+            "至少选择D0或D1一个正式生产域。",
+        )
     for attempt in range(5):
         try:
-            return _persist_source_research_day_once(config, facts)
+            return _persist_source_research_day_once(
+                config, facts, include_d0=include_d0, include_d1=include_d1
+            )
         except source_raw.RawSourcePgError as error:
             if getattr(error.__cause__, "sqlstate", None) != "40001" or attempt == 4:
                 raise
@@ -772,13 +787,19 @@ def persist_source_research_day(
 
 
 def _persist_source_research_day_once(
-    config: Mapping[str, Any], facts: ResearchDayFacts
+    config: Mapping[str, Any],
+    facts: ResearchDayFacts,
+    *,
+    include_d0: bool,
+    include_d1: bool,
 ) -> dict[str, Any]:
-    """串行化事务写三张typed事实表；同键异内容拒绝并回滚。"""
+    """串行化事务写所选D0/D1 typed表；同键异内容拒绝并回滚。"""
     _validate_facts(facts)
-    d0_rows = _sort_rows(_d0_rows(facts), _D0_COLUMNS, _D0_KEY)
-    d1_rows = _sort_rows(_d1_rows(facts), _D1_COLUMNS, _D1_KEY)
+    d0_rows = _sort_rows(_d0_rows(facts), _D0_COLUMNS, _D0_KEY) if include_d0 else ()
+    d1_rows = _sort_rows(_d1_rows(facts), _D1_COLUMNS, _D1_KEY) if include_d1 else ()
     inserted = {}
+    expected_rows: dict[str, int] = {}
+    existing_scopes: list[bool] = []
     with source_raw._transaction(config, write=True, statement_timeout_ms=30000) as (
         _connection,
         cursor,
@@ -786,142 +807,216 @@ def _persist_source_research_day_once(
     ):
         _ensure_tables(cursor)
         _verify_raw_source(cursor, facts)
-        # 在本事务写入之前读取范围，避免把刚插入的行误认作历史半批。
-        preexisting = []
-        for (table, columns, _key), rows in zip(
-            _TABLES[:2], (d0_rows, d1_rows), strict=True
-        ):
-            predicate, params = _scope_predicate(table, facts)
-            existing = _select_rows(cursor, table, columns, predicate, params)
-            if existing and (
-                len(existing) != len(rows)
+        any_existing = False
+        if include_d0:
+            predicate, params = _scope_predicate("source_d0_launch_day_facts", facts)
+            existing_d0 = _select_rows(
+                cursor, "source_d0_launch_day_facts", _D0_COLUMNS, predicate, params
+            )
+            if existing_d0 and (
+                len(existing_d0) != len(d0_rows)
                 or any(
                     not _row_matches(expected, actual)
-                    for expected, actual in zip(rows, existing, strict=True)
+                    for expected, actual in zip(d0_rows, existing_d0, strict=True)
                 )
             ):
                 raise ResearchDayPgError(
                     "RESEARCH_DAY_CONTENT_CONFLICT",
-                    "相同D0/D1业务键已有不同或不完整事实",
+                    "相同D0业务键已有不同或不完整事实",
                 )
-            preexisting.append(existing)
-        inserted["source_d0_launch_day_facts"] = _insert_rows(
-            cursor,
-            "source_d0_launch_day_facts",
-            _D0_COLUMNS,
-            _D0_KEY,
-            d0_rows,
-        )
-        inserted["source_d1_structure_day_facts"] = _insert_rows(
-            cursor,
-            "source_d1_structure_day_facts",
-            _D1_COLUMNS,
-            _D1_KEY,
-            d1_rows,
-        )
-        d1_predicate, d1_params = _scope_predicate(
-            "source_d1_structure_day_facts", facts
-        )
-        cursor.execute(
-            "SELECT id, source_symbol, structure_type "
-            f"FROM source_d1_structure_day_facts WHERE {d1_predicate} "
-            "ORDER BY source_symbol, structure_type",
-            d1_params,
-        )
-        structure_ids = {
-            (source_symbol, structure_type): structure_id
-            for structure_id, source_symbol, structure_type in cursor.fetchall()
-        }
-        expected_d1_keys = {
-            (item.source_symbol, item.structure_type)
-            for item in facts.d1_structure_facts
-        }
-        if set(structure_ids) != expected_d1_keys:
-            raise ResearchDayPgError(
-                "RESEARCH_DAY_D1_PARENT_MISSING",
-                "D1材料锚无法绑定唯一的数字结构事实主键",
-            )
-        anchor_rows = _sort_rows(
-            _anchor_rows(facts, structure_ids), _ANCHOR_COLUMNS, _ANCHOR_KEY
-        )
-        expected_rows = (d0_rows, d1_rows, anchor_rows)
-        predicate, params = _scope_predicate(
-            _TABLES[2][0], facts, tuple(structure_ids.values())
-        )
-        preexisting.append(
-            _select_rows(cursor, _TABLES[2][0], _ANCHOR_COLUMNS, predicate, params)
-        )
-        existing_scopes = []
-        any_existing = any(preexisting)
-        for existing, rows in zip(preexisting, expected_rows, strict=True):
-            if existing and len(existing) != len(rows):
-                raise ResearchDayPgError(
-                    "RESEARCH_DAY_PARTIAL_EXISTING_SCOPE",
-                    "PG中存在不完整的单日事实范围，拒绝覆盖或继续写入",
+            any_existing = any_existing or bool(existing_d0)
+            existing_scopes.append(len(existing_d0) == len(d0_rows))
+            expected_rows["source_d0_launch_day_facts"] = len(d0_rows)
+            if not existing_d0:
+                inserted["source_d0_launch_day_facts"] = _insert_rows(
+                    cursor,
+                    "source_d0_launch_day_facts",
+                    _D0_COLUMNS,
+                    _D0_KEY,
+                    d0_rows,
                 )
-            if existing and any(
-                not _row_matches(expected, actual)
-                for expected, actual in zip(rows, existing, strict=True)
-            ):
-                raise ResearchDayPgError(
-                    "RESEARCH_DAY_CONTENT_CONFLICT",
-                    "相同D0/D1业务键已存在不同typed事实，事务回滚",
-                )
-            existing_scopes.append(len(existing) == len(rows))
-        if any_existing and not all(existing_scopes):
-            raise ResearchDayPgError(
-                "RESEARCH_DAY_CROSS_TABLE_PARTIAL_SCOPE",
-                "三类事实表的既存范围不完整，拒绝跨表补写",
+            actual_d0 = _select_rows(
+                cursor, "source_d0_launch_day_facts", _D0_COLUMNS, predicate, params
             )
-        if not all(existing_scopes):
-            inserted["source_d1_material_anchor_day_facts"] = _insert_rows(
-                cursor,
-                "source_d1_material_anchor_day_facts",
-                _ANCHOR_COLUMNS,
-                _ANCHOR_KEY,
-                anchor_rows,
-            )
-        for index, ((table, columns, _key), rows) in enumerate(
-            zip(_TABLES, expected_rows, strict=True)
-        ):
-            predicate, params = (
-                _scope_predicate(table, facts, tuple(structure_ids.values()))
-                if index == 2
-                else _scope_predicate(table, facts)
-            )
-            actual = _select_rows(cursor, table, columns, predicate, params)
-            if len(actual) != len(rows) or any(
+            if len(actual_d0) != len(d0_rows) or any(
                 not _row_matches(expected, persisted)
-                for expected, persisted in zip(rows, actual, strict=True)
+                for expected, persisted in zip(d0_rows, actual_d0, strict=True)
             ):
                 raise ResearchDayPgError(
                     "RESEARCH_DAY_TYPED_READBACK_MISMATCH",
-                    "事务内typed事实读回和预期不一致，拒绝提交",
+                    "D0 typed事实事务内读回不一致，拒绝提交",
                 )
-        from stock_a.storage.postgres.research_enrollment import insert_d0_enrollments
+            from stock_a.storage.postgres.research_enrollment import (
+                insert_d0_enrollments,
+            )
 
-        enrollment = insert_d0_enrollments(
-            cursor,
-            target=facts.target_session,
-            package=facts.source_package_id,
-            capture=facts.target_capture_id,
-            before=facts.before_session,
-            before_capture=facts.before_capture_id,
-            producer_version=facts.d0_producer_version,
-            algorithm_contract=facts.d0_algorithm_contract,
-            session_contract=facts.d0_session_contract,
-            calendar_revision=facts.calendar_revision,
-        )
+            enrollment = insert_d0_enrollments(
+                cursor,
+                target=facts.target_session,
+                package=facts.source_package_id,
+                capture=facts.target_capture_id,
+                before=facts.before_session,
+                before_capture=facts.before_capture_id,
+                producer_version=facts.d0_producer_version,
+                algorithm_contract=facts.d0_algorithm_contract,
+                session_contract=facts.d0_session_contract,
+                calendar_revision=facts.calendar_revision,
+            )
+        else:
+            enrollment = {"inserted": 0, "status": "SKIPPED_BY_USER"}
+
+        if include_d1:
+            d1_predicate, d1_params = _scope_predicate(
+                "source_d1_structure_day_facts", facts
+            )
+            existing_d1 = _select_rows(
+                cursor,
+                "source_d1_structure_day_facts",
+                _D1_COLUMNS,
+                d1_predicate,
+                d1_params,
+            )
+            if existing_d1 and (
+                len(existing_d1) != len(d1_rows)
+                or any(
+                    not _row_matches(expected, actual)
+                    for expected, actual in zip(d1_rows, existing_d1, strict=True)
+                )
+            ):
+                raise ResearchDayPgError(
+                    "RESEARCH_DAY_CONTENT_CONFLICT",
+                    "相同D1结构业务键已有不同或不完整事实",
+                )
+            any_existing = any_existing or bool(existing_d1)
+            existing_scopes.append(len(existing_d1) == len(d1_rows))
+            expected_rows["source_d1_structure_day_facts"] = len(d1_rows)
+            if not existing_d1:
+                inserted["source_d1_structure_day_facts"] = _insert_rows(
+                    cursor,
+                    "source_d1_structure_day_facts",
+                    _D1_COLUMNS,
+                    _D1_KEY,
+                    d1_rows,
+                )
+            cursor.execute(
+                "SELECT id, source_symbol, structure_type "
+                f"FROM source_d1_structure_day_facts WHERE {d1_predicate} "
+                "ORDER BY source_symbol, structure_type",
+                d1_params,
+            )
+            structure_ids = {
+                (source_symbol, structure_type): structure_id
+                for structure_id, source_symbol, structure_type in cursor.fetchall()
+            }
+            expected_d1_keys = {
+                (item.source_symbol, item.structure_type)
+                for item in facts.d1_structure_facts
+            }
+            if set(structure_ids) != expected_d1_keys:
+                raise ResearchDayPgError(
+                    "RESEARCH_DAY_D1_PARENT_MISSING",
+                    "D1材料锚无法绑定唯一的数字结构事实主键",
+                )
+            anchor_rows = _sort_rows(
+                _anchor_rows(facts, structure_ids), _ANCHOR_COLUMNS, _ANCHOR_KEY
+            )
+            anchor_table, _anchor_columns, _anchor_key = _TABLES[2]
+            anchor_predicate, anchor_params = _scope_predicate(
+                anchor_table, facts, tuple(structure_ids.values())
+            )
+            existing_anchor = _select_rows(
+                cursor,
+                anchor_table,
+                _ANCHOR_COLUMNS,
+                anchor_predicate,
+                anchor_params,
+            )
+            if existing_anchor and (
+                len(existing_anchor) != len(anchor_rows)
+                or any(
+                    not _row_matches(expected, actual)
+                    for expected, actual in zip(
+                        anchor_rows, existing_anchor, strict=True
+                    )
+                )
+            ):
+                raise ResearchDayPgError(
+                    "RESEARCH_DAY_CONTENT_CONFLICT",
+                    "相同D1材料锚业务键已有不同或不完整事实",
+                )
+            any_existing = any_existing or bool(existing_anchor)
+            existing_scopes.append(len(existing_anchor) == len(anchor_rows))
+            expected_rows["source_d1_material_anchor_day_facts"] = len(anchor_rows)
+            if not existing_anchor:
+                inserted["source_d1_material_anchor_day_facts"] = _insert_rows(
+                    cursor,
+                    anchor_table,
+                    _ANCHOR_COLUMNS,
+                    _ANCHOR_KEY,
+                    anchor_rows,
+                )
+            actual_d1 = _select_rows(
+                cursor,
+                "source_d1_structure_day_facts",
+                _D1_COLUMNS,
+                d1_predicate,
+                d1_params,
+            )
+            actual_anchor = _select_rows(
+                cursor,
+                anchor_table,
+                _ANCHOR_COLUMNS,
+                anchor_predicate,
+                anchor_params,
+            )
+            for expected, actual in (
+                (d1_rows, actual_d1),
+                (anchor_rows, actual_anchor),
+            ):
+                if len(actual) != len(expected) or any(
+                    not _row_matches(wanted, persisted)
+                    for wanted, persisted in zip(expected, actual, strict=True)
+                ):
+                    raise ResearchDayPgError(
+                        "RESEARCH_DAY_TYPED_READBACK_MISMATCH",
+                        "D1 typed事实事务内读回不一致，拒绝提交",
+                    )
+
+        if any_existing and not all(existing_scopes):
+            raise ResearchDayPgError(
+                "RESEARCH_DAY_CROSS_TABLE_PARTIAL_SCOPE",
+                "所选D0或D1事实表的既存范围不完整，拒绝跨表补写",
+            )
     return {
         "status": "IDEMPOTENT_ALREADY_PRESENT"
-        if all(existing_scopes) and enrollment["inserted"] == 0
+        if existing_scopes and all(existing_scopes) and enrollment["inserted"] == 0
         else "WRITTEN_AND_TYPED_READBACK_VERIFIED",
-        "rows_expected": {
-            table.rsplit(".", 1)[-1]: len(rows)
-            for (table, _columns, _key), rows in zip(
-                _TABLES, expected_rows, strict=True
-            )
+        "persisted_domains": {
+            "D0": include_d0,
+            "D1": include_d1,
         },
+        "calendar_revision": facts.calendar_revision,
+        "producer_versions": {
+            **(
+                {"source_d0_launch_day_facts": facts.d0_producer_version}
+                if include_d0
+                else {}
+            ),
+            **(
+                {
+                    "source_d1_structure_day_facts": facts.d1_producer_version,
+                    "source_d1_material_anchor_day_facts": facts.d1_producer_version,
+                }
+                if include_d1
+                else {}
+            ),
+            **(
+                {"source_research_enrollments": facts.d0_producer_version}
+                if include_d0
+                else {}
+            ),
+        },
+        "rows_expected": expected_rows,
         "rows_inserted": inserted,
         "research_enrollments": enrollment,
         "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED"

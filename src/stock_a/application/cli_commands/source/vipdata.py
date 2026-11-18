@@ -120,10 +120,12 @@ def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
         )
     if (
         type(args.history_session_count) is not int
-        or not 1 <= args.history_session_count <= 75
+        or not 1 <= args.history_session_count <= 32767
     ):
         raise DiagnosticError(
-            "HISTORY_SESSION_WINDOW_INVALID", "历史扫描会话数须为1至75", _EXIT_ARGUMENT
+            "HISTORY_SESSION_WINDOW_INVALID",
+            "历史扫描会话数必须为正整数且不超过32767",
+            _EXIT_ARGUMENT,
         )
     available_sessions = tuple(
         session for session in official_sessions if session <= target
@@ -158,7 +160,7 @@ def _run_source_vipdata_persist(args: argparse.Namespace) -> int:
                 task_scope=args.task_scope,
                 scan_budget=budget,
                 chunk_size=args.chunk_size,
-                max_raw_rows=750_000,
+                max_raw_rows=args.max_raw_rows,
             )
     except VipdataError as error:
         raise DiagnosticError(

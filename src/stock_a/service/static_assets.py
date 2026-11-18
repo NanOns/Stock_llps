@@ -10,6 +10,7 @@ _WORKSPACE = Path("G:/codex work/Stock A")
 _ASSET_TYPES = {
     "index.html": "text/html; charset=utf-8",
     "app.js": "text/javascript; charset=utf-8",
+    "data_jobs.js": "text/javascript; charset=utf-8",
     "app.css": "text/css; charset=utf-8",
     "api.js": "text/javascript; charset=utf-8",
     "state.js": "text/javascript; charset=utf-8",

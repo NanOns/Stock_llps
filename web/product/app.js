@@ -1,4 +1,5 @@
 import { requestD1Material } from "./api.js";
+import { mountDataJobPages } from "./data_jobs.js";
 import {
   buildD1MaterialRequest,
   byId,
@@ -63,6 +64,12 @@ const names = {
   focus: ["关注跟踪", "读取来源级冻结规则与后继观察。", "04"],
   market: ["市场研究", "查看来源池宽度与成交参与。", "05"],
   diagnostics: ["数据与诊断", "查看所选来源与质量。", "06"],
+  initialize: [
+    "数据初始化",
+    "按官方交易会话规划历史Raw、Core/Profile和指定研究输出。",
+    "07",
+  ],
+  daily: ["数据日更", "手动检查并处理研究截止内连续的官方交易会话。", "08"],
 };
 function node(tag, text, cls) {
   const n = document.createElement(tag);
@@ -1670,6 +1677,7 @@ async function waitForD1Material(body, signal, onBusy) {
   }
 }
 let activePage = "overview";
+const dataJobPages = mountDataJobPages(api);
 let extraRequest = 0;
 let cohortRequest = 0;
 let focusStockRequest = 0;
@@ -1682,10 +1690,13 @@ let currentStockSource = null;
 function gotoPage(page) {
   const changed = activePage !== page;
   activePage = page;
-  const extra = ["focus", "market", "diagnostics"].includes(page);
+  const operationPage = ["initialize", "daily"].includes(page);
+  const extra =
+    ["focus", "market", "diagnostics"].includes(page) || operationPage;
   $("refreshResearch").hidden = extra;
+  $("researchDate").closest(".context-button").hidden = operationPage;
   $("contextNotice").hidden =
-    extra && state.profileDirectoryStatus !== "READ_FAILED";
+    operationPage || (extra && state.profileDirectoryStatus !== "READ_FAILED");
   $("d1MaterialFilters").hidden =
     !state.d1Requested || !["sectors", "stocks"].includes(page);
   $("d1MaterialQuality").hidden =
@@ -1706,13 +1717,19 @@ function gotoPage(page) {
   message("pageTitle", data[0]);
   message("pageSubtitle", data[1]);
   message("headingIndex", data[2]);
+  message(
+    "pageCategory",
+    operationPage ? "DATA OPERATIONS" : "MARKET RESEARCH",
+  );
   if (page === "sectors" && state.selected?.contextReady)
     d1MaterialState.data &&
       renderD1Boards(d1MaterialState.data, openD1Board, toggleBoardComparison);
   if (page === "stocks" && state.selected?.contextReady)
     d1MaterialState.data && renderD1Stocks(d1MaterialState.data, openD1Stock);
   if (page === "market") renderMarketD0Summary();
-  if (["focus", "market", "diagnostics"].includes(page)) void loadExtra(page);
+  if (operationPage) void dataJobPages.load(page);
+  else if (["focus", "market", "diagnostics"].includes(page))
+    void loadExtra(page);
 }
 document
   .querySelectorAll("[data-page]")
