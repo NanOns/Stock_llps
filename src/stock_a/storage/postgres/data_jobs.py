@@ -85,7 +85,6 @@ _MODULE_PROGRESS_TABLES = {
     "SECTOR_PULSE": frozenset(
         {
             "stock.source_sector_cross_period_pulse_facts",
-            "stock.source_sector_pulse_adjacent_transitions",
         }
     ),
     "SECTOR_TRANSITION": frozenset({"stock.source_sector_pulse_adjacent_transitions"}),
@@ -2875,6 +2874,52 @@ def set_job_source_package(
         )
         if cursor.rowcount != 1:
             raise DataJobPgError("DATA_JOB_STATE_CONFLICT", "来源包无法绑定到运行任务")
+
+
+def read_reset_preflight_fingerprint(
+    config: Mapping[str, Any], *, job_id: UUID
+) -> str | None:
+    if not isinstance(job_id, UUID):
+        raise DataJobPgError("DATA_JOB_ID_INVALID", "重置任务ID无效")
+    with source_raw._transaction(config, write=False) as (_connection, cursor, _scope):
+        cursor.execute(
+            "SELECT reset_preflight_fingerprint FROM stock.data_jobs WHERE job_id=%s",
+            (job_id,),
+        )
+        row = cursor.fetchone()
+    if row is None:
+        raise DataJobPgError("DATA_JOB_NOT_FOUND", "重置任务主记录不存在")
+    return str(row[0]) if row[0] is not None else None
+
+
+def bind_reset_preflight_fingerprint(
+    config: Mapping[str, Any], *, job_id: UUID, fingerprint: str
+) -> None:
+    if (
+        not isinstance(job_id, UUID)
+        or not isinstance(fingerprint, str)
+        or len(fingerprint) != 64
+        or any(char not in "0123456789abcdef" for char in fingerprint)
+    ):
+        raise DataJobPgError(
+            "RESET_PREFLIGHT_FINGERPRINT_INVALID", "重置输入预检指纹必须为SHA-256"
+        )
+    with source_raw._transaction(config, write=True) as (_connection, cursor, _scope):
+        cursor.execute(
+            """UPDATE stock.data_jobs
+               SET reset_preflight_fingerprint=%s,updated_at=clock_timestamp()
+               WHERE job_id=%s AND mode='INITIALIZE'
+                 AND initialization_mode='RESET_ALL_BUSINESS_FACTS'
+                 AND status='RUNNING' AND reset_preview_fingerprint IS NOT NULL
+                 AND (reset_preflight_fingerprint IS NULL
+                      OR reset_preflight_fingerprint=%s)""",
+            (fingerprint, job_id, fingerprint),
+        )
+        if cursor.rowcount != 1:
+            raise DataJobPgError(
+                "RESET_INPUT_IDENTITY_CONFLICT",
+                "重置任务已绑定不同的来源输入，拒绝覆盖或混用。",
+            )
 
 
 def recover_interrupted_jobs(config: Mapping[str, Any]) -> dict[str, int]:

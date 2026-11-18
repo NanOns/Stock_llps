@@ -5,6 +5,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from datetime import date, datetime, timezone
 from decimal import Decimal
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -1016,6 +1017,215 @@ def import_verified_vipdata_target(
         "stable_security_identity_issued": False,
         "canonical_or_foundation_written": False,
         "storage_location_status": "USER_CONFIRMED_NOT_INDEPENDENTLY_VERIFIED",
+    }
+
+
+def preflight_verified_vipdata_history(
+    config: Mapping[str, Any],
+    package: Any,
+    sessions: Sequence[date],
+    *,
+    task_scope: str,
+    scan_budget: Any,
+    max_raw_rows: int = 2_000_000,
+) -> dict[str, Any]:
+    """只读扫描完整来源包，逐候选、逐目标会话验证未来Raw可重建性。"""
+    from bisect import bisect_right
+    from dataclasses import replace
+
+    from stock_a.sources.tdx.day import UnitContract
+    from stock_a.sources.tdx.vipdata import (
+        VipdataTargetScanBudget,
+        _target_quality_row,
+        build_vipdata_entry_capture_for_target,
+        scan_vipdata_target_quality,
+        vipdata_package_entry_sha256,
+        vipdata_research_candidate_pool,
+    )
+
+    if (
+        not isinstance(sessions, (tuple, list))
+        or not sessions
+        or len(sessions) > 32767
+        or any(type(day) is not date for day in sessions)
+        or tuple(sorted(set(sessions))) != tuple(sessions)
+    ):
+        raise RawSourcePgError(
+            "HISTORY_SESSION_WINDOW_INVALID",
+            "重置预检会话须为严格递增且不重复的官方date列表",
+        )
+    _validate_source_input(package, sessions[-1], task_scope=task_scope)
+    if (
+        not isinstance(scan_budget, VipdataTargetScanBudget)
+        or config.get("paths", {}).get("temporary_root") != "G:/codex_tmp"
+        or type(max_raw_rows) is not int
+        or max_raw_rows < 1
+    ):
+        raise RawSourcePgError(
+            "SCAN_BUDGET_INVALID", "重置来源预检预算或G盘临时目录配置无效"
+        )
+
+    pool = vipdata_research_candidate_pool(package)
+    candidate_total = len(pool.candidates)
+    validate_source_candidate_limit(candidate_total)
+    planned_rows = candidate_total * len(sessions)
+    if planned_rows > max_raw_rows:
+        raise RawSourcePgError(
+            "HISTORY_ROW_BUDGET_EXCEEDED",
+            f"来源预检需要{candidate_total}个候选×{len(sessions)}个会话={planned_rows}行，超过预算",
+        )
+    candidate_by_symbol = {item["symbol"]: item for item in pool.candidates}
+    seen: set[str] = set()
+    counts = {
+        session: {"TARGET_PRESENT": 0, "TARGET_MISSING": 0} for session in sessions
+    }
+
+    def validate_candidate(quality_row: Any, entry_capture: Any | None) -> None:
+        symbol = quality_row.symbol
+        candidate = candidate_by_symbol.get(symbol)
+        if candidate is None or symbol in seen:
+            raise RawSourcePgError(
+                "CANDIDATE_BINDING_MISMATCH", "来源扫描候选缺失、重复或不属于当前目录"
+            )
+        if quality_row.status in {"READ_FAILED", "NOT_EVALUATED"}:
+            raise RawSourcePgError(
+                "RESET_SOURCE_CANDIDATE_UNREADABLE",
+                f"{symbol}来源条目未完整读取：{quality_row.reason or quality_row.status}",
+            )
+
+        if entry_capture is None:
+            if quality_row.status != "TARGET_MISSING" or not candidate.get(
+                "empty_placeholder"
+            ):
+                raise RawSourcePgError(
+                    "RESET_SOURCE_CAPTURE_MISSING",
+                    f"{symbol}缺少非空来源条目的完整解码捕获",
+                )
+            for session in sessions:
+                row = replace(quality_row, target_session=session)
+                typed = _raw_candidate(
+                    row,
+                    None,
+                    candidate=candidate,
+                    source_package_id=1,
+                    capture_id=1,
+                    target_session=session,
+                )
+                _validate_raw_candidate(typed)
+                counts[session]["TARGET_MISSING"] += 1
+            seen.add(symbol)
+            return
+
+        if entry_capture.source_symbol != symbol or not getattr(
+            entry_capture.scan_summary, "complete", False
+        ):
+            raise RawSourcePgError(
+                "RESET_SOURCE_ENTRY_INCOMPLETE",
+                f"{symbol}来源条目没有同代码绑定的完整解码结果",
+            )
+        decoded_rows = tuple(entry_capture.rows)
+        record_dates = tuple(item.session_date for item in decoded_rows)
+        if record_dates != tuple(sorted(set(record_dates))):
+            raise RawSourcePgError(
+                "SOURCE_HISTORY_ORDER_INVALID", f"{symbol}来源历史日期无序或重复"
+            )
+        bars = {item.session_date: item for item in decoded_rows}
+        summary = entry_capture.scan_summary
+        for source_index, session in enumerate(sessions):
+            target_bar = bars.get(session)
+            capture = build_vipdata_entry_capture_for_target(
+                package,
+                candidate,
+                scan_summary=summary,
+                target_session=session,
+                target_bar=target_bar,
+                future_source_rows_excluded=len(record_dates)
+                - bisect_right(record_dates, session),
+            )
+            status = "TARGET_PRESENT" if target_bar is not None else "TARGET_MISSING"
+            row = _target_quality_row(
+                candidate,
+                target_session=session,
+                source_index=source_index,
+                page_offset=source_index,
+                capture=capture,
+                status=status,
+                reason=None if target_bar is not None else "TARGET_SESSION_BAR_MISSING",
+                bytes_read=summary.byte_count,
+                record_count=summary.record_count,
+            )
+            if status == "TARGET_PRESENT" and row.price_quality != "OBSERVED":
+                raise RawSourcePgError(
+                    "RESET_SOURCE_PRICE_QUALITY_INVALID",
+                    f"{symbol}在{session.isoformat()}没有可重建的有效OHLC价格",
+                )
+            if "BAD_VALUE" in {
+                row.price_quality,
+                row.amount_quality,
+                row.volume_quality,
+            }:
+                raise RawSourcePgError(
+                    "RESET_SOURCE_VALUE_QUALITY_INVALID",
+                    f"{symbol}在{session.isoformat()}存在非法价格、金额或数量值",
+                )
+            typed = _raw_candidate(
+                row,
+                capture,
+                candidate=candidate,
+                source_package_id=1,
+                capture_id=1,
+                target_session=session,
+            )
+            _validate_raw_candidate(typed)
+            counts[session][status] += 1
+        seen.add(symbol)
+
+    report = scan_vipdata_target_quality(
+        package,
+        pool,
+        target_session=sessions[-1],
+        units=UnitContract("TDX_RAW_SOURCE_VALUES_UNIT_UNVERIFIED_R1", None, None),
+        budget=scan_budget,
+        on_candidate=validate_candidate,
+    )
+    if (
+        report.candidate_total != candidate_total
+        or report.evaluated != candidate_total
+        or report.not_evaluated != 0
+        or report.read_failed != 0
+        or len(seen) != candidate_total
+    ):
+        raise RawSourcePgError(
+            "TARGET_SCAN_INCOMPLETE", "重置前来源候选扫描分母未闭合，拒绝清理"
+        )
+    for session, session_counts in counts.items():
+        if sum(session_counts.values()) != candidate_total:
+            raise RawSourcePgError(
+                "TARGET_SCAN_CLOSURE_INVALID",
+                f"{session.isoformat()}的Raw候选预期行数未闭合",
+            )
+        if session_counts["TARGET_PRESENT"] == 0:
+            raise RawSourcePgError(
+                "RESET_SOURCE_SESSION_EMPTY",
+                f"官方会话{session.isoformat()}没有任何可恢复的来源Bar",
+            )
+
+    package_sha256 = vipdata_package_entry_sha256(package)
+    return {
+        "status": "COMPLETE_BEFORE_DELETE",
+        "target_sessions": [session.isoformat() for session in sessions],
+        "candidate_total": candidate_total,
+        "planned_raw_rows": planned_rows,
+        "session_counts": {
+            session.isoformat(): dict(session_counts)
+            for session, session_counts in counts.items()
+        },
+        "source_bytes_read": report.bytes_read,
+        "source_records_read": report.records_read,
+        "scan_elapsed_seconds": report.elapsed_seconds,
+        "package_sha256": package_sha256,
+        "database_write_attempted": False,
+        "source_io_attempted": False,
     }
 
 

@@ -50,12 +50,14 @@ from stock_a.storage.postgres.static_research_facts import (
     persist_static_research_day,
     read_source_pool_seed_forward_scope,
 )
+
 from stock_a.storage.postgres.source_raw import (
     read_raw_daily_forward_pool,
     read_raw_daily_catalog,
     read_source_version_context,
 )
 
+D1_DEFAULT_HISTORY_SESSION_COUNT = 40
 
 _SYMBOL = re.compile(r"^(SH|SZ)\.[0-9]{6}$")
 _D1_STATUS_COUNTS = (

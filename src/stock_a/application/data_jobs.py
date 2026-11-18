@@ -97,6 +97,38 @@ _MODULES = {
     "SECTOR_TRANSITION": ("RESEARCH", "行业 / GN概念相邻变化", True, True),
     "SECTOR_FOLLOWUP": ("RESEARCH", "板块跨日跟踪", True, True),
 }
+_UNCOORDINATED_RESEARCH_CONSUMERS = (
+    (
+        "source_rule_evaluations",
+        "规则评估",
+        "当前菜单协调器没有该现役生产者，清理后依赖它的规则与观察读取会保留未计算状态。",
+    ),
+    (
+        "source_cohort_group_stats",
+        "Cohort分组统计",
+        "当前菜单协调器没有该现役生产者，清理后Cohort统计读取会保留未计算状态。",
+    ),
+    (
+        "source_fep_baseline_facts",
+        "FEP条件基线",
+        "当前菜单协调器没有该现役生产者，清理后FEP基线读取会保留未计算状态。",
+    ),
+    (
+        "source_forward_path_facts",
+        "Forward路径",
+        "当前菜单协调器没有该现役生产者，清理后Forward路径读取会保留未计算状态。",
+    ),
+    (
+        "source_research_observation_segment_days",
+        "观察持续分段",
+        "当前菜单协调器没有该现役生产者，清理后观察分段读取会保留未计算状态。",
+    ),
+    (
+        "source_t0_early_observation_facts",
+        "T0早期观察",
+        "当前菜单协调器没有该现役生产者，清理后T0早期观察读取会保留未计算状态。",
+    ),
+)
 _CLEANUP_OPERATIONS = {"CLEAR_DERIVED", "CLEAR_AND_REGENERATE"}
 _OPERATIONS = {
     "FILL_MISSING",
@@ -124,6 +156,7 @@ def _request_fields(body: Any) -> dict[str, Any]:
         "target_session",
         "history_session_count",
         "profile_history_session_count",
+        "d1_history_session_count",
         "d0_output_session_count",
         "d1_output_session_count",
         "source_modules",
@@ -224,11 +257,6 @@ def _request_fields(body: Any) -> dict[str, Any]:
         counts = {}
     if not modules:
         raise DataJobError("DATA_JOB_MODULE_SELECTION_EMPTY", "至少选择一个实际模块。")
-    if "BAOSTOCK" in selections["source"] and "TDX_RAW" not in selections["source"]:
-        raise DataJobError(
-            "DATA_JOB_BAOSTOCK_REQUIRES_TDX_RAW",
-            "BaoStock补充来源需要同时选择TDX Raw，以取得精确的来源代码池。",
-        )
     profile_history_count = body.get("profile_history_session_count")
     if profile_history_count is not None:
         profile_history_count = _positive_integer(
@@ -237,6 +265,15 @@ def _request_fields(body: Any) -> dict[str, Any]:
     elif legacy and mode == "INITIALIZE":
         # BIZ08/BIZ09请求曾把Raw历史数同时作为Profile窗口；旧请求仍按原语义解析。
         profile_history_count = body.get("history_session_count")
+    d1_history_count = body.get("d1_history_session_count")
+    if d1_history_count is not None:
+        d1_history_count = _positive_integer(
+            d1_history_count, "d1_history_session_count"
+        )
+        if d1_history_count < 2:
+            raise DataJobError(
+                "DATA_JOB_D1_WINDOW_INVALID", "D1历史窗口至少需要两个官方会话。"
+            )
     if mode == "INITIALIZE" and initialization_mode == "RESET_ALL_BUSINESS_FACTS":
         if not {"TDX_RAW", "TDX_SECTOR_MEMBERS"}.issubset(set(selections["source"])):
             raise DataJobError(
@@ -275,6 +312,7 @@ def _request_fields(body: Any) -> dict[str, Any]:
         "target_session": body.get("target_session"),
         "history_session_count": body.get("history_session_count"),
         "profile_history_session_count": profile_history_count,
+        "d1_history_session_count": d1_history_count,
         "d0_output_session_count": body.get("d0_output_session_count", 0),
         "d1_output_session_count": body.get("d1_output_session_count", 0),
         "source_modules": selections["source"],
@@ -605,6 +643,18 @@ def build_data_job_plan(
         if "TDX_RAW" in selected_source_modules
         else ()
     )
+    if "BAOSTOCK" in selected_source_modules:
+        if "TDX_RAW" in selected_source_modules:
+            baostock_output_sessions = tdx_raw_output_sessions
+        else:
+            baostock_count = _positive_integer(
+                output_counts.get("BAOSTOCK", 1), "BAOSTOCK输出会话数"
+            )
+            baostock_output_sessions = recent_official_sessions(
+                eligible, through=target, count=baostock_count
+            )
+    else:
+        baostock_output_sessions = ()
     if mode == "INITIALIZE":
         requested_target_count = raw_request_count
         if len(eligible) < requested_target_count:
@@ -774,8 +824,17 @@ def build_data_job_plan(
         else profile_dates
     )
 
-    current_d1_window = raw_coverage.get("current_d1_history_session_count")
+    stored_d1_window = raw_coverage.get("current_d1_history_session_count")
     d1_window_ambiguous = raw_coverage.get("d1_history_window_ambiguous") is True
+    current_d1_window = request["d1_history_session_count"]
+    if current_d1_window is None:
+        current_d1_window = stored_d1_window
+    if current_d1_window is None and not d1_window_ambiguous:
+        from stock_a.application.source_research_day import (
+            D1_DEFAULT_HISTORY_SESSION_COUNT,
+        )
+
+        current_d1_window = D1_DEFAULT_HISTORY_SESSION_COUNT
     required_raw_sessions: set[date] = set(raw_window)
     required_raw_sessions.update(tdx_raw_output_sessions)
     profile_inputs: dict[date, tuple[date, ...]] = {}
@@ -847,6 +906,39 @@ def build_data_job_plan(
         package_sessions.setdefault(int(item["source_package_id"]), {})[
             str(item["session_date"])
         ] = item
+    baostock_raw_session_inputs: list[Mapping[str, Any]] = []
+    baostock_source_package_id = None
+    if baostock_output_sessions and "TDX_RAW" not in selected_source_modules:
+        resolved_versions = []
+        for session in baostock_output_sessions:
+            matches = [
+                item
+                for item in closed_versions
+                if item.get("session_date") == session.isoformat()
+            ]
+            preferred = [
+                item
+                for item in matches
+                if item.get("source_package_id") == active_package_id
+            ]
+            candidates = preferred or matches
+            if len(candidates) != 1:
+                resolved_versions = []
+                break
+            resolved_versions.append(candidates[0])
+        package_ids = {int(item["source_package_id"]) for item in resolved_versions}
+        if (
+            len(resolved_versions) == len(baostock_output_sessions)
+            and len(package_ids) == 1
+            and all(
+                int(item["row_count"]) == int(item["expected_row_count"])
+                for item in resolved_versions
+            )
+        ):
+            baostock_source_package_id = next(iter(package_ids))
+            baostock_raw_session_inputs = sorted(
+                resolved_versions, key=lambda item: item["session_date"]
+            )
     package_order = sorted(
         package_sessions,
         key=lambda package_id: (
@@ -1205,20 +1297,39 @@ def build_data_job_plan(
                 business_table="stock.source_raw_daily",
             )
     if "BAOSTOCK" in selected_source_modules:
-        for day in tdx_raw_output_sessions:
+        for day in baostock_output_sessions:
             _unit(
                 units,
                 stage="SOURCE_BAOSTOCK",
                 target_session=day,
                 business_table="stock.source_baostock_daily",
+                status=(
+                    "NOT_COMPUTED"
+                    if "TDX_RAW" not in selected_source_modules
+                    and baostock_source_package_id is None
+                    else "NOT_STARTED"
+                ),
+                error_code=(
+                    "BAOSTOCK_RAW_INPUT_UNAVAILABLE"
+                    if "TDX_RAW" not in selected_source_modules
+                    and baostock_source_package_id is None
+                    else None
+                ),
+                error_message=(
+                    "目标会话没有唯一、完整且同包绑定的PG TDX Raw输入；不启动TDX采集。"
+                    if "TDX_RAW" not in selected_source_modules
+                    and baostock_source_package_id is None
+                    else None
+                ),
             )
     if "TDX_SECTOR_MEMBERS" in selected_source_modules:
-        _unit(
-            units,
-            stage="SOURCE_SECTOR_MEMBERS",
-            target_session=target,
-            business_table="stock.tdx_sector_source_snapshots",
-        )
+        for table in _STAGE_TABLES["SOURCE_SECTOR_MEMBERS"]:
+            _unit(
+                units,
+                stage="SOURCE_SECTOR_MEMBERS",
+                target_session=target,
+                business_table=table,
+            )
     for day in market_sessions:
         status = (
             "NOT_COMPUTED" if day.isoformat() in market_insufficient else "NOT_STARTED"
@@ -1450,6 +1561,13 @@ def build_data_job_plan(
         "calendar_revision": calendar_revision,
         "raw_history_sessions": [day.isoformat() for day in raw_window],
         "tdx_raw_output_sessions": [day.isoformat() for day in tdx_raw_output_sessions],
+        "baostock_output_sessions": [
+            day.isoformat() for day in baostock_output_sessions
+        ],
+        "baostock_source_package_id": baostock_source_package_id,
+        "baostock_raw_session_inputs": [
+            dict(item) for item in baostock_raw_session_inputs
+        ],
         "raw_history_session_count_available": len(raw_window),
         "raw_history_sessions_in_pg": len(raw_window) - len(missing_raw),
         "missing_raw_sessions": missing_raw,
@@ -1505,7 +1623,7 @@ def build_data_job_plan(
                 for module, sessions in module_output_sessions.items()
             },
             **(
-                {"BAOSTOCK": [day.isoformat() for day in tdx_raw_output_sessions]}
+                {"BAOSTOCK": [day.isoformat() for day in baostock_output_sessions]}
                 if "BAOSTOCK" in selected_source_modules
                 else {}
             ),
@@ -1652,13 +1770,19 @@ class DataJobCoordinator:
         except DataJobError:
             target_sessions = list(coverage.get("closed_sessions", ()))
         modules = []
+        sector_source_can_be_planned = True
         for code, (layer, label, implemented, available) in _MODULES.items():
             reason = None
             if (
                 code in {"SECTOR_PULSE", "SECTOR_TRANSITION"}
                 and sector_pair.get("status") != "AVAILABLE"
             ):
-                reason = sector_pair.get("reason_code") or "行业与概念快照对不可用。"
+                reason = (
+                    "PG当前没有已配对快照；在本次任务中选择行业/GN成员来源后，"
+                    "可先生成同次快照再计算。"
+                    if sector_source_can_be_planned
+                    else sector_pair.get("reason_code") or "行业与概念快照对不可用。"
+                )
             cleanup_allowed = _MODULES[code][0] != "SOURCE"
             modules.append(
                 {
@@ -1666,11 +1790,7 @@ class DataJobCoordinator:
                     "label": label,
                     "layer": layer,
                     "implemented": implemented,
-                    "available": available
-                    and (
-                        code not in {"SECTOR_PULSE", "SECTOR_TRANSITION"}
-                        or sector_pair.get("status") == "AVAILABLE"
-                    ),
+                    "available": available,
                     "reason": reason,
                     "cleanup_allowed": cleanup_allowed,
                     "default_selected": (
@@ -1723,6 +1843,113 @@ class DataJobCoordinator:
             raw_coverage=coverage,
             execution_authorized=self.execution_authorized,
         )
+        if "BAOSTOCK" in request["source_modules"]:
+            bao_policy = self.config.get("source_policy", {}).get(
+                "baostock_supplement", {}
+            )
+            plan["baostock_request_status"] = {
+                "source_availability": "NOT_CHECKED_NO_NETWORK",
+                "request_policy": bao_policy.get("request_policy", "UNKNOWN"),
+                "execution_authorized": self.execution_authorized,
+                "network_requests_performed": False,
+            }
+            if "TDX_RAW" not in request["source_modules"]:
+                from stock_a.application.baostock_daily_jobs import (
+                    _request_budget,
+                    plan_baostock_capture_batches,
+                )
+                from stock_a.storage.postgres.data_jobs import (
+                    read_raw_symbols_by_session,
+                )
+
+                package_id = plan.get("baostock_source_package_id")
+                sessions = tuple(
+                    date.fromisoformat(item)
+                    for item in plan.get("baostock_output_sessions", ())
+                )
+                units = [
+                    item
+                    for item in plan.get("stage_units", ())
+                    if item.get("stage_code") == "SOURCE_BAOSTOCK"
+                ]
+                blockers = plan.setdefault("blocked_reasons", [])
+
+                def block_baostock(code: str, message: str) -> None:
+                    blockers.append(code)
+                    plan["executable"] = False
+                    plan["status"] = "BLOCKED_INPUT_UNAVAILABLE"
+                    for unit in units:
+                        unit.update(
+                            {
+                                "status": "BLOCKED",
+                                "error_code": code,
+                                "error_message": message,
+                            }
+                        )
+                    plan.setdefault("unplanned_producers", []).append(
+                        {
+                            "stage_code": "BAOSTOCK",
+                            "status": "BLOCKED",
+                            "reason_code": code,
+                            "message": message,
+                        }
+                    )
+
+                if type(package_id) is not int or not sessions:
+                    block_baostock(
+                        "BAOSTOCK_RAW_INPUT_UNAVAILABLE",
+                        "目标日期没有唯一完整的PG TDX Raw来源包；未启动TDX重新采集。",
+                    )
+                else:
+                    raw_readback = read_raw_symbols_by_session(
+                        self.config,
+                        target_sessions=sessions,
+                        source_package_id=package_id,
+                        cutoff=self.research_cutoff,
+                    )
+                    expected_counts = {
+                        item["session_date"]: int(item["expected_row_count"])
+                        for item in plan.get("baostock_raw_session_inputs", ())
+                    }
+                    actual_counts = raw_readback["symbol_counts_by_session"]
+                    if raw_readback["missing_sessions"] or any(
+                        actual_counts.get(day.isoformat())
+                        != expected_counts.get(day.isoformat())
+                        for day in sessions
+                    ):
+                        block_baostock(
+                            "BAOSTOCK_RAW_READBACK_INCOMPLETE",
+                            "独立PG读回的TDX代码分母与闭合Raw目录不一致；未发起来源请求。",
+                        )
+                    else:
+                        max_logins, max_queries, _timeout = _request_budget(self.config)
+                        budget_plan = plan_baostock_capture_batches(
+                            sessions,
+                            raw_readback["symbols_by_session"],
+                            max_login_batches=max_logins,
+                            max_queries_per_target_session=max_queries,
+                        )
+                        plan["baostock_request_budget"] = {
+                            key: budget_plan[key]
+                            for key in (
+                                "status",
+                                "target_session_count",
+                                "symbol_session_units",
+                                "required_login_batches",
+                                "allowed_login_batches",
+                                "max_queries_per_target_session",
+                            )
+                        }
+                        if budget_plan["status"] != "READY":
+                            block_baostock(
+                                "BAOSTOCK_REQUEST_BUDGET_EXCEEDED",
+                                "所需BaoStock登录批次超过本机预算；未抽样、未登录且未发送请求。",
+                            )
+                if bao_policy.get("request_policy") != "REQUESTED":
+                    block_baostock(
+                        "BAOSTOCK_REQUEST_NOT_AUTHORIZED",
+                        "BaoStock来源策略为未请求；仅核对PG代码池和预算，不发送网络请求。",
+                    )
         plan["sector_snapshot_pair"] = sector_pair
         plan["sector_snapshot_ids"] = sector_pair.get("snapshot_ids")
         completed = self._complete_plan(plan, request, coverage, sector_pair)
@@ -1840,7 +2067,7 @@ class DataJobCoordinator:
                 )
             elif module == "BAOSTOCK":
                 output_counts[module] = max(
-                    1, int(plan.get("history_session_count") or 1)
+                    1, len(plan.get("baostock_output_sessions", ()))
                 )
             elif module == "TDX_SECTOR_MEMBERS":
                 output_counts[module] = 1
@@ -1869,6 +2096,17 @@ class DataJobCoordinator:
             for item in sorted(version_rows, key=lambda value: value["session_date"])
         ]
         if "BAOSTOCK" in request["selected_modules"]:
+            source_identity.extend(
+                {
+                    "source": "TDX_RAW_REUSE_FOR_BAOSTOCK",
+                    "session_date": item.get("session_date"),
+                    "source_package_id": item.get("source_package_id"),
+                    "source_capture_id": item.get("source_capture_id"),
+                    "row_count": item.get("row_count"),
+                    "expected_row_count": item.get("expected_row_count"),
+                }
+                for item in plan.get("baostock_raw_session_inputs", ())
+            )
             bao_units = (
                 coverage.get("completed_units_by_module", {}).get("BAOSTOCK", [])
                 if isinstance(coverage.get("completed_units_by_module"), Mapping)
@@ -1883,7 +2121,7 @@ class DataJobCoordinator:
                 }
                 for item in bao_units
                 if item.get("target_session")
-                in set(plan.get("tdx_raw_output_sessions", ()))
+                in set(plan.get("baostock_output_sessions", ()))
             )
         request_identity = {
             "algorithm_revision": "STOCK_A_DATA_JOB_ALGORITHM_R3",
@@ -1909,12 +2147,18 @@ class DataJobCoordinator:
             )
         ).hexdigest()
         if "SECTOR_PULSE" in request["selected_modules"]:
+            sector_source_will_generate = (
+                "TDX_SECTOR_MEMBERS" in request["source_modules"]
+            )
             pulse_days = plan.get("sector_pulse_sessions", ())
             unavailable_days = set(plan.get("sector_pulse_insufficient_sessions", ()))
             for day in pulse_days:
                 day_status = (
                     "NOT_COMPUTED"
-                    if sector_pair.get("status") != "AVAILABLE"
+                    if (
+                        sector_pair.get("status") != "AVAILABLE"
+                        and not sector_source_will_generate
+                    )
                     or day in unavailable_days
                     else "NOT_STARTED"
                 )
@@ -1933,14 +2177,20 @@ class DataJobCoordinator:
                     else None,
                     error_message=(
                         "行业与GN概念来源快照对不存在；保留未计算。"
-                        if sector_pair.get("status") != "AVAILABLE"
+                        if (
+                            sector_pair.get("status") != "AVAILABLE"
+                            and not sector_source_will_generate
+                        )
                         else "目标日Raw不在已存完整来源包中；保留未计算。"
                     )
                     if day_status == "NOT_COMPUTED"
                     else None,
                 )
             plan["planned_unit_count"] = len(plan["stage_units"])
-            if sector_pair.get("status") != "AVAILABLE":
+            if (
+                sector_pair.get("status") != "AVAILABLE"
+                and not sector_source_will_generate
+            ):
                 plan.setdefault("unplanned_producers", []).append(
                     {
                         "stage_code": "SECTOR_PULSE",
@@ -1982,11 +2232,18 @@ class DataJobCoordinator:
                         else "研究截止内尚无到期后继会话；不读取截止后的行情。",
                     )
         if "SECTOR_TRANSITION" in request["selected_modules"]:
+            sector_source_will_generate = (
+                "TDX_SECTOR_MEMBERS" in request["source_modules"]
+            )
             unavailable = set(plan.get("sector_transition_insufficient_sessions", ()))
             for day in plan.get("sector_transition_sessions", ()):
                 status = (
                     "NOT_COMPUTED"
-                    if day in unavailable or sector_pair.get("status") != "AVAILABLE"
+                    if day in unavailable
+                    or (
+                        sector_pair.get("status") != "AVAILABLE"
+                        and not sector_source_will_generate
+                    )
                     else "NOT_STARTED"
                 )
                 _unit(
@@ -2005,6 +2262,20 @@ class DataJobCoordinator:
                         if status == "NOT_COMPUTED"
                         else None
                     ),
+                )
+        if request["daily_mode"] == "FULL_THREE_LAYERS" or (
+            request["mode"] == "INITIALIZE"
+            and request["initialization_mode"] == "RESET_ALL_BUSINESS_FACTS"
+        ):
+            for table, label, message in _UNCOORDINATED_RESEARCH_CONSUMERS:
+                plan.setdefault("unplanned_producers", []).append(
+                    {
+                        "stage_code": label,
+                        "business_table": f"stock.{table}",
+                        "status": "SKIPPED_NOT_IMPLEMENTED",
+                        "reason_code": "PRODUCER_NOT_IN_JOB_COORDINATOR",
+                        "message": message,
+                    }
                 )
         if (
             request["mode"] == "INITIALIZE"
@@ -2211,6 +2482,9 @@ class DataJobCoordinator:
 
     def _execute_job(self, job_id: UUID, plan: Mapping[str, Any]) -> None:
         prepared_package = None
+        prepared_package_owner = None
+        reset_input_bound = False
+        job_finished = False
         try:
             execution_plan = dict(plan)
             if (
@@ -2226,12 +2500,41 @@ class DataJobCoordinator:
                 reset_already_completed = bool(reset_progress) and all(
                     item.get("status") == "CLEARED" for item in reset_progress
                 )
-                prepared = _prepare_reset_source_inputs(self.config, plan)
+                expected_input_fingerprint = (
+                    data_job_pg.read_reset_preflight_fingerprint(
+                        self.config, job_id=job_id
+                    )
+                )
+                prepared = _prepare_reset_source_inputs(
+                    self.config,
+                    plan,
+                    job_id=job_id,
+                    expected_preflight_fingerprint=expected_input_fingerprint,
+                )
                 prepared_package = prepared["vipdata_package"]
+                package_owner = prepared["package_owner"]
+                prepared_package_owner = package_owner
+                data_job_pg.bind_reset_preflight_fingerprint(
+                    self.config,
+                    job_id=job_id,
+                    fingerprint=prepared["preflight_fingerprint"],
+                )
+                reset_input_bound = True
                 execution_plan["_prepared_vipdata_package"] = prepared_package
                 execution_plan["_prepared_sector_snapshots"] = prepared[
                     "sector_snapshots"
                 ]
+                from stock_a.sources.tdx.vipdata import vipdata_package_entry_sha256
+
+                if (
+                    vipdata_package_entry_sha256(prepared_package)
+                    != prepared["package_sha256"]
+                ):
+                    raise DataJobError(
+                        "RESET_SOURCE_PACKAGE_CHANGED",
+                        "Raw包在预检完成后发生变化；未开始清理。",
+                        status=409,
+                    )
                 if not reset_already_completed:
                     reset_units = [
                         unit
@@ -2258,6 +2561,14 @@ class DataJobCoordinator:
                             preview.get("reset_preview_fingerprint") or ""
                         ),
                         expected_table_counts=expected_counts,
+                        target_sessions=tuple(preview.get("target_sessions", ())),
+                        source_modules=tuple(preview.get("source_modules", ())),
+                        history_session_count=int(
+                            preview.get("history_session_count") or 0
+                        ),
+                        module_output_session_counts=preview.get(
+                            "module_output_session_counts", {}
+                        ),
                     )
                     deleted_rows = reset_result.get("deleted_rows_by_table", {})
                     for unit in reset_units:
@@ -2286,6 +2597,7 @@ class DataJobCoordinator:
                 )
                 if plan.get("operation") == "CLEAR_DERIVED":
                     data_job_pg.finish_job(self.config, job_id=job_id)
+                    job_finished = True
                     return
             _execute_shared_production_chain(
                 config=self.config,
@@ -2295,6 +2607,7 @@ class DataJobCoordinator:
                 begin_callback=self._begin_units,
             )
             data_job_pg.finish_job(self.config, job_id=job_id)
+            job_finished = True
         except Exception as error:  # noqa: BLE001 - 后台任务必须把任意阶段异常持久化为失败状态。
             error_code = getattr(error, "code", type(error).__name__)
             error_message = str(error)[:1000]
@@ -2311,10 +2624,12 @@ class DataJobCoordinator:
                 error_message=error_message,
             )
         finally:
-            if prepared_package is not None:
+            if prepared_package_owner is not None and (
+                job_finished or not reset_input_bound
+            ):
                 from stock_a.sources.tdx.vipdata import cleanup_vipdata_package
 
-                cleanup_vipdata_package(prepared_package)
+                cleanup_vipdata_package(prepared_package_owner)
 
     def _begin_units(self, *, job_id: UUID, units: Sequence[Mapping[str, Any]]) -> None:
         data_job_pg.mark_progress_running_batch(self.config, job_id=job_id, units=units)
@@ -2446,24 +2761,32 @@ class DataJobCoordinator:
 
 
 def _prepare_reset_source_inputs(
-    config: Mapping[str, Any], plan: Mapping[str, Any]
+    config: Mapping[str, Any],
+    plan: Mapping[str, Any],
+    *,
+    job_id: UUID,
+    expected_preflight_fingerprint: str | None = None,
 ) -> dict[str, Any]:
-    """清理前验证并暂存官方Raw包和只读行业/GN输入。"""
-    from stock_a.application.tdx_sector_members import (
-        TdxSectorMembersApplicationError,
-    )
+    """清理前逐会话验证Raw并绑定可恢复的任务级输入。"""
+    from dataclasses import replace
+    from datetime import datetime
+    from pathlib import Path
+    from zoneinfo import ZoneInfo
+
     from stock_a.sources.tdx.sector_members import (
         parse_sector_source_inputs,
         read_sector_source_inputs,
     )
     from stock_a.sources.tdx.vipdata import (
         VipdataBudgets,
+        VipdataPackage,
         VipdataSourceConfig,
+        VipdataTargetScanBudget,
         cleanup_vipdata_package,
         download_vipdata_package,
         inspect_vipdata_page,
-        validate_source_candidate_limit,
-        vipdata_research_candidate_pool,
+        verify_existing_vipdata_package,
+        vipdata_package_entry_sha256,
     )
     from stock_a.storage.postgres import source_raw
     from stock_a.storage.postgres.tdx_sector_members import _validate_limits
@@ -2473,62 +2796,153 @@ def _prepare_reset_source_inputs(
     )
     cutoff = date.fromisoformat(plan["research_cutoff"])
     if (
-        not sessions
+        not isinstance(job_id, UUID)
+        or not sessions
         or tuple(sorted(set(sessions))) != sessions
         or sessions[-1] > cutoff
         or any(session > cutoff for session in sessions)
     ):
         raise DataJobError(
             "RESET_RAW_WINDOW_INVALID",
-            "清理预检要求完整、严格递增且不晚于研究截止的官方Raw窗口。",
+            "清理预检要求完整、严格递增且不晚于研究截止的Raw窗口。",
             status=409,
+        )
+    _calendar_id, _calendar_revision, official_sessions = _load_official_sessions(
+        cutoff
+    )
+    if any(session not in official_sessions for session in sessions):
+        raise DataJobError(
+            "RESET_RAW_WINDOW_NOT_OFFICIAL",
+            "清理预检窗口包含不在现行官方日历中的会话；现有事实保持不变。",
+            status=409,
+        )
+
+    temporary_parent = Path("G:/codex_tmp/stock_a_vipdata").resolve()
+    temporary_parent.mkdir(parents=True, exist_ok=True)
+    job_root = temporary_parent / f"reset-job-{job_id.hex}"
+    if job_root.parent != temporary_parent:
+        raise DataJobError(
+            "RESET_TEMP_ROOT_REJECTED", "重置来源临时目录越出G盘授权根。", status=409
         )
     source_config = VipdataSourceConfig.from_mapping(
         config["source_policy"]["vipdata_official"]
     )
     budgets = VipdataBudgets()
+    package_owner = None
+    verified_package = None
+    package_downloaded = False
     try:
-        observation = inspect_vipdata_page(
-            sessions[-1].isoformat(),
-            budgets=budgets,
-            source_config=source_config,
-        )
-    except Exception as error:
-        raise DataJobError(
-            "RESET_OFFICIAL_SOURCE_PREFLIGHT_FAILED",
-            "官方Raw来源在清理前不可验证；现有业务事实保持不变。",
-            status=503,
-        ) from error
-    if observation.status != "PACKAGE_CANDIDATE_READY":
-        raise DataJobError(
-            "RESET_OFFICIAL_SOURCE_NOT_READY",
-            observation.reason or "官方Raw来源当前不可验证；现有事实保持不变。",
-            status=503,
-        )
-    update_at = getattr(observation, "official_update_at", None)
-    if update_at is None or update_at.date() > cutoff:
-        raise DataJobError(
-            "BLOCKED_SOURCE_AFTER_CUTOFF"
-            if update_at is not None
-            else "RESET_SOURCE_CLOCK_UNKNOWN",
-            "官方来源更新时钟晚于研究截止或不可验证；未下载行情包，也未清理现有事实。",
-            status=409,
-        )
-
-    package = None
-    try:
-        package = download_vipdata_package(observation, budgets=budgets)
-        source_raw._validate_source_input(
-            package, sessions[-1], task_scope=_RAW_JOB_SCOPE
-        )
-        pool = vipdata_research_candidate_pool(package)
-        candidate_count = len(pool.candidates)
-        validate_source_candidate_limit(candidate_count)
-        planned_rows = candidate_count * len(sessions)
-        if planned_rows > 2_000_000:
+        cached_packages = tuple(job_root.glob("*.zip")) if job_root.exists() else ()
+        if expected_preflight_fingerprint is not None and len(cached_packages) != 1:
             raise DataJobError(
-                "RESET_RAW_ROW_BUDGET_EXCEEDED",
-                f"完整Raw候选×会话为{planned_rows}行，超过本机受控来源行数预算；未清理。",
+                "RESET_SOURCE_CACHE_MISSING",
+                "重置任务已经清理过业务事实，但原始已核验包缓存缺失；拒绝使用新来源续跑。",
+                status=409,
+            )
+        if cached_packages:
+            if len(cached_packages) != 1:
+                raise DataJobError(
+                    "RESET_SOURCE_CACHE_AMBIGUOUS",
+                    "任务级Raw缓存不唯一；未清理或继续写入。",
+                    status=409,
+                )
+            verified_package = verify_existing_vipdata_package(
+                cached_packages[0], budgets=budgets
+            )
+            if verified_package.file_path.resolve().parent != job_root.resolve():
+                raise DataJobError(
+                    "RESET_SOURCE_CACHE_PATH_INVALID",
+                    "重置任务缓存文件越出其G盘任务目录。",
+                    status=409,
+                )
+            package_sha256 = vipdata_package_entry_sha256(verified_package)
+            package_owner = VipdataPackage(
+                file_path=verified_package.file_path,
+                file_name=verified_package.file_name,
+                file_size=verified_package.file_size,
+                sha256=package_sha256,
+                zip_entry_count=verified_package.zip_entry_count,
+                zip_crc=verified_package.zip_crc,
+                total_uncompressed_bytes=verified_package.total_uncompressed_bytes,
+                entry_count_by_market=verified_package.entry_count_by_market,
+                day_entries=verified_package.day_entries,
+                download_final_url=source_config.package_url,
+                request_started_at=verified_package.verified_at,
+                download_finished_at=verified_package.verified_at,
+                temporary_root=job_root,
+            )
+        else:
+            if job_root.exists():
+                if any(job_root.iterdir()):
+                    raise DataJobError(
+                        "RESET_SOURCE_CACHE_DIRTY",
+                        "重置任务缓存目录包含未登记文件；拒绝覆盖。",
+                        status=409,
+                    )
+                job_root.rmdir()
+            if expected_preflight_fingerprint is not None:
+                raise DataJobError(
+                    "RESET_SOURCE_CACHE_MISSING",
+                    "重置任务缺少原始输入缓存；拒绝重新下载不同来源续跑。",
+                    status=409,
+                )
+            try:
+                observation = inspect_vipdata_page(
+                    sessions[-1].isoformat(),
+                    budgets=budgets,
+                    source_config=source_config,
+                )
+            except Exception as error:
+                raise DataJobError(
+                    "RESET_OFFICIAL_SOURCE_PREFLIGHT_FAILED",
+                    "官方Raw来源在清理前不可验证；现有业务事实保持不变。",
+                    status=503,
+                ) from error
+            if observation.status != "PACKAGE_CANDIDATE_READY":
+                raise DataJobError(
+                    "RESET_OFFICIAL_SOURCE_NOT_READY",
+                    observation.reason or "官方Raw来源当前不可验证；现有事实保持不变。",
+                    status=503,
+                )
+            update_at = getattr(observation, "official_update_at", None)
+            if update_at is None or update_at.date() > cutoff:
+                raise DataJobError(
+                    "BLOCKED_SOURCE_AFTER_CUTOFF"
+                    if update_at is not None
+                    else "RESET_SOURCE_CLOCK_UNKNOWN",
+                    "官方来源时钟晚于研究截止或不可验证；未下载行情包，也未清理事实。",
+                    status=409,
+                )
+            job_root.mkdir()
+            package_owner = replace(
+                download_vipdata_package(
+                    observation,
+                    destination_root=job_root,
+                    budgets=budgets,
+                ),
+                temporary_root=job_root,
+            )
+            package_downloaded = True
+            verified_package = verify_existing_vipdata_package(
+                package_owner.file_path, budgets=budgets
+            )
+            package_sha256 = vipdata_package_entry_sha256(verified_package)
+
+        source_raw._validate_source_input(
+            verified_package, sessions[-1], task_scope=_RAW_JOB_SCOPE
+        )
+        raw_preflight = source_raw.preflight_verified_vipdata_history(
+            config,
+            verified_package,
+            sessions,
+            task_scope=_RAW_JOB_SCOPE,
+            scan_budget=VipdataTargetScanBudget(),
+            max_raw_rows=2_000_000,
+        )
+        if raw_preflight["package_sha256"] != package_sha256:
+            raise DataJobError(
+                "RESET_SOURCE_PACKAGE_CHANGED",
+                "Raw包在逐会话预检期间发生变化；现有事实保持不变。",
                 status=409,
             )
 
@@ -2546,9 +2960,6 @@ def _prepare_reset_source_inputs(
                 status=409,
             )
         inputs = read_sector_source_inputs(roots[0])
-        from datetime import datetime
-        from zoneinfo import ZoneInfo
-
         snapshots = parse_sector_source_inputs(
             inputs, observed_at=datetime.now(ZoneInfo("Asia/Shanghai"))
         )
@@ -2562,18 +2973,55 @@ def _prepare_reset_source_inputs(
                 status=409,
             )
         _validate_limits(snapshots)
+        sector_file_fingerprint = {
+            relative: {
+                "size_bytes": evidence.size_bytes,
+                "sha256": hashlib.sha256(evidence.raw).hexdigest(),
+            }
+            for relative, evidence in sorted(inputs.files.items())
+        }
+        fingerprint_material = {
+            "contract": "STOCK_A_RESET_INPUT_PREFLIGHT_R1",
+            "target_sessions": [session.isoformat() for session in sessions],
+            "raw_package_sha256": package_sha256,
+            "raw_candidate_total": raw_preflight["candidate_total"],
+            "sector_parse_contract": snapshots[0].parse_contract_version,
+            "sector_sources": sector_file_fingerprint,
+        }
+        preflight_fingerprint = hashlib.sha256(
+            json.dumps(
+                fingerprint_material, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        ).hexdigest()
+        if (
+            expected_preflight_fingerprint is not None
+            and preflight_fingerprint != expected_preflight_fingerprint
+        ):
+            raise DataJobError(
+                "RESET_INPUT_IDENTITY_CHANGED",
+                "重置恢复时Raw包、候选范围或行业/GN来源与已核验输入不一致；拒绝混用。",
+                status=409,
+            )
         return {
-            "vipdata_package": package,
-            "candidate_count": candidate_count,
-            "planned_raw_rows": planned_rows,
+            "vipdata_package": verified_package,
+            "package_owner": package_owner,
+            "package_sha256": package_sha256,
+            "candidate_count": raw_preflight["candidate_total"],
+            "planned_raw_rows": raw_preflight["planned_raw_rows"],
+            "raw_preflight": raw_preflight,
             "sector_snapshots": tuple(snapshots),
             "sector_source_root": inputs.root,
+            "sector_source_fingerprint": sector_file_fingerprint,
+            "preflight_fingerprint": preflight_fingerprint,
             "preflight_status": "COMPLETE_BEFORE_DELETE",
-            "source_request_performed": True,
+            "source_request_performed": package_downloaded,
         }
     except Exception:
-        if package is not None:
-            cleanup_vipdata_package(package)
+        if package_owner is not None and expected_preflight_fingerprint is None:
+            try:
+                cleanup_vipdata_package(package_owner)
+            except Exception:
+                pass
         raise
 
 
@@ -2804,7 +3252,7 @@ def _execute_baostock_source_stage(
     from stock_a.storage.postgres.data_jobs import read_raw_symbols_by_session
 
     target_sessions = tuple(
-        date.fromisoformat(item) for item in plan.get("tdx_raw_output_sessions", ())
+        date.fromisoformat(item) for item in plan.get("baostock_output_sessions", ())
     )
     if not target_sessions:
         return
@@ -3120,7 +3568,37 @@ def _execute_shared_production_chain(
 
     reuse_package_id = plan.get("reuse_raw_package_id")
     raw_session_inputs = plan.get("raw_session_inputs", [])
-    if reuse_package_id is not None and len(raw_session_inputs) == len(raw_sessions):
+    reuse_saved_baostock_raw = (
+        "BAOSTOCK" in selected_source_modules
+        and "TDX_RAW" not in selected_source_modules
+        and not raw_sessions
+        and type(plan.get("baostock_source_package_id")) is int
+    )
+    if reuse_saved_baostock_raw:
+        source_package_id = int(plan["baostock_source_package_id"])
+        package_id_holder.append(source_package_id)
+        saved_inputs = plan.get("baostock_raw_session_inputs", ())
+        data_job_pg.set_job_source_package(
+            config, job_id=job_id, source_package_id=source_package_id
+        )
+        raw_result = {
+            "status": "ALREADY_COMPLETE",
+            "source_package_id": source_package_id,
+            "session_results": [
+                {
+                    "target_session": item["session_date"],
+                    "candidate_total": int(item["expected_row_count"]),
+                    "row_count_before": int(item["row_count"]),
+                    "row_count_after": int(item["row_count"]),
+                    "new_rows_committed": 0,
+                    "source_capture_id": int(item["source_capture_id"]),
+                    "capture_inserted": False,
+                    "status": "ALREADY_COMPLETE",
+                }
+                for item in saved_inputs
+            ],
+        }
+    elif reuse_package_id is not None and len(raw_session_inputs) == len(raw_sessions):
         package_id_holder.append(int(reuse_package_id))
         data_job_pg.set_job_source_package(
             config, job_id=job_id, source_package_id=int(reuse_package_id)
@@ -3155,39 +3633,43 @@ def _execute_shared_production_chain(
     else:
         prepared_package = plan.get("_prepared_vipdata_package")
         owns_package = prepared_package is None
-        if prepared_package is None:
-            source_config = VipdataSourceConfig.from_mapping(
-                config["source_policy"]["vipdata_official"]
-            )
-            download_budgets = VipdataBudgets()
-            observation = inspect_vipdata_page(
-                target.isoformat(),
-                budgets=download_budgets,
-                source_config=source_config,
-            )
-            if observation.status != "PACKAGE_CANDIDATE_READY":
-                raise DataJobError(
-                    "BLOCKED_SOURCE_NOT_AVAILABLE",
-                    observation.reason or "VIPDATA来源当前不可验证。",
-                    status=503,
-                )
-            update_at = getattr(observation, "official_update_at", None)
-            if update_at is None:
-                raise DataJobError(
-                    "BLOCKED_SOURCE_TIME_UNKNOWN",
-                    "官方来源更新时钟未知；未下载或读取行情包。",
-                    status=409,
-                )
-            if update_at.date() > cutoff:
-                raise DataJobError(
-                    "BLOCKED_SOURCE_AFTER_CUTOFF",
-                    "官方来源更新时钟晚于任务截止；未下载或读取行情包。",
-                    status=409,
-                )
-            prepared_package = download_vipdata_package(
-                observation, budgets=download_budgets
-            )
+        package_owner = None
         try:
+            if prepared_package is None:
+                source_config = VipdataSourceConfig.from_mapping(
+                    config["source_policy"]["vipdata_official"]
+                )
+                download_budgets = VipdataBudgets()
+                observation = inspect_vipdata_page(
+                    target.isoformat(),
+                    budgets=download_budgets,
+                    source_config=source_config,
+                )
+                if observation.status != "PACKAGE_CANDIDATE_READY":
+                    raise DataJobError(
+                        "BLOCKED_SOURCE_NOT_AVAILABLE",
+                        observation.reason or "VIPDATA来源当前不可验证。",
+                        status=503,
+                    )
+                update_at = getattr(observation, "official_update_at", None)
+                if update_at is None:
+                    raise DataJobError(
+                        "BLOCKED_SOURCE_TIME_UNKNOWN",
+                        "官方来源更新时钟未知；未下载或读取行情包。",
+                        status=409,
+                    )
+                if update_at.date() > cutoff:
+                    raise DataJobError(
+                        "BLOCKED_SOURCE_AFTER_CUTOFF",
+                        "官方来源更新时钟晚于任务截止；未下载或读取行情包。",
+                        status=409,
+                    )
+                package_owner = download_vipdata_package(
+                    observation, budgets=download_budgets
+                )
+                prepared_package = verify_existing_vipdata_package(
+                    package_owner.file_path, budgets=download_budgets
+                )
             raw_result = import_verified_vipdata_history(
                 config,
                 prepared_package,
@@ -3201,8 +3683,8 @@ def _execute_shared_production_chain(
                 on_session_verified=session_verified,
             )
         finally:
-            if owns_package:
-                cleanup_vipdata_package(prepared_package)
+            if owns_package and package_owner is not None:
+                cleanup_vipdata_package(package_owner)
 
     source_package_id = int(raw_result["source_package_id"])
     capture_by_session = {
@@ -3510,7 +3992,15 @@ def _execute_shared_production_chain(
                 inserted_rows = int(
                     persistence.get("research_enrollments", {}).get("inserted", 0) or 0
                 )
-                expected_rows = None
+                expected_rows = persistence.get("research_enrollments", {}).get(
+                    "expected"
+                )
+                if type(expected_rows) is not int or expected_rows < 0:
+                    raise DataJobError(
+                        "D0_ENROLLMENT_EXPECTED_ROWS_UNKNOWN",
+                        "D0入组事务未返回可独立核验的精确预期行数。",
+                        status=409,
+                    )
             else:
                 inserted_rows = int(inserted.get(key, 0) or 0)
                 expected_rows = expected.get(key)

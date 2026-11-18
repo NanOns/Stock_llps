@@ -404,6 +404,10 @@ def clear_business_facts(
     job_id: UUID,
     expected_preview_fingerprint: str,
     expected_table_counts: Mapping[str, int],
+    target_sessions: tuple[str, ...],
+    source_modules: tuple[str, ...],
+    history_session_count: int,
+    module_output_session_counts: Mapping[str, int],
 ) -> dict[str, Any]:
     """在一笔可回滚事务中按真实外键子表优先清除全部业务事实。"""
     if (
@@ -420,6 +424,25 @@ def clear_business_facts(
         raise BusinessFactsResetError(
             "RESET_PREVIEW_TABLES_INVALID", "重置预览没有完整登记所有业务事实表。"
         )
+    if (
+        not isinstance(target_sessions, tuple)
+        or not target_sessions
+        or any(not isinstance(value, str) for value in target_sessions)
+        or tuple(sorted(set(target_sessions))) != target_sessions
+        or not isinstance(source_modules, tuple)
+        or any(not isinstance(value, str) for value in source_modules)
+        or len(source_modules) != len(set(source_modules))
+        or type(history_session_count) is not int
+        or history_session_count < 1
+        or not isinstance(module_output_session_counts, Mapping)
+        or any(
+            not isinstance(key, str) or type(value) is not int or value < 0
+            for key, value in module_output_session_counts.items()
+        )
+    ):
+        raise BusinessFactsResetError(
+            "RESET_PREVIEW_INPUT_INVALID", "事务内重置指纹缺少预览绑定窗口。"
+        )
     counts = {
         key.removeprefix("stock."): value
         for key, value in expected_table_counts.items()
@@ -433,9 +456,53 @@ def clear_business_facts(
         cursor,
         _scope,
     ):
+        cursor.execute("LOCK TABLE stock.data_jobs IN ACCESS EXCLUSIVE MODE")
         cursor.execute(
-            "LOCK TABLE stock.data_jobs,stock.data_job_progress IN SHARE ROW EXCLUSIVE MODE"
+            "SELECT count(*) FROM stock.data_jobs WHERE status='RUNNING' AND job_id<>%s",
+            (job_id,),
         )
+        if int(cursor.fetchone()[0]):
+            raise BusinessFactsResetError(
+                "RESET_OTHER_JOB_RUNNING",
+                "另一个数据任务正在运行；未清理任何业务事实。",
+            )
+        lock_tables = sql.SQL(",").join(
+            sql.Identifier("stock", table)
+            for table in sorted(_BUSINESS_FACT_TABLES - {"data_jobs"})
+        )
+        cursor.execute(
+            sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(lock_tables)
+        )
+        cursor.execute(
+            """SELECT reset_preview_fingerprint
+               FROM stock.data_jobs WHERE job_id=%s FOR UPDATE""",
+            (job_id,),
+        )
+        job_row = cursor.fetchone()
+        if job_row is None or job_row[0] != expected_preview_fingerprint:
+            raise BusinessFactsResetError(
+                "RESET_PREVIEW_JOB_BINDING_CHANGED",
+                "重置任务中保存的确认指纹与本次预览不一致。",
+            )
+        _actual, current_counts = _table_inventory(cursor)
+        order, constraints = _delete_order(cursor)
+        current_fingerprint = _fingerprint(
+            counts=current_counts,
+            order=order,
+            constraints=constraints,
+            target_sessions=target_sessions,
+            source_modules=source_modules,
+            history_session_count=history_session_count,
+            module_output_session_counts=module_output_session_counts,
+        )
+        if (
+            current_counts != counts
+            or current_fingerprint != expected_preview_fingerprint
+        ):
+            raise BusinessFactsResetError(
+                "RESET_PREVIEW_STALE",
+                "PG当前业务表行数或外键已不同于双重确认时的预览；未删除事实。",
+            )
         deleted = _delete_business_facts_in_cursor(
             cursor, preserve_job_id=job_id, expected_counts=counts
         )

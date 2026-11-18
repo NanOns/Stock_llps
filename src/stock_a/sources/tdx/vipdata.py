@@ -2919,7 +2919,7 @@ def cleanup_vipdata_package(package: VipdataPackage) -> None:
     _cleanup_owned_temp_directory(
         resolved_root,
         parent_path=parent,
-        prefixes=("run",),
+        prefixes=("run", "reset-job"),
     )
 
 

@@ -612,9 +612,27 @@ export function mountDataJobPages(api) {
 
   function updateInitializationMode() {
     const reset = byId("dataInitMode").value === "RESET_ALL_BUSINESS_FACTS";
+    if (
+      reset &&
+      ["CLEAR_DERIVED", "CLEAR_AND_REGENERATE"].includes(
+        byId("dataInitOperation").value,
+      )
+    ) {
+      byId("dataInitOperation").value = "FILL_MISSING";
+    }
+    if (reset) {
+      const modules = byId("dataInitModules");
+      for (const moduleCode of ["TDX_RAW", "TDX_SECTOR_MEMBERS"]) {
+        const checkbox = modules.querySelector(
+          `[data-module-code="${moduleCode}"]`,
+        );
+        if (checkbox) checkbox.checked = true;
+      }
+    }
     byId("dataInitResetNotice").hidden = !reset;
     byId("dataInitOperationWrap").hidden = reset;
     byId("dataInitOperation").disabled = reset;
+    updateCleanupAvailability("initialize");
     invalidateStart("initialize");
   }
 
@@ -973,6 +991,20 @@ export function mountDataJobPages(api) {
     byId(
       page === "initialize" ? "dataInitStatus" : "dataDailyStatus",
     ).textContent = statusLabel(plan.status);
+    if (plan.baostock_request_status) {
+      const request = plan.baostock_request_status;
+      const budget = plan.baostock_request_budget;
+      const budgetText = budget
+        ? `登录批次需要 ${budget.required_login_batches}，当前允许 ${budget.allowed_login_batches}，代码会话数 ${budget.symbol_session_units}。`
+        : "尚无可用的现存PG Raw批次预算。";
+      root.append(
+        element(
+          "p",
+          `BaoStock来源可用性：${request.source_availability}；请求策略：${request.request_policy}；本次采集授权：${request.execution_authorized ? "允许" : "未授权"}。${budgetText}未联网检查来源状态，也未发送网络请求。`,
+          "muted",
+        ),
+      );
+    }
     root.append(
       element(
         "p",
@@ -1497,7 +1529,7 @@ export function mountDataJobPages(api) {
       await loadJob(null, page);
       const result = await api(
         "/api/product/data-jobs/plan",
-        currentPageBody(page),
+        requestBodyForPage(page),
       );
       renderPlan(result.plan, page);
     } catch (error) {

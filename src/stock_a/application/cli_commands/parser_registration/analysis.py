@@ -16,6 +16,7 @@ from stock_a.application.source_d1_structures import (
     MATERIAL_CHANGE_REASONS,
     STRUCTURE_TYPES,
 )
+from stock_a.application.source_research_day import D1_DEFAULT_HISTORY_SESSION_COUNT
 
 
 def register_commands(commands):
@@ -42,7 +43,10 @@ def register_commands(commands):
         "--history-session-count", type=int, default=75, help="画像历史会话数"
     )
     observation.add_argument(
-        "--d1-history-session-count", type=int, default=40, help="D1历史会话数"
+        "--d1-history-session-count",
+        type=int,
+        default=D1_DEFAULT_HISTORY_SESSION_COUNT,
+        help="D1历史会话数",
     )
     observation.add_argument(
         "--horizon",
