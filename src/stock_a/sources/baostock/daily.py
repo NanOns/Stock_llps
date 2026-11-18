@@ -9,7 +9,7 @@ from decimal import Decimal, InvalidOperation
 from fractions import Fraction
 
 from stock_a.domain import ContractError, FieldValue, exact_number, unknown
-
+from stock_a.sources.baostock.identity import normalize_baostock_symbol
 
 _SEMANTIC_FIELDS = frozenset(
     {
@@ -44,7 +44,9 @@ class BaoUnitContract:
     version: str
     close_input_unit: str
     close_to_cny: object
+    amount_input_unit: str
     amount_to_cny: object
+    volume_input_unit: str
     volume_to_shares: object
     turn_input_unit: str
 
@@ -69,8 +71,22 @@ class BaoUnitContract:
             not isinstance(self.close_input_unit, str)
             or not self.close_input_unit.strip()
             or self.close_input_unit != self.close_input_unit.strip()
+            or self.close_input_unit == "LEGACY_UNIT_NOT_RECORDED"
+            or len(self.close_input_unit) > 64
         ):
             raise ContractError("BaoStock收盘价输入单位必须显式提供且不能含首尾空白")
+        for label, value in (
+            ("成交金额输入单位", self.amount_input_unit),
+            ("成交量输入单位", self.volume_input_unit),
+        ):
+            if (
+                not isinstance(value, str)
+                or not value.strip()
+                or value != value.strip()
+                or value == "LEGACY_UNIT_NOT_RECORDED"
+                or len(value) > 64
+            ):
+                raise ContractError(f"BaoStock{label}必须明确且不能使用旧版本未知标记")
         if self.turn_input_unit != "PERCENT":
             raise ContractError("BaoStock换手率输入单位必须明确为PERCENT")
 
@@ -178,6 +194,18 @@ def _passthrough_field(
     return FieldValue(value)
 
 
+def _binary_status_field(
+    row: Mapping[str, object], fields: frozenset[str], column: str
+) -> FieldValue:
+    """仅接受BaoStock交易/ST状态合同值0/1，其它原值局部降级为未知。"""
+    value = _passthrough_field(row, fields, column)
+    if value.quality != "OBSERVED":
+        return value
+    if value.value not in (0, 1, "0", "1") or isinstance(value.value, bool):
+        return unknown("来源状态值不在0/1合同范围")
+    return FieldValue(str(value.value))
+
+
 def normalize_daily_row(
     row: Mapping[str, object],
     returned_fields: Collection[str],
@@ -221,6 +249,8 @@ def normalize_daily_row(
         except (TypeError, ValueError) as error:
             raise ContractError("BaoStock交易日必须是有效ISO日期") from error
     source_code = _required_key(row, columns, field_map["source_code"], "来源证券代码")
+    if normalize_baostock_symbol(source_code) is None:
+        raise ContractError("BaoStock来源证券代码必须是有效沪深市场代码")
 
     try:
         close_scale = exact_number(units.close_to_cny)
@@ -242,6 +272,17 @@ def normalize_daily_row(
         if value.quality == "OBSERVED" and value.value == 0:
             value = unknown(_INVALID_FIELD_REASONS[price_name])
         prices[price_name] = value
+    if all(prices[name].quality == "OBSERVED" for name in prices):
+        open_price, high_price, low_price, close_price = (
+            exact_number(prices[name].value)
+            for name in ("open", "high", "low", "close")
+        )
+        if (
+            high_price < max(open_price, close_price)
+            or low_price > min(open_price, close_price)
+            or high_price < low_price
+        ):
+            prices = {name: unknown("BaoStock OHLC高低价关系非法") for name in prices}
     volume = _field_value(
         row,
         columns,
@@ -268,7 +309,7 @@ def normalize_daily_row(
         volume=volume,
         amount=amount,
         turn=turn,
-        tradestatus=_passthrough_field(row, columns, field_map["tradestatus"]),
-        is_st=_passthrough_field(row, columns, field_map["isST"]),
+        tradestatus=_binary_status_field(row, columns, field_map["tradestatus"]),
+        is_st=_binary_status_field(row, columns, field_map["isST"]),
         returned_fields=tuple(sorted(columns)),
     )

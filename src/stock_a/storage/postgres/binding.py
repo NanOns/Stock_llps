@@ -56,6 +56,9 @@ _MIGRATION_FILES = (
     "0042_r08_biz07_formal_admission_calendar_key.sql",
     "0043_r08_biz08_data_jobs.sql",
     "0044_r08_biz08_formal_history_window.sql",
+    "0045_r08_biz09_baostock_source_daily.sql",
+    "0046_r08_biz09_layered_jobs_cleanup.sql",
+    "0047_r08_biz09_baostock_input_units.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -97,6 +100,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R08_FEP05_REENTRY_CONDITIONAL_BASELINE_R1": frozenset({40}),
     "R08_BIZ07_LAUNCH_FORMAL_ADMISSION_FROZEN_LINE_R1": frozenset({41, 42}),
     "R08_BIZ08_DATA_JOBS_AND_HISTORY_WINDOW_R1": frozenset({43, 44}),
+    "R08_BIZ09_LAYERED_DATA_JOBS_SECTOR_BAOSTOCK_R1": frozenset({45, 46, 47}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -261,6 +265,12 @@ _RELATIONS_BY_MIGRATION_COUNT[43] = _RELATIONS_BY_MIGRATION_COUNT[42] | {
     "data_job_progress",
 }
 _RELATIONS_BY_MIGRATION_COUNT[44] = _RELATIONS_BY_MIGRATION_COUNT[43]
+_RELATIONS_BY_MIGRATION_COUNT[45] = _RELATIONS_BY_MIGRATION_COUNT[44] | {
+    "source_baostock_unit_contracts",
+    "source_baostock_daily",
+}
+_RELATIONS_BY_MIGRATION_COUNT[46] = _RELATIONS_BY_MIGRATION_COUNT[45]
+_RELATIONS_BY_MIGRATION_COUNT[47] = _RELATIONS_BY_MIGRATION_COUNT[46]
 
 
 class BindingRefused(Exception):

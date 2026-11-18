@@ -7,6 +7,15 @@ import {
   element,
 } from "./state.js";
 
+function snapshotPairLabel(data) {
+  const pair = data.snapshot_pair_provenance;
+  if (pair?.status === "AVAILABLE") {
+    const ids = pair.snapshot_ids || {};
+    return `同次快照观察 ${pair.observed_at || "UNKNOWN"} · 行业 ${ids.INDUSTRY ?? "UNKNOWN"} / GN 概念 ${ids.CONCEPT ?? "UNKNOWN"} · NON_PIT`;
+  }
+  return `双快照对 ${pair?.reason_code || pair?.status || "NOT_AVAILABLE"} · NON_PIT`;
+}
+
 export function renderD1Boards(data, openBoard, compareBoard) {
   const rows = byId("boardRows");
   const missing = Object.entries(data.membership_availability || {})
@@ -53,7 +62,7 @@ export function renderD1Boards(data, openBoard, compareBoard) {
     rows.append(row);
   }
   byId("boardSummary").textContent =
-    `已读取板块 ${display(data.boards.total_count)} 个 · 材料变化交集；成员快照 NON_PIT${missing.length ? ` · ${missing.join("、")}成员 UNKNOWN` : ""}`;
+    `已读取板块 ${display(data.boards.total_count)} 个 · 材料变化交集；${snapshotPairLabel(data)}${missing.length ? ` · ${missing.join("、")}成员 UNKNOWN` : ""}`;
   byId("boardPage").textContent =
     `偏移 ${data.boards.offset} · ${data.boards.summaries.length} 个`;
   byId("boardPrev").disabled = data.boards.offset === 0;
@@ -69,7 +78,7 @@ export function renderD1Members(data, openStock) {
   )?.snapshot?.observed_at;
   byId("boardTitle").textContent = displayBoardName(board);
   byId("boardMeta").textContent =
-    `${board.board_kind === "INDUSTRY" ? "行业" : "概念"} · 当前成员观测 ${observed || "UNKNOWN"} · NON_PIT 回看 · D1材料交集`;
+    `${board.board_kind === "INDUSTRY" ? "行业" : "概念"} · 当前成员观测 ${observed || "UNKNOWN"} · ${snapshotPairLabel(data)} · D1材料交集`;
   byId("boardCoverage").textContent =
     `当前成员 ${display(board.snapshot_member_count)} · 来源池内 ${display(board.members_in_source_pool)} · 池外 ${display(board.members_outside_source_pool)} · 筛选 ${display(data.boards.selected_member_count)} · 本页 ${members.length}`;
   const list = byId("memberList");

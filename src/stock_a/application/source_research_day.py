@@ -1162,8 +1162,10 @@ def prepare_source_research_day(
     research_cutoff: date,
     source_package_id: int,
     d1_history_session_count: int,
+    include_d0: bool = True,
+    include_d1: bool = True,
 ) -> tuple[ResearchDayFacts, dict[str, Any]]:
-    """同一生产者准备一个交易日；只读Raw，默认永不写PG。"""
+    """按选中的研究域独立准备一个交易日；只读Raw，默认永不写PG。"""
     started = time.perf_counter()
     if (
         type(target_session) is not date
@@ -1171,9 +1173,13 @@ def prepare_source_research_day(
         or target_session > research_cutoff
         or type(source_package_id) is not int
         or source_package_id <= 0
+        or type(include_d0) is not bool
+        or type(include_d1) is not bool
+        or not (include_d0 or include_d1)
     ):
         raise SourceResearchDayError(
-            "RESEARCH_DAY_SCOPE_INVALID", "单日研究范围或数据包编号无效"
+            "RESEARCH_DAY_SCOPE_INVALID",
+            "单日研究范围、数据包编号或域选择无效",
         )
     official = _official_calendar(target_session)
     try:
@@ -1188,89 +1194,141 @@ def prepare_source_research_day(
         )
     before_session = official["sessions"][target_index - 1]
 
-    d0_started = time.perf_counter()
-    d0 = query_source_d0_raw_launch(
-        config,
-        scenario="LAUNCH_CONFIRM",
-        action="changes",
-        before_session=before_session,
-        target_session=target_session,
-        research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
-        before_source_package_id=source_package_id,
-        transition="ALL",
-        offset=0,
-        limit=5000,
-    )
-    d0_wall_seconds = time.perf_counter() - d0_started
-    d0_rows = _prepare_d0_facts(d0)
+    d0: Mapping[str, Any] = {}
+    d1: Mapping[str, Any] = {}
+    d0_rows = ()
+    d1_rows = ()
+    anchor_rows = ()
+    d0_wall_seconds = 0.0
+    d1_wall_seconds = 0.0
+    prepared: Mapping[str, Any] = {}
 
-    _target, d1_sessions, _calendar_revision = resolve_pg_history_window(
-        target_session.isoformat(), d1_history_session_count
-    )
-    if d1_sessions[-1] != target_session or d1_sessions[-2] != before_session:
-        raise SourceResearchDayError(
-            "D0_D1_ADJACENT_SESSION_MISMATCH", "D0与D1目标及相邻观察会话不一致"
+    if include_d0:
+        d0_started = time.perf_counter()
+        d0 = query_source_d0_raw_launch(
+            config,
+            scenario="LAUNCH_CONFIRM",
+            action="changes",
+            before_session=before_session,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            source_package_id=source_package_id,
+            before_source_package_id=source_package_id,
+            transition="ALL",
+            offset=0,
+            limit=5000,
         )
-    d1_started = time.perf_counter()
-    prepared = prepare_d1_material_observation(
-        config,
-        target_session=target_session,
-        research_cutoff=research_cutoff,
-        source_package_id=source_package_id,
-        d1_history_session_count=d1_history_session_count,
-        industry_snapshot_id=None,
-        concept_snapshot_id=None,
-        include_source_symbol_structure_results=True,
-    )
-    d1_wall_seconds = time.perf_counter() - d1_started
-    d1 = prepared["d1"]
-    d1_rows, anchor_rows = _prepare_d1_facts(d1)
+        d0_wall_seconds = time.perf_counter() - d0_started
+        d0_rows = _prepare_d0_facts(d0)
+
+    if include_d1:
+        _target, d1_sessions, _calendar_revision = resolve_pg_history_window(
+            target_session.isoformat(), d1_history_session_count
+        )
+        if d1_sessions[-1] != target_session or d1_sessions[-2] != before_session:
+            raise SourceResearchDayError(
+                "D1_ADJACENT_SESSION_MISMATCH", "D1目标与前一官方会话不一致"
+            )
+        d1_started = time.perf_counter()
+        prepared = prepare_d1_material_observation(
+            config,
+            target_session=target_session,
+            research_cutoff=research_cutoff,
+            source_package_id=source_package_id,
+            d1_history_session_count=d1_history_session_count,
+            industry_snapshot_id=None,
+            concept_snapshot_id=None,
+            include_source_symbol_structure_results=True,
+        )
+        d1_wall_seconds = time.perf_counter() - d1_started
+        d1 = prepared["d1"]
+        d1_rows, anchor_rows = _prepare_d1_facts(d1)
 
     after = d0.get("after", {})
     before = d0.get("before", {})
     after_source = after.get("source_version", {})
     before_source = before.get("source_version", {})
     d1_source = d1.get("source", {})
-    if (
+    if include_d0 and (
         d0.get("pair_status") != "COMPARABLE"
         or after.get("target_session") != target_session.isoformat()
         or before.get("target_session") != before_session.isoformat()
         or after_source.get("source_package_id") != source_package_id
         or before_source.get("source_package_id") != source_package_id
-        or d1.get("target_session") != target_session.isoformat()
+        or d0.get("source_key_set", {}).get("union_partition_closed") is not True
+        or len(d0_rows) != d0.get("source_key_set", {}).get("source_union_count")
+    ):
+        raise SourceResearchDayError(
+            "D0_SOURCE_PARTITION_OPEN",
+            "D0前后来源、相邻日期或完整总体未闭合",
+        )
+    if include_d1 and (
+        d1.get("target_session") != target_session.isoformat()
         or d1_source.get("source_package_id") != source_package_id
-        or d1_source.get("source_capture_id") != after_source.get("source_capture_id")
+        or d1.get("source_pool_partition_closed") is not True
         or d1.get("source_pool_count")
-        != after.get("source_pool", {}).get("source_count")
-        or d1.get("source_pool_count")
-        != len(d1_rows) // len(d1.get("structure_type_counts", {}))
+        != len(d1_rows) // max(1, len(d1.get("structure_type_counts", {})))
+        or len(d1_rows)
+        != d1.get("source_pool_count") * len(d1.get("structure_type_counts", {}))
+    ):
+        raise SourceResearchDayError(
+            "D1_SOURCE_PARTITION_OPEN", "D1目标来源或完整总体未闭合"
+        )
+    if (
+        include_d0
+        and include_d1
+        and (
+            d1_source.get("source_capture_id") != after_source.get("source_capture_id")
+            or d1.get("source_pool_count")
+            != after.get("source_pool", {}).get("source_count")
+            or {item.source_symbol for item in d1_rows}
+            != {item.source_symbol for item in d0_rows if item.after_state is not None}
+        )
     ):
         raise SourceResearchDayError(
             "RESEARCH_DAY_SOURCE_IDENTITY_MISMATCH",
             "D0与D1没有绑定同一目标来源捕获、内容、日期及完整总体",
         )
-    target_count = d1.get("source_pool_count")
-    if (
-        d0.get("source_key_set", {}).get("union_partition_closed") is not True
-        or len(d0_rows) != d0.get("source_key_set", {}).get("source_union_count")
-        or len(d1_rows) != target_count * len(d1.get("structure_type_counts", {}))
-    ):
-        raise SourceResearchDayError(
-            "RESEARCH_DAY_PARTITION_OPEN", "D0/D1事实没有闭合到来源分母"
+
+    if include_d0:
+        source = after_source
+        target_capture_id = _numeric_id(
+            after_source.get("source_capture_id"), "D0目标来源捕获"
         )
-    calendar = d1.get("calendar", {})
-    source = d1_source
+        before_capture_id = _numeric_id(
+            before_source.get("source_capture_id"), "D0前态来源捕获"
+        )
+        target_count = int(d0.get("source_key_set", {}).get("after_count"))
+    else:
+        source = d1_source
+        target_capture_id = _numeric_id(
+            d1_source.get("source_capture_id"), "D1目标来源捕获"
+        )
+        before_version = read_source_version_context(
+            config,
+            target_session=before_session,
+            source_package_id=source_package_id,
+        )
+        if before_version.get("status") != "AVAILABLE":
+            raise SourceResearchDayError(
+                "D1_PREVIOUS_SOURCE_UNAVAILABLE", "D1前一会话来源捕获不可读取"
+            )
+        before_capture_id = int(before_version["source_capture_id"])
+        target_count = int(d1.get("source_pool_count"))
+
+    if include_d1:
+        calendar = d1.get("calendar", {})
+    else:
+        calendar = {
+            "calendar_id": official["calendar_id"],
+            "calendar_revision": official["calendar_revision"],
+        }
     facts = ResearchDayFacts(
         before_session=before_session,
         target_session=target_session,
         source_package_id=source_package_id,
-        before_capture_id=_numeric_id(
-            before_source.get("source_capture_id"), "前态来源捕获"
-        ),
-        target_capture_id=_numeric_id(
-            after_source.get("source_capture_id"), "目标来源捕获"
-        ),
+        before_capture_id=before_capture_id,
+        target_capture_id=target_capture_id,
         source_time_quality=_required_text(
             source.get("source_time_quality"), "来源时钟质量"
         ),
@@ -1282,87 +1340,150 @@ def prepare_source_research_day(
         calendar_revision=_required_text(
             calendar.get("calendar_revision"), "官方日历修订"
         ),
-        d0_before_window_start=_session(
-            before.get("strict_official_sessions", [None])[0], "D0前态窗口起点"
+        d0_before_window_start=(
+            _session(
+                before.get("strict_official_sessions", [None])[0], "D0前态窗口起点"
+            )
+            if include_d0
+            else before_session
         ),
-        d0_target_window_start=_session(
-            after.get("strict_official_sessions", [None])[0], "D0目标窗口起点"
+        d0_target_window_start=(
+            _session(after.get("strict_official_sessions", [None])[0], "D0目标窗口起点")
+            if include_d0
+            else target_session
         ),
-        d0_before_source_count=int(d0.get("source_key_set", {}).get("before_count")),
-        d0_target_source_count=int(d0.get("source_key_set", {}).get("after_count")),
-        d0_union_source_count=int(
-            d0.get("source_key_set", {}).get("source_union_count")
+        d0_before_source_count=(
+            int(d0.get("source_key_set", {}).get("before_count", 0))
+            if include_d0
+            else 0
         ),
-        d1_history_session_count=len(prepared["sessions"]),
-        d1_history_window_start=prepared["sessions"][0],
-        d1_history_window_end=prepared["sessions"][-1],
-        d1_source_count=int(target_count),
-        d0_producer_version=_required_text(d0.get("producer_version"), "D0生产者版本"),
-        d0_algorithm_contract=_required_text(
-            after.get("algorithm_contract"), "D0算法合同"
+        d0_target_source_count=(
+            int(d0.get("source_key_set", {}).get("after_count", 0)) if include_d0 else 0
         ),
-        d0_session_contract=_required_text(after.get("session_contract"), "D0会话合同"),
-        d1_producer_contract=_required_text(d1.get("contract"), "D1生产者合同"),
-        d1_producer_version="STOCK_A_D1_FIVE_STRUCTURE_SOURCE_READER_R1",
-        d1_material_change_contract=_required_text(
-            d1.get("historical_anchor_changes", {}).get("material_change_contract"),
-            "D1材料变化合同",
+        d0_union_source_count=(
+            int(d0.get("source_key_set", {}).get("source_union_count", 0))
+            if include_d0
+            else 0
+        ),
+        d1_history_session_count=len(prepared.get("sessions", ())) if include_d1 else 0,
+        d1_history_window_start=(
+            prepared["sessions"][0] if include_d1 else target_session
+        ),
+        d1_history_window_end=(
+            prepared["sessions"][-1] if include_d1 else target_session
+        ),
+        d1_source_count=target_count if include_d1 else 0,
+        d0_producer_version=(
+            _required_text(d0.get("producer_version"), "D0生产者版本")
+            if include_d0
+            else "SKIPPED_BY_USER"
+        ),
+        d0_algorithm_contract=(
+            _required_text(after.get("algorithm_contract"), "D0算法合同")
+            if include_d0
+            else "SKIPPED_BY_USER"
+        ),
+        d0_session_contract=(
+            _required_text(after.get("session_contract"), "D0会话合同")
+            if include_d0
+            else "SKIPPED_BY_USER"
+        ),
+        d1_producer_contract=(
+            _required_text(d1.get("contract"), "D1生产者合同")
+            if include_d1
+            else "SKIPPED_BY_USER"
+        ),
+        d1_producer_version=(
+            "STOCK_A_D1_FIVE_STRUCTURE_SOURCE_READER_R1"
+            if include_d1
+            else "SKIPPED_BY_USER"
+        ),
+        d1_material_change_contract=(
+            _required_text(
+                d1.get("historical_anchor_changes", {}).get("material_change_contract"),
+                "D1材料变化合同",
+            )
+            if include_d1
+            else "SKIPPED_BY_USER"
         ),
         d0_facts=d0_rows,
         d1_structure_facts=d1_rows,
         d1_anchor_facts=anchor_rows,
     )
-    _validate_day_facts(facts)
+    _validate_day_facts(facts, include_d0=include_d0, include_d1=include_d1)
     report = _summarize_day(
-        facts, d0, d1, d0_wall_seconds, d1_wall_seconds, time.perf_counter() - started
+        facts,
+        d0,
+        d1,
+        d0_wall_seconds,
+        d1_wall_seconds,
+        time.perf_counter() - started,
+        include_d0=include_d0,
+        include_d1=include_d1,
     )
+    report["research_cutoff"] = research_cutoff.isoformat()
     return facts, report
 
 
-def _validate_day_facts(facts: ResearchDayFacts) -> None:
+def _validate_day_facts(
+    facts: ResearchDayFacts, *, include_d0: bool, include_d1: bool
+) -> None:
     if (
-        facts.target_session <= facts.before_session
-        or facts.d0_before_source_count < 0
-        or facts.d0_target_source_count < 1
-        or facts.d0_union_source_count != len(facts.d0_facts)
-        or facts.d1_source_count < 1
-        or len(facts.d1_structure_facts) != facts.d1_source_count * 5
-        or len({item.source_symbol for item in facts.d0_facts}) != len(facts.d0_facts)
-        or len(
-            {
-                (item.source_symbol, item.structure_type)
-                for item in facts.d1_structure_facts
-            }
+        type(include_d0) is not bool
+        or type(include_d1) is not bool
+        or not (include_d0 or include_d1)
+        or facts.target_session <= facts.before_session
+        or (include_d0 and facts.d0_before_source_count < 0)
+        or (include_d0 and facts.d0_target_source_count < 1)
+        or (include_d0 and facts.d0_union_source_count != len(facts.d0_facts))
+        or (include_d1 and facts.d1_source_count < 1)
+        or (include_d1 and len(facts.d1_structure_facts) != facts.d1_source_count * 5)
+        or (
+            include_d0
+            and len({item.source_symbol for item in facts.d0_facts})
+            != len(facts.d0_facts)
         )
-        != len(facts.d1_structure_facts)
-        or len(
-            {
-                (
-                    item.source_symbol,
-                    item.structure_type,
-                    item.created_session,
-                )
-                for item in facts.d1_anchor_facts
-            }
+        or (
+            include_d1
+            and len(
+                {
+                    (item.source_symbol, item.structure_type)
+                    for item in facts.d1_structure_facts
+                }
+            )
+            != len(facts.d1_structure_facts)
         )
-        != len(facts.d1_anchor_facts)
+        or (
+            include_d1
+            and len(
+                {
+                    (item.source_symbol, item.structure_type, item.created_session)
+                    for item in facts.d1_anchor_facts
+                }
+            )
+            != len(facts.d1_anchor_facts)
+        )
     ):
         raise SourceResearchDayError(
             "RESEARCH_DAY_BUSINESS_KEY_INVALID", "单日事实业务键或总量无效"
         )
-    symbols = {item.source_symbol for item in facts.d1_structure_facts}
-    if any(
-        item.official_sessions_adjacent is not True for item in facts.d1_anchor_facts
-    ):
-        raise SourceResearchDayError(
-            "D1_ADJACENT_SESSION_INVALID", "D1锚明细未证明官方相邻会话"
-        )
-    if symbols != {
-        item.source_symbol for item in facts.d0_facts if item.after_state is not None
-    }:
-        raise SourceResearchDayError(
-            "RESEARCH_DAY_SYMBOL_SET_MISMATCH", "D0目标分母与D1逐股分母不同"
-        )
+    if include_d1:
+        symbols = {item.source_symbol for item in facts.d1_structure_facts}
+        if any(
+            item.official_sessions_adjacent is not True
+            for item in facts.d1_anchor_facts
+        ):
+            raise SourceResearchDayError(
+                "D1_ADJACENT_SESSION_INVALID", "D1锚明细未证明官方相邻会话"
+            )
+        if include_d0 and symbols != {
+            item.source_symbol
+            for item in facts.d0_facts
+            if item.after_state is not None
+        }:
+            raise SourceResearchDayError(
+                "RESEARCH_DAY_SYMBOL_SET_MISMATCH", "D0目标分母与D1逐股分母不同"
+            )
 
 
 def _summarize_day(
@@ -1372,30 +1493,16 @@ def _summarize_day(
     d0_wall_seconds: float,
     d1_wall_seconds: float,
     total_wall_seconds: float,
+    *,
+    include_d0: bool,
+    include_d1: bool,
 ) -> dict[str, Any]:
     d0_state_counts = (
         d0.get("after", {}).get("source_pool", {}).get("scenario_state_counts", {})
     )
     d1_changes = d1.get("historical_anchor_changes", {})
-    return {
-        "status": "DRY_RUN_READY",
-        "target_session": facts.target_session.isoformat(),
-        "before_session": facts.before_session.isoformat(),
-        "research_cutoff": d1.get("research_cutoff"),
-        "source_package_id": facts.source_package_id,
-        "before_capture_id": facts.before_capture_id,
-        "target_capture_id": facts.target_capture_id,
-        "calendar": {
-            "calendar_id": facts.calendar_id,
-            "calendar_revision": facts.calendar_revision,
-        },
-        "source_quality": {
-            "source_time_quality": facts.source_time_quality,
-            "source_clock_role": facts.source_clock_role,
-            "pit_status": "NON_PIT_RETROSPECTIVE",
-            "price_coordinate": "RAW_UNADJUSTED",
-        },
-        "d0": {
+    d0_summary = (
+        {
             "producer_version": facts.d0_producer_version,
             "algorithm_contract": facts.d0_algorithm_contract,
             "before_source_count": facts.d0_before_source_count,
@@ -1408,8 +1515,16 @@ def _summarize_day(
             "typed_fact_rows": len(facts.d0_facts),
             "partition_closed": len(facts.d0_facts) == facts.d0_union_source_count,
             "reader_wall_seconds": d0_wall_seconds,
-        },
-        "d1": {
+        }
+        if include_d0
+        else {
+            "status": "SKIPPED_BY_USER",
+            "calculation_performed": False,
+            "typed_fact_rows": 0,
+        }
+    )
+    d1_summary = (
+        {
             "producer_contract": facts.d1_producer_contract,
             "producer_version": facts.d1_producer_version,
             "material_change_contract": facts.d1_material_change_contract,
@@ -1428,16 +1543,51 @@ def _summarize_day(
             ),
             "execution": d1.get("execution", {}),
             "reader_wall_seconds": d1_wall_seconds,
-        },
-        "estimated_transaction_scope": {
-            "tables": [
-                "source_d0_launch_day_facts",
+        }
+        if include_d1
+        else {
+            "status": "SKIPPED_BY_USER",
+            "calculation_performed": False,
+            "typed_stock_type_rows": 0,
+            "typed_anchor_detail_rows": 0,
+        }
+    )
+    tables = []
+    insert_rows = 0
+    if include_d0:
+        tables.append("source_d0_launch_day_facts")
+        insert_rows += len(facts.d0_facts)
+    if include_d1:
+        tables.extend(
+            (
                 "source_d1_structure_day_facts",
                 "source_d1_material_anchor_day_facts",
-            ],
-            "insert_rows_if_empty": len(facts.d0_facts)
-            + len(facts.d1_structure_facts)
-            + len(facts.d1_anchor_facts),
+            )
+        )
+        insert_rows += len(facts.d1_structure_facts) + len(facts.d1_anchor_facts)
+    return {
+        "status": "DRY_RUN_READY",
+        "target_session": facts.target_session.isoformat(),
+        "before_session": facts.before_session.isoformat(),
+        "research_cutoff": d1.get("research_cutoff"),
+        "source_package_id": facts.source_package_id,
+        "before_capture_id": facts.before_capture_id,
+        "target_capture_id": facts.target_capture_id,
+        "calendar": {
+            "calendar_id": facts.calendar_id,
+            "calendar_revision": facts.calendar_revision,
+        },
+        "source_quality": {
+            "source_time_quality": facts.source_time_quality,
+            "source_clock_role": facts.source_clock_role,
+            "pit_status": "NON_PIT_RETROSPECTIVE",
+            "price_coordinate": "RAW_UNADJUSTED",
+        },
+        "d0": d0_summary,
+        "d1": d1_summary,
+        "estimated_transaction_scope": {
+            "tables": tables,
+            "insert_rows_if_empty": insert_rows,
             "d0_rows": len(facts.d0_facts),
             "d1_stock_type_rows": len(facts.d1_structure_facts),
             "d1_anchor_detail_rows": len(facts.d1_anchor_facts),
@@ -1497,6 +1647,8 @@ def run_source_research_day(
             "RESEARCH_DAY_DOMAIN_SELECTION_INVALID",
             "至少选择D0或D1一个生产域，且域开关必须是布尔值。",
         )
+    # 静态D0画像属于D0选择范围；关闭D0时不启动其独立计算器。
+    include_static = include_static and include_d0
     validate_seed_worker_count(worker_count)
     if include_static:
         _validate_static_history_count(history_session_count)
@@ -1506,6 +1658,8 @@ def run_source_research_day(
         research_cutoff=research_cutoff,
         source_package_id=source_package_id,
         d1_history_session_count=d1_history_session_count,
+        include_d0=include_d0,
+        include_d1=include_d1,
     )
     if persist:
         write_result = persist_source_research_day(
@@ -1522,7 +1676,11 @@ def run_source_research_day(
                 research_cutoff=research_cutoff,
                 source_package_id=source_package_id,
                 expected_capture_id=facts.target_capture_id,
-                expected_source_count=facts.d1_source_count,
+                expected_source_count=(
+                    facts.d1_source_count
+                    if include_d1
+                    else facts.d0_target_source_count
+                ),
                 history_session_count=history_session_count,
                 worker_count=worker_count,
             )

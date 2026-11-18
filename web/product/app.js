@@ -11,7 +11,11 @@ import {
 } from "./state.js";
 import { renderD1MaterialMarket, setD1MaterialStatus } from "./market.js";
 import { renderD1Boards, renderD1Members } from "./sectors.js";
-import { renderD1StockDetail, renderD1Stocks } from "./stocks.js";
+import {
+  renderBaoStockSupplement,
+  renderD1StockDetail,
+  renderD1Stocks,
+} from "./stocks.js";
 const $ = (id) => document.getElementById(id);
 const state = {
   versions: [],
@@ -6085,7 +6089,11 @@ async function openStock(symbol, row = {}) {
       grid.append(
         fact(label, data.raw?.[key]?.value, data.raw?.[key]?.quality),
       );
-    root.append(grid, node("h3", "价格与画像"));
+    root.append(
+      grid,
+      node("h3", "价格与画像"),
+      renderBaoStockSupplement(data.baostock_supplement),
+    );
     const core = node("div", null, "fact-grid");
     for (const [key, label] of [
       ["core.ma20", "MA20"],

@@ -63,6 +63,71 @@ export function renderD1Stocks(data, openStock) {
   byId("stockNext").disabled = data.stocks.next_offset == null;
 }
 
+export function renderBaoStockSupplement(data) {
+  const section = element("section", null, "card");
+  section.append(element("h3", "BaoStock补充来源"));
+  const status = data?.status || "NOT_AVAILABLE";
+  if (status !== "AVAILABLE") {
+    const reason =
+      data?.message || data?.reason_code || "该目标日没有已保存捕获。";
+    section.append(
+      element(
+        "p",
+        `${status} · ${reason}；不回退到其它交易日，不影响TDX价格。`,
+        "rule",
+      ),
+    );
+    return section;
+  }
+
+  section.append(
+    element(
+      "p",
+      `来源代码 ${data.source_symbol || "UNKNOWN"} · 会话 ${data.target_session || "UNKNOWN"} · 捕获 ${data.capture_id || "UNKNOWN"} · 捕获时刻 ${data.captured_at || "UNKNOWN"}`,
+      "rule",
+    ),
+    element(
+      "p",
+      `${data.pit_status || "NON_PIT"} · ${data.price_coordinate || "RAW_UNADJUSTED"} · adjustflag=${data.adjustment_flag || "UNKNOWN"} · 时钟 ${data.capture_clock_role || "UNKNOWN"}`,
+      "muted",
+    ),
+  );
+  const contract = data.unit_contract || {};
+  section.append(
+    element(
+      "p",
+      `单位合同 ${contract.version || "UNKNOWN"} · 价格输入 ${contract.close_input_unit || "UNKNOWN"} × ${contract.close_to_cny || "UNKNOWN"} → 人民币元/股 · 成交额输入 ${contract.amount_input_unit || "UNKNOWN"} × ${contract.amount_to_cny || "UNKNOWN"} → 人民币元 · 成交量输入 ${contract.volume_input_unit || "UNKNOWN"} × ${contract.volume_to_shares || "UNKNOWN"} → 股 · 换手输入 ${contract.turn_input_unit || "UNKNOWN"}`,
+      "muted",
+    ),
+  );
+
+  const labels = {
+    open: "开盘",
+    high: "最高",
+    low: "最低",
+    close: "收盘",
+    volume: "成交量",
+    amount: "成交额",
+    turn: "换手率",
+    tradestatus: "交易状态",
+    is_st: "ST标记",
+  };
+  const grid = element("div", null, "fact-grid");
+  for (const [name, label] of Object.entries(labels)) {
+    const field = data.fields?.[name] || {};
+    const quality = field.quality || "UNKNOWN_DATA";
+    const value =
+      quality === "OBSERVED"
+        ? `${field.value ?? "UNKNOWN"} ${field.unit || ""}`.trim()
+        : `UNKNOWN · ${field.reason || quality}`;
+    const fact = element("div", null, "fact");
+    fact.append(element("span", label), element("strong", value));
+    grid.append(fact);
+  }
+  section.append(grid);
+  return section;
+}
+
 export function renderD1StockDetail(stock, root = byId("stockContent")) {
   root.replaceChildren();
   if (!stock || stock.source_pool_status !== "AVAILABLE") {

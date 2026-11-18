@@ -11,7 +11,9 @@ const STATUS_LABELS = {
   COMPLETED: "完成",
   ALREADY_COMPLETE: "同输入已完成",
   NO_CHANGE: "无变化",
+  CLEARED: "已清理",
   NOT_COMPUTED: "未计算",
+  NOT_DUE: "未到期",
   INCOMPLETE: "不完整",
   BLOCKED: "受限",
   FAILED: "失败",
@@ -23,13 +25,31 @@ const STATUS_LABELS = {
 
 const STAGE_LABELS = {
   SOURCE_RAW: "来源与 Raw",
+  SOURCE_BAOSTOCK: "BaoStock补充来源",
   CORE_PROFILE: "Core / Profile",
   STATIC_RESEARCH: "静态研究",
   D0_D1: "D0 / D1",
   MARKET_BREADTH: "市场宽度",
   MARKET_PARTICIPATION: "成交参与",
   FOCUS_FORMAL: "Focus正式准入",
+  SECTOR_PULSE: "行业 / 概念 PULSE",
+  SECTOR_FOLLOWUP: "板块跨日跟踪",
 };
+
+const LAYER_LABELS = {
+  SOURCE: "第一层 · 基础来源",
+  BASE: "第二层 · 基础画像与指标",
+  RESEARCH: "第三层 · 研究算法",
+};
+
+const CLOSED_UNIT_STATUSES = [
+  "COMPLETED",
+  "ALREADY_COMPLETE",
+  "NO_CHANGE",
+  "CLEARED",
+  "SKIPPED_BY_USER",
+  "SKIPPED_NOT_IMPLEMENTED",
+];
 
 function byId(id) {
   return document.getElementById(id);
@@ -52,6 +72,55 @@ function count(value) {
     : Number(value).toLocaleString("zh-CN");
 }
 
+function plainValue(value) {
+  if (value === null || value === undefined || value === "") return "未知";
+  if (typeof value === "string" || typeof value === "number") {
+    return String(value);
+  }
+  if (Array.isArray(value)) return value.map(plainValue).join("、");
+  return JSON.stringify(value);
+}
+
+function dependencySummary(dependency) {
+  if (typeof dependency === "string") return `依赖项：${dependency}`;
+  if (!dependency || typeof dependency !== "object") {
+    return `依赖项：${plainValue(dependency)}`;
+  }
+  const table =
+    dependency.table ||
+    dependency.business_table ||
+    dependency.table_name ||
+    dependency.relation_table;
+  const relation =
+    dependency.relation ||
+    dependency.relation_type ||
+    dependency.dependency_type;
+  const relationLabels = {
+    FK: "外键依赖",
+    FOREIGN_KEY: "外键依赖",
+    DOWNSTREAM: "下游派生依赖",
+    DERIVED_FROM: "派生来源依赖",
+    READER: "读取依赖",
+    API: "接口读取依赖",
+    SQL: "SQL读取依赖",
+  };
+  const reason =
+    dependency.reason ||
+    dependency.reason_text ||
+    dependency.reason_code ||
+    dependency.description;
+  const parts = [];
+  if (table) parts.push(`业务表：${plainValue(table)}`);
+  if (relation) {
+    const relationText = plainValue(relation);
+    parts.push(
+      `依赖关系：${relationLabels[relationText.toUpperCase()] || relationText}`,
+    );
+  }
+  if (reason) parts.push(`原因：${plainValue(reason)}`);
+  return parts.join("；") || "依赖关系：未提供详细信息";
+}
+
 function renderProgress(root, job) {
   root.replaceChildren();
   if (!job) {
@@ -64,6 +133,11 @@ function renderProgress(root, job) {
     );
     return;
   }
+  const units = Array.isArray(job.progress) ? job.progress : [];
+  const completedUnits = units.length
+    ? units.filter((unit) => CLOSED_UNIT_STATUSES.includes(unit.status)).length
+    : job.completed_units;
+  const plannedUnits = job.planned_units ?? (units.length || null);
   const heading = element("div", null, "job-progress-heading");
   heading.append(
     element(
@@ -76,13 +150,13 @@ function renderProgress(root, job) {
     element(
       "p",
       statusLabel(job.status) +
-        " · 已核验单元 " +
-        count(job.completed_units) +
+        " · 已闭合单元 " +
+        count(completedUnits) +
         "/" +
-        count(job.planned_units) +
+        count(plannedUnits) +
         "（" +
-        (job.planned_units
-          ? Math.floor((job.completed_units / job.planned_units) * 100) + "%"
+        (plannedUnits && completedUnits !== null && completedUnits !== undefined
+          ? Math.floor((completedUnits / plannedUnits) * 100) + "%"
           : "未知") +
         "）",
       "job-progress-summary",
@@ -119,7 +193,6 @@ function renderProgress(root, job) {
       ),
     );
   }
-  const units = Array.isArray(job.progress) ? job.progress : [];
   if (!units.length) {
     root.append(element("p", "此任务没有阶段与业务表单元。", "muted"));
     return;
@@ -131,13 +204,7 @@ function renderProgress(root, job) {
   }
   for (const [stage, rows] of groups) {
     const done = rows.filter((row) =>
-      [
-        "COMPLETED",
-        "ALREADY_COMPLETE",
-        "NO_CHANGE",
-        "SKIPPED_BY_USER",
-        "SKIPPED_NOT_IMPLEMENTED",
-      ].includes(row.status),
+      CLOSED_UNIT_STATUSES.includes(row.status),
     ).length;
     const details = document.createElement("details");
     details.className = "job-stage";
@@ -166,6 +233,7 @@ function renderProgress(root, job) {
       "预期行",
       "PG读回行",
       "新增 / 变更",
+      "删除行",
       "质量",
       "状态 / 原因",
     ]) {
@@ -183,7 +251,9 @@ function renderProgress(root, job) {
         element(
           "td",
           row.verified_at &&
-            ["COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE"].includes(row.status)
+            ["COMPLETED", "ALREADY_COMPLETE", "NO_CHANGE", "CLEARED"].includes(
+              row.status,
+            )
             ? row.target_session
             : "—",
         ),
@@ -193,6 +263,7 @@ function renderProgress(root, job) {
           "td",
           count(row.inserted_rows) + " / " + count(row.updated_rows),
         ),
+        element("td", count(row.deleted_rows)),
         element("td", row.quality_status || "未知"),
         element(
           "td",
@@ -262,18 +333,71 @@ function renderRecent(root, jobs) {
 }
 
 function currentPageBody(page) {
+  const modules = selectedModules(page);
+  const moduleOutputSessionCounts = Object.fromEntries(
+    modules
+      .filter((item) => item.outputSessionCount !== null)
+      .map((item) => [item.code, item.outputSessionCount]),
+  );
+  const countFor = (codes) =>
+    modules.find((item) => codes.includes(item.code))?.outputSessionCount || 0;
   if (page === "initialize") {
-    const d0 = byId("dataInitD0Enabled").checked;
-    const d1 = byId("dataInitD1Enabled").checked;
     return {
       mode: "INITIALIZE",
       target_session: byId("dataInitTarget").value || undefined,
       history_session_count: Number(byId("dataInitHistory").value),
-      d0_output_session_count: d0 ? Number(byId("dataInitD0Count").value) : 0,
-      d1_output_session_count: d1 ? Number(byId("dataInitD1Count").value) : 0,
+      source_modules: modules
+        .filter((item) => item.layer === "SOURCE")
+        .map((item) => item.code),
+      base_modules: modules
+        .filter((item) => item.layer === "BASE")
+        .map((item) => item.code),
+      research_modules: modules
+        .filter((item) => item.layer === "RESEARCH")
+        .map((item) => item.code),
+      module_output_session_counts: moduleOutputSessionCounts,
+      d0_output_session_count: countFor(["D0", "SOURCE_D0", "D0_RESEARCH"]),
+      d1_output_session_count: countFor(["D1", "SOURCE_D1", "D1_RESEARCH"]),
+      operation: byId("dataInitOperation").value,
     };
   }
-  return { mode: "MANUAL_DAILY" };
+  return {
+    mode: "MANUAL_DAILY",
+    source_modules: modules
+      .filter((item) => item.layer === "SOURCE")
+      .map((item) => item.code),
+    base_modules: modules
+      .filter((item) => item.layer === "BASE")
+      .map((item) => item.code),
+    research_modules: modules
+      .filter((item) => item.layer === "RESEARCH")
+      .map((item) => item.code),
+    output_session_count:
+      modules.find((item) => item.outputSessionCount !== null)
+        ?.outputSessionCount || 0,
+    module_output_session_counts: Object.fromEntries(
+      modules
+        .filter((item) => item.outputSessionCount !== null)
+        .map((item) => [item.code, item.outputSessionCount]),
+    ),
+    operation: byId("dataDailyOperation").value,
+  };
+}
+
+function selectedModules(page) {
+  const root = byId(
+    page === "initialize" ? "dataInitModules" : "dataDailyModules",
+  );
+  return [...root.querySelectorAll("[data-module-code]:checked")].map(
+    (input) => ({
+      code: input.dataset.moduleCode,
+      layer: input.dataset.moduleLayer,
+      cleanupAllowed: input.dataset.cleanupAllowed === "true",
+      outputSessionCount: input.dataset.outputCountId
+        ? Number(byId(input.dataset.outputCountId).value)
+        : null,
+    }),
+  );
 }
 
 export function mountDataJobPages(api) {
@@ -283,11 +407,199 @@ export function mountDataJobPages(api) {
     latestJobId: null,
     timer: null,
     loading: false,
+    planBody: null,
   };
+
+  function normalizeModules(capabilities) {
+    const raw = capabilities.modules ||
+      capabilities.available_modules ||
+      capabilities.module_options || [
+        ...(capabilities.source_modules || []).map((item) => ({
+          layer: "SOURCE",
+          ...item,
+        })),
+        ...(capabilities.base_modules || []).map((item) => ({
+          layer: "BASE",
+          ...item,
+        })),
+        ...(capabilities.research_modules || []).map((item) => ({
+          layer: "RESEARCH",
+          ...item,
+        })),
+      ];
+    if (Array.isArray(raw)) return raw;
+    if (raw && typeof raw === "object") {
+      return Object.entries(raw).flatMap(([layer, entries]) =>
+        Array.isArray(entries)
+          ? entries.map((entry) => ({ layer, ...entry }))
+          : [],
+      );
+    }
+    return [];
+  }
+
+  function renderModulePicker(page, capabilities) {
+    const root = byId(
+      page === "initialize" ? "dataInitModules" : "dataDailyModules",
+    );
+    const previous = new Map(
+      [...root.querySelectorAll("[data-module-code]")].map((input) => [
+        input.dataset.moduleCode,
+        input.checked,
+      ]),
+    );
+    const modules = normalizeModules(capabilities).filter((item) => {
+      const layer = String(item.layer || item.layer_code || "").toUpperCase();
+      return Object.hasOwn(LAYER_LABELS, layer);
+    });
+    root.replaceChildren();
+    if (!modules.length) {
+      root.append(
+        element(
+          "p",
+          "服务尚未返回可执行模块清单；当前不允许按猜测启动生产者。",
+          "job-error",
+        ),
+      );
+      return;
+    }
+    for (const layer of ["SOURCE", "BASE", "RESEARCH"]) {
+      const rows = modules.filter(
+        (item) =>
+          String(item.layer || item.layer_code || "").toUpperCase() === layer,
+      );
+      if (!rows.length) continue;
+      const group = document.createElement("fieldset");
+      group.className = "job-module-group";
+      const legend = element("legend", LAYER_LABELS[layer]);
+      group.append(legend);
+      const options = element("div", null, "job-module-options");
+      for (const item of rows) {
+        const code = String(item.code || item.module_code || "");
+        if (!code) continue;
+        const implemented = item.implemented !== false;
+        const available = item.available !== false && implemented;
+        const wrapper = element("div", null, "job-module-option");
+        const checkbox = document.createElement("input");
+        checkbox.type = "checkbox";
+        checkbox.dataset.moduleCode = code;
+        checkbox.dataset.moduleLayer = layer;
+        checkbox.dataset.moduleAvailable = String(available);
+        checkbox.dataset.cleanupAllowed = String(item.cleanup_allowed === true);
+        checkbox.dataset.cleanupReason = item.cleanup_reason || "";
+        checkbox.disabled = !available;
+        checkbox.checked = previous.has(code)
+          ? previous.get(code)
+          : Boolean(item.default_selected) && available;
+        const moduleLabel = element("label", null, "job-module-label");
+        moduleLabel.append(
+          checkbox,
+          element("span", item.label || item.title || code),
+        );
+        wrapper.append(moduleLabel);
+        if (!available) {
+          const reason = item.reason || item.status || "当前不可执行";
+          checkbox.dataset.unavailableReason = reason;
+          const note = element("small", reason, "job-module-unavailable");
+          note.dataset.moduleReason = "true";
+          wrapper.append(note);
+        } else if (layer !== "SOURCE") {
+          const countId = `dataJobCount_${page}_${code.replace(/[^A-Za-z0-9_-]/g, "_")}`;
+          const countLabel = element("span", "最近输出");
+          const countInput = document.createElement("input");
+          countInput.type = "number";
+          countInput.min = "1";
+          countInput.max = "32767";
+          countInput.step = "1";
+          countInput.value = String(item.default_output_session_count || 1);
+          countInput.id = countId;
+          countInput.setAttribute(
+            "aria-label",
+            `${item.label || code}输出会话数`,
+          );
+          countInput.dataset.outputFor = code;
+          countInput.disabled = !checkbox.checked;
+          checkbox.dataset.outputCountId = countId;
+          checkbox.addEventListener("change", () => {
+            countInput.disabled = !checkbox.checked;
+            invalidateStart(page);
+          });
+          countInput.addEventListener("input", () => invalidateStart(page));
+          wrapper.append(countLabel, countInput, element("span", "个官方会话"));
+        }
+        checkbox.addEventListener("change", () => invalidateStart(page));
+        options.append(wrapper);
+      }
+      group.append(options);
+      root.append(group);
+    }
+    updateCleanupAvailability(page);
+  }
+
+  function updateCleanupAvailability(page) {
+    const root = byId(
+      page === "initialize" ? "dataInitModules" : "dataDailyModules",
+    );
+    const operation = byId(
+      page === "initialize" ? "dataInitOperation" : "dataDailyOperation",
+    ).value;
+    const cleanupRequested = ["CLEAR_DERIVED", "CLEAR_AND_REGENERATE"].includes(
+      operation,
+    );
+    for (const checkbox of root.querySelectorAll("[data-module-code]")) {
+      const wrapper = checkbox.closest(".job-module-option");
+      const available = checkbox.dataset.moduleAvailable === "true";
+      const sourceLayer = checkbox.dataset.moduleLayer === "SOURCE";
+      const cleanupAllowed = checkbox.dataset.cleanupAllowed === "true";
+      const canClean = !sourceLayer && cleanupAllowed;
+      const allowed = available && (!cleanupRequested || canClean);
+      checkbox.disabled = !allowed;
+      if (!allowed && checkbox.checked) checkbox.checked = false;
+      if (checkbox.dataset.outputCountId) {
+        const outputCount = byId(checkbox.dataset.outputCountId);
+        outputCount.disabled = !checkbox.checked;
+      }
+
+      let reason = wrapper.querySelector("[data-module-reason]");
+      if (cleanupRequested && !canClean) {
+        if (!reason) {
+          reason = element("small", null, "job-module-unavailable");
+          reason.dataset.moduleReason = "true";
+          wrapper.append(reason);
+        }
+        const configuredReason = checkbox.dataset.cleanupReason;
+        const cleanupReason = sourceLayer
+          ? "基础来源为保留层，不允许通过派生清理操作删除。"
+          : /[\u3400-\u9fff]/.test(configuredReason)
+            ? configuredReason
+            : `该模块未声明受控派生清理能力，不能清理。${configuredReason ? `（原因码：${configuredReason}）` : ""}`;
+        reason.textContent = available
+          ? cleanupReason
+          : `模块当前不可执行；${cleanupReason}`;
+      } else if (reason && checkbox.dataset.moduleAvailable === "false") {
+        reason.textContent =
+          checkbox.dataset.unavailableReason || "当前不可执行";
+      } else if (reason) {
+        reason.remove();
+      }
+    }
+  }
+
+  function invalidateStart(page) {
+    byId(page === "initialize" ? "startDataInit" : "startDataDaily").disabled =
+      true;
+    state.planBody = null;
+  }
 
   function populateTargets(capabilities) {
     const select = byId("dataInitTarget");
-    const sessions = capabilities.raw_coverage.closed_sessions || [];
+    const cutoff = capabilities.research_cutoff || "9999-12-31";
+    const sessions = (
+      capabilities.available_target_sessions ||
+      capabilities.official_calendar_sessions ||
+      capabilities.raw_coverage?.closed_sessions ||
+      []
+    ).filter((session) => String(session) <= cutoff);
     const previous = select.value;
     select.replaceChildren();
     if (!sessions.length) {
@@ -347,12 +659,15 @@ export function mountDataJobPages(api) {
       ? "未启动"
       : "受限";
     populateTargets(capabilities);
+    renderModulePicker("initialize", capabilities);
+    renderModulePicker("daily", capabilities);
     renderRecent(byId("dataInitRecent"), capabilities.recent_jobs);
     renderRecent(byId("dataDailyRecent"), capabilities.recent_jobs);
   }
 
   function renderPlan(plan, page) {
     state.plan = plan;
+    state.planBody = JSON.stringify(currentPageBody(page));
     const root = byId(page === "initialize" ? "dataInitPlan" : "dataDailyPlan");
     root.replaceChildren();
     byId(
@@ -419,7 +734,15 @@ export function mountDataJobPages(api) {
         ),
       );
     }
-    if (plan.d1_calculation_session_count) {
+    const selectedResearchModules = new Set(
+      (currentPageBody(page).research_modules || []).map((item) =>
+        String(item).toUpperCase(),
+      ),
+    );
+    if (
+      plan.d1_calculation_session_count &&
+      (selectedResearchModules.has("D1") || plan.legacy_request === true)
+    ) {
       root.append(
         element(
           "p",
@@ -428,7 +751,10 @@ export function mountDataJobPages(api) {
             " 个会话；此值与D1输出保存范围分开。",
         ),
       );
-    } else if (plan.d1_output_session_count > 0) {
+    } else if (
+      plan.d1_output_session_count > 0 &&
+      (selectedResearchModules.has("D1") || plan.legacy_request === true)
+    ) {
       root.append(element("p", "没有唯一已存D1算法窗口；D1输出保留为未计算。"));
     }
     const outputs = [];
@@ -455,12 +781,109 @@ export function mountDataJobPages(api) {
       );
     }
     if (outputs.length) root.append(element("p", outputs.join("；")));
-    if (plan.d0_output_session_count === 0) {
+    const moduleOutputSessions = plan.module_output_sessions || {};
+    const moduleTargets = selectedModules(page).map((item) => {
+      const sessions = moduleOutputSessions[item.code];
+      const range =
+        Array.isArray(sessions) && sessions.length
+          ? `${sessions[0]} 至 ${sessions[sessions.length - 1]}（${sessions.length}个官方会话）`
+          : "计划未返回目标会话";
+      return `${item.code}：${range}`;
+    });
+    if (moduleTargets.length) {
+      const list = document.createElement("ul");
+      list.className = "job-reasons";
+      for (const target of moduleTargets) list.append(element("li", target));
+      root.append(element("h3", "所选模块目标会话"), list);
+    }
+    const currentBody = currentPageBody(page);
+    const isCleanupOperation = [
+      "CLEAR_DERIVED",
+      "CLEAR_AND_REGENERATE",
+    ].includes(currentBody.operation);
+    const plannedModules = Array.isArray(plan.selected_modules)
+      ? plan.selected_modules
+      : selectedModules(page);
+    const plannedModuleCodes = plannedModules.map((item) =>
+      typeof item === "string" ? item : item.module_code || item.code || "",
+    );
+    const sectorModuleSelected = plannedModuleCodes.some((code) =>
+      ["SECTOR_PULSE", "SECTOR_FOLLOWUP"].some((sectorCode) =>
+        String(code).toUpperCase().includes(sectorCode),
+      ),
+    );
+    const snapshotPair = plan.sector_snapshot_pair;
+    if (snapshotPair && sectorModuleSelected) {
+      const snapshotIds = snapshotPair.snapshot_ids || {};
+      const snapshotDetails = [
+        `观察时间：${snapshotPair.observed_at || "未知"}`,
+        `行业快照：${snapshotIds.INDUSTRY || "不可用"}`,
+        `GN概念快照：${snapshotIds.CONCEPT || "不可用"}`,
+        `成员时态：${snapshotPair.membership_mode || "UNKNOWN"}`,
+      ];
+      for (const snapshot of snapshotPair.snapshots || []) {
+        snapshotDetails.push(
+          `${snapshot.source_kind || "来源"}：${snapshot.source_quality || "UNKNOWN"} · ${snapshot.research_mode || "时态未知"}`,
+        );
+      }
+      root.append(
+        element("h3", "行业 / GN概念快照配对"),
+        element("p", snapshotDetails.join("；"), "muted"),
+      );
+    }
+    const stageUnits = Array.isArray(plan.stage_units) ? plan.stage_units : [];
+    const notReadyUnits = stageUnits.filter((unit) =>
+      ["NOT_DUE", "NOT_COMPUTED"].includes(unit.status || unit.status_code),
+    );
+    if (notReadyUnits.length) {
+      const list = document.createElement("ul");
+      list.className = "job-reasons";
+      for (const unit of notReadyUnits) {
+        const module = unit.module_code || unit.stage_code || "研究模块";
+        const targets = Array.isArray(unit.target_sessions)
+          ? unit.target_sessions.join("、")
+          : unit.target_session || "目标会话未知";
+        const reason =
+          unit.reason_code || unit.error_code || unit.reason || unit.message;
+        list.append(
+          element(
+            "li",
+            `${module} · ${targets} · ${statusLabel(unit.status || unit.status_code)}${reason ? ` · ${reason}` : ""}`,
+          ),
+        );
+      }
+      root.append(element("h3", "未到期 / 未计算单元"), list);
+    }
+    const newModuleRequest =
+      Array.isArray(currentBody.source_modules) ||
+      Array.isArray(currentBody.base_modules) ||
+      Array.isArray(currentBody.research_modules) ||
+      Array.isArray(plan.selected_modules);
+    const legacyRequest =
+      plan.legacy_request === true ||
+      plan.request_kind === "LEGACY" ||
+      plan.request_version === 1 ||
+      !newModuleRequest;
+    const d0ExplicitlyDisabled =
+      plan.d0_skipped_by_user === true ||
+      plan.d0_enabled === false ||
+      currentBody.d0_enabled === false;
+    const d1ExplicitlyDisabled =
+      plan.d1_skipped_by_user === true ||
+      plan.d1_enabled === false ||
+      currentBody.d1_enabled === false;
+    if (
+      plan.d0_output_session_count === 0 &&
+      (legacyRequest || d0ExplicitlyDisabled)
+    ) {
       root.append(
         element("p", "D0：SKIPPED_BY_USER（用户关闭D0输出）", "muted"),
       );
     }
-    if (plan.d1_output_session_count === 0) {
+    if (
+      plan.d1_output_session_count === 0 &&
+      (legacyRequest || d1ExplicitlyDisabled)
+    ) {
       root.append(
         element("p", "D1：SKIPPED_BY_USER（用户关闭D1输出）", "muted"),
       );
@@ -519,8 +942,94 @@ export function mountDataJobPages(api) {
         ),
       );
     }
+    if (plan.cleanup_preview) {
+      const preview = plan.cleanup_preview;
+      const details = document.createElement("dl");
+      details.className = "job-cleanup-preview";
+      const dependents = Array.isArray(preview.dependents)
+        ? preview.dependents.map(dependencySummary)
+        : preview.dependents
+          ? [dependencySummary(preview.dependents)]
+          : [];
+      const entries = [
+        ["模块", preview.module_label || preview.module_code || "未知"],
+        [
+          "来源 / 算法版本",
+          [preview.source_version, preview.algorithm_version]
+            .filter(Boolean)
+            .join(" / ") || "按计划输入",
+        ],
+        ["目标会话", (preview.target_sessions || []).join("、") || "未知"],
+        ["影响表", (preview.affected_tables || []).join("、") || "未知"],
+        ["预计影响行", count(preview.affected_rows)],
+        ["下游依赖", dependents.join("；") || "无 / 未声明"],
+        [
+          "基础来源Raw",
+          preview.raw_rows_untouched === true ? "不变" : "需要后端明确说明",
+        ],
+      ];
+      for (const [label, value] of entries) {
+        details.append(element("dt", label), element("dd", value));
+      }
+      root.append(element("h3", "派生结果清理预览"), details);
+    }
+    const body = currentPageBody(page);
+    const derivedModules =
+      body.base_modules.length + body.research_modules.length;
+    const selected = selectedModules(page);
+    const cleanupRequested = ["CLEAR_DERIVED", "CLEAR_AND_REGENERATE"].includes(
+      body.operation,
+    );
+    if (!(body.source_modules.length + derivedModules)) {
+      root.append(element("p", "至少选择一个实际可用模块。", "job-error"));
+    }
+    if (cleanupRequested && body.source_modules.length) {
+      root.append(
+        element(
+          "p",
+          "基础来源（包括Raw）不能从此处清理；取消来源选择并仅选择一个派生模块。",
+          "job-error",
+        ),
+      );
+    }
+    if (cleanupRequested && derivedModules !== 1) {
+      root.append(
+        element(
+          "p",
+          "局部清理必须只选择一个基础画像或研究模块，以便核对精确依赖。",
+          "job-error",
+        ),
+      );
+    }
+    if (
+      cleanupRequested &&
+      selected.some((item) => item.layer === "SOURCE" || !item.cleanupAllowed)
+    ) {
+      root.append(
+        element(
+          "p",
+          "清理计划包含未标记 cleanup_allowed=true 的模块；请只选择明确允许清理的派生模块。",
+          "job-error",
+        ),
+      );
+    }
+    const cleanupScopeValid =
+      !cleanupRequested ||
+      (body.source_modules.length === 0 &&
+        derivedModules === 1 &&
+        selected.every(
+          (item) => item.layer !== "SOURCE" && item.cleanupAllowed,
+        ));
     byId(page === "initialize" ? "startDataInit" : "startDataDaily").disabled =
-      !plan.executable;
+      !plan.executable ||
+      !(
+        body.source_modules.length +
+        body.base_modules.length +
+        body.research_modules.length
+      ) ||
+      !cleanupScopeValid ||
+      (cleanupRequested &&
+        (!plan.cleanup_preview || plan.cleanup_preview.complete !== true));
   }
 
   async function loadJob(jobId, page) {
@@ -593,10 +1102,8 @@ export function mountDataJobPages(api) {
 
   async function preview(page) {
     try {
-      const result = await api(
-        "/api/product/data-jobs/plan",
-        currentPageBody(page),
-      );
+      const body = currentPageBody(page);
+      const result = await api("/api/product/data-jobs/plan", body);
       renderPlan(result.plan, page);
     } catch (error) {
       renderPlan(
@@ -616,10 +1123,43 @@ export function mountDataJobPages(api) {
     );
     button.disabled = true;
     try {
-      const result = await api(
-        "/api/product/data-jobs/start",
-        currentPageBody(page),
-      );
+      const body = currentPageBody(page);
+      if (state.planBody !== JSON.stringify(body)) {
+        await preview(page);
+      }
+      if (!state.plan?.executable) return;
+      if (["CLEAR_DERIVED", "CLEAR_AND_REGENERATE"].includes(body.operation)) {
+        if (
+          selectedModules(page).some(
+            (item) => item.layer === "SOURCE" || !item.cleanupAllowed,
+          )
+        ) {
+          throw new Error("清理模块未声明 cleanup_allowed=true；未执行清理。");
+        }
+        if (
+          body.source_modules.length ||
+          body.base_modules.length + body.research_modules.length !== 1
+        ) {
+          throw new Error("清理仅允许一个派生模块且不可包含基础来源。");
+        }
+        const preview = state.plan.cleanup_preview;
+        if (!preview || preview.complete !== true) {
+          throw new Error("清理范围没有完整预检；未执行清理。");
+        }
+        const summary = [
+          `模块：${preview.module_label || preview.module_code || "未知"}`,
+          `目标会话：${(preview.target_sessions || []).join("、") || "未知"}`,
+          `影响表：${(preview.affected_tables || []).join("、") || "未知"}`,
+          `预计行数：${count(preview.affected_rows)}`,
+          `Raw来源行保持：${preview.raw_rows_untouched === true ? "是" : "未证明"}`,
+        ].join("\n");
+        if (
+          preview.raw_rows_untouched !== true ||
+          !window.confirm(`确认只处理以下派生结果？\n${summary}`)
+        )
+          return;
+      }
+      const result = await api("/api/product/data-jobs/start", body);
       state.latestJobId = result.job_id || result.job?.job_id || null;
       await loadJob(state.latestJobId, page);
       const recent = await api("/api/product/data-jobs/capabilities");
@@ -648,32 +1188,37 @@ export function mountDataJobPages(api) {
   );
   byId("planDataDaily").addEventListener("click", () => void preview("daily"));
   byId("startDataDaily").addEventListener("click", () => void start("daily"));
+  byId("refreshDataInit").addEventListener(
+    "click",
+    () => void load("initialize"),
+  );
+  byId("refreshDataDaily").addEventListener("click", () => void load("daily"));
+  byId("dataInitOperation").addEventListener("change", () => {
+    updateCleanupAvailability("initialize");
+  });
+  byId("dataDailyOperation").addEventListener("change", () => {
+    updateCleanupAvailability("daily");
+  });
   for (const button of document.querySelectorAll("[data-history-sessions]")) {
     button.addEventListener("click", () => {
       byId("dataInitHistory").value = button.dataset.historySessions;
     });
   }
-  for (const [toggleId, countId] of [
-    ["dataInitD0Enabled", "dataInitD0Count"],
-    ["dataInitD1Enabled", "dataInitD1Count"],
-  ]) {
-    byId(toggleId).addEventListener("change", (event) => {
-      byId(countId).disabled = !event.target.checked;
-    });
-  }
   for (const id of [
     "dataInitTarget",
     "dataInitHistory",
-    "dataInitD0Enabled",
-    "dataInitD0Count",
-    "dataInitD1Enabled",
-    "dataInitD1Count",
+    "dataInitOperation",
+    "dataDailyOperation",
   ]) {
     byId(id).addEventListener("input", () => {
       byId("startDataInit").disabled = true;
+      byId("startDataDaily").disabled = true;
+      state.planBody = null;
     });
     byId(id).addEventListener("change", () => {
       byId("startDataInit").disabled = true;
+      byId("startDataDaily").disabled = true;
+      state.planBody = null;
     });
   }
   return { load };

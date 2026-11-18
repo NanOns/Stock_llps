@@ -744,7 +744,7 @@
                 <div>
                   <h2>数据初始化</h2>
                   <p>
-                    选择官方目标会话、基础Raw历史窗口，以及D0和D1各自最近需要生成的输出会话数。
+                    选择官方目标会话、需要运行的来源与算法模块，以及每个模块最近需要生成的输出会话数。
                   </p>
                 </div>
                 <span id="dataInitStatus" class="job-status-pill"
@@ -791,55 +791,36 @@
                   </button>
                   <span>或输入自定义正整数</span>
                 </div>
-                <label class="job-output-control">
-                  <span
-                    ><input
-                      id="dataInitD0Enabled"
-                      type="checkbox"
-                      aria-label="生成D0输出"
-                      checked
-                    />
-                    生成D0</span
-                  >
-                  <span>输出保存最近</span>
-                  <input
-                    id="dataInitD0Count"
-                    type="number"
-                    min="1"
-                    max="32767"
-                    step="1"
-                    value="1"
-                    aria-label="D0输出保存最近官方会话数"
-                  />
-                  <span>个官方会话</span>
-                </label>
-                <label class="job-output-control">
-                  <span
-                    ><input
-                      id="dataInitD1Enabled"
-                      type="checkbox"
-                      aria-label="生成D1输出"
-                      checked
-                    />
-                    生成D1</span
-                  >
-                  <span>输出保存最近</span>
-                  <input
-                    id="dataInitD1Count"
-                    type="number"
-                    min="1"
-                    max="32767"
-                    step="1"
-                    value="1"
-                    aria-label="D1输出保存最近官方会话数"
-                  />
-                  <span>个官方会话</span>
+              </div>
+              <div
+                id="dataInitModules"
+                class="job-module-picker"
+                aria-label="初始化模块"
+              >
+                <p class="muted">正在读取实际可用的来源与算法模块…</p>
+              </div>
+              <div class="job-controls job-scope-controls">
+                <label>
+                  执行方式
+                  <select id="dataInitOperation">
+                    <option value="FILL_MISSING">仅补齐缺失结果</option>
+                    <option value="RECOMPUTE">按范围重算</option>
+                    <option value="CLEAR_DERIVED">清理派生结果</option>
+                    <option value="CLEAR_AND_REGENERATE">清理后重新生成</option>
+                  </select>
                 </label>
               </div>
               <p class="muted">
-                基础窗口用于Raw与Core/Profile预热；D0/D1数字只决定输出会话范围，不改变MA、ATR或D1算法窗口。关闭某项表示用户跳过。
+                基础Raw窗口用于来源读取与必要预热；每个已选模块只保存其指定的最近N个官方输出会话。基础Raw默认保留，清理操作只允许作用于预览中明确列出的派生事实。
               </p>
               <div class="job-actions">
+                <button
+                  id="refreshDataInit"
+                  class="button subtle"
+                  type="button"
+                >
+                  刷新任务状态
+                </button>
                 <button id="planDataInit" class="button subtle" type="button">
                   检查数据与执行计划
                 </button>
@@ -875,7 +856,9 @@
               <div class="job-page-heading">
                 <div>
                   <h2>数据日更</h2>
-                  <p>手动检查最近已完成会话之后的连续官方交易会话。</p>
+                  <p>
+                    手动检查最近已完成会话之后的连续官方交易会话，并选择本次需要更新的来源和算法模块。
+                  </p>
                 </div>
                 <span id="dataDailyStatus" class="job-status-pill">未启动</span>
               </div>
@@ -884,10 +867,34 @@
                 正在读取运行许可…
               </p>
               <p>
-                一次点击由后台任务复用Raw、Core/Profile、市场宽度与成交参与、静态Seed、D0/D1和已实现的LAUNCH
-                Focus准入生产者。页面只发起任务并读取PG进度，不定时采集。
+                来源更新与算法生成分别记录；未选择的模块不会启动。页面只发起任务并读取PG进度，不定时采集。
               </p>
+              <div class="job-controls job-scope-controls">
+                <label>
+                  执行方式
+                  <select id="dataDailyOperation">
+                    <option value="FILL_MISSING">仅补齐缺失结果</option>
+                    <option value="RECOMPUTE">按范围重算</option>
+                    <option value="CLEAR_DERIVED">清理派生结果</option>
+                    <option value="CLEAR_AND_REGENERATE">清理后重新生成</option>
+                  </select>
+                </label>
+              </div>
+              <div
+                id="dataDailyModules"
+                class="job-module-picker"
+                aria-label="日更模块"
+              >
+                <p class="muted">正在读取实际可用的来源与算法模块…</p>
+              </div>
               <div class="job-actions">
+                <button
+                  id="refreshDataDaily"
+                  class="button subtle"
+                  type="button"
+                >
+                  刷新任务状态
+                </button>
                 <button id="planDataDaily" class="button subtle" type="button">
                   检查本次日更
                 </button>

@@ -374,18 +374,16 @@ def _anchor_rows(
     return result
 
 
-def _validate_facts(facts: ResearchDayFacts) -> None:
+def _validate_facts(
+    facts: ResearchDayFacts, *, include_d0: bool, include_d1: bool
+) -> None:
     if not isinstance(facts, ResearchDayFacts):
         raise ResearchDayPgError("RESEARCH_DAY_FACTS_INVALID", "单日事实类型无效")
     if (
-        facts.target_session <= facts.before_session
-        or facts.d0_before_source_count < 0
-        or facts.d0_target_source_count < 1
-        or facts.d0_union_source_count != len(facts.d0_facts)
-        or facts.d1_source_count < 1
-        or facts.d1_history_session_count < 1
-        or facts.d1_history_window_end != facts.target_session
-        or facts.d1_history_window_start > facts.before_session
+        type(include_d0) is not bool
+        or type(include_d1) is not bool
+        or not (include_d0 or include_d1)
+        or facts.target_session <= facts.before_session
         or type(facts.source_package_id) is not int
         or facts.source_package_id <= 0
         or type(facts.before_capture_id) is not int
@@ -394,22 +392,39 @@ def _validate_facts(facts: ResearchDayFacts) -> None:
         or facts.target_capture_id <= 0
     ):
         raise ResearchDayPgError(
-            "RESEARCH_DAY_FACTS_INCOMPLETE", "单日来源、日历或窗口分母无效"
+            "RESEARCH_DAY_FACTS_INCOMPLETE", "单日来源身份或域选择无效"
+        )
+    if include_d0 and (
+        facts.d0_before_source_count < 0
+        or facts.d0_target_source_count < 1
+        or facts.d0_union_source_count != len(facts.d0_facts)
+    ):
+        raise ResearchDayPgError(
+            "RESEARCH_DAY_FACTS_INCOMPLETE", "D0来源或窗口分母无效"
+        )
+    if include_d1 and (
+        facts.d1_source_count < 1
+        or facts.d1_history_session_count < 1
+        or facts.d1_history_window_end != facts.target_session
+        or facts.d1_history_window_start > facts.before_session
+    ):
+        raise ResearchDayPgError(
+            "RESEARCH_DAY_FACTS_INCOMPLETE", "D1来源或窗口分母无效"
         )
     d0_by_symbol = {item.source_symbol: item for item in facts.d0_facts}
     d1_by_key = {
         (item.source_symbol, item.structure_type): item
         for item in facts.d1_structure_facts
     }
-    if len(d0_by_symbol) != len(facts.d0_facts) or len(d1_by_key) != len(
-        facts.d1_structure_facts
+    if (include_d0 and len(d0_by_symbol) != len(facts.d0_facts)) or (
+        include_d1 and len(d1_by_key) != len(facts.d1_structure_facts)
     ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_FACTS_DUPLICATED_KEY", "D0或D1事实包含重复业务键"
         )
     before_symbols = set()
     target_symbols = set()
-    for item in facts.d0_facts:
+    for item in facts.d0_facts if include_d0 else ():
         if (
             _SYMBOL.fullmatch(item.source_symbol) is None
             or item.market not in {"SH", "SZ"}
@@ -426,17 +441,16 @@ def _validate_facts(facts: ResearchDayFacts) -> None:
             before_symbols.add(item.source_symbol)
         if item.after_state is not None:
             target_symbols.add(item.source_symbol)
-    if (
+    if include_d0 and (
         len(before_symbols) != facts.d0_before_source_count
         or len(target_symbols) != facts.d0_target_source_count
         or len(facts.d0_facts) != facts.d0_union_source_count
-        or target_symbols != {item.source_symbol for item in facts.d1_structure_facts}
     ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_D0_PARTITION_OPEN", "D0三态事实与前后总体分母未闭合"
         )
     structures_by_symbol: dict[str, set[str]] = {}
-    for item in facts.d1_structure_facts:
+    for item in facts.d1_structure_facts if include_d1 else ():
         key = (item.source_symbol, item.structure_type)
         structures_by_symbol.setdefault(item.source_symbol, set()).add(
             item.structure_type
@@ -467,19 +481,18 @@ def _validate_facts(facts: ResearchDayFacts) -> None:
             raise ResearchDayPgError(
                 "RESEARCH_DAY_D1_FACT_INVALID", "D1结构、质量或分母字段无效"
             )
-    if (
+    if include_d1 and (
         len(facts.d1_structure_facts) != facts.d1_source_count * len(_STRUCTURE_TYPES)
         or any(
             set(kinds) != _STRUCTURE_TYPE_SET for kinds in structures_by_symbol.values()
         )
-        or set(structures_by_symbol) != target_symbols
     ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_D1_PARTITION_OPEN", "D1逐股五类结构事实未完整闭合"
         )
     detail_counts: dict[tuple[str, str], int] = {}
     anchor_keys = set()
-    for item in facts.d1_anchor_facts:
+    for item in facts.d1_anchor_facts if include_d1 else ():
         key = (
             item.source_symbol,
             item.structure_type,
@@ -498,13 +511,20 @@ def _validate_facts(facts: ResearchDayFacts) -> None:
             raise ResearchDayPgError(
                 "RESEARCH_DAY_D1_ANCHOR_INVALID", "D1材料或质量锚明细不完整"
             )
-    if len(anchor_keys) != len(facts.d1_anchor_facts) or any(
-        detail_counts.get(key, 0) != item.persisted_detail_count
-        for key, item in d1_by_key.items()
+    if include_d1 and (
+        len(anchor_keys) != len(facts.d1_anchor_facts)
+        or any(
+            detail_counts.get(key, 0) != item.persisted_detail_count
+            for key, item in d1_by_key.items()
+        )
     ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_D1_DETAIL_PARTITION_OPEN",
             "D1逐股结构分母与typed锚明细不一致",
+        )
+    if include_d0 and include_d1 and target_symbols != set(structures_by_symbol):
+        raise ResearchDayPgError(
+            "RESEARCH_DAY_SYMBOL_SET_MISMATCH", "D0目标分母与D1逐股分母不一致"
         )
 
 
@@ -578,57 +598,67 @@ def _scope_predicate(
     return "d1_structure_id = ANY(%s)", (list(structure_ids),)
 
 
-def _verify_raw_source(cursor: Any, facts: ResearchDayFacts) -> None:
+def _verify_raw_source(
+    cursor: Any,
+    facts: ResearchDayFacts,
+    *,
+    include_d0: bool,
+    include_d1: bool,
+) -> None:
+    sessions = (
+        (facts.before_session, facts.target_session)
+        if include_d0
+        else (facts.target_session,)
+    )
+    placeholders = ", ".join(["%s"] * len(sessions))
     cursor.execute(
-        """
+        f"""
         SELECT session_date, count(*), count(DISTINCT source_symbol),
                count(DISTINCT source_capture_id), min(source_capture_id),
                count(DISTINCT source_package_id), min(source_package_id)
         FROM source_raw_daily
         WHERE source_package_id=%s
-          AND session_date IN (%s, %s)
+          AND session_date IN ({placeholders})
         GROUP BY session_date ORDER BY session_date
         """,
-        (
-            facts.source_package_id,
-            facts.before_session,
-            facts.target_session,
-        ),
+        (facts.source_package_id, *sessions),
     )
     observed = {row[0]: row[1:] for row in cursor.fetchall()}
     target = observed.get(facts.target_session)
-    before = observed.get(facts.before_session)
+    before = observed.get(facts.before_session) if include_d0 else None
+    target_count = facts.d0_target_source_count if include_d0 else facts.d1_source_count
     if (
         target is None
-        or before is None
-        or target[0] != facts.d1_source_count
-        or target[1] != facts.d1_source_count
+        or (include_d0 and before is None)
+        or target[0] != target_count
+        or target[1] != target_count
         or target[2] != 1
         or target[3] != facts.target_capture_id
         or target[4] != 1
         or target[5] != facts.source_package_id
-        or before[1] != facts.d0_before_source_count
-        or before[2] != 1
-        or before[3] != facts.before_capture_id
+        or (
+            include_d0
+            and (
+                before[1] != facts.d0_before_source_count
+                or before[2] != 1
+                or before[3] != facts.before_capture_id
+            )
+        )
     ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_RAW_IDENTITY_MISMATCH",
             "D0/D1事实与固定PG中的前后态Raw总体、捕获或数据包编号不一致",
         )
     cursor.execute(
-        """
+        f"""
         SELECT session_date, source_symbol FROM source_raw_daily
         WHERE source_package_id=%s
-          AND session_date IN (%s, %s)
+          AND session_date IN ({placeholders})
         ORDER BY session_date, source_symbol
         """,
-        (
-            facts.source_package_id,
-            facts.before_session,
-            facts.target_session,
-        ),
+        (facts.source_package_id, *sessions),
     )
-    raw_symbols_by_session = {facts.before_session: set(), facts.target_session: set()}
+    raw_symbols_by_session = {session: set() for session in sessions}
     for session_date, source_symbol in cursor.fetchall():
         raw_symbols_by_session[session_date].add(source_symbol)
     raw_symbols = raw_symbols_by_session[facts.target_session]
@@ -636,7 +666,9 @@ def _verify_raw_source(cursor: Any, facts: ResearchDayFacts) -> None:
     d0_target_symbols = {
         item.source_symbol for item in facts.d0_facts if item.after_state is not None
     }
-    if raw_symbols != d1_symbols or raw_symbols != d0_target_symbols:
+    if (include_d1 and raw_symbols != d1_symbols) or (
+        include_d0 and raw_symbols != d0_target_symbols
+    ):
         raise ResearchDayPgError(
             "RESEARCH_DAY_RAW_SYMBOL_PARTITION_OPEN",
             "目标Raw、D0目标态和D1逐股集合不一致",
@@ -645,7 +677,7 @@ def _verify_raw_source(cursor: Any, facts: ResearchDayFacts) -> None:
         item.source_symbol for item in facts.d0_facts if item.before_state is not None
     }
     fact_union_symbols = {item.source_symbol for item in facts.d0_facts}
-    if (
+    if include_d0 and (
         before_symbols != raw_symbols_by_session[facts.before_session]
         or len(before_symbols) != facts.d0_before_source_count
         or fact_union_symbols
@@ -794,7 +826,7 @@ def _persist_source_research_day_once(
     include_d1: bool,
 ) -> dict[str, Any]:
     """串行化事务写所选D0/D1 typed表；同键异内容拒绝并回滚。"""
-    _validate_facts(facts)
+    _validate_facts(facts, include_d0=include_d0, include_d1=include_d1)
     d0_rows = _sort_rows(_d0_rows(facts), _D0_COLUMNS, _D0_KEY) if include_d0 else ()
     d1_rows = _sort_rows(_d1_rows(facts), _D1_COLUMNS, _D1_KEY) if include_d1 else ()
     inserted = {}
@@ -806,7 +838,7 @@ def _persist_source_research_day_once(
         _connection_identity,
     ):
         _ensure_tables(cursor)
-        _verify_raw_source(cursor, facts)
+        _verify_raw_source(cursor, facts, include_d0=include_d0, include_d1=include_d1)
         any_existing = False
         if include_d0:
             predicate, params = _scope_predicate("source_d0_launch_day_facts", facts)
@@ -1022,7 +1054,7 @@ def _persist_source_research_day_once(
         "same_input_retry": "ZERO_INSERTS_TYPED_EQUALITY_VERIFIED"
         if all(existing_scopes) and enrollment["inserted"] == 0
         else None,
-        "transaction": "SERIALIZABLE_ATOMIC_THREE_TABLE_WRITE",
+        "transaction": "SERIALIZABLE_ATOMIC_SELECTED_DOMAIN_TABLES",
         "database_write_attempted": any(inserted.values())
         or enrollment["inserted"] > 0,
         "ddl_executed": False,

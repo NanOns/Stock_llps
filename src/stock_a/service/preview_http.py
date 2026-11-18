@@ -445,6 +445,111 @@ def _require_research_cutoff(target_session: date, max_target_session: date) -> 
         )
 
 
+def _verified_sector_snapshot_pair(
+    config: Mapping[str, Any], *, industry_snapshot_id: int, concept_snapshot_id: int
+) -> dict[str, Any]:
+    """校验行业与GN快照来自同一观察，并返回其非PIT来源身份。"""
+    if industry_snapshot_id == concept_snapshot_id:
+        raise PreviewHttpError(
+            409,
+            "SECTOR_SNAPSHOT_PAIR_NOT_DISTINCT",
+            "行业与GN概念必须使用不同的来源快照",
+        )
+    catalog = read_tdx_sector_source_snapshot_catalog(dict(config))
+    rows = catalog.get("snapshots", ()) if catalog.get("status") == "AVAILABLE" else ()
+    by_id = {
+        int(row["snapshot_id"]): row
+        for row in rows
+        if isinstance(row, Mapping) and row.get("snapshot_id") is not None
+    }
+    selected = {
+        "INDUSTRY": by_id.get(industry_snapshot_id),
+        "CONCEPT": by_id.get(concept_snapshot_id),
+    }
+    expected_sources = {
+        "INDUSTRY": "TDX_TDXHY_CFG",
+        "CONCEPT": "TDX_INFOHARBOR_BLOCK_DAT",
+    }
+    normalized_times: dict[str, datetime] = {}
+    for kind, row in selected.items():
+        if row is None or row.get("source_kind") != expected_sources[kind]:
+            raise PreviewHttpError(
+                409,
+                "SECTOR_SNAPSHOT_PAIR_IDENTITY_INVALID",
+                f"{kind}快照ID不存在或来源类型不匹配",
+            )
+        try:
+            observed_at = datetime.fromisoformat(str(row["observed_at"]))
+            catalog_count = int(row.get(f"{kind.lower()}_catalog_rows") or 0)
+            member_count = int(row.get(f"{kind.lower()}_member_rows") or 0)
+            invalid_members = int(row.get("invalid_membership_quality_rows") or 0)
+        except (KeyError, TypeError, ValueError) as error:
+            raise PreviewHttpError(
+                409,
+                "SECTOR_SNAPSHOT_PAIR_METADATA_INVALID",
+                f"{kind}快照观察时间或目录/成员统计无效",
+            ) from error
+        if (
+            observed_at.tzinfo is None
+            or row.get("research_mode") != "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT"
+            or row.get("clock_quality") != "UNKNOWN"
+            or row.get("source_valid_on") is not None
+            or row.get("source_known_at") is not None
+            or row.get("source_available_at") is not None
+            or catalog_count <= 0
+            or member_count <= 0
+            or invalid_members != 0
+        ):
+            raise PreviewHttpError(
+                409,
+                "SECTOR_SNAPSHOT_PAIR_METADATA_INVALID",
+                f"{kind}快照不满足非PIT目录、成员及未知来源时钟合同",
+            )
+        normalized_times[kind] = observed_at.astimezone(timezone.utc)
+    if normalized_times["INDUSTRY"] != normalized_times["CONCEPT"]:
+        raise PreviewHttpError(
+            409,
+            "SECTOR_SNAPSHOT_PAIR_OBSERVATION_MISMATCH",
+            "行业与GN概念快照不是同一次来源观察",
+        )
+
+    industry = selected["INDUSTRY"]
+    concept = selected["CONCEPT"]
+    observed_at = datetime.fromisoformat(str(industry["observed_at"]))
+    return {
+        "status": "AVAILABLE",
+        "selection_rule": "EXPLICIT_IDS_VALIDATED_SAME_OBSERVATION",
+        "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+        "research_mode": "NON_PIT_RETROSPECTIVE_CURRENT_SNAPSHOT",
+        "clock_quality": "UNKNOWN",
+        "observed_at": observed_at.isoformat(),
+        "snapshot_ids": {
+            "INDUSTRY": industry_snapshot_id,
+            "CONCEPT": concept_snapshot_id,
+        },
+        "snapshots": [
+            {
+                "snapshot_id": industry_snapshot_id,
+                "board_kind": "INDUSTRY",
+                "source_kind": industry["source_kind"],
+                "observed_at": industry["observed_at"],
+                "source_quality": industry.get("source_quality"),
+                "catalog_rows": int(industry["industry_catalog_rows"]),
+                "member_rows": int(industry["industry_member_rows"]),
+            },
+            {
+                "snapshot_id": concept_snapshot_id,
+                "board_kind": "CONCEPT",
+                "source_kind": concept["source_kind"],
+                "observed_at": concept["observed_at"],
+                "source_quality": concept.get("source_quality"),
+                "catalog_rows": int(concept["concept_catalog_rows"]),
+                "member_rows": int(concept["concept_member_rows"]),
+            },
+        ],
+    }
+
+
 def _iso_date(value: Any, field: str = "target_session") -> date:
     if not isinstance(value, str) or _DATE.fullmatch(value) is None:
         raise PreviewHttpError(
@@ -2965,6 +3070,25 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 "D1_MATERIAL_SNAPSHOT_IDS_NOT_DISTINCT",
                 "行业与GN成员快照必须是两个不同的记录",
             )
+        if (
+            snapshots["industry_snapshot_id"] is not None
+            and snapshots["concept_snapshot_id"] is not None
+        ):
+            snapshot_pair_provenance = _verified_sector_snapshot_pair(
+                self.preview_server.state.config,
+                industry_snapshot_id=snapshots["industry_snapshot_id"],
+                concept_snapshot_id=snapshots["concept_snapshot_id"],
+            )
+        else:
+            snapshot_pair_provenance = {
+                "status": "NOT_AVAILABLE",
+                "reason_code": "SECTOR_SNAPSHOT_PAIR_NOT_BOUND",
+                "membership_mode": "CURRENT_MEMBERSHIP_RETROSPECTIVE_NON_PIT",
+                "snapshot_ids": {
+                    "INDUSTRY": snapshots["industry_snapshot_id"],
+                    "CONCEPT": snapshots["concept_snapshot_id"],
+                },
+            }
 
         structure_type = body.get("structure_type") or None
         if structure_type == "ALL":
@@ -3138,6 +3262,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 )
             },
             "snapshots": result["snapshots"],
+            "snapshot_pair_provenance": snapshot_pair_provenance,
             "market": result["market"],
             "boards": {
                 key: value
@@ -4196,6 +4321,29 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                     "limit",
                     50,
                 )
+                industry_snapshot_id = _positive_int(
+                    _nonnegative_int(
+                        values["industry_snapshot_id"],
+                        "industry_snapshot_id",
+                        2**31 - 1,
+                    ),
+                    "industry_snapshot_id",
+                    2**31 - 1,
+                )
+                concept_snapshot_id = _positive_int(
+                    _nonnegative_int(
+                        values["concept_snapshot_id"],
+                        "concept_snapshot_id",
+                        2**31 - 1,
+                    ),
+                    "concept_snapshot_id",
+                    2**31 - 1,
+                )
+                snapshot_pair_provenance = _verified_sector_snapshot_pair(
+                    self.preview_server.state.config,
+                    industry_snapshot_id=industry_snapshot_id,
+                    concept_snapshot_id=concept_snapshot_id,
+                )
                 calendar = _official_calendar(target)
                 if target not in calendar["sessions"]:
                     raise PreviewHttpError(
@@ -4243,24 +4391,8 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         source_pool_count=source["raw_row_count"],
                         profile_revision=_profile_revision(values["profile_revision"]),
                         snapshot_ids={
-                            "INDUSTRY": _positive_int(
-                                _nonnegative_int(
-                                    values["industry_snapshot_id"],
-                                    "industry_snapshot_id",
-                                    2**31 - 1,
-                                ),
-                                "industry_snapshot_id",
-                                2**31 - 1,
-                            ),
-                            "CONCEPT": _positive_int(
-                                _nonnegative_int(
-                                    values["concept_snapshot_id"],
-                                    "concept_snapshot_id",
-                                    2**31 - 1,
-                                ),
-                                "concept_snapshot_id",
-                                2**31 - 1,
-                            ),
+                            "INDUSTRY": industry_snapshot_id,
+                            "CONCEPT": concept_snapshot_id,
                         },
                         calendar_id=calendar["calendar_id"],
                         calendar_revision=calendar["calendar_revision"],
@@ -4278,6 +4410,7 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         getattr(error, "code", "SECTOR_PULSE_DIRECTORY_UNAVAILABLE"),
                         str(error),
                     ) from error
+                result["snapshot_pair_provenance"] = snapshot_pair_provenance
                 self._send_json(200, {"ok": True, **result})
                 return
             if parsed.path == "/api/product/resolve-stock-code":
@@ -6797,6 +6930,31 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                 result["stored_research_evidence"]["formal_d0_admission"] = (
                     formal_d0_admission
                 )
+                try:
+                    from stock_a.application.source_baostock_detail import (
+                        read_baostock_detail,
+                    )
+
+                    result["baostock_supplement"] = read_baostock_detail(
+                        config,
+                        source_symbol=symbol,
+                        target_session=target,
+                        research_cutoff=research_cutoff,
+                    )
+                except Exception as error:
+                    result["baostock_supplement"] = {
+                        "status": "UNKNOWN",
+                        "reason_code": getattr(error, "code", type(error).__name__),
+                        "message": "BaoStock补充来源读取失败；TDX核心结果保持可用。",
+                        "source": "BAOSTOCK",
+                        "source_symbol": symbol,
+                        "target_session": target.isoformat(),
+                        "research_cutoff": research_cutoff.isoformat(),
+                        "price_coordinate": "RAW_UNADJUSTED",
+                        "pit_status": "NON_PIT",
+                        "source_network_called": False,
+                        "database_write_attempted": False,
+                    }
             self._send_json(200, result)
         except Exception as error:
             self._handle_error(error)
