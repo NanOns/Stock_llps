@@ -6126,6 +6126,8 @@ async function openStock(symbol, row = {}) {
       profiles.textContent = "Profile UNKNOWN · 本次没有可用组件。";
     root.append(profiles, node("h3", "日 / 周 / 月价格"));
     const periods = node("div", null, "rule");
+    const coordinateControls = node("div", null, "period-controls");
+    const coordinateStatus = node("p", null, "rule");
     const periodControls = node("div", null, "period-controls");
     const periodResults = node("div", "正在读取历史价格…", "history-list");
     const history = {
@@ -6133,17 +6135,77 @@ async function openStock(symbol, row = {}) {
       dayError: null,
       week: null,
       month: null,
+      adjusted: null,
+      adjustedNotice: "",
+      coordinate: "RAW_UNADJUSTED",
+      adjustedRequest: 0,
       selected: "day",
       periodStatus: "LOADING",
     };
     const dayErrorNotice = node("p", null, "rule");
     dayErrorNotice.hidden = true;
+    const coordinateButtons = new Map();
+    function updateCoordinateControls() {
+      for (const [coordinate, button] of coordinateButtons) {
+        button.classList.toggle("selected", history.coordinate === coordinate);
+      }
+      message(
+        "stockMeta",
+        `${c.target_session} · ${history.coordinate} · SOURCE_SYMBOL_ONLY · NON_PIT${history.coordinate === "ADJUSTED" ? " · RETROSPECTIVE" : ""}`,
+      );
+      if (
+        history.coordinate === "ADJUSTED" &&
+        history.adjusted?.status === "READY"
+      ) {
+        const payload = history.adjusted;
+        const points = Array.isArray(payload.points) ? payload.points : [];
+        const qualities = points.reduce((counts, item) => {
+          const quality = item.price_quality || "UNKNOWN";
+          counts[quality] = (counts[quality] || 0) + 1;
+          return counts;
+        }, {});
+        const qualitySummary =
+          Object.entries(qualities)
+            .map(([quality, count]) => `${quality} ${count}`)
+            .join(" / ") || "UNKNOWN";
+        const coverage = payload.coverage || {};
+        const covered =
+          coverage.covered_session_count ??
+          coverage.stored_session_count ??
+          points.length;
+        const expected =
+          coverage.expected_session_count ??
+          coverage.requested_session_count ??
+          "未知";
+        const references = Array.isArray(payload.event_refs)
+          ? payload.event_refs
+          : [];
+        const source =
+          payload.source ||
+          (references.length
+            ? "TDX_RAW + 公司行为事件引用"
+            : "TDX_RAW + 公司行为事件引用未返回");
+        const referenceSummary = references.length
+          ? ` · 事件引用 ${references.length}`
+          : " · 事件引用未返回";
+        const actionCoverage = Array.isArray(coverage.action_coverage_status)
+          ? coverage.action_coverage_status.join(" / ")
+          : "UNKNOWN";
+        const coverageState = coverage.status || "UNKNOWN";
+        coordinateStatus.textContent = `当前显示 ADJUSTED · 来源 ${source} · 算法 ${payload.algorithm_version || "UNKNOWN"} · 质量 ${qualitySummary} · 价格窗口 ${covered}/${expected} · 事件覆盖 ${actionCoverage} (${coverageState})${referenceSummary} · RETROSPECTIVE_NON_PIT`;
+      } else if (history.coordinate === "RAW_UNADJUSTED") {
+        coordinateStatus.textContent = history.adjustedNotice
+          ? `${history.adjustedNotice} 当前保留并显示 RAW_UNADJUSTED 原始价格。`
+          : "当前显示 RAW_UNADJUSTED 原始价格；未闭合周 / 月不展示部分 OHLC。";
+      }
+    }
     function showHistory(kind) {
       history.selected = kind;
       periodControls.querySelectorAll("button").forEach((button) => {
         button.classList.toggle("selected", button.dataset.kind === kind);
       });
-      const entries = history[kind];
+      const adjusted = history.coordinate === "ADJUSTED";
+      const entries = adjusted ? history.adjusted?.[kind] : history[kind];
       periodResults.replaceChildren();
       if (!entries) {
         periodResults.textContent =
@@ -6160,13 +6222,18 @@ async function openStock(symbol, row = {}) {
       }
       for (const item of [...entries].reverse()) {
         const label = kind === "day" ? item.session_date : item.period_key;
-        const o = kind === "day" ? item.raw_ohlc : item.ohlc;
-        const val = (name) => (kind === "day" ? o?.[name]?.value : o?.[name]);
+        const o =
+          kind === "day" ? (adjusted ? item.ohlc : item.raw_ohlc) : item.ohlc;
+        const scalar = (value) =>
+          value && typeof value === "object" && "value" in value
+            ? value.value
+            : value;
+        const val = (name) => scalar(o?.[name]);
         const quality =
           kind === "day" ? item.price_quality : item.coverage_status;
         const reason =
           kind === "day"
-            ? item.price_reason
+            ? item.reason || item.price_reason || item.adjustment_status
             : (item.reason_codes || []).join(" / ");
         const line =
           val("close") == null
@@ -6186,12 +6253,105 @@ async function openStock(symbol, row = {}) {
       button.addEventListener("click", () => showHistory(kind));
       periodControls.append(button);
     }
+    for (const [coordinate, label] of [
+      ["RAW_UNADJUSTED", "RAW_UNADJUSTED"],
+      ["ADJUSTED", "ADJUSTED"],
+    ]) {
+      const button = node("button", label, "button subtle");
+      button.type = "button";
+      button.addEventListener("click", () => {
+        if (coordinate === "RAW_UNADJUSTED") {
+          history.adjustedRequest += 1;
+          history.coordinate = "RAW_UNADJUSTED";
+          updateCoordinateControls();
+          showHistory(history.selected);
+          return;
+        }
+        const request = ++history.adjustedRequest;
+        if (history.adjusted?.status === "READY") {
+          history.coordinate = "ADJUSTED";
+          history.adjustedNotice = "";
+          updateCoordinateControls();
+          showHistory(history.selected);
+          return;
+        }
+        history.adjustedNotice =
+          "正在只读PG中查询已保存的 ADJUSTED 结果；当前仍显示原始价格。";
+        updateCoordinateControls();
+        const query = new URLSearchParams({
+          symbol,
+          target_session: c.target_session,
+        });
+        stockApi(`/api/source-symbol/adjusted-history?${query}`)
+          .then((result) => {
+            if (
+              request !== history.adjustedRequest ||
+              token !== state.stockRequest ||
+              selected !== state.selected
+            )
+              return;
+            const points = Array.isArray(result.points) ? result.points : [];
+            if (
+              result.status === "READY" &&
+              result.price_coordinate === "ADJUSTED" &&
+              result.research_mode === "RETROSPECTIVE_NON_PIT" &&
+              points.length
+            ) {
+              history.adjusted = {
+                ...result,
+                day: points,
+                week: result.periods?.week || [],
+                month: result.periods?.month || [],
+              };
+              history.coordinate = "ADJUSTED";
+              history.adjustedNotice = "";
+            } else {
+              history.coordinate = "RAW_UNADJUSTED";
+              const reason =
+                result.reason ||
+                result.coverage?.reason ||
+                result.coverage?.reason_code ||
+                "PG中没有完整可读的调整价格结果";
+              const coverage = result.coverage || {};
+              const covered =
+                coverage.covered_session_count ??
+                coverage.stored_session_count ??
+                "未知";
+              const expected =
+                coverage.expected_session_count ??
+                coverage.requested_session_count ??
+                "未知";
+              const source = result.source || "UNKNOWN";
+              history.adjustedNotice = `ADJUSTED ${result.status || "UNKNOWN"}：来源 ${source} · 质量 UNKNOWN · 覆盖 ${covered}/${expected} · RETROSPECTIVE_NON_PIT · ${reason}`;
+            }
+            updateCoordinateControls();
+            showHistory(history.selected);
+          })
+          .catch((error) => {
+            if (
+              request !== history.adjustedRequest ||
+              token !== state.stockRequest ||
+              selected !== state.selected ||
+              error.name === "AbortError"
+            )
+              return;
+            history.coordinate = "RAW_UNADJUSTED";
+            history.adjustedNotice = `ADJUSTED 读取失败：${error.message}`;
+            updateCoordinateControls();
+            showHistory(history.selected);
+          });
+      });
+      coordinateButtons.set(coordinate, button);
+      coordinateControls.append(button);
+    }
     periods.append(
-      node("p", "RAW_UNADJUSTED · 未闭合周期不展示部分 OHLC。"),
+      coordinateControls,
+      coordinateStatus,
       periodControls,
       dayErrorNotice,
       periodResults,
     );
+    updateCoordinateControls();
     root.append(periods, node("h3", "来源级规则与未展示原因"));
     const rules = node("div", null, "rule");
     const seedInfo = node("p", sourceSeedExplanation(data.source_seed));

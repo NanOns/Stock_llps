@@ -65,6 +65,7 @@ _STAGE_TABLES = {
         "stock.source_sector_pulse_cohort_group_facts",
         "stock.source_sector_pulse_cohort_reason_facts",
     ),
+    "ADJUSTED_PRICE": ("stock.source_adjusted_daily_prices",),
 }
 _STAGE_ORDER = {
     "BUSINESS_RESET": 1,
@@ -80,6 +81,7 @@ _STAGE_ORDER = {
     "SECTOR_PULSE": 9,
     "SECTOR_TRANSITION": 10,
     "SECTOR_FOLLOWUP": 11,
+    "ADJUSTED_PRICE": 12,
 }
 _RAW_JOB_SCOPE = "STOCK_A_R08_BIZ08_DATA_JOB_RAW_IMPORT_R1"
 
@@ -96,6 +98,7 @@ _MODULES = {
     "SECTOR_PULSE": ("RESEARCH", "行业 / GN概念PULSE", True, True),
     "SECTOR_TRANSITION": ("RESEARCH", "行业 / GN概念相邻变化", True, True),
     "SECTOR_FOLLOWUP": ("RESEARCH", "板块跨日跟踪", True, True),
+    "ADJUSTED_PRICE": ("RESEARCH", "仿射复权价格", True, True),
 }
 _UNCOORDINATED_RESEARCH_CONSUMERS = (
     (
@@ -457,6 +460,8 @@ def build_data_job_plan(
     cutoff: date,
     raw_coverage: Mapping[str, Any],
     execution_authorized: bool,
+    adjusted_action_sessions: Sequence[date] = (),
+    adjusted_action_symbols_by_session: Mapping[str, Sequence[str]] | None = None,
 ) -> dict[str, Any]:
     """按官方日历与截止日内闭合PG Raw目录生成不写数据的任务计划。"""
     request = _request_fields(body)
@@ -744,6 +749,7 @@ def build_data_job_plan(
                     "SECTOR_PULSE",
                     "SECTOR_TRANSITION",
                     "SECTOR_FOLLOWUP",
+                    "ADJUSTED_PRICE",
                     "FOCUS_FORMAL",
                     "D0",
                     "D1",
@@ -762,6 +768,41 @@ def build_data_job_plan(
             operation=operation,
             raw_coverage=raw_coverage,
         )
+
+    adjusted_action_session_set = {
+        session
+        for session in adjusted_action_sessions
+        if type(session) is date and session <= target
+    }
+    adjusted_symbols = adjusted_action_symbols_by_session or {}
+    adjusted_source_windows: dict[str, tuple[date, ...]] = {}
+    if "ADJUSTED_PRICE" in selected_research_modules:
+        for day in module_output_sessions.get("ADJUSTED_PRICE", ()):
+            day_text = day.isoformat()
+            symbols = tuple(
+                sorted(
+                    {
+                        symbol
+                        for symbol in adjusted_symbols.get(day_text, ())
+                        if isinstance(symbol, str) and symbol
+                    }
+                )
+            )
+            if day not in adjusted_action_session_set or not symbols:
+                continue
+            source_window = recent_official_sessions(eligible, through=day, count=2)
+            if len(source_window) == 2 and source_window[-1] == day:
+                adjusted_source_windows[day_text] = source_window
+        if "TDX_RAW" in selected_source_modules and adjusted_source_windows:
+            raw_window = tuple(
+                sorted(
+                    set(raw_window).union(
+                        session
+                        for window in adjusted_source_windows.values()
+                        for session in window
+                    )
+                )
+            )
 
     sector_followup_due: dict[str, dict[int, date]] = {}
     if "SECTOR_FOLLOWUP" in selected_research_modules:
@@ -949,6 +990,12 @@ def build_data_job_plan(
         reverse=True,
     )
     required_iso = {day.isoformat() for day in raw_window}
+    if "ADJUSTED_PRICE" in selected_research_modules:
+        required_iso.update(
+            session.isoformat()
+            for window in adjusted_source_windows.values()
+            for session in window
+        )
     reusable_packages = [
         package_id
         for package_id in package_order
@@ -1552,7 +1599,7 @@ def build_data_job_plan(
         "blocked_reasons": blockers,
         "target_session": target.isoformat(),
         "research_cutoff": cutoff.isoformat(),
-        "history_session_count": raw_request_count,
+        "history_session_count": max(raw_request_count, len(raw_window)),
         "profile_history_session_count": profile_history,
         "d0_output_session_count": d0_count,
         "d1_output_session_count": d1_count,
@@ -1637,6 +1684,14 @@ def build_data_job_plan(
                 if "TDX_RAW" in selected_source_modules
                 else {}
             ),
+        },
+        "adjusted_price_source_windows": {
+            target_session: [session.isoformat() for session in window]
+            for target_session, window in adjusted_source_windows.items()
+        },
+        "adjusted_price_symbols_by_session": {
+            target_session: list(adjusted_symbols.get(target_session, ()))
+            for target_session in adjusted_source_windows
         },
         "market_breadth_insufficient_history_sessions": sorted(market_insufficient),
         "market_participation_insufficient_sessions": sorted(
@@ -1826,6 +1881,113 @@ class DataJobCoordinator:
     def plan(self, body: Any) -> dict[str, Any]:
         coverage = self._coverage()
         request = _request_fields(body)
+        adjusted_action_sessions: tuple[date, ...] = ()
+        adjusted_symbols_by_session: dict[str, tuple[str, ...]] = {}
+        adjusted_input_status_by_session: dict[str, dict[str, str]] = {}
+        adjusted_event_revisions_by_session: dict[str, list[dict[str, str]]] = {}
+        adjusted_capture_by_session: dict[str, int] = {}
+        adjusted_raw_identities_by_session: dict[str, dict[str, Any]] = {}
+        if "ADJUSTED_PRICE" in request["selected_modules"]:
+            latest_raw = coverage.get("last_stored_session")
+            if request.get("target_session") is not None:
+                adjusted_target = _parse_session(request["target_session"])
+            elif request["mode"] == "INITIALIZE" and latest_raw:
+                adjusted_target = _parse_session(latest_raw)
+            else:
+                _calendar_id, _calendar_revision, sessions = _load_official_sessions(
+                    self.research_cutoff
+                )
+                valid_sessions = tuple(
+                    session for session in sessions if session <= self.research_cutoff
+                )
+                adjusted_target = valid_sessions[-1] if valid_sessions else None
+
+            if adjusted_target is not None and adjusted_target <= self.research_cutoff:
+                _calendar_id, _calendar_revision, sessions = _load_official_sessions(
+                    self.research_cutoff
+                )
+                if adjusted_target in sessions:
+                    output_count = request["module_output_session_counts"].get(
+                        "ADJUSTED_PRICE",
+                        request["output_session_count"] or 5,
+                    )
+                    output_count = _positive_integer(
+                        output_count, "ADJUSTED_PRICE输出会话数"
+                    )
+                    adjusted_output_sessions = recent_official_sessions(
+                        sessions,
+                        through=adjusted_target,
+                        count=output_count,
+                    )
+                    from stock_a.storage.postgres.adjusted_prices import (
+                        read_corporate_action_events,
+                        read_verified_action_sessions,
+                        read_verified_action_symbols_for_session,
+                    )
+
+                    adjusted_action_sessions = read_verified_action_sessions(
+                        self.config, through_session=adjusted_target
+                    )
+                    action_session_set = set(adjusted_action_sessions)
+                    for action_session in adjusted_output_sessions:
+                        day_text = action_session.isoformat()
+                        if action_session not in action_session_set:
+                            adjusted_input_status_by_session[day_text] = {
+                                "status": "NOT_COMPUTED",
+                                "code": "ADJUSTMENT_ACTION_NOT_PROVEN",
+                                "message": "该目标会话没有已验证的公司行为公告范围；不推断零调整。",
+                            }
+                            continue
+                        symbols = read_verified_action_symbols_for_session(
+                            self.config, target_session=action_session
+                        )
+                        if not symbols:
+                            adjusted_input_status_by_session[day_text] = {
+                                "status": "NOT_COMPUTED",
+                                "code": "ADJUSTMENT_ACTION_SYMBOL_NOT_PROVEN",
+                                "message": "目标公告没有可唯一绑定的已验证来源代码。",
+                            }
+                            continue
+                        revisions: list[dict[str, str]] = []
+                        invalid_reason = None
+                        for symbol in symbols:
+                            events = read_corporate_action_events(
+                                self.config,
+                                source_symbol=symbol,
+                                through_session=action_session,
+                            )
+                            if (
+                                len(events) != 1
+                                or events[0].get("effective_session") != action_session
+                                or events[0].get("source_quality")
+                                != "VERIFIED_OFFICIAL_NOTICE"
+                                or events[0].get("action_kind")
+                                != "CAPITAL_RESERVE_TO_STOCK"
+                            ):
+                                invalid_reason = (
+                                    "该来源代码存在多事件、非目标生效日或未验证事件；"
+                                    "本公告能力不能闭合此目标窗口。"
+                                )
+                                break
+                            revisions.append(
+                                {
+                                    "source_symbol": symbol,
+                                    "event_ref": str(events[0]["event_ref"]),
+                                    "semantic_revision": str(
+                                        events[0]["semantic_revision"]
+                                    ).strip(),
+                                }
+                            )
+                        if invalid_reason:
+                            adjusted_input_status_by_session[day_text] = {
+                                "status": "INCOMPLETE",
+                                "code": "ADJUSTMENT_EVENT_COVERAGE_INCOMPLETE",
+                                "message": invalid_reason,
+                            }
+                            continue
+                        adjusted_symbols_by_session[day_text] = tuple(symbols)
+                        adjusted_event_revisions_by_session[day_text] = revisions
+
         sector_pair = {"status": "NOT_REQUESTED", "snapshot_ids": None}
         if {
             "SECTOR_PULSE",
@@ -1842,7 +2004,110 @@ class DataJobCoordinator:
             cutoff=self.research_cutoff,
             raw_coverage=coverage,
             execution_authorized=self.execution_authorized,
+            adjusted_action_sessions=adjusted_action_sessions,
+            adjusted_action_symbols_by_session=adjusted_symbols_by_session,
         )
+        if "ADJUSTED_PRICE" in request["selected_modules"]:
+            plan["adjusted_price_input_status_by_session"] = (
+                adjusted_input_status_by_session
+            )
+            plan["adjusted_price_event_revisions"] = adjusted_event_revisions_by_session
+            plan["adjusted_price_capture_by_session"] = adjusted_capture_by_session
+            plan["adjusted_price_raw_identities_by_session"] = (
+                adjusted_raw_identities_by_session
+            )
+            if "TDX_RAW" not in request["source_modules"]:
+                package_id = plan.get("reuse_raw_package_id")
+                windows = plan.get("adjusted_price_source_windows", {})
+                symbols_by_session = plan.get("adjusted_price_symbols_by_session", {})
+                if type(package_id) is int:
+                    from stock_a.storage.postgres.adjusted_prices import (
+                        read_adjustment_raw_window,
+                    )
+
+                    for day_text, window_text in windows.items():
+                        symbols = symbols_by_session.get(day_text, ())
+                        expected_window = tuple(
+                            date.fromisoformat(value) for value in window_text
+                        )
+                        capture_ids: set[int] = set()
+                        capture_ids_by_source_session: dict[str, int] = {}
+                        window_complete = len(expected_window) == 2
+                        for symbol in symbols:
+                            rows = read_adjustment_raw_window(
+                                self.config,
+                                source_symbol=symbol,
+                                source_package_id=package_id,
+                                target_session=expected_window[-1],
+                                session_count=2,
+                            )
+                            if tuple(
+                                row["session_date"] for row in rows
+                            ) != expected_window or any(
+                                row.get("source_package_id") != package_id
+                                or row.get("price_quality") != "OBSERVED"
+                                or row.get("bar_status") != "TARGET_PRESENT"
+                                for row in rows
+                            ):
+                                window_complete = False
+                                break
+                            symbol_capture_ids = {
+                                row["session_date"].isoformat(): int(
+                                    row["source_capture_id"]
+                                )
+                                for row in rows
+                            }
+                            if len(symbol_capture_ids) != 2 or (
+                                capture_ids_by_source_session
+                                and symbol_capture_ids != capture_ids_by_source_session
+                            ):
+                                window_complete = False
+                                break
+                            capture_ids_by_source_session = symbol_capture_ids
+                            target_rows = [
+                                row
+                                for row in rows
+                                if row["session_date"] == expected_window[-1]
+                            ]
+                            capture_ids.update(
+                                int(row["source_capture_id"]) for row in target_rows
+                            )
+                        if window_complete and len(capture_ids) == 1:
+                            adjusted_capture_by_session[day_text] = next(
+                                iter(capture_ids)
+                            )
+                            adjusted_raw_identities_by_session[day_text] = {
+                                "source_package_id": package_id,
+                                "source_capture_ids_by_session": (
+                                    capture_ids_by_source_session
+                                ),
+                                "source_symbols": list(symbols),
+                            }
+                        else:
+                            plan["adjusted_price_input_status_by_session"][day_text] = {
+                                "status": "NOT_COMPUTED",
+                                "code": "ADJUSTMENT_RAW_WINDOW_UNAVAILABLE",
+                                "message": "同一来源包没有完整的前一官方会话与公告生效会话Raw窗口。",
+                            }
+                else:
+                    for day_text in plan.get("adjusted_price_source_windows", {}):
+                        plan["adjusted_price_input_status_by_session"][day_text] = {
+                            "status": "NOT_COMPUTED",
+                            "code": "ADJUSTMENT_RAW_PACKAGE_UNAVAILABLE",
+                            "message": "没有绑定包含两会话输入窗口的已存Raw来源包；未启动来源采集。",
+                        }
+            for day_text in plan.get("module_output_sessions", {}).get(
+                "ADJUSTED_PRICE", ()
+            ):
+                if (
+                    day_text not in plan.get("adjusted_price_source_windows", {})
+                    and day_text not in plan["adjusted_price_input_status_by_session"]
+                ):
+                    plan["adjusted_price_input_status_by_session"][day_text] = {
+                        "status": "NOT_COMPUTED",
+                        "code": "ADJUSTMENT_TWO_SESSION_WINDOW_UNAVAILABLE",
+                        "message": "没有完整的两个截止内官方输入会话；不触发调整生产。",
+                    }
         if "BAOSTOCK" in request["source_modules"]:
             bao_policy = self.config.get("source_policy", {}).get(
                 "baostock_supplement", {}
@@ -2123,6 +2388,21 @@ class DataJobCoordinator:
                 if item.get("target_session")
                 in set(plan.get("baostock_output_sessions", ()))
             )
+        if "ADJUSTED_PRICE" in request["selected_modules"]:
+            source_identity.append(
+                {
+                    "source": "VERIFIED_CORPORATE_ACTION_EVENTS",
+                    "sessions": plan.get("adjusted_price_event_revisions", {}),
+                }
+            )
+            source_identity.append(
+                {
+                    "source": "ADJUSTED_PRICE_RAW_INPUTS",
+                    "sessions": plan.get(
+                        "adjusted_price_raw_identities_by_session", {}
+                    ),
+                }
+            )
         request_identity = {
             "algorithm_revision": "STOCK_A_DATA_JOB_ALGORITHM_R3",
             "profile_semantics_contract": "STOCK-A-PRICE-PROFILE-SEMANTICS/R1",
@@ -2146,6 +2426,22 @@ class DataJobCoordinator:
                 "utf-8"
             )
         ).hexdigest()
+        if "ADJUSTED_PRICE" in request["selected_modules"]:
+            input_statuses = plan.get("adjusted_price_input_status_by_session", {})
+            for day_text in plan.get("module_output_sessions", {}).get(
+                "ADJUSTED_PRICE", ()
+            ):
+                input_status = input_statuses.get(day_text, {})
+                status = input_status.get("status", "NOT_STARTED")
+                _unit(
+                    plan["stage_units"],
+                    stage="ADJUSTED_PRICE",
+                    target_session=date.fromisoformat(day_text),
+                    business_table="stock.source_adjusted_daily_prices",
+                    status=status,
+                    error_code=input_status.get("code"),
+                    error_message=input_status.get("message"),
+                )
         if "SECTOR_PULSE" in request["selected_modules"]:
             sector_source_will_generate = (
                 "TDX_SECTOR_MEMBERS" in request["source_modules"]
@@ -3427,6 +3723,135 @@ def _execute_baostock_source_stage(
         )
 
 
+def _execute_adjusted_price_stage(
+    *,
+    config: Mapping[str, Any],
+    job_id: UUID,
+    plan: Mapping[str, Any],
+    source_package_id: int,
+    capture_by_session: Mapping[str, int],
+    progress_callback: Any,
+    begin_callback: Any,
+) -> None:
+    """复用现役复权生产者，仅处理公告生效日的精确两会话窗口。"""
+    from stock_a.application.adjusted_prices import produce_adjusted_price_window
+    from stock_a.canonical.adjustment import PRODUCER_VERSION
+
+    units = [
+        unit
+        for unit in plan.get("stage_units", ())
+        if unit.get("stage_code") == "ADJUSTED_PRICE"
+        and unit.get("status") == "NOT_STARTED"
+    ]
+    symbols_by_session = plan.get("adjusted_price_symbols_by_session", {})
+    windows_by_session = plan.get("adjusted_price_source_windows", {})
+    planned_captures = plan.get("adjusted_price_capture_by_session", {})
+    cutoff = date.fromisoformat(plan["research_cutoff"])
+    for unit in units:
+        target = unit["target_session"]
+        target_text = target.isoformat()
+        symbols = tuple(symbols_by_session.get(target_text, ()))
+        source_window = tuple(
+            date.fromisoformat(value)
+            for value in windows_by_session.get(target_text, ())
+        )
+        if (
+            len(source_window) != 2
+            or source_window[-1] != target
+            or source_window[-1] > cutoff
+            or not symbols
+        ):
+            data_job_pg.mark_progress_unavailable(
+                config,
+                job_id=job_id,
+                stage_code="ADJUSTED_PRICE",
+                target_session=target,
+                business_table="stock.source_adjusted_daily_prices",
+                status="NOT_COMPUTED",
+                error_code="ADJUSTMENT_TWO_SESSION_WINDOW_UNAVAILABLE",
+                error_message="公告目标未绑定截止内两个相邻官方Raw会话；不触发调整生产。",
+            )
+            continue
+        begin_callback(job_id=job_id, units=[unit])
+        expected_rows = 0
+        inserted_rows = 0
+        statuses: list[str] = []
+        try:
+            for symbol in symbols:
+                result = produce_adjusted_price_window(
+                    config,
+                    source_symbol=symbol,
+                    source_package_id=source_package_id,
+                    target_session=target,
+                    source_window_sessions=source_window,
+                    research_cutoff=cutoff,
+                    calendar_id=str(plan["calendar_id"]),
+                    calendar_revision=str(plan["calendar_revision"]),
+                )
+                if result.get("status") != "COMMITTED_SINGLE_NOTICE_WINDOW":
+                    raise DataJobError(
+                        str(
+                            result.get("reason_code") or "ADJUSTED_PRICE_NOT_COMMITTED"
+                        ),
+                        "复权生产者未提交完整的单公告两会话结果。",
+                        status=409,
+                    )
+                expected_rows += int(result.get("expected_rows", 0) or 0)
+                inserted_rows += int(result.get("inserted_rows", 0) or 0)
+                statuses.append(str(result["status"]))
+            if expected_rows != 2 * len(symbols):
+                raise DataJobError(
+                    "ADJUSTED_PRICE_EXPECTED_ROW_COUNT_MISMATCH",
+                    "复权生产结果没有为每个公告代码返回恰好两会话事实。",
+                    status=409,
+                )
+            target_capture_id = capture_by_session.get(target_text)
+            if target_capture_id is None:
+                target_capture_id = planned_captures.get(target_text)
+            if type(target_capture_id) is not int or target_capture_id <= 0:
+                raise DataJobError(
+                    "ADJUSTED_PRICE_TARGET_CAPTURE_UNAVAILABLE",
+                    "公告目标会话没有唯一的同包Raw捕获身份；调整进度保留未完成。",
+                    status=409,
+                )
+            progress_callback(
+                job_id=job_id,
+                stage_code="ADJUSTED_PRICE",
+                target_session=target,
+                business_table="stock.source_adjusted_daily_prices",
+                source_package_id=source_package_id,
+                source_capture_id=target_capture_id,
+                profile_history_session_count=None,
+                d1_history_session_count=None,
+                expected_rows=expected_rows,
+                inserted_rows=inserted_rows,
+                quality_status=";".join(sorted(set(statuses))),
+                no_change=inserted_rows == 0,
+                producer_version=PRODUCER_VERSION,
+                calendar_revision=str(plan["calendar_revision"]),
+            )
+        except Exception as error:  # noqa: BLE001 - 局部能力缺口保留具体阶段状态。
+            code = str(getattr(error, "code", type(error).__name__))
+            incomplete = inserted_rows > 0 or code in {
+                "ADJUSTMENT_EVENT_COVERAGE_INCOMPLETE",
+                "ADJUSTMENT_EVENT_WINDOW_NOT_PROVEN",
+                "ADJUSTMENT_EVENT_SYMBOL_MISMATCH",
+                "ADJUSTMENT_EVENT_SESSION_MISMATCH",
+                "ADJUSTED_PRICE_READBACK_MISMATCH",
+                "ADJUSTED_PRICE_EXPECTED_ROW_COUNT_MISMATCH",
+            }
+            data_job_pg.mark_progress_unavailable(
+                config,
+                job_id=job_id,
+                stage_code="ADJUSTED_PRICE",
+                target_session=target,
+                business_table="stock.source_adjusted_daily_prices",
+                status="INCOMPLETE" if incomplete else "NOT_COMPUTED",
+                error_code=code,
+                error_message=f"调整价格单股生产未闭合：{str(error)[:500]}",
+            )
+
+
 def _execute_shared_production_chain(
     *,
     config: Mapping[str, Any],
@@ -3566,6 +3991,18 @@ def _execute_shared_production_chain(
     ):
         return
 
+    if (
+        not selected_source_modules
+        and not plan.get("base_modules")
+        and set(plan.get("research_modules", ())) <= {"ADJUSTED_PRICE"}
+        and not any(
+            unit.get("stage_code") == "ADJUSTED_PRICE"
+            and unit.get("status") == "NOT_STARTED"
+            for unit in plan.get("stage_units", ())
+        )
+    ):
+        return
+
     reuse_package_id = plan.get("reuse_raw_package_id")
     raw_session_inputs = plan.get("raw_session_inputs", [])
     reuse_saved_baostock_raw = (
@@ -3695,6 +4132,16 @@ def _execute_shared_production_chain(
         item["target_session"]: int(item["candidate_total"])
         for item in raw_result["session_results"]
     }
+    if "ADJUSTED_PRICE" in plan.get("research_modules", ()):
+        _execute_adjusted_price_stage(
+            config=config,
+            job_id=job_id,
+            plan=plan,
+            source_package_id=source_package_id,
+            capture_by_session=capture_by_session,
+            progress_callback=progress_callback,
+            begin_callback=begin_callback,
+        )
     if "BAOSTOCK" in selected_source_modules:
         try:
             _calendar_id, _calendar_revision, official_sessions = (

@@ -183,6 +183,7 @@ _DIAGNOSTIC_ROUTES = frozenset(
         "/api/source-symbol-price-profiles",
         "/api/source-symbol-price-profiles/snapshots",
         "/api/source-symbol/raw-periods",
+        "/api/source-symbol/adjusted-history",
     }
 )
 # 只登记运行代码当前实际提供的能力边界。阶段名称、输入、产物和消费者始终来自机器合同。
@@ -5863,6 +5864,95 @@ class _PreviewHandler(BaseHTTPRequestHandler):
                         "source_zip_opened": False,
                         "source_recalculated": False,
                         "database_write": False,
+                        "ddl_executed": False,
+                    },
+                )
+                return
+            if parsed.path == "/api/source-symbol/adjusted-history":
+                values = _query(self.path, {"symbol", "target_session"})
+                if set(values) != {"symbol", "target_session"}:
+                    raise PreviewHttpError(
+                        400,
+                        "ADJUSTED_HISTORY_QUERY_REQUIRED",
+                        "复权历史查询须提供来源代码和目标交易日",
+                    )
+                symbol = _symbol(values["symbol"])
+                target = _iso_date(values["target_session"])
+                _require_research_cutoff(
+                    target, self.preview_server.state.research_cutoff
+                )
+                from stock_a.storage.postgres.adjusted_prices import (
+                    read_adjusted_history,
+                )
+
+                result = read_adjusted_history(
+                    self.preview_server.state.config,
+                    source_symbol=symbol,
+                    target_session=target,
+                )
+                if not isinstance(result, Mapping):
+                    raise PreviewHttpError(
+                        500,
+                        "ADJUSTED_HISTORY_READER_INVALID",
+                        "复权历史Reader未返回结构化结果",
+                    )
+                status = result.get("status")
+                if status not in {"READY", "NOT_COMPUTED", "INCOMPLETE"}:
+                    raise PreviewHttpError(
+                        500,
+                        "ADJUSTED_HISTORY_STATUS_INVALID",
+                        "复权历史Reader返回了未知状态",
+                    )
+                if (
+                    result.get("source_symbol", symbol) != symbol
+                    or result.get("target_session", target.isoformat())
+                    != target.isoformat()
+                    or result.get("price_coordinate") != "ADJUSTED"
+                    or result.get("research_mode") != "RETROSPECTIVE_NON_PIT"
+                ):
+                    raise PreviewHttpError(
+                        409,
+                        "ADJUSTED_HISTORY_IDENTITY_INVALID",
+                        "复权历史身份、坐标或后验研究范围与请求不一致",
+                    )
+                points = result.get("points", [])
+                if not isinstance(points, list):
+                    raise PreviewHttpError(
+                        500,
+                        "ADJUSTED_HISTORY_POINTS_INVALID",
+                        "复权历史Reader的日线结果格式无效",
+                    )
+                if status == "READY" and not points:
+                    status = "INCOMPLETE"
+                periods = result.get("periods", {})
+                if not isinstance(periods, Mapping):
+                    periods = {}
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "status": status,
+                        "source_symbol": symbol,
+                        "target_session": target.isoformat(),
+                        "price_coordinate": "ADJUSTED",
+                        "research_mode": "RETROSPECTIVE_NON_PIT",
+                        "algorithm_version": result.get("algorithm_version"),
+                        "source": result.get("source"),
+                        "event_refs": result.get("event_refs", []),
+                        "coverage": result.get("coverage", {}),
+                        "reason": result.get("reason")
+                        or ("调整价格状态未闭合。" if status == "INCOMPLETE" else None),
+                        "points": points if status == "READY" else [],
+                        "periods": {
+                            "week": periods.get("week", [])
+                            if status == "READY"
+                            else [],
+                            "month": periods.get("month", [])
+                            if status == "READY"
+                            else [],
+                        },
+                        "database_write": False,
+                        "source_io": False,
                         "ddl_executed": False,
                     },
                 )

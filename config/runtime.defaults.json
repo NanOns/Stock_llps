@@ -35,7 +35,6 @@
       "D:/new_tdx"
     ],
     "all_source_roots_read_only": true,
-    "require_phase0_before_dependent_operations": true,
     "vipdata_official": {
       "page_url": "https://www.tdx.com.cn/article/vipdata.html",
       "package_url": "https://data.tdx.com.cn/vipdoc/hsjday.zip",
@@ -167,7 +166,7 @@
     "cluster_system_identifier": "7688198230782699460",
     "deployment_applied": true,
     "business_login": "stock_a",
-    "migration_version": 51,
+    "migration_version": 53,
     "project_id": 1,
     "deployment_instance_id": 1
   }

@@ -47,35 +47,3 @@ def register_commands(commands):
         default=600.0,
         help="集中迁移事务总耗时上限，默认600秒；普通迁移最大900秒，R06大表迁移22最大14400秒",
     )
-    phase0 = commands.add_parser(
-        "source-phase0",
-        help="有界核验已绑定的本地TDX来源能力",
-        description="按明示预算有界核验已绑定的本地TDX来源能力，只读不写",
-    )
-    phase0.add_argument(
-        "--max-entries",
-        type=int,
-        default=50000,
-        help="每个行情目录最多枚举的目录项数，默认50000",
-    )
-    phase0.add_argument(
-        "--max-file-bytes",
-        type=int,
-        default=16777216,
-        help="单个来源文件最大读取字节数，默认16777216",
-    )
-    phase0.add_argument(
-        "--max-total-bytes",
-        type=int,
-        default=33554432,
-        help="本次来源文件总读取字节数上限，默认33554432",
-    )
-    phase0.add_argument(
-        "--max-records",
-        type=int,
-        default=200000,
-        help="每个日线文件及GBBQ最多解析记录数，默认200000",
-    )
-    phase0.add_argument(
-        "--max-seconds", default="30", help="本次总核验耗时上限，默认30秒"
-    )

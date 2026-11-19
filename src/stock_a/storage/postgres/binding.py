@@ -63,6 +63,8 @@ _MIGRATION_FILES = (
     "0049_r08_biz10_typed_job_modes_and_provenance.sql",
     "0050_r08_biz10_register_current_job_modules.sql",
     "0051_r08_biz11_reset_input_preflight_fingerprint.sql",
+    "0052_r00_adjusted_price_facts.sql",
+    "0053_r00_register_adjusted_price_module.sql",
 )
 _MIGRATIONS = tuple(
     (migration_id, "STOCK_A_INITIAL_R1", ("migrations", filename))
@@ -107,6 +109,7 @@ _TASK_SCOPE_MIGRATIONS = {
     "R08_BIZ09_LAYERED_DATA_JOBS_SECTOR_BAOSTOCK_R1": frozenset({45, 46, 47}),
     "R08_BIZ10_RESET_INITIALIZE_LAYERED_DAILY_R1": frozenset({48, 49, 50}),
     "R08_BIZ11_RESET_SOURCE_PREFLIGHT_R1": frozenset({51}),
+    "R00_ADJUSTED_PRICE_PG_CLOSURE_R1": frozenset({52, 53}),
 }
 _BASE_TABLES = {
     "installation_identity",
@@ -281,6 +284,11 @@ _RELATIONS_BY_MIGRATION_COUNT[48] = _RELATIONS_BY_MIGRATION_COUNT[47]
 _RELATIONS_BY_MIGRATION_COUNT[49] = _RELATIONS_BY_MIGRATION_COUNT[48]
 _RELATIONS_BY_MIGRATION_COUNT[50] = _RELATIONS_BY_MIGRATION_COUNT[49]
 _RELATIONS_BY_MIGRATION_COUNT[51] = _RELATIONS_BY_MIGRATION_COUNT[50]
+_RELATIONS_BY_MIGRATION_COUNT[52] = _RELATIONS_BY_MIGRATION_COUNT[51] | {
+    "source_corporate_action_events",
+    "source_adjusted_daily_prices",
+}
+_RELATIONS_BY_MIGRATION_COUNT[53] = _RELATIONS_BY_MIGRATION_COUNT[52]
 
 
 class BindingRefused(Exception):

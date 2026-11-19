@@ -248,7 +248,6 @@ def _validate_config(config: Any) -> None:
             for item in roots
         )
         or sources.get("all_source_roots_read_only") is not True
-        or sources.get("require_phase0_before_dependent_operations") is not True
     ):
         raise DiagnosticError("CONFIG_INVALID", "TDX来源根必须是绝对路径字符串列表")
     bao = _require_mapping(

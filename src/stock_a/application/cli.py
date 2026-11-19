@@ -57,7 +57,6 @@ from stock_a.application.cli_commands.source.source_diagnostics import (
     _run_doctor,
     _run_pg_bind,
     _run_pg_identity,
-    _run_source_phase0,
 )
 from stock_a.application.cli_commands.source.vipdata import (
     _run_source_inspect,
@@ -91,8 +90,6 @@ def main(argv: list[str] | None = None) -> int:
             return _run_pg_identity(args)
         if args.command == "pg-bind":
             return _run_pg_bind(args)
-        if args.command == "source-phase0":
-            return _run_source_phase0(args)
         if args.command == "source-inspect":
             return _run_source_inspect(args)
         if args.command == "research-stock":

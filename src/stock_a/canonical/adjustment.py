@@ -425,8 +425,6 @@ def build_affine_factor(
     _validate_event_set(event_tuple, context)
     eligible = []
     for event in event_tuple:
-        if event.available_at > context.source_cutoff:
-            continue
         if isinstance(event, UnresolvedAction):
             if (
                 event.security_id is not None
@@ -437,8 +435,16 @@ def build_affine_factor(
                 source_session < event.effective_session <= context.target_session
             ):
                 continue
+            if event.available_at > context.source_cutoff:
+                raise ContractError(
+                    "相关公司行为在source_cutoff时尚不可得，阻断该价格窗口"
+                )
             eligible.append(event)
         elif source_session < event.effective_session <= context.target_session:
+            if event.available_at > context.source_cutoff:
+                raise ContractError(
+                    "相关公司行为在source_cutoff时尚不可得，阻断该价格窗口"
+                )
             eligible.append(event)
     unresolved = [event for event in eligible if isinstance(event, UnresolvedAction)]
     if unresolved:
@@ -507,6 +513,8 @@ def affine_price(
     if price <= 0:
         raise ContractError("RAW输入价格必须大于0")
     result = factor.alpha * price + factor.beta
+    if result <= 0:
+        raise ContractError("调整后的价格必须大于0")
     if tick is not None:
         try:
             supplied_tick = exact_number(tick)
@@ -516,7 +524,10 @@ def affine_price(
             raise ContractError("传入tick与factor绑定tick不匹配")
     if factor.coordinate_mode == EXACT_RESEARCH_COORDINATE:
         return result
-    return round_to_tick(result, factor.tick)
+    rounded = round_to_tick(result, factor.tick)
+    if rounded <= 0:
+        raise ContractError("按tick舍入后的调整价格必须大于0")
+    return rounded
 
 
 def inverse_affine_price(value: object, factor: AdjustmentFactor) -> Fraction:
@@ -579,12 +590,16 @@ def adjust_ohlc(
             raise ContractError("OHLC tick与factor绑定tick不匹配")
 
     values = tuple(factor.alpha * value + factor.beta for value in raw_values)
+    if any(value <= 0 for value in values):
+        raise ContractError("调整后的OHLC价格必须大于0")
     rounded = tuple(
         value
         if factor.coordinate_mode == EXACT_RESEARCH_COORDINATE
         else round_to_tick(value, factor.tick)
         for value in values
     )
+    if any(value <= 0 for value in rounded):
+        raise ContractError("按tick舍入后的OHLC价格必须大于0")
     return rounded  # type: ignore[return-value]
 
 

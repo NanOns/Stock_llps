@@ -33,6 +33,8 @@ _BUSINESS_FACT_TABLES = frozenset(
         "source_baostock_daily",
         "source_baostock_unit_contracts",
         "source_captures",
+        "source_adjusted_daily_prices",
+        "source_corporate_action_events",
         "source_cohort_group_stats",
         "source_d0_formal_admission_day_facts",
         "source_d0_launch_day_facts",

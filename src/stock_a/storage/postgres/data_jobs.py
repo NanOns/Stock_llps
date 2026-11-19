@@ -95,6 +95,7 @@ _MODULE_PROGRESS_TABLES = {
             "stock.source_sector_pulse_cohort_reason_facts",
         }
     ),
+    "ADJUSTED_PRICE": frozenset({"stock.source_adjusted_daily_prices"}),
 }
 
 _CLEANUP_MODULES = {
@@ -226,6 +227,14 @@ _CLEANUP_MODULES = {
         ),
         "algorithm_column": "producer_version",
         "algorithm_label": "市场成交参与生产者版本",
+    },
+    "ADJUSTED_PRICE": {
+        "parent_table": "stock.source_adjusted_daily_prices",
+        "child_table": None,
+        "cleanup_tables": ("stock.source_adjusted_daily_prices",),
+        "progress_tables": ("stock.source_adjusted_daily_prices",),
+        "algorithm_column": "algorithm_version",
+        "algorithm_label": "仿射复权生产者版本",
     },
 }
 
@@ -867,6 +876,43 @@ def _cleanup_version_rows(
     target_sessions: tuple[date, ...],
     cutoff: date,
 ) -> list[dict[str, Any]]:
+    if module_code == "ADJUSTED_PRICE":
+        cursor.execute(
+            """SELECT target_session,source_package_id,target_capture_id,
+                      target_coordinate_id,event_set_revision,parameter_version,
+                      algorithm_version,calendar_revision,count(*)
+               FROM stock.source_adjusted_daily_prices
+               WHERE target_session=ANY(%s) AND target_session<=%s
+               GROUP BY target_session,source_package_id,target_capture_id,
+                        target_coordinate_id,event_set_revision,parameter_version,
+                        algorithm_version,calendar_revision
+               ORDER BY target_session,source_package_id,target_capture_id,
+                        target_coordinate_id,event_set_revision,parameter_version,
+                        algorithm_version,calendar_revision""",
+            (list(target_sessions), cutoff),
+        )
+        return [
+            {
+                "target_session": row[0],
+                "source_version": {
+                    "source_package_id": int(row[1]),
+                    "target_capture_id": int(row[2]),
+                },
+                "algorithm_version": str(row[6]),
+                "parent_rows": int(row[8]),
+                "child_rows": 0,
+                "version_key": {
+                    "source_package_id": int(row[1]),
+                    "target_capture_id": int(row[2]),
+                    "target_coordinate_id": str(row[3]),
+                    "event_set_revision": str(row[4]).strip(),
+                    "parameter_version": str(row[5]),
+                    "algorithm_version": str(row[6]),
+                    "calendar_revision": str(row[7]),
+                },
+            }
+            for row in cursor.fetchall()
+        ]
     if module_code == "CORE_PROFILE":
         cursor.execute(
             """SELECT target_session,source_package_id,source_capture_id,
@@ -1392,7 +1438,9 @@ def _cleanup_preview_in_cursor(
         source_scopes_by_session.setdefault(version["target_session"], set()).add(
             source_scope
         )
-    if any(len(scopes) > 1 for scopes in source_scopes_by_session.values()):
+    if module_code != "ADJUSTED_PRICE" and any(
+        len(scopes) > 1 for scopes in source_scopes_by_session.values()
+    ):
         blockers.append(
             {
                 "referenced_table": spec["parent_table"],
@@ -1768,7 +1816,29 @@ def clear_derived_module(
         for version in preview["versions"]:
             target_session = date.fromisoformat(version["target_session"])
             key = version["version_key"]
-            if module_code == "CORE_PROFILE":
+            if module_code == "ADJUSTED_PRICE":
+                cursor.execute(
+                    """DELETE FROM stock.source_adjusted_daily_prices
+                       WHERE target_session=%s AND source_package_id=%s
+                         AND target_capture_id=%s AND target_coordinate_id=%s
+                         AND event_set_revision=%s AND parameter_version=%s
+                         AND algorithm_version=%s AND calendar_revision=%s""",
+                    (
+                        target_session,
+                        key["source_package_id"],
+                        key["target_capture_id"],
+                        key["target_coordinate_id"],
+                        key["event_set_revision"],
+                        key["parameter_version"],
+                        key["algorithm_version"],
+                        key["calendar_revision"],
+                    ),
+                )
+                deleted_rows["stock.source_adjusted_daily_prices"] += cursor.rowcount
+                deleted_by_session[target_session.isoformat()][
+                    "stock.source_adjusted_daily_prices"
+                ] += cursor.rowcount
+            elif module_code == "CORE_PROFILE":
                 cursor.execute(
                     """DELETE FROM stock.source_symbol_price_profiles
                        WHERE target_session=%s AND source_package_id=%s
@@ -2368,6 +2438,20 @@ def read_business_table_count(
             """SELECT count(*) FROM stock.source_baostock_daily
                WHERE capture_id=%s AND session_date=%s AND session_date<=%s""",
             lambda: (baostock_capture_id, target_session, research_cutoff),
+        ),
+        "stock.source_adjusted_daily_prices": (
+            """SELECT count(*) FROM stock.source_adjusted_daily_prices
+               WHERE target_session=%s AND target_session<=%s
+                 AND source_package_id=%s AND target_capture_id=%s
+                 AND algorithm_version=%s AND calendar_revision=%s""",
+            lambda: (
+                target_session,
+                research_cutoff,
+                source_package_id,
+                source_capture_id,
+                producer_version,
+                calendar_revision,
+            ),
         ),
         "stock.source_symbol_price_profiles": (
             """SELECT count(*) FROM stock.source_symbol_price_profiles
@@ -3466,6 +3550,9 @@ def mark_progress_cleared(
             "DATA_JOB_CLEANUP_PROGRESS_INVALID", "清理进度读回键或删除行数无效"
         )
     count_queries = {
+        "stock.source_adjusted_daily_prices": (
+            "SELECT count(*) FROM stock.source_adjusted_daily_prices WHERE target_session=%s AND target_session<=%s",
+        ),
         "stock.source_symbol_price_profiles": (
             "SELECT count(*) FROM stock.source_symbol_price_profiles WHERE target_session=%s AND target_session<=%s",
         ),

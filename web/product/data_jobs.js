@@ -1176,6 +1176,25 @@ export function mountDataJobPages(api) {
       root.append(element("h3", "所选模块目标会话"), list);
     }
     const currentBody = currentPageBody(page);
+    if (currentBody.research_modules?.includes("ADJUSTED_PRICE")) {
+      const windows = plan.adjusted_price_source_windows || {};
+      const symbols = plan.adjusted_price_symbols_by_session || {};
+      const statuses = plan.adjusted_price_input_status_by_session || {};
+      const details = (plan.module_output_sessions?.ADJUSTED_PRICE || []).map(
+        (target) => {
+          const window = windows[target] || [];
+          const inputStatus = statuses[target] || {};
+          return window.length
+            ? `${target}：同包已存Raw ${window[0]} 至 ${window[window.length - 1]}（${window.length}个官方会话），公告来源代码 ${symbols[target]?.length ?? 0} 个`
+            : `${target}：${inputStatus.status || "NOT_COMPUTED"} · ${inputStatus.message || "公司行为事件覆盖未证明"}`;
+        },
+      );
+      if (details.length) {
+        root.append(
+          element("p", `仿射复权输入：${details.join("；")}`, "muted"),
+        );
+      }
+    }
     const isCleanupOperation = [
       "CLEAR_DERIVED",
       "CLEAR_AND_REGENERATE",
@@ -1598,6 +1617,7 @@ export function mountDataJobPages(api) {
       page === "initialize" ? "startDataInit" : "startDataDaily",
     );
     button.disabled = true;
+    let startError = null;
     try {
       const body = requestBodyForPage(page);
       if (state.planBody !== JSON.stringify(body)) {
@@ -1682,6 +1702,7 @@ export function mountDataJobPages(api) {
         recent.recent_jobs,
       );
     } catch (error) {
+      startError = error;
       byId(
         page === "initialize" ? "dataInitPlan" : "dataDailyPlan",
       ).replaceChildren(
@@ -1690,7 +1711,7 @@ export function mountDataJobPages(api) {
     } finally {
       state.startPending = false;
       updateResetConfirmAvailability();
-      if (!state.resetDialogOpen) await preview(page);
+      if (!state.resetDialogOpen && !startError) await preview(page);
     }
   }
 
